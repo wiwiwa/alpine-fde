@@ -1,0 +1,4 @@
+ID=debian-fde-test
+NAME="Debian FDE Test OS"
+VERSION=1 (test)
+PRETTY_NAME="Debian FDE Test OS 1"

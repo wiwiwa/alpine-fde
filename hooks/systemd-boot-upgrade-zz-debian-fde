@@ -1,0 +1,77 @@
+#!/bin/sh
+# systemd-boot-upgrade-zz-debian-fde — template for
+# /etc/kernel/postinst.d/zz-debian-fde-systemd-boot-upgrade (§8.3; runs after
+# zz-debian-fde in run-parts order). `install` copies this file into the
+# target root, executable (enabled).
+#
+# Guard for the masked systemd-boot-update.service: the boot manager never
+# self-updates at boot; when the systemd-boot PACKAGE upgrade re-runs
+# `bootctl install` and re-flashes ESP:/EFI/systemd/systemd-bootx64.efi and
+# /EFI/BOOT/BOOTX64.EFI, this hook re-signs them with the release key from the
+# signing medium (DEBIAN_FDE_KEYDIR). Installation of the signed result is
+# GATED on sbverify passing against release.crt — an unverified binary never
+# lands on the ESP.
+#
+# ADR-8: a missing key or failed verification is a LOUD failure — rc 64 + the
+# build-failed marker persisted for `debian-fde status`; the previously
+# installed binary stays untouched on the verification path. Operator
+# recovery: attach the signing medium and re-run the hook (or
+# `debian-fde ukictl build <kver>`), then `dpkg --configure -a`.
+#
+# Env: DEBIAN_FDE_ESP (ESP mount, default /efi), DEBIAN_FDE_KEYDIR (signing
+# medium), DEBIAN_FDE_ROOT (target root for the marker, default /).
+
+set -u
+
+ESP=${DEBIAN_FDE_ESP:-/efi}
+KEYDIR=${DEBIAN_FDE_KEYDIR:-}
+DEBIAN_FDE_ETC=${DEBIAN_FDE_ROOT:-}/etc/debian-fde
+marker="$DEBIAN_FDE_ETC/build-failed"
+
+guard_fail() {
+    mkdir -p "$DEBIAN_FDE_ETC" 2>/dev/null || true
+    {
+        printf 'boot-manager re-sign failed: %s\n' "$1"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: attach the signing medium (DEBIAN_FDE_KEYDIR) and re-run this hook, then "dpkg --configure -a"\n'
+    } >"$marker" 2>/dev/null || true
+    exit 64
+}
+
+[ -n "$KEYDIR" ] || guard_fail "no signing medium configured (DEBIAN_FDE_KEYDIR unset)"
+for f in release.pem release.crt; do
+    [ -f "$KEYDIR/$f" ] || guard_fail "missing key material: $KEYDIR/$f"
+done
+
+for rel in EFI/systemd/systemd-bootx64.efi EFI/BOOT/BOOTX64.EFI; do
+    src="$ESP/$rel"
+    [ -f "$src" ] || guard_fail "boot-manager binary missing on ESP: $src"
+    # verify-first (review LO-05): sbsign APPENDS signatures — re-signing an
+    # already-signed binary stacks a dual signature, which a later revocation
+    # of the old key renders outright rejected (the §9.6/s16 failure mode).
+    # A manual hook re-run (the documented ADR-8 recovery) on a binary that
+    # already verifies against the CURRENT key is an idempotent no-op.
+    if sbverify --cert "$KEYDIR/release.crt" "$src" >/dev/null 2>&1; then
+        printf 'debian-fde hook: %s already verifies against the current key — skip re-sign\n' "$src" >&2
+        continue
+    fi
+    tmp="$src.signed.$$"
+    if ! sbsign --key "$KEYDIR/release.pem" --cert "$KEYDIR/release.crt" --output "$tmp" "$src"; then
+        rm -f "$tmp" 2>/dev/null || true
+        guard_fail "sbsign failed for $src"
+    fi
+    # gate: the signed output must verify against the release cert BEFORE it
+    # replaces anything — no unverified binary ever lands on the ESP
+    if ! sbverify --cert "$KEYDIR/release.crt" "$tmp"; then
+        rm -f "$tmp" 2>/dev/null || true
+        guard_fail "sbverify failed for $src — not installed"
+    fi
+    if ! mv -f "$tmp" "$src"; then
+        rm -f "$tmp" 2>/dev/null || true
+        guard_fail "install failed for $src"
+    fi
+done
+
+# success — clear any stale marker from a previous failed attempt
+rm -f "$marker" 2>/dev/null || true
+exit 0

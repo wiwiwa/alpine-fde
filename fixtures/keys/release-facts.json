@@ -1,0 +1,10 @@
+{
+  "comment": "TEST-ONLY release key fixture. Private key has zero production value (committed on purpose for unit tests).",
+  "key_bits": 2048,
+  "attrs_hex": "0x00020012",
+  "modulus_sha256": "92bece0eeaef20368d1380d76516e330f6c6dd285e6a1a61b1ba3fa308e43791",
+  "tpmt_public_b64": "ARYAAQALAAIAEgAAABAAEAgAAAEAAQEAqws93m469YzHnRX5VpQOANbk6TfArpU3sZ/P5RLvdU5nOBFGmx/Y98yRuIL4sW4NC2VGN6WN+8cEolb9gAhTC3l52R6JUjZiqEigYbvSvC/W/dYLfWr1OChO3V5ymnhcNm1rlxulNHHVkKtOyqDcKFZThafFqP2HlHRlOvAM566he0TULhsAnrPSQpPRcKAc4As29GPpxKHLTdz4nFwx/1e4pFYHwnxLAVENSEI+8ZIIdeNO+/vWx97c7VetvabOlrwclWXzsmlp2FeNlLQluUXn09dGDYabPww/XTEjyHcvlJXvt7OR59hVftvT3RqmJl62oEDxBI8FltsIrHak7Q==",
+  "tpmt_public_inner_sha256": "b79679ef9bef2b546e2a569622661c2509913d9b3783f7df3f5c29d106da0d10",
+  "keyname_hex": "000bb79679ef9bef2b546e2a569622661c2509913d9b3783f7df3f5c29d106da0d10",
+  "name_formula": "000b || SHA256(TPMT_PUBLIC bytes)"
+}

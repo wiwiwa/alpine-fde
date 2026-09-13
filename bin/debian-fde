@@ -1,0 +1,168 @@
+#!/bin/sh
+# debian-fde — dispatcher CLI for the Debian FDE verified-boot / FDE lifecycle (§8.1):
+# global flags + subcommand table; implementations are sourced lazily from
+# lib/cmd/<name>.sh and must define cmd_<name_with_underscores>_main.
+
+set -eu
+umask 077
+
+PROG=debian-fde
+DEBIAN_FDE_VERSION='0.1.0'
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck disable=SC1091  # resolved at runtime next to the binary
+. "$SCRIPT_DIR/../lib/common.sh"
+
+# Test seam: override where command implementations live (unit tests inject stubs).
+DEBIAN_FDE_CMD_DIR="${DEBIAN_FDE_CMD_DIR:-$SCRIPT_DIR/../lib/cmd}"
+
+SUBCOMMANDS='provision install ukictl pcrsign enroll-tpm rotate audit status bootnext pre-upgrade doctor'
+
+usage() {
+    cat >&2 <<EOF
+Usage: $PROG [global flags] <subcommand> [args...]
+
+$PROG $DEBIAN_FDE_VERSION — TPM 2.0-backed verified boot & full-disk-encryption lifecycle
+
+Subcommands:
+  provision      one-time: release keys, firmware key enrollment, pending baseline
+  install        guided disk setup, minimal Debian rootfs, signed boot chain
+  ukictl         build / sign / enroll / prune unified kernel images
+  pcrsign        release-key signature over the combined PCR 7+11 policy digest
+  enroll-tpm     re-enroll the TPM seal for all manifest kernels (TPM-clear recovery)
+  rotate         change the keyslot-0 passphrase (no re-encryption, no re-seal)
+  audit          compare live PCRs + Secure Boot state against the baseline
+  status         Secure Boot state, PCR readings, keyslots, manifest vs ESP
+  bootnext       set a one-shot boot entry (rollback)
+  pre-upgrade    snapshot the root filesystem before upgrades (btrfs only)
+  doctor         check/repair prerequisites of the running environment
+
+Global flags (must precede the subcommand):
+  --tcti <conf>   TCTI config for tpm2-tools (env: DEBIAN_FDE_TCTI; empty = default discovery)
+  --yes           answer yes to prompts
+  --dry-run       print actions without performing them
+  --root <dir>    target root directory (env: DEBIAN_FDE_ROOT)
+  --esp <path>    ESP mount point or image file (env: DEBIAN_FDE_ESP)
+  --disk <dev>    target disk device or image file (env: DEBIAN_FDE_DISK)
+  --keydir <dir>  Debian FDE key material directory (env: DEBIAN_FDE_KEYDIR)
+  --version       print version and exit
+  -h, --help      show this help
+
+Exit codes: 0 ok | 1 drift/check failed | 2 usage | 3 not implemented | 64 fail-closed
+
+Config: KEY=VALUE pairs from \$DEBIAN_FDE_CONF or /etc/debian-fde/debian-fde.conf (optional;
+the environment and explicit flags always win over the file).
+EOF
+}
+
+die_usage() {
+    err "$*"
+    usage
+    exit "$DEBIAN_FDE_USAGE"
+}
+
+# is_subcommand NAME — rc 0 iff NAME is in the dispatcher table
+is_subcommand() {
+    # shellcheck disable=SC2086  # deliberate word split over the table
+    for _s in $SUBCOMMANDS; do
+        if [ "$_s" = "$1" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# cmd_to_fn NAME — entry-point function name for a subcommand.
+# Hyphens are invalid in shell identifiers: 'enroll-tpm' → 'cmd_enroll_tpm_main'
+# (single hyphen supported, matching the current subcommand table).
+cmd_to_fn() {
+    _head=${1%-*}
+    if [ "$_head" = "$1" ]; then
+        printf 'cmd_%s_main' "$1"
+    else
+        printf 'cmd_%s_%s_main' "$_head" "${1#*-}"
+    fi
+}
+
+load_config
+
+sp_cmd=''
+# shellcheck disable=SC2034  # consumed by lib/cmd/* implementations via the environment
+while [ $# -gt 0 ]; do
+    case $1 in
+        --version)
+            printf '%s %s\n' "$PROG" "$DEBIAN_FDE_VERSION"
+            exit 0
+            ;;
+        -h | --help)
+            usage 2>&1
+            exit 0
+            ;;
+        --tcti)
+            [ $# -ge 2 ] || die_usage "option $1 requires an argument"
+            DEBIAN_FDE_TCTI=$2
+            shift
+            ;;
+        --root)
+            [ $# -ge 2 ] || die_usage "option $1 requires an argument"
+            DEBIAN_FDE_ROOT=$2
+            shift
+            ;;
+        --esp)
+            [ $# -ge 2 ] || die_usage "option $1 requires an argument"
+            DEBIAN_FDE_ESP=$2
+            shift
+            ;;
+        --disk)
+            [ $# -ge 2 ] || die_usage "option $1 requires an argument"
+            DEBIAN_FDE_DISK=$2
+            shift
+            ;;
+        --keydir)
+            [ $# -ge 2 ] || die_usage "option $1 requires an argument"
+            DEBIAN_FDE_KEYDIR=$2
+            shift
+            ;;
+        --yes)
+            DEBIAN_FDE_YES=1
+            ;;
+        --dry-run)
+            DEBIAN_FDE_DRY_RUN=1
+            ;;
+        --)
+            : # end-of-global-flags marker; parsing continues with the subcommand
+            ;;
+        -*)
+            die_usage "unknown option: $1"
+            ;;
+        *)
+            sp_cmd=$1
+            shift
+            break
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$sp_cmd" ]; then
+    die_usage "no subcommand given"
+fi
+if ! is_subcommand "$sp_cmd"; then
+    die_usage "unknown subcommand: $sp_cmd"
+fi
+
+sp_cmd_file="$DEBIAN_FDE_CMD_DIR/$sp_cmd.sh"
+if [ ! -f "$sp_cmd_file" ]; then
+    err "$PROG: $sp_cmd: not implemented yet"
+    exit "$DEBIAN_FDE_NOT_IMPLEMENTED"
+fi
+# shellcheck disable=SC1090
+. "$sp_cmd_file"
+
+sp_fn=$(cmd_to_fn "$sp_cmd")
+if ! command -v "$sp_fn" >/dev/null 2>&1; then
+    err "$PROG: $sp_cmd: not implemented yet"
+    exit "$DEBIAN_FDE_NOT_IMPLEMENTED"
+fi
+
+"$sp_fn" "$@"

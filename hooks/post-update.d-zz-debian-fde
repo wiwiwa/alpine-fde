@@ -1,0 +1,42 @@
+#!/bin/sh
+# post-update.d-zz-debian-fde — template for /etc/initramfs/post-update.d/
+# zz-debian-fde (§8.3). `install` copies this file into the target root,
+# executable. Debian /etc/initramfs/post-update.d convention: update-initramfs
+# run-parts hook, invoked with $1 = the kernel version whose initramfs was
+# (re)built — microcode and other initrd-affecting updates therefore trigger a
+# UKI rebuild for that kernel through `ukictl build`.
+#
+# ADR-8: a failing rebuild must fail loudly — the nonzero exit propagates to
+# update-initramfs/dpkg, the failure marker is persisted for
+# `debian-fde status`, and the PREVIOUS default UKI is never touched (ukictl
+# build writes the ESP atomically and prunes only after success). Operator
+# recovery: attach the signing medium, re-run `debian-fde ukictl build <kver>`
+# (idempotent), then `dpkg --configure -a`.
+
+set -u
+
+kver=${1:-}
+[ -n "$kver" ] || exit 0
+
+DEBIAN_FDE_BIN=${DEBIAN_FDE_BIN:-debian-fde}
+DEBIAN_FDE_ETC=${DEBIAN_FDE_ROOT:-}/etc/debian-fde
+marker="$DEBIAN_FDE_ETC/build-failed"
+
+"$DEBIAN_FDE_BIN" ukictl build "$kver"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    mkdir -p "$DEBIAN_FDE_ETC" 2>/dev/null || true
+    # APPEND, don't overwrite (review IN-04): the build already wrote a marker
+    # naming the exact failing step/pin — keep it and add the recovery line
+    # beneath it.
+    {
+        printf 'initramfs post-update hook: ukictl build failed for kernel %s\n' "$kver"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: attach the signing medium, re-run "debian-fde ukictl build %s", then "dpkg --configure -a"\n' "$kver"
+    } >>"$marker" 2>/dev/null || true
+    exit "$rc"
+fi
+
+# success — clear any stale marker from a previous failed attempt
+rm -f "$marker"
+exit 0

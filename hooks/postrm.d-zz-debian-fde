@@ -1,0 +1,49 @@
+#!/bin/sh
+# postrm.d-zz-debian-fde — template for /etc/kernel/postrm.d/zz-debian-fde
+# (docs/Architecture.md §8.3, gap B-G6). `install` copies this file into the
+# target root, executable. Maps linux-image removal to Debian FDE pruning:
+# ESP UKI + digest manifest entry (TPM keyslot/token cleanup keys off the same
+# manifest diff, §7.2/§8.3 — one enrollment per retained UKI).
+#
+# dpkg contract: postrm.d hooks run with $1 = the removed ABI version and
+# DEB_MAINT_PARAMS = e.g. "remove 6.12.8-1". We act on remove passes.
+# Exit status propagates (loud, ADR-8): a failed prune leaves a stale UKI —
+# which fails closed at boot (boots, prompts) — and `dpkg --configure -a` /
+# re-running `debian-fde ukictl remove <kver>` recovers.
+
+set -u
+
+kver=${1:-}
+if [ -z "$kver" ]; then
+    echo "debian-fde hook: postrm: no kernel version argument (\$1=<kver>, dpkg hook convention) — refusing to act (ADR-8)" >&2
+    exit 64
+fi
+
+if [ -n "${DEB_MAINT_PARAMS:-}" ]; then
+    # Anchor on the FIRST token (review LO-03): `abort-remove <ver>` contains
+    # "remove" as a substring, but an abort pass RESTORES the kernel — pruning
+    # its live UKI there would delete a bootable entry. Only genuine remove /
+    # purge passes act.
+    case $DEB_MAINT_PARAMS in
+        remove | remove\ * | purge | purge\ *) ;;
+        *)
+            exit 0
+            ;;
+    esac
+fi
+
+DEBIAN_FDE_BIN=${DEBIAN_FDE_BIN:-debian-fde}
+DEBIAN_FDE_ETC=${DEBIAN_FDE_ROOT:-}/etc/debian-fde
+
+"$DEBIAN_FDE_BIN" ukictl remove "$kver"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    mkdir -p "$DEBIAN_FDE_ETC" 2>/dev/null || true
+    {
+        printf 'kernel postrm hook: ukictl remove failed for kernel %s\n' "$kver"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: re-run "debian-fde ukictl remove %s" (stale UKIs fail closed at boot)\n' "$kver"
+    } >"$DEBIAN_FDE_ETC/build-failed" 2>/dev/null || true
+    exit "$rc"
+fi
+exit 0

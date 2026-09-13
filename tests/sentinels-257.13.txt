@@ -1,0 +1,139 @@
+# tests/sentinels-257.13.txt — versioned sentinel table for the Debian FDE
+# harness (docs/Architecture.md §12 "Sentinel pinning").
+#
+# Schema: one sentinel per line, `name<TAB>string`. Data lines carry NO
+# trailing comments (the awk helper greps field 2 verbatim). All console
+# greps in the e2e scenarios consume THIS table — never hardcode sentinel
+# strings in scenario code. Strings drift across systemd releases (the
+# 257.13 wording differs from 261's); this table is the pin of record for
+# Debian 13 trixie.
+#
+# Extraction (verified empirically, not transcribed from docs): each deb was
+# downloaded from deb.debian.org, unpacked with `ar x` + tar, and the exact
+# bytes confirmed in the named binary via `strings`/byte-grep. The task-spec
+# string is stored verbatim; where it is a substring of a longer literal, the
+# full literal is noted in the per-line provenance comments.
+#
+# Pinned artifacts (sha256) — systemd/cryptsetup/dracut section:
+#   systemd-cryptsetup_257.13-1~deb13u1_amd64.deb
+#     08ec2063867d0e5861b01340f9705dfe0ef4c4612dc5bdfeae29e5d8e7370034
+#   libsystemd-shared_257.13-1~deb13u1_amd64.deb
+#     2d349824e57f88507e2a33360610d8afc143a4ad5e80ee4bf8f37b826d6f37f9
+#   cryptsetup-bin_2.7.5-2_amd64.deb
+#     b77b192cf1c35f96da02134300bb227ab92c49eec2444268049fa1ce84fb9bc7
+#   dracut_106-6_all.deb
+#     01d71791af2b8306296c48f22b3aef390df21c84eb1328ded174722f19e1d349
+#   dracut-core_106-6_amd64.deb
+#     3d42a242f2a1d6a8dcef15a66ddbb1263050695b2cff544b57a7a12d88338686
+#
+# Deb locations:
+#   http://deb.debian.org/debian/pool/main/s/systemd/systemd-cryptsetup_257.13-1~deb13u1_amd64.deb
+#   http://deb.debian.org/debian/pool/main/s/systemd/libsystemd-shared_257.13-1~deb13u1_amd64.deb
+#   http://deb.debian.org/debian/pool/main/c/cryptsetup/cryptsetup-bin_2.7.5-2_amd64.deb
+#   http://deb.debian.org/debian/pool/main/d/dracut/dracut_106-6_all.deb
+#   http://deb.debian.org/debian/pool/main/d/dracut/dracut-core_106-6_amd64.deb
+#
+# Provenance notes (systemd/cryptsetup/dracut section):
+#   Most policy/token messages live in libsystemd-shared-257.so (the
+#   systemd-cryptsetup binary links it, symbol version SD_SHARED), NOT in the
+#   systemd-cryptsetup deb itself. "Entering emergency mode." is not from
+#   systemd at all — it is echoed by dracut's 98dracut-systemd
+#   dracut-emergency.sh (trixie dracut 106-6). systemd-cryptenroll ships in
+#   the systemd-cryptsetup deb (usr/bin/systemd-cryptenroll).
+#
+# Full literals (for reference; stored values below may be substrings):
+#   token_discovered: observed live in the s00/s01 consoles (2026-09-14):
+#     "Requesting JSON for token 0." [libcryptsetup-token-systemd-tpm2.so /
+#     libsystemd-shared-257.so]. The originally pinned string
+#     "Automatically discovered security TPM2 token unlocks volume." exists
+#     in libsystemd-shared but is NEVER printed by 257.13's attach flow with
+#     tpm2-device=auto (determine_token_type short-circuits the generic
+#     token-discovery scan that logs it).
+#   pcr_sig_added: full literal == stored string
+#     "Adding PCR signature policy."
+#     [libsystemd-shared-257.so]
+#   unlocked: full literal "Volume %s activated with a LUKS token."
+#     [systemd-cryptsetup binary]
+#   prompt_re: matches printf literal "Please enter %s for disk %s:"
+#     (also "... (verification):") [systemd-cryptsetup binary]
+#   retry_cap: full literal == stored string
+#     "Too many attempts to activate; giving up."
+#     [systemd-cryptsetup binary]
+#   cryptenroll_enrolled: printf format in the binary is
+#     "New TPM2 token enrolled as key slot %i." (observed on console with
+#     %i = 1) [systemd-cryptenroll binary, systemd-cryptsetup deb]
+#   pcr_sig_missing: full literal == stored string
+#     "Couldn't find signature for this PCR bank"
+#     [libsystemd-shared-257.so]
+#   cryptsetup_nokey: full literal == stored string
+#     "No key available with this passphrase."
+#     [cryptsetup binary, cryptsetup-bin_2.7.5-2]
+#   tpm_absent_nodevice: full literal == stored string
+#     "No TPM2 (tpmrm) device found."
+#     [libsystemd-shared-257.so] (observed live in s10's TPM-less boot)
+#   tpm_absent_notfound: full literal == stored string
+#     "TPM2 device not found."
+#     [libcryptsetup-token-systemd-tpm2.so]
+#   tpm_absent_fallback: full literal == stored string
+#     "No TPM2 hardware discovered and EFI firmware does not see it either,
+#     falling back to traditional unlocking."
+#     [systemd-cryptsetup binary] (observed live in s10's TPM-less boot;
+#     supersedes the old "tpm_absent" pin — a different code path whose
+#     "Could not find TPM2 device: %m" is never printed by this flow)
+#   da_locked: full literal "TPM2 device is in dictionary attack lockout mode."
+#     [libsystemd-shared-257.so]
+#   emergency_forbidden: full literal
+#     "Entering emergency mode. Exit the shell to continue."
+#     [dracut 98dracut-systemd/dracut-emergency.sh line 25]
+#
+# ===========================================================================
+# FIRMWARE / HOST-TOOL section — NOT systemd provenance. The same
+# `sentinel_of` helper consumes this one file (a second table file would
+# need helper churn in every scenario, so the sections share the file; the
+# break keeps provenance classes distinct).
+#
+# Pinned artifacts (sha256) — firmware/host-tool section:
+#   ovmf_2025.02-8+deb13u1_all.deb
+#     78e0d54df11fc77406cb7a0bc9a39e5bca6d1cbe06556b91d9a73491c52decdf
+#   sbsigntool_0.9.5-2_amd64.deb
+#     93cff927de0fcd6c6973bf51cf46b27a3d803479fc69936e46db8bf1c68f8e17
+#
+# Deb locations:
+#   http://deb.debian.org/debian/pool/main/e/edk2/ovmf_2025.02-8+deb13u1_all.deb
+#   http://deb.debian.org/debian/pool/main/s/sbsigntool/sbsigntool_0.9.5-2_amd64.deb
+#
+# Provenance notes (firmware/host-tool section):
+#   The ovmf_* strings were byte-OBSERVED in guest consoles but are NOT
+#   byte-greppable inside the firmware image: BdsDxe/DXE modules live in
+#   LZMA-compressed firmware volumes. The sandbox firmware
+#   (/usr/share/ovmf/x64/OVMF_CODE.secboot.4m.fd) is the pinned deb's
+#   OVMF_CODE_4M.secboot.fd except the FV header build stamp (OVMF_VARS
+#   byte-identical). Re-pin by re-observing a console, not by grepping the
+#   image. linux_banner is the runtime-constructed kernel printk prefix of
+#   the guest kernel pinned in tests/lib/rootfs-fixture.sh
+#   (linux-image-6.12.107+deb13-amd64-unsigned_6.12.107-1) — never a static
+#   image byte either. sbverify_no_sig IS byte-verified in the pinned deb's
+#   /usr/bin/sbverify (and in the sandbox's installed binary).
+#
+# Data lines:
+
+token_discovered	Requesting JSON for token 0.
+pcr_sig_added	Adding PCR signature policy.
+unlocked	activated with a LUKS token.
+prompt_re	^Please enter .* for disk
+retry_cap	Too many attempts to activate; giving up.
+cryptenroll_enrolled	New TPM2 token enrolled as key slot 1.
+pcr_sig_missing	Couldn't find signature for this PCR bank
+cryptsetup_nokey	No key available with this passphrase.
+tpm_absent_nodevice	No TPM2 (tpmrm) device found.
+tpm_absent_notfound	TPM2 device not found.
+tpm_absent_fallback	No TPM2 hardware discovered and EFI firmware does not see it either, falling back to traditional unlocking.
+tpm2_refused	Failed to unseal secret using TPM2
+da_locked	dictionary attack lockout mode
+emergency_forbidden	Entering emergency mode.
+ovmf_bds_loading	BdsDxe: loading Boot0002
+ovmf_sb_denied	Access Denied -- rejected probably by Secure Boot
+ovmf_no_bootable	BdsDxe: No bootable option or device was found.
+ovmf_bds_starting	BdsDxe: starting Boot
+sbverify_no_sig	No signature table present
+linux_banner	Linux version 6.

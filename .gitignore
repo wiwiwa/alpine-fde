@@ -1,3 +1,7 @@
 .*
 *.img
 *.tar.xz
+__pycache__/
+*.pyc
+err.txt
+/proc/

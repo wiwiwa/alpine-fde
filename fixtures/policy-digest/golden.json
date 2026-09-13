@@ -1,0 +1,12 @@
+{
+  "comment": "Golden vector for the combined {7,11} PolicyPCR policy digest (docs/Architecture.md \u00a76.1.1). Formula (verified against live TPM trial sessions, tpm2-tools 5.8/swtpm): policy_digest = SHA256( zero32 || CC_PolicyPCR(0000017f) || TPML_PCR_SELECTION{count=1, sha256, sizeofSelect=3, select=80 08 00} || SHA256(d7_raw || d11_raw) ). The 4-byte command code IS part of the TPM2_PolicyUpdate hash (TPM 2.0 Part 3 PolicyContextUpdate); omitting it does NOT reproduce this vector.",
+  "pcr_bank": "sha256",
+  "pcrs": [
+    7,
+    11
+  ],
+  "pcr7_digest": "fbd081aba59bc55a7cc09aed8652fa17c5b35a9158b0b5986853eb8a746414b3",
+  "pcr11_digest": "10f4cb525ab05f5bd5b4c088898a25656464327ace606405bea644d6a8c10877",
+  "pcr_digest": "7cf21207e642b35b06e18b4f9abe507189ff55e92fc25479f6c7cc26bc6f4b22",
+  "policy_digest": "8764f34f731c25b746e4cc68072e3fc844437826709e4ca8ae73ec9f72817c23"
+}
