@@ -13,34 +13,44 @@ type **no password at boot**, ever.
   the TPM refuses to release the key → you see the recovery passphrase prompt.
 - Kernel update or rollback → still passwordless.
 
-> Status: implementation in progress (docs/Architecture.md is implementation-ready;
-> unit suite green; the e2e scenario matrix is being re-validated wave by wave).
-> See "For developers".
-
 ---
 
 ## For end users
 
 ### What you need
 
-- A Debian 13 ("trixie") machine, x86_64, UEFI firmware with TPM 2.0.
-- The ability to set a **firmware admin password** and enroll custom Secure Boot
-  keys (any modern machine; a firmware UI or the bundled KeyTool handles it).
-- One **offline USB stick** that holds the signing key (kept in a drawer, used
-  only during provisioning and kernel-signing updates).
-- One **recovery passphrase** (chosen during install; the only password you ever
-  type for the disk — stored somewhere safe, not on the machine).
+- An x86_64 machine with UEFI firmware and TPM 2.0.
+- The ability to enter UEFI Setup, clear vendor keys to enter **Setup Mode** (`SetupMode=1`), and set a **firmware admin password**.
+- One **recovery passphrase** (chosen during install; the only password you ever type for the disk — stored somewhere safe, not on the machine).
+- A remote host to `scp` backup your keys (or an offline USB stick).
 
-### Quick start (from the Debian live ISO)
+### Quick start
 
+#### Option A: Wave 2 Installation (Btrfs default, single-reboot ceremony — Design Preview)
+*(Note: Wave 2 features are currently in design preview; see Option B for shipped `main` commands).*
+```sh
+# 1. From live host (Debian Live or Alpine):
+# Standard single-disk installation (Btrfs root with @, @home, @snapshots):
+./bin/debian-fde install --disk /dev/nvme0n1
+
+# Accelerated hybrid storage (fast SSD caching slow HDD; strictly writethrough):
+./bin/debian-fde install --disk /dev/sda --bcache /dev/nvme0n1
+
+# Multi-disk Btrfs RAID1 across two drives:
+./bin/debian-fde install --disk /dev/nvme0n1 --disk /dev/nvme1n1
+```
+
+The installer prompts for your disk recovery passphrase and signing key passphrase, installs Debian, enrolls your custom Secure Boot keys into firmware, and automatically reboots into BIOS.
+* In BIOS: Toggle **Secure Boot: ON** and exit BIOS.
+* On first boot: Enter your recovery passphrase once. The system verifies Secure Boot, securely seals your disk to the TPM, and prompts you to back up your keys off-machine.
+* From now on: **Zero passwords at boot.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered.
+
+#### Option B: Shipped Wave 1 Installation (Single-disk ext4, offline signing medium)
 ```sh
 # boot the Debian installer/live ISO, then run debian-fde from your USB stick:
-./bin/debian-fde doctor            # checks the environment (read-only — it
-                                 # installs nothing)
-./bin/debian-fde provision         # creates + enrolls Secure Boot keys,
-                                 # generates the release key on your USB stick
-./bin/debian-fde install           # partitions, encrypts (LUKS2), installs a
-                                 # minimal Debian, sets up the signed boot chain
+./bin/debian-fde doctor            # checks the environment (read-only — it installs nothing)
+./bin/debian-fde provision stage1   # creates + enrolls Secure Boot keys, generates release key on USB
+./bin/debian-fde install --disk /dev/nvme0n1 --keydir /media/usb/keys # partitions, encrypts, installs
 # reboot — you'll be asked ONCE for the recovery passphrase
 ./bin/debian-fde audit --init      # record the verified-boot baseline
 ./bin/debian-fde ukictl build      # build + sign the kernel image (UKI)
@@ -53,10 +63,14 @@ type **no password at boot**, ever.
 | You do… | What happens |
 |---|---|
 | Boot the machine | Unlocks automatically. No password. |
-| `apt upgrade` (new kernel) | The kernel hook rebuilds and re-signs the boot image. Next boot: still automatic. |
+| `apt upgrade` (new kernel) | The kernel hook prompts for your release key passphrase, then rebuilds and re-signs the boot image and PCR policy. Next boot: still automatic. |
+| Before major upgrades / experiments | `debian-fde pre-upgrade` takes an atomic Btrfs snapshot of `@` to `/.snapshots` for instant rollback. |
 | Machine won't unlock after a firmware/BIOS update or a Secure Boot change | You're asked for the **recovery passphrase** — that's by design (the machine noticed boot verification changed). Fix the cause, then `debian-fde audit --accept` and re-enroll; see `docs/Architecture.md` §9.4. |
 | Want to boot the previous kernel | Pick it in the boot menu (`debian-fde bootnext <entry>`) — still passwordless for the retained kernels. |
 | Suspect the passphrase leaked | `debian-fde rotate` — new passphrase, no re-encryption. |
+
+> [!TIP]
+> For complete operational procedures, hardware replacement runbooks (including recovering from a failed cache SSD and rebuilding the ESP), and snapshot rollbacks, see [docs/UserGuide.md](docs/UserGuide.md).
 
 ### Honest limits
 
@@ -69,8 +83,7 @@ firmware admin password.
 
 ### Keep safe
 
-1. The **offline signing USB** — whoever holds it can sign boot images this TPM
-   will trust.
+1. Your **signing key backup** (and its passphrase) — whoever holds your decrypted signing key can sign boot images this TPM will trust.
 2. The **recovery passphrase** — with it, you can always get back in; without it
    (and with the TPM refusing), the data is gone. That's the point.
 
@@ -83,25 +96,25 @@ firmware admin password.
 ```
 bin/debian-fde            CLI dispatcher (subcommands in lib/cmd/)
 lib/                      core libraries (TCTI/TPM seam, efivarfs seam, baseline,
-                          manifest, ESP management, policy/signing, firmware keys)
-hooks/                    /etc/kernel/postinst.d + postrm.d integration
+                          manifest, ESP management, policy/signing, firmware keys,
+                          initramfs/crypttab/cmdline build guards)
+hooks/                    /etc/kernel + initramfs hook templates (postinst build,
+                          postrm prune, initramfs post-update, systemd-boot
+                          upgrade re-sign)
 fixtures/                 pinned test artifacts (keys, UKI inputs, golden vectors)
 tests/                    unit suite + e2e harness (swtpm, QEMU/OVMF, sentinels)
 docs/Architecture.md      the design — SOURCE OF TRUTH, implementation-ready
+docs/UserGuide.md         operator guide: workflows, RAID1, bcache, and recovery runbooks
 ```
 
-### Design in one paragraph
+### How it works
 
-Debian 13 + systemd-native tooling: `ukify` builds a Unified Kernel Image
-(kernel + initramfs + cmdline, one signed EFI binary); `sbctl`-style custom
-Secure Boot keys (openssl + sbsigntool — sbctl itself isn't in Debian) make the
-firmware verify it; the stub measures it into PCR 11. The LUKS2 key is enrolled
-via `systemd-cryptenroll` with **PCR 7 bound statically and PCR 11 covered by a
-release-key-signed policy** whose signatures ride inside each UKI (`.pcrsig`).
-Unlock is **systemd's own initramfs code** — Debian FDE adds no boot-critical
-custom code. A decision ladder (Architecture.md §6.1) spikes the preferred
-mechanism first; fallbacks are specified and tested. See ADR-1…ADR-15 for every
-decision and its rationale.
+The design — what gets sealed where, why the boot chain verifies, and every
+trade-off — is documented in [docs/Architecture.md](docs/Architecture.md).
+In short: your machine verifies the boot chain with your own Secure Boot keys,
+measures what it verified into the TPM, and the TPM only releases the disk key
+when both check out. No boot component added by Debian FDE ever needs to be
+trusted with your passphrase.
 
 ### Development environment
 
@@ -112,9 +125,10 @@ decision and its rationale.
 - `tests/env-check.sh` — verifies your environment, prints what's missing.
 - `tests/run-unit.sh` — unit suite (TAP output). Fast, no VM; TPM tests run
   against **swtpm**, never your real TPM.
-- e2e (scenario matrix S-00…S-18, mapping 1:1 to the failure matrix in
-  Architecture.md §10) runs on the swtpm + QEMU/OVMF harness (`tests/run-e2e.sh`);
-  the headline assertion is *boots to login with zero input*.
+- The e2e scenario matrix (mapping 1:1 to the failure matrix in
+  Architecture.md §10) runs on the swtpm + QEMU/OVMF harness
+  (`tests/run-e2e.sh`; `tests/e2e/results-final.json` holds the last pinned
+  baseline run).
 
 ### Conventions (enforced by review)
 
@@ -130,7 +144,7 @@ decision and its rationale.
   run against real `systemd-cryptenroll`/TPM, never swtpm alone.
 - The installed system stays **minimal** (§3.3): `debootstrap --variant=minbase`,
   no-recommends, an explicit ~15-package addition set; size budget asserted in CI.
-- Everything in `docs/Architecture.md` §14 (ADR-1…15) is decided; if code and
+- Everything in `docs/Architecture.md` §14 (ADR-1…18) is decided; if code and
   doc disagree, raise it — never work around silently.
 
 ### Build & test
