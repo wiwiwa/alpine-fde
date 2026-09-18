@@ -18,6 +18,10 @@ if [ -z "${DEBIAN_FDE_ESP_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../esp.sh"
 fi
+if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+    # shellcheck disable=SC1090
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../install-state.sh"
+fi
 
 status_usage() {
     cat >&2 <<'EOF'
@@ -96,6 +100,30 @@ cmd_status_main() {
     [ $# -eq 0 ] || die -r "$DEBIAN_FDE_USAGE" "status: unexpected arguments: $*"
 
     _st_bl=$(sp_baseline_file)
+    # Install-state row (§8.1/§9.1, G-IL12): the lifecycle headline. SILENT for
+    # pre-state-machine installs (no state file), a quiet line when finalized,
+    # a PROMINENT warning + resume hint while state=installed (pending
+    # first-boot finalization). Report-only: rc stays 0.
+    _st_isf=$(istate_file)
+    if [ -f "$_st_isf" ]; then
+        printf '== Install state\n'
+        _st_is=$(istate_state)
+        case $_st_is in
+            installed)
+                printf '    WARNING: installation is NOT finalized (install state: installed)\n'
+                printf '    First-boot finalization pending: debian-fde-finalize.service runs\n'
+                printf '    it on the next boot, or resume now: debian-fde finalize\n'
+                ;;
+            finalized)
+                printf '    install state: finalized\n'
+                ;;
+            *)
+                printf '    WARNING: unreadable install state in %s\n' "$_st_isf"
+                ;;
+        esac
+        printf '\n'
+    fi
+
     printf '== Secure Boot (efivars: %s)\n' "$(fw_efivars_dir)"
     if _st_sb=$(fw_sb_state); then
         printf '    %s\n' "$_st_sb"

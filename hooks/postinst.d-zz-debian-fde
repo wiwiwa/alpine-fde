@@ -14,8 +14,10 @@
 # ADR-8: a failing build must fail loudly — non-zero exit propagates to dpkg,
 # the failure marker is persisted for `debian-fde status`, and the PREVIOUS
 # default UKI is never touched (ukictl build writes the ESP atomically and
-# prunes only after success). Operator recovery: attach the signing medium,
-# re-run `debian-fde ukictl build <kver>` (idempotent), then `dpkg --configure -a`.
+# prunes only after success). Operator recovery (ADR-18): re-run
+# `debian-fde ukictl build <kver>` and enter the release-key passphrase when
+# prompted; unattended, provide DEBIAN_FDE_KEY_PASSPHRASE via your credential
+# agent, then `dpkg --configure -a`.
 
 set -u
 
@@ -49,7 +51,7 @@ if [ "$rc" -ne 0 ]; then
     {
         printf 'kernel hook: ukictl build failed for kernel %s\n' "$kver"
         printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'recovery: attach the signing medium, re-run "debian-fde ukictl build %s", then "dpkg --configure -a"\n' "$kver"
+        printf 'recovery: re-run "debian-fde ukictl build %s" (enter the release-key passphrase when prompted); unattended: provide DEBIAN_FDE_KEY_PASSPHRASE via your credential agent, then "dpkg --configure -a"\n' "$kver"
     } >>"$marker" 2>/dev/null || true
     exit "$rc"
 fi

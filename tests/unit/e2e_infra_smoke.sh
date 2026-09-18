@@ -47,6 +47,33 @@ assert_eq "disk: 2 keyslots after luksAddKey" "2" "$SLOTS"
 TOKENS=$(disk_token_json "$WORK/disk.img")
 assert_eq "disk: no tokens before enrollment" "{}" "$TOKENS"
 
+# --- qemu argv contract (G-HW1): N-disk attachment + documented drive map --------
+# qemu_argv is the pure-argv seam of qemu_run (no sockets/pins/processes): the
+# drive map is vda=ESP, vdb=LUKS, vdc=optional pcrsig payload, vdd… = the
+# opt-in 7th argument (newline-separated images appended in list order).
+source "$TESTS/lib/qemu.sh"
+mkdir -p "$WORK/argv"
+ARGV=$(qemu_argv "$WORK/argv" "$WORK/argv/esp.img" "$WORK/argv/disk.img" \
+    "$WORK/argv/vars.fd" "$WORK/argv/tpm" "$WORK/argv/pcrsig.img" \
+    "$(printf '%s\n%s\n' "$WORK/argv/x1.img" "$WORK/argv/x2.img")")
+assert_contains "qemu_argv: OVMF code pflash (readonly)" "$ARGV" \
+    "if=pflash,format=raw,readonly=on"
+assert_contains "qemu_argv: per-scenario vars pflash" "$ARGV" \
+    "if=pflash,format=raw,file=$WORK/argv/vars.fd"
+assert_contains "qemu_argv: swtpm ctrl-socket tpmdev" "$ARGV" \
+    "socket,id=chrtpm,path=$WORK/argv/tpm/sock.ctrl"
+assert_contains "qemu_argv: tpm-tis device" "$ARGV" "tpm-tis,tpmdev=tpm0"
+assert_not_contains "qemu_argv: TCG argv carries no -accel flag" "$ARGV" "-accel"
+DRIVES=$(sed -n 's/^file=\(.*\),format=raw,if=virtio$/\1/p' <<<"$ARGV" | tr '\n' ' ')
+assert_eq "qemu_argv: virtio drive order == documented map vda..vde (2 extra drives)" \
+    "$WORK/argv/esp.img $WORK/argv/disk.img $WORK/argv/pcrsig.img $WORK/argv/x1.img $WORK/argv/x2.img " \
+    "$DRIVES"
+ARGV5=$(qemu_argv "$WORK/argv" "$WORK/argv/esp.img" "$WORK/argv/disk.img" \
+    "$WORK/argv/vars.fd" "$WORK/argv/tpm")
+DRIVES5=$(sed -n 's/^file=\(.*\),format=raw,if=virtio$/\1/p' <<<"$ARGV5" | tr '\n' ' ')
+assert_eq "qemu_argv: legacy 5-arg contract == vda+vdb only" \
+    "$WORK/argv/esp.img $WORK/argv/disk.img " "$DRIVES5"
+
 # --- UKI builder: guest tree, initramfs, ukify sections, pcrsig ------------------
 keys_create "$WORK/uki-keys"
 echo "# building guest tree + UKI (first run extracts pinned debs; cached) ..."
@@ -85,6 +112,37 @@ assert_contains "initrd: systemd-cryptsetup present" "$CPIO" "usr/lib/systemd/sy
 assert_contains "initrd: cryptenroll present" "$CPIO" "usr/bin/systemd-cryptenroll"
 assert_contains "initrd: tpm2 helper present" "$CPIO" "opt/tpm/bin/tpm2_pcrread"
 assert_contains "initrd: dm-crypt module present" "$CPIO" "modules/dm-crypt.ko"
+# G-HW3: the btrfs+bcache module closure (deps first in UKI_MODULES; every
+# member verified present as a .ko.xz in the PINNED kernel deb — see the
+# modules-tree asserts below — and packed decompressed into the initrd)
+for m in btrfs bcache zstd xor raid6_pq; do
+    assert_contains "initrd: $m module present (G-HW3 btrfs/bcache closure)" "$CPIO" "modules/$m.ko"
+done
+# G-HW4: the pinned kernel carries the btrfs/bcache modules (gap-review fact,
+# re-asserted here against the extracted deb so a kernel re-pin cannot drop
+# the driver silently)
+for m in btrfs bcache zstd xor raid6_pq; do
+    KMOD=$(find "$WORK/run/guest-tree/modules-tree" -name "$m.ko.xz" 2>/dev/null | head -1)
+    if [[ -n "$KMOD" ]]; then
+        _assert_result ok "pinned kernel deb carries $m.ko.xz" ""
+    else
+        _assert_result not-ok "pinned kernel deb carries $m.ko.xz" \
+            "no $m.ko.xz under guest-tree/modules-tree"
+    fi
+done
+# G-HW5: the btrfs userspace closure rides the initrd (mkfs.btrfs + subvolume
+# tooling for the §9.1 installer stage). The udev pieces ride with it: without
+# systemd-udevd + the dm rules in the initrd, the LUKS attach is udev-
+# unregistered and the installed system's §9.1 fstab UUID= submounts can
+# never resolve (device units require the udev db — observed live 2026-09-19)
+assert_contains "initrd: btrfs tool present" "$CPIO" "usr/bin/btrfs"
+assert_contains "initrd: mkfs.btrfs present" "$CPIO" "usr/sbin/mkfs.btrfs"
+assert_contains "initrd: systemd-udevd present (fstab UUID= resolution)" "$CPIO" \
+    "usr/lib/systemd/systemd-udevd"
+assert_contains "initrd: udevadm present" "$CPIO" "usr/bin/udevadm"
+assert_contains "initrd: 55-dm.rules present" "$CPIO" "usr/lib/udev/rules.d/55-dm.rules"
+assert_contains "initrd: 60-persistent-storage.rules present" "$CPIO" \
+    "usr/lib/udev/rules.d/60-persistent-storage.rules"
 assert_contains "initrd: release pub present" "$CPIO" "rel.pub"
 # NOTE: pcrsig.json deliberately NOT in the initrd (would change its own
 # PCR prediction) — travels on the payload drive instead.
@@ -162,16 +220,26 @@ else
 fi
 
 # --- scenario registry completeness vs the §10/§12 matrix -------------------------
-# The registry in run-e2e.sh must declare the FULL S-00..S-17 matrix: a dropped
-# row would silently shrink the §10 failure matrix. Assert every matrix id is
-# covered AND that the registry carries exactly 18 rows (duplicates inflate the
-# count and fail here too).
+# The registry in run-e2e.sh must declare the FULL §10/§12 matrix: a dropped
+# row would silently shrink the failure matrix. Assert every matrix id is
+# covered — s00–s17 (the original 18-row matrix) PLUS the W2b multi-drive
+# rows s19–s22 (now LITERAL table rows, per run-e2e.sh's registry notes).
+# The pinned invariants are (a) the per-id coverage below, (b) no duplicate
+# rows and (c) the 18-row floor (now 22 rows with W2b landed).
 REGISTRY_IDS=$(awk -F '\t' '$1 ~ /^s[0-9][0-9]$/ {print $1}' "$TESTS/run-e2e.sh")
-for s in s00 s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 s11 s12 s13 s14 s15 s16 s17; do
+for s in s00 s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 s11 s12 s13 s14 s15 s16 s17 \
+    s19 s20 s21 s22; do
     assert_contains "registry covers $s" "$REGISTRY_IDS" "$s"
 done
-assert_eq "registry declares exactly the 18-row §10/§12 matrix" "18" \
-    "$(grep -c . <<<"$REGISTRY_IDS")"
+N_ROWS=$(grep -c . <<<"$REGISTRY_IDS")
+N_UNIQ=$(sort -u <<<"$REGISTRY_IDS" | wc -l)
+assert_eq "registry: no duplicate matrix rows (dynamic count)" "$N_UNIQ" "$N_ROWS"
+if (( N_UNIQ >= 18 )); then
+    _assert_result ok "registry: >= 18 rows (§10/§12 matrix floor; 22 with the W2b rows)" ""
+else
+    _assert_result not-ok "registry: >= 18 rows (§10/§12 matrix floor)" \
+        "only $N_UNIQ distinct ids in the literal table"
+fi
 
 # --- I1/I2/I4 artifact scans: no private key material in build artifacts ----------
 # I4: the release signing private key never ships on/in the protected machine;

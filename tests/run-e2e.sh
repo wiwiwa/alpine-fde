@@ -23,11 +23,13 @@
 #   exit 1  — one or more scenario-class failures (including registry ids
 #             whose scenario file is missing, and vacuous zero-scenario runs)
 #
-# Wave 1 status: S-00/S-01 exist as LITE bring-up scenarios (*-lite.sh); the
-# remaining §10/§12 rows are pre-registered here for Wave 2 (see
-# tests/e2e/README.md for the registry contract). The third column is a
-# wave-status hint only — the RUNTIME status is always derived from file
-# existence (absent scenario file ⇒ failure, see below).
+# Registry status (updated 2026-09-19, W2b): s00/s00b are the full §12
+# bootstrap chain; s01–s18 carry pinned/observed statuses in
+# tests/e2e/results-final.json. The W2b multi-drive rows s19–s22 (§10 BASE
+# matrix + §12 S-19..S-22) are LITERAL table rows now — they bootstrap
+# IN-SCENARIO (each builds its own fixtures and consumes no s00/s00b state),
+# so the -j scheduler's s00/s00b hoist cannot misorder them and they are NOT
+# in _STATE_CONSUMERS.
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -139,13 +141,19 @@ s14	s14-kernel-update.sh	ready
 s15	s15-pcr7-drift.sh	ready
 s16	s16-key-rotation.sh	ready
 s17	s17-tpm-clear.sh	ready
+s19	s19-bcache-crash.sh	ready
+s20	s20-raid1-member-loss.sh	ready
+s21	s21-finalize-guard.sh	ready
+s22	s22-handoff-immunity.sh	ready
 "
-# Extension scenarios BEYOND the §10/§12 matrix (§6.1 signing negative controls)
-# are appended at runtime, NOT as literal table lines: the infra smoke
-# (tests/unit/e2e_infra_smoke.sh) pins this file's literal table at exactly the
-# 18 matrix rows, so extension ids must never inflate that count. (printf with
-# \t escapes keeps raw tabs out of this file text; at runtime the row is a
-# normal TAB-separated registry entry.)
+# Extension scenario BEYOND the §10/§12 matrix (the §6.1 signing negative
+# control) is appended at runtime, NOT as a literal table line: the literal
+# table keeps exactly the §10/§12 matrix rows (now 22: s00–s17 + the W2b
+# multi-drive rows s19–s22). The infra smoke (tests/unit/e2e_infra_smoke.sh)
+# pins per-id §10/§12 coverage + no duplicates + an 18-row floor (dynamic
+# count — it does not pin 18 exactly anymore). (printf with \t escapes keeps
+# raw tabs out of this file text; at runtime the row is a normal
+# TAB-separated registry entry.)
 #   s18  s18-foreign-pcrsig.sh  (G-T5: foreign-key .pcrsig negative control)
 REGISTRY="${REGISTRY}$(printf '\n%s\t%s\t%s\n' "s18" "s18-foreign-pcrsig.sh" "ready")"
 

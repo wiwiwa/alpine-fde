@@ -9,6 +9,16 @@ if [ -n "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
 fi
 DEBIAN_FDE_FIRMWARE_LOADED=1
 
+# Self-load common.sh (info/die) — the §9.1 step-4 guest one-liner
+# `. /opt/debian-fde/lib/firmware.sh && fw_auth_enroll …` runs in a fresh
+# chroot shell where nothing is preloaded. Pattern: lib/install-state.sh.
+_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+_is_lib_dir=${_is_cmd_dir%/*}
+if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
+    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
+    . "$_is_lib_dir/common.sh"
+fi
+
 # EFI_GLOBAL_VARIABLE — the firmware's own namespace. S-M5: a same-named
 # variable in a vendor namespace is creatable by root and must never be
 # mistaken for the firmware's SB state (the §8.4 guard trusts it).
@@ -90,6 +100,116 @@ fw_var_present() {
     _fw_file=$(fw_find_var "$1" "$2") || return 1
     _fw_sz=$(wc -c <"$_fw_file" 2>/dev/null | tr -d '[:space:]') || return 1
     [ "$_fw_sz" -gt 4 ]
+}
+
+# fw_guid_le_hex GUID-STRING — mixed-endian binary byte hex of an EFI GUID
+# (first three fields byte-reversed, last two verbatim) as used inside EFI
+# data structures; consumed by fw_var_write's packet identity check.
+fw_guid_le_hex() {
+    _fgl_a=${1%%-*}
+    _fgl_rest=${1#*-}
+    _fgl_b=${_fgl_rest%%-*}
+    _fgl_rest=${_fgl_rest#*-}
+    _fgl_c=${_fgl_rest%%-*}
+    _fgl_rest=${_fgl_rest#*-}
+    _fgl_d=${_fgl_rest%%-*}
+    _fgl_e=${_fgl_rest#*-}
+    _fgl_out=''
+    for _fgl_seg in "$_fgl_a" "$_fgl_b" "$_fgl_c"; do
+        # byte-reverse the segment two hex digits at a time (fold+tac are
+        # coreutils; the installer host always has them, ADR-15 host tools)
+        _fgl_r=$(printf '%s\n' "$_fgl_seg" | fold -w2 | tac | tr -d '\n')
+        _fgl_out="$_fgl_out$_fgl_r"
+    done
+    printf '%s%s%s%s%s\n' "$_fgl_out" "$_fgl_d" "$_fgl_e"
+}
+
+# fw_hex_le_dec HEXLE — decode a little-endian hex byte string to decimal
+fw_hex_le_dec() {
+    printf '%d\n' "0x$(printf '%s\n' "$1" | fold -w2 | tac | tr -d '\n')"
+}
+
+# fw_name_utf16_hex NAME — UTF-16LE byte hex of an ASCII variable name
+fw_name_utf16_hex() {
+    _fnu_out=''
+    for _fnu_c in $(printf '%s\n' "$1" | fold -w1); do
+        _fnu_out="$_fnu_out$(printf '%02x00' "'$_fnu_c")"
+    done
+    printf '%s\n' "$_fnu_out"
+}
+
+# fw_var_write DIR NAME GUID AUTHFILE — write an authenticated variable update
+# (the .auth packet from the key ceremony, provision stage1) into efivarfs as
+# a 4-byte u32le attributes header (NV+BS+RT = 7) followed by the packet.
+# The packet is identity-checked BEFORE any write: its embedded EFI_VARIABLE_DATA
+# GUID and UnicodeName must name exactly the target variable — an .auth packet
+# aimed at another variable must never be able to program this one (fail-closed).
+fw_var_write() {
+    _fwv_dir=$1
+    _fwv_name=$2
+    _fwv_guid=$3
+    _fwv_auth=$4
+    [ -d "$_fwv_dir" ] ||
+        die "firmware: no efivars directory $_fwv_dir — cannot enroll $_fwv_name (UEFI boot required)"
+    [ -f "$_fwv_auth" ] ||
+        die "firmware: authenticated update packet missing: $_fwv_auth (run the key ceremony first)"
+    _fwv_hex=$(od -An -vtx1 "$_fwv_auth" | tr -d ' \n')
+    # EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME (16 bytes) then EFI_VARIABLE_DATA:
+    # GUID (16 bytes) at offset 16, DataSize u32le at 32, UnicodeName at 36.
+    _fwv_got_guid=$(printf '%s\n' "$_fwv_hex" | cut -c33-64)
+    [ "$_fwv_got_guid" = "$(fw_guid_le_hex "$_fwv_guid")" ] ||
+        die "firmware: $_fwv_auth does not name GUID $_fwv_guid — refusing to program $_fwv_name (packet identity mismatch)"
+    _fwv_datasize=$(fw_hex_le_dec "$(printf '%s\n' "$_fwv_hex" | cut -c65-72)")
+    _fwv_size=$(wc -c <"$_fwv_auth" | tr -d '[:space:]')
+    [ "$_fwv_size" -ge $((_fwv_datasize + 36)) ] ||
+        die "firmware: $_fwv_auth truncated (DataSize $_fwv_datasize > packet body) — refusing to program $_fwv_name"
+    _fwv_got_name=$(printf '%s\n' "$_fwv_hex" | cut -c73-$((72 + 4 * ${#_fwv_name})))
+    [ "$_fwv_got_name" = "$(fw_name_utf16_hex "$_fwv_name")" ] ||
+        die "firmware: $_fwv_auth does not name variable $_fwv_name — refusing to program it (packet identity mismatch)"
+    printf '\007\000\000\000' >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
+        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid"
+    cat "$_fwv_auth" >>"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
+        die "firmware: cannot append packet to $_fwv_dir/$_fwv_name-$_fwv_guid"
+    info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
+    return 0
+}
+
+# fw_auth_enroll EFIVARS_DIR KEYDIR — the §9.1 Stage-1 step-4 enrollment:
+# authenticated updates into NVRAM in strict order db → KEK → PK (last) from
+# KEYDIR's .auth packets (db in the image-security database namespace, KEK/PK
+# in EFI_GLOBAL_VARIABLE). Gated: requires SetupMode==1 (fail-closed 64 —
+# authenticated writes outside setup mode fail or, worse, brick the boot
+# entry). Aborts on the first failure: a half-enrolled trust root (PK without
+# db/KEK) is never left behind.
+fw_auth_enroll() {
+    _fae_dir=$1
+    _fae_keys=$2
+    _fae_setup=$(fw_var_u8 "$_fae_dir" SetupMode) ||
+        die "firmware: SetupMode state unknown at $_fae_dir — refusing to enroll (§9.1 preflight: clear the vendor PK in BIOS setup first)"
+    [ "$_fae_setup" = "1" ] ||
+        die "firmware: not in Setup Mode (setup_mode=$_fae_setup) — refusing to enroll (§9.1: clear the vendor PK in BIOS setup first)"
+    for _fae_v in db KEK PK; do
+        _fae_guid=$FW_GUID_GLOBAL
+        [ "$_fae_v" = "db" ] && _fae_guid=$FW_GUID_IMAGE_SECURITY
+        # provision stage1 ships the packets as db.auth / kek.auth / pk.auth
+        _fae_lc=$(printf '%s' "$_fae_v" | tr '[:upper:]' '[:lower:]')
+        fw_var_write "$_fae_dir" "$_fae_v" "$_fae_guid" "$_fae_keys/$_fae_lc.auth"
+    done
+    return 0
+}
+
+# fw_osindications_set EFIVARS_DIR — set OsIndications bit 0 (EFI_GLOBAL_VARIABLE,
+# u64le payload 1, attributes 7): signals the firmware to enter BIOS setup on
+# the next boot (§9.1 teardown: the single-reboot ceremony).
+fw_osindications_set() {
+    _fod_dir=$1
+    [ -d "$_fod_dir" ] ||
+        die "firmware: no efivars directory $_fod_dir — cannot set OsIndications (UEFI boot required)"
+    printf '\007\000\000\000\001\000\000\000\000\000\000\000' \
+        >"$_fod_dir/OsIndications-$FW_GUID_GLOBAL" ||
+        die "firmware: cannot write $_fod_dir/OsIndications-$FW_GUID_GLOBAL"
+    info "firmware: OsIndications bit 0 set — next boot enters BIOS setup (§9.1)"
+    return 0
 }
 
 # fw_sb_state — print "secureboot=N setup_mode=N pk=N".

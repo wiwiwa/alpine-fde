@@ -33,6 +33,10 @@ trap 'rm -rf "$TMP"' EXIT
 . "$REPO/lib/common.sh"
 . "$REPO/lib/initramfs.sh"
 
+# deterministic topology: absent conf ⇒ btrfs default (per-call conf legs
+# below override this for ROOT_FS=ext4 / BCACHE=1)
+export DEBIAN_FDE_CONF="$TMP/conf-default-absent"
+
 FAKE="$REPO/fixtures/initramfs/lsinitrd-fake.sh"
 
 # --- inventories -----------------------------------------------------------------
@@ -49,6 +53,7 @@ cat >"$inv_complete" <<'EOF'
 -rw-r--r--   1 root root  15k kernel/drivers/char/tpm/tpm_tis.ko
 -rw-r--r--   1 root root  15k kernel/drivers/char/tpm/tpm_crb.ko
 -rw-r--r--   1 root root  383 usr/lib/udev/rules.d/60-tpm-udev.rules
+-rw-r--r--   1 root root  950k kernel/fs/btrfs/btrfs.ko
 -rwxr-xr-x   1 root root  60k usr/bin/systemd-cryptsetup
 -rwxr-xr-x   1 root root  90k bin/sh
 EOF
@@ -121,6 +126,57 @@ LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=busybox \
     initrd_audit "$TMP/whatever.img" 2>/dev/null
 assert_rc "audit 8: busybox present fails the audit" 1 $?
 assert_contains "audit 8: reason names the denied busybox" "$_initrd_audit_reason" "usr/bin/busybox"
+
+# --- G-ST5: filesystem drivers + bcache artifacts are topology-required (§8.2/§4.1) ---
+# A root filesystem driver missing from the initrd means the unlock path can
+# mount NOTHING (G2 lost / I6 class) — btrfs.ko is required by default,
+# ext4.ko when the persisted conf says ROOT_FS=ext4; BCACHE=1 additionally
+# requires bcache.ko + 69-bcache.rules + bcache-register (without them
+# /dev/bcache0 never registers and cryptsetup cannot open the container).
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=btrfs-ok \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 9: btrfs-ok inventory passes (default topology)" 0 $?
+assert_eq "audit 9: no reason on the btrfs-ok inventory" "" "$_initrd_audit_reason"
+
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=missing-btrfs \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 10: missing btrfs.ko fails the audit (default topology)" 1 $?
+assert_contains "audit 10: reason names btrfs.ko" "$_initrd_audit_reason" "btrfs.ko"
+
+printf 'ROOT_FS=ext4\n' >"$TMP/conf-ext4"
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=ext4-ok DEBIAN_FDE_CONF="$TMP/conf-ext4" \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 11: ext4-ok inventory passes under ROOT_FS=ext4" 0 $?
+assert_eq "audit 11: no reason on the ext4-ok inventory" "" "$_initrd_audit_reason"
+
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=missing-btrfs DEBIAN_FDE_CONF="$TMP/conf-ext4" \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 12: no fs driver fails under ROOT_FS=ext4" 1 $?
+assert_contains "audit 12: reason names ext4.ko (conf-driven requirement)" \
+    "$_initrd_audit_reason" "ext4.ko"
+
+printf 'ROOT_FS=btrfs\nBCACHE=1\n' >"$TMP/conf-bcache"
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-ok DEBIAN_FDE_CONF="$TMP/conf-bcache" \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 13: bcache-ok inventory passes under BCACHE=1" 0 $?
+assert_eq "audit 13: no reason on the bcache-ok inventory" "" "$_initrd_audit_reason"
+
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-missing DEBIAN_FDE_CONF="$TMP/conf-bcache" \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 14: BCACHE=1 without bcache artifacts fails the audit" 1 $?
+assert_contains "audit 14: reason names bcache.ko" "$_initrd_audit_reason" "bcache.ko"
+
+_initrd_audit_reason=''
+LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-missing \
+    initrd_audit "$TMP/whatever.img" 2>/dev/null
+assert_rc "audit 15: bcache artifacts NOT required without BCACHE=1" 0 $?
+assert_eq "audit 15: no reason on the default-topology bcache-missing" "" "$_initrd_audit_reason"
 
 # --- scenario 4: full real `ukictl build` over the fake inventory --------------------
 KVER=6.12.8-1-amd64

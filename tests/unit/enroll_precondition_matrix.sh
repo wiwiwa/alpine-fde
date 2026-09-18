@@ -605,5 +605,24 @@ assert_eq "no temp files left behind in the state dir" "" \
     "$(find "$ETC_DIR" -maxdepth 1 -name "$TMP_PAT" -print)"
 rm -f "$BYUUID/$QUOTED_UUID"
 
+# --- 21. G-XC12: --uuid accepts a block-device path (§8.1 "(or target block device)") ---
+# In addition to /dev/disk/by-uuid/<uuid>, an explicit /dev/... block-device
+# path must be accepted and passed to cryptenroll verbatim as the target.
+reset_state
+make_baseline final
+sb_vars 1 0
+write_pre
+write_post_happy
+mkdir -p "$T/dev"
+BLKDEV="$T/dev/nvme0n1p2"
+: >"$BLKDEV"
+run_enroll --uuid "$BLKDEV"
+assert_eq "block-device --uuid: enroll rc 0" "0" "$ENROLL_RC"
+assert_contains "block-device --uuid: passed verbatim as the cryptenroll target" \
+    "$(grep -v 'tpm2-device=list' "$LOG")" "$BLKDEV"
+assert_eq "block-device --uuid: enrolled.json records the device target" "$BLKDEV" \
+    "$(baseline_get "$(sp_enrolled_file)" luks_uuid)"
+rm -f "$BLKDEV"
+
 swtpm_stop "$STATE" || true
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

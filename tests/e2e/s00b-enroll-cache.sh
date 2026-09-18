@@ -40,11 +40,13 @@
 #               hand-rolled cryptenroll exists anywhere in this scenario.
 #           Then the PRISTINE disk + TPM state are snapshotted into the
 #           stable cache (tests/e2e/.cache/pristine-s00b/, SHA256-recorded
-#           manifest, fail-closed verification on reuse, s00 STATE SHAPE
-#           including tpm/tpm2-00.permall). The cache also carries
+#           manifest + FORMAT marker, fail-closed verification on reuse, s00
+#           STATE SHAPE including tpm/tpm2-00.permall). The cache also carries
 #           baseline.json + uki-pcrsig.json: earlier cache formats (flat
 #           permall, no finalized baseline, pre-jq target set, no
-#           signed-prediction JSON) fail verification and trigger a rebuild.
+#           signed-prediction JSON, pre-btrfs ext4 disk without the
+#           `btrfs-1` FORMAT marker — G-HW5 bump) fail verification and
+#           trigger a rebuild.
 #   boot C  §12 S-01 happy path: the login-stage UKI (enroll-skip -> token
 #           unlock with ZERO console input -> switch_root into the populated
 #           installed system) must reach `login:` on the serial console.
@@ -125,8 +127,11 @@ source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
 CACHE_DIR="$TESTS/e2e/.cache/pristine-s00b"
-# boot C runs the real installed systemd under TCG
-export QEMU_TIMEOUT="${DEBIAN_FDE_S00B_TIMEOUT:-900}"
+# boot C runs the real installed systemd under TCG: boot-to-login includes
+# the pinned tree's apparmor profile load (~100 apparmor_parser spawns) and
+# the §9.1 fstab submounts — 900 s was exceeded once (2026-09-19,
+# s00b-enroll-1789764323: console reached only guest-t=141 s at wall 900 s)
+export QEMU_TIMEOUT="${DEBIAN_FDE_S00B_TIMEOUT:-1800}"
 
 # --- hardening: bounded stages, loud failures, overall budget --------------------
 OVERALL_BUDGET="${DEBIAN_FDE_S00B_BUDGET:-5400}"
@@ -263,11 +268,13 @@ _qemu_alive() {
 # _cache_verify <dir> — rc 0 iff the pristine cache exists AND every recorded
 # SHA256 matches (fail-closed: never enroll/consume from tampered artifacts).
 # The cache mirrors the s00 STATE SHAPE (tpm/tpm2-00.permall) so state consumers
-# can treat both identically; requires baseline.json + uki-pcrsig.json: earlier
-# cache formats (flat permall, no finalized baseline, pre-jq target set, no
-# signed-prediction JSON) fail closed and trigger a rebuild.
+# can treat both identically; requires baseline.json + uki-pcrsig.json + the
+# FORMAT marker: earlier cache formats (flat permall, no finalized baseline,
+# pre-jq target set, no signed-prediction JSON, pre-btrfs ext4 disk — G-HW5
+# format bump) fail closed and trigger a rebuild.
 _cache_verify() {
     local dir="$1"
+    [[ -f "$dir/FORMAT" ]] && grep -q '^btrfs-2$' "$dir/FORMAT" || return 1
     [[ -f "$dir/MANIFEST.sha256" && -f "$dir/disk.img" && -f "$dir/tpm/tpm2-00.permall" \
         && -f "$dir/harness.efi" && -f "$dir/pcrsig.img" && -f "$dir/vars-enrolled.fd" \
         && -f "$dir/baseline.json" && -f "$dir/uki-pcrsig.json" ]] || return 1
@@ -284,6 +291,13 @@ _cache_store() {
     cp "$run/disk.img" "$run/harness.efi" "$run/pcrsig.img" "$run/vars-enrolled.fd" "$dir/"
     cp "$run/baseline.json" "$dir/baseline.json"
     cp "$run/uki-pcrsig.json" "$dir/uki-pcrsig.json"
+    # cache FORMAT marker (G-HW5 format bump): the disk layout generation —
+    # btrfs @/@home/@snapshots with the §9.1 UUID= fstab + udev-registered
+    # initrd attach since 2026-09-19 (btrfs-1 briefly carried a /dev/dm-0
+    # fstab). A cache without it (or from the ext4 era) fails _cache_verify
+    # and triggers a rebuild; the login-stage initrd of that generation
+    # cannot boot an older-layout disk and vice versa.
+    printf 'btrfs-2\n' >"$dir/FORMAT"
     # s00 STATE SHAPE (tpm/tpm2-00.permall): the snapshot below consumes
     # $STATE/tpm/tpm2-00.permall — a flat copy here would be silently skipped
     # by that guard and the from-cache boot would resume a VIRGIN TPM whose
@@ -292,9 +306,9 @@ _cache_store() {
     # "State not recoverable" -> clean poweroff before login).
     cp "$run/tpm/tpm2-00.permall" "$dir/tpm/tpm2-00.permall"
     cp -a "$run/keys" "$dir/keys"
-    (cd "$dir" && sha256sum disk.img harness.efi pcrsig.img vars-enrolled.fd \
+    (cd "$dir" && sha256sum FORMAT disk.img harness.efi pcrsig.img vars-enrolled.fd \
         tpm/tpm2-00.permall baseline.json uki-pcrsig.json >MANIFEST.sha256)
-    echo "# pristine enrolled state cached in $dir (SHA256 manifest: $(wc -l <"$dir/MANIFEST.sha256") entries)"
+    echo "# pristine enrolled state cached in $dir (FORMAT $(cat "$dir/FORMAT"), SHA256 manifest: $(wc -l <"$dir/MANIFEST.sha256") entries)"
 }
 
 STATE="${DEBIAN_FDE_S00_STATE:-}"
@@ -310,7 +324,7 @@ elif _cache_verify "$CACHE_DIR"; then
     FROM_CACHE=1
 else
     if [[ -d "$CACHE_DIR" ]]; then
-        echo "# S-00b: cache at $CACHE_DIR is STALE (pre-rework: flat permall / no finalized baseline / pre-jq target set / no uki-pcrsig.json) — rebuilding"
+        echo "# S-00b: cache at $CACHE_DIR is STALE (pre-rework: flat permall / no finalized baseline / pre-jq target set / no uki-pcrsig.json / pre-btrfs FORMAT marker) — rebuilding"
         rm -rf "$CACHE_DIR"
     fi
     echo "# S-00b: no s00 state, no valid cache — self-bootstrapping the S-00 chain"
@@ -824,6 +838,8 @@ assert_contains "[boot C] token unlocked with ZERO console input" "$LOG_C" \
     "debian-fde: UNSEALED"
 assert_contains "[boot C] switch_root into the populated installed system" "$LOG_C" \
     "debian-fde-harness: switching to the installed system"
+assert_contains "[boot C] root mount is the §9.1 @ subvolume (G-HW5 btrfs default)" "$LOG_C" \
+    "debian-fde-btrfs: root mounted subvol=@ (login stage)"
 assert_contains "[boot C] the installed system's getty banner (real Debian userspace)" "$LOG_C" \
     "Debian GNU/Linux"
 assert_not_contains "[boot C] no passphrase prompt ever armed (zero-input path)" "$LOG_C" \

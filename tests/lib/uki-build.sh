@@ -66,7 +66,13 @@ source "$_HERE/disk-fixture.sh"
 
 UKI_KERNEL_RELEASE="6.12.107+deb13-amd64"
 UKI_KERNEL_CMDLINE="console=ttyS0,115200 rdinit=/init loglevel=7"
-UKI_MODULES="gf128mul cryptd crypto_simd aesni-intel aes_x86_64 xts dm-mod dm-crypt crc16 mbcache crc32c_generic libcrc32c jbd2 ext4 virtio_blk efivarfs"
+# G-HW3: the btrfs-default BASE matrix closure. Dependency-ordered for the
+# bare-insmod loop in /init (no modprobe): btrfs needs xor + raid6_pq +
+# libcrc32c (already listed above); zstd (crypto scomp, btrfs compression)
+# and bcache (§8.2 topology driver, no deps) load standalone. Every entry is
+# verified present as a .ko.xz in the pinned kernel deb AND packed into the
+# initrd (tests/unit/e2e_infra_smoke.sh asserts both).
+UKI_MODULES="gf128mul cryptd crypto_simd aesni-intel aes_x86_64 xts dm-mod dm-crypt crc16 mbcache crc32c_generic libcrc32c jbd2 ext4 virtio_blk efivarfs zstd xor raid6_pq btrfs bcache"
 
 # _uki_closure_check <root> <binary>... — objdump NEEDED walk; echo MISSING lines
 _uki_closure_check() {
@@ -102,9 +108,15 @@ uki_guest_tree() {
     local d
     # systemd_257.13 provides /usr/lib/systemd/systemd-pcrextend (the real
     # enter-initrd phase-word extension a production initrd runs before
-    # unlocking — see the WAVE-2 UNLOCK RESOLUTION note above).
+    # unlocking — see the WAVE-2 UNLOCK RESOLUTION note above). btrfs-progs
+    # 6.14 (G-HW5): mkfs.btrfs + the subvolume tooling for the §9.1 Btrfs
+    # installer stage (lib closure: only liblzo2 is new — pinned above).
+    # udev + dmsetup (G-HW5): systemd-udevd/udevadm + the dm rules so the
+    # LUKS attach is udev-registered (the §9.1 fstab UUID= submounts resolve
+    # only via the udev db; same pinned systemd version).
     for d in systemd-cryptsetup_257.13_amd64.deb libsystemd-shared_257.13_amd64.deb \
-             systemd_257.13_amd64.deb busybox-static_1.37.0_amd64.deb cryptsetup-bin.deb; do
+             systemd_257.13_amd64.deb busybox-static_1.37.0_amd64.deb cryptsetup-bin.deb \
+             btrfs-progs_6.14_amd64.deb udev_257.13_amd64.deb dmsetup.deb; do
         rootfs_deb_extract "$d" "$dest" || return 1
     done
     for d in libc6.deb libssl3t64.deb libargon2-1.deb libcryptsetup12.deb libdevmapper.deb libjson-c5.deb \
@@ -112,7 +124,7 @@ uki_guest_tree() {
              libtss2-tctildr.deb libtss2-tcti-device.deb libacl1.deb libblkid1.deb \
              libmount1.deb libuuid1.deb libcap2.deb libcap-ng0.deb libcrypt1.deb \
              libpam0g.deb libseccomp2.deb libselinux1.deb libsepol2.deb libpcre2-8-0.deb \
-             libudev1.deb libz1.deb libzstd1.deb libaudit1.deb; do
+             libudev1.deb libz1.deb libzstd1.deb libaudit1.deb liblzo2-2.deb; do
         rootfs_deb_extract "$d" "$dest" || return 1
     done
     # strip non-runtime payload (docs/man/completions) — keeps the initramfs
@@ -122,6 +134,17 @@ uki_guest_tree() {
            "$dest"/usr/share/fish "$dest"/etc/dhcp "$dest"/usr/lib/systemd/system \
            2>/dev/null
     find "$dest" -name '*.mo' -delete 2>/dev/null
+    # btrfs-progs trim: /init needs only the `btrfs` multitool (subvolume
+    # create/list) + mkfs.btrfs; the recovery/editor helpers (~2.8 MiB) would
+    # bloat the initramfs for nothing. udev trim: the hwdb sources (~2 MiB)
+    # are only consulted for net/usb device naming — nothing this initrd
+    # attaches needs them.
+    rm -f "$dest/usr/bin/btrfs-convert" "$dest/usr/bin/btrfs-find-root" \
+          "$dest/usr/bin/btrfs-image" "$dest/usr/bin/btrfs-map-logical" \
+          "$dest/usr/bin/btrfs-select-super" "$dest/usr/bin/btrfstune" \
+          "$dest/usr/sbin/btrfs-convert" "$dest/usr/sbin/btrfs-image" \
+          "$dest/usr/sbin/btrfstune" 2>/dev/null
+    rm -rf "$dest/usr/lib/udev/hwdb.d" "$dest/etc/udev/hwdb.d" 2>/dev/null
     true
     # kernel + modules
     local ktmp
@@ -160,6 +183,10 @@ uki_guest_tree() {
         "$dest/usr/bin/systemd-cryptenroll" \
         "$dest/usr/sbin/cryptsetup" \
         "$dest/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-tpm2.so" \
+        "$dest/usr/bin/btrfs" \
+        "$dest/usr/sbin/mkfs.btrfs" \
+        "$dest/usr/lib/systemd/systemd-udevd" \
+        "$dest/usr/bin/udevadm" \
         "$dest/opt/tpm/bin/tpm2_pcrread" \
         "$dest/opt/tpm/bin/tpm2_pcrextend" 2>/dev/null | grep -v '/opt/tpm' || true)
     if [[ -n "$miss" ]]; then
@@ -213,6 +240,26 @@ echo "debian-fde-cmdline2 $(cat /proc/cmdline)"
 busybox mkdir -p /sys/firmware/efi/efivars
 busybox mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null \
     || echo "debian-fde-harness: efivarfs not mounted (pcrextend fallback will be used)"
+
+# udev in the initrd (the dracut pattern): systemd-cryptsetup's dm attach must
+# happen with udev sync so 55-dm.rules registers /dev/mapper/root and the
+# persistent by-uuid links — systemd's device units (and therefore the §9.1
+# fstab UUID= submounts after switch_root) NEVER activate for a dm device
+# created udev-unregistered (observed live 2026-09-19: dev-disk-by...device
+# timed out even for the raw /dev/dm-0 node → local-fs failed → emergency
+# sulogin instead of login:). login_stage stops udevd again before
+# switch_root so the installed system's own udevd starts cleanly; /run/udev
+# (the device db with our by-uuid entries) moves into the real system with
+# switch_root. A failed start is logged LOUDLY (rc + stderr on the console),
+# never silent and never fatal.
+mkdir -p /run/udev
+udev_err=$(/usr/lib/systemd/systemd-udevd --daemon 2>&1)
+udev_rc=$?
+if [ "$udev_rc" = "0" ] && [ -e /run/udev/control ]; then
+    echo "debian-fde-harness: udevd running (dm attach will be udev-registered)"
+else
+    echo "debian-fde-harness: udevd NOT started (rc=$udev_rc): $udev_err"
+fi
 
 # signed-PCR-policy JSON: delivered on the raw payload drive (/dev/vdc)
 if [ -b /dev/vdc ]; then
@@ -337,10 +384,37 @@ installer_stage() {
     echo "@@ROOTFS_SHA@@  /rootfs.tar" | sha256sum -c - || {
         echo "debian-fde-install: pinned rootfs artifact hash MISMATCH"; return 1; }
     echo "debian-fde-install: rootfs payload verified ($(du -k /rootfs.tar | cut -f1) KiB)"
-    busybox mke2fs -F /dev/mapper/root || { echo "debian-fde-install: mke2fs FAILED"; return 1; }
+    # §9.1 default filesystem (G-HW5, revised-design BASE matrix): Btrfs with
+    # the @/@home/@snapshots subvolume layout. mkfs.btrfs + the `btrfs`
+    # multitool come from the pinned btrfs-progs deb (packed into this
+    # initrd). The legacy flat fs stays production-only (`install --fs ext4`);
+    # no harness scenario exercises it, so there is no ext4 seam here.
+    mkfs.btrfs -f /dev/mapper/root >/tmp/mkfs.log 2>&1 || {
+        echo "debian-fde-install: mkfs.btrfs FAILED"; busybox tail -5 /tmp/mkfs.log; return 1; }
+    ROOTFS_UUID=$(awk '/^UUID:/ {print $2; exit}' /tmp/mkfs.log)
+    if [ -z "$ROOTFS_UUID" ]; then
+        ROOTFS_UUID=$(btrfs filesystem show /dev/mapper/root 2>/dev/null | awk '/uuid:/ {print $NF; exit}')
+    fi
+    if [ -z "$ROOTFS_UUID" ]; then
+        echo "debian-fde-install: no btrfs UUID — cannot write the §9.1 fstab"; return 1
+    fi
+    echo "debian-fde-install: btrfs rootfs created (uuid=$ROOTFS_UUID)"
+    mkdir -p /btop
+    busybox mount -t btrfs /dev/mapper/root /btop || {
+        echo "debian-fde-install: btrfs top-level mount FAILED"; return 1; }
+    SVOK=1
+    btrfs subvolume create /btop/@ >/dev/null 2>&1 || SVOK=0
+    btrfs subvolume create /btop/@home >/dev/null 2>&1 || SVOK=0
+    btrfs subvolume create /btop/@snapshots >/dev/null 2>&1 || SVOK=0
+    busybox umount /btop
+    if [ "$SVOK" != "1" ]; then
+        echo "debian-fde-install: btrfs subvolume create FAILED"; return 1
+    fi
+    echo "debian-fde-install: subvolumes created (@ @home @snapshots)"
     mkdir -p /newroot
-    busybox mount -t ext2 /dev/mapper/root /newroot || {
-        echo "debian-fde-install: root mount FAILED"; return 1; }
+    busybox mount -t btrfs -o subvol=@ /dev/mapper/root /newroot || {
+        echo "debian-fde-install: root mount FAILED (btrfs subvol=@)"; return 1; }
+    echo "debian-fde-install: root mounted (btrfs subvol=@)"
     echo "debian-fde-install: populating rootfs from the pinned Debian artifact (§3.3)"
     gzip -dc /rootfs.tar | tar -xf - -C /newroot || {
         echo "debian-fde-install: rootfs untar FAILED"; return 1; }
@@ -360,23 +434,51 @@ installer_stage() {
     ln -sfn /usr/lib/systemd/system/serial-getty@.service \
         /newroot/etc/systemd/system/multi-user.target.wants/serial-getty@ttyS0.service
     echo "debian-fde-install: getty/networkd configured (§3.3)"
-    # fstab: the pinned tree is a CLOUD image root — its fstab entries are
-    # PARTUUID=… mounts of the source image's partitions, which do not exist
-    # on this machine (root arrives LUKS-unlocked and mounted rw from the
-    # boot initrd). A stale root/boot entry fails local-fs.target into
-    # EMERGENCY MODE — ship the initrd-handoff fstab instead: no / entry.
+    # §9.1 mountpoints inside @ — the fstab entries below mount @home and
+    # @snapshots here at boot. Plus the btrfs userspace: production §9.1
+    # apt-installs btrfs-progs in-chroot for btrfs roots; the harness ships
+    # the pinned binaries instead (fsck.btrfs satisfies the fstab passno-2
+    # entries at boot, `btrfs` powers the pre-upgrade snapshots §9.3).
+    mkdir -p /newroot/home /newroot/.snapshots
+    mkdir -p /newroot/usr/bin /newroot/usr/sbin /newroot/usr/lib/x86_64-linux-gnu
+    cp /usr/bin/btrfs /newroot/usr/bin/btrfs
+    cp /usr/sbin/mkfs.btrfs /newroot/usr/sbin/mkfs.btrfs
+    cp -P /usr/sbin/fsck.btrfs /newroot/usr/sbin/fsck.btrfs 2>/dev/null \
+        || busybox ln -sf ../bin/btrfs /newroot/usr/sbin/fsck.btrfs
+    for _l in /usr/lib/x86_64-linux-gnu/liblzo2.so.2*; do
+        cp -a "$_l" /newroot/usr/lib/x86_64-linux-gnu/
+    done
+    # fstab: the §9.1 Btrfs subvolume forms (verbatim production shapes,
+    # lib/cmd/install.sh: UUID=<rootfs-uuid> /|/home|/.snapshots btrfs
+    # subvol=@…). Root is hand-mounted rw by the boot initrd before
+    # switch_root; /home and /.snapshots resolve via the udev-registered
+    # by-uuid links (the initrd udevd above). The source-image PARTUUID
+    # entries do not exist on this hardware; the harness ESP is not
+    # fstab-mounted (production adds `PARTUUID=<esp> /efi vfat umask=0077 0 2`).
     printf '%s\n' \
-        '# /etc/fstab — root is mounted rw by the boot initrd before' \
-        '# switch_root (LUKS volume unlocked in the initrd); the source' \
-        '# image PARTUUID entries do not exist on this hardware.' \
+        '# /etc/fstab — §9.1 Btrfs subvolume layout; root is mounted rw by' \
+        '# the boot initrd before switch_root (LUKS volume unlocked there).' \
+        "UUID=$ROOTFS_UUID / btrfs subvol=@,defaults 0 1" \
+        "UUID=$ROOTFS_UUID /home btrfs subvol=@home,defaults 0 2" \
+        "UUID=$ROOTFS_UUID /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
         > /newroot/etc/fstab
     # cloud-init probes DHCP before multi-user.target (minutes under TCG,
     # degraded boots) — the official kill switch:
     mkdir -p /newroot/etc/cloud
     : > /newroot/etc/cloud/cloud-init.disabled
-    echo "debian-fde-install: fstab (initrd handoff) + cloud-init.disabled written"
+    echo "debian-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) + cloud-init.disabled written"
+    # console proof of the on-disk fstab forms (asserted verbatim by S-00)
+    while read -r _fl; do
+        case "$_fl" in \#*) continue ;; esac
+        echo "debian-fde-btrfs: fstab| $_fl"
+    done < /newroot/etc/fstab
     # machine-readable installed size + package count (§3.3 budget, asserted by S-00)
     echo "debian-fde-rootfs: kib=$(du -sk /newroot | cut -f1) packages=$(grep -c '^Package: ' /newroot/var/lib/dpkg/status)"
+    # §9.1 subvolume presence — the on-disk evidence S-00 asserts (the mounted
+    # root IS the @ subvolume; the list shows every subvolume on the volume)
+    echo "debian-fde-btrfs: subvolume list (on-disk evidence):"
+    btrfs subvolume list /newroot || {
+        echo "debian-fde-install: btrfs subvolume list FAILED"; return 1; }
     # I2/I4 disk-side scan: no private key material anywhere on the LUKS payload.
     #   keyfiles: .pem/.key OUTSIDE the public trust store (the Debian CA
     #     bundle ships hundreds of PUBLIC .pem certs — /etc/ssl/certs,
@@ -424,8 +526,42 @@ fi
 # after UNSEALED instead of switching root).
 login_stage() {
     mkdir -p /newroot
-    busybox mount -t ext2 /dev/mapper/root /newroot || {
-        echo "debian-fde-login: root mount FAILED"; return 1; }
+    # §9.1: the installed root is the @ subvolume of the LUKS volume (G-HW5)
+    busybox mount -t btrfs -o subvol=@ /dev/mapper/root /newroot || {
+        echo "debian-fde-login: root mount FAILED (btrfs subvol=@)"; return 1; }
+    busybox grep -Eq 'subvol=/?@(,| )' /proc/mounts \
+        && echo "debian-fde-btrfs: root mounted subvol=@ (login stage)"
+    # settle: give the udev event pipeline a bounded window to finish the
+    # persistent by-uuid links for the dm volume (they are what the installed
+    # system's fstab resolves). Loud on timeout, never fatal.
+    i=0
+    while [ -z "$(ls /dev/disk/by-uuid 2>/dev/null)" ]; do
+        [ "$i" -lt 20 ] && { i=$((i + 1)); busybox sleep 0.5; continue; }
+        echo "debian-fde-harness: WARNING no /dev/disk/by-uuid links after 10s (fstab submounts will not resolve)"
+        break
+    done
+    if [ -n "$(ls /dev/disk/by-uuid 2>/dev/null)" ]; then
+        echo "debian-fde-harness: udev by-uuid links present: $(ls /dev/disk/by-uuid | tr '\n' ' ')"
+    fi
+    # stop the initrd udevd so the installed system's own udevd starts
+    # cleanly; the /run/udev device db (by-uuid entries for the dm volume)
+    # must survive the switch
+    udevadm control --exit 2>/dev/null || busybox killall systemd-udevd 2>/dev/null
+    busybox sleep 0.3
+    # busybox switch_root does NOT carry the initrd's api-fs mounts over: it
+    # overmounts / with the new root, and the initrd-only mounts (devtmpfs on
+    # /dev — the mapper node + the udev by-uuid links — and the /run tmpfs
+    # WITH the udev device db) would be buried; the installed systemd then
+    # mounts a FRESH /dev and /run and its fstab UUID= device units can never
+    # resolve (observed live 2026-09-19: 90 s device timeout → emergency).
+    # Move them onto the new root first — exactly what dracut/systemd's
+    # switch_root does internally.
+    busybox mount -o move /dev /newroot/dev \
+        || echo "debian-fde-harness: /dev move FAILED (mapper node + by-uuid links lost)"
+    busybox mount -o move /proc /newroot/proc || echo "debian-fde-harness: /proc move FAILED"
+    busybox mount -o move /sys /newroot/sys || echo "debian-fde-harness: /sys move FAILED"
+    busybox mount -o move /run /newroot/run \
+        || echo "debian-fde-harness: /run move FAILED (udev device db lost)"
     echo "debian-fde-harness: switching to the installed system (zero console input so far)"
     echo "debian-fde: SWITCH-ROOT"
     exec busybox switch_root /newroot /sbin/init

@@ -112,11 +112,12 @@ enrl_policy_mode() {
 
 enroll_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde enroll-tpm [--uuid LUKS-UUID] [--reseat] [--dry-run]
+Usage: debian-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--reseat] [--dry-run]
 
 Enroll the TPM seal (systemd-cryptenroll wrapper). Preconditions: finalized
-baseline, Secure Boot on + SetupMode=0, live PCR 7 == baseline, LUKS uuid
-resolvable. An existing tpm2 slot is wiped and re-created in ONE invocation.
+baseline, Secure Boot on + SetupMode=0, live PCR 7 == baseline, LUKS device
+resolvable (--uuid takes a LUKS uuid or a /dev/... block-device path). An
+existing tpm2 slot is wiped and re-created in ONE invocation.
 
 Policy mechanism (ADR-14: resolved — Mechanism A'' is the ONLY mode):
   a2             systemd-native static PCR 7 + release-key-signed PCR 11;
@@ -182,7 +183,17 @@ enrl_preconditions() {
 
     _ep_uuid=${_ep_override:-$(baseline_get_in "$_ep_bl" target luks_uuid)}
     [ -n "$_ep_uuid" ] || die "enroll-tpm: no LUKS uuid (baseline target.luks_uuid empty; set it in install or pass --uuid)"
-    _ep_dev="$(enrl_by_uuid_dir)/$_ep_uuid"
+    case $_ep_uuid in
+        /*)
+            # G-XC12 (§8.1 "(or target block device)"): an explicit
+            # block-device path (/dev/nvme0n1p2, /dev/mapper/root1, …) is
+            # addressed verbatim — not looked up under by-uuid
+            _ep_dev=$_ep_uuid
+            ;;
+        *)
+            _ep_dev="$(enrl_by_uuid_dir)/$_ep_uuid"
+            ;;
+    esac
     [ -e "$_ep_dev" ] || die "enroll-tpm: LUKS device not resolvable: $_ep_dev"
 
     if ! enrl_cryptenroll --tpm2-device=list >/dev/null 2>&1; then
@@ -346,22 +357,87 @@ enrl_run() {
     return "$_er_rc"
 }
 
+# enrl_install_state — the persisted installation state (state sibling's API:
+# lib/install-state.sh; the state file is resolved by istate_file() —
+# $DEBIAN_FDE_INSTALL_STATE test override, else $(sp_etc_dir)/install-state.json).
+# Empty output ⇒ no state file (legacy / not-installed build context — the
+# G-IL7 gate PASSES, backward compat with pre-install-state builds and the
+# existing unit tests) or an unreadable document (istate_state reports empty;
+# the sibling owns the file contract and decides warn semantics). The lib is
+# sourced when present; until it lands, a local jq fallback reads .state
+# (same schema contract: {"state": "installed"|"finalized", ...}).
+enrl_install_state() {
+    if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+        _eis_lib="$(sp_cmd_dir)/../install-state.sh"
+        if [ -r "$_eis_lib" ]; then
+            # shellcheck disable=SC1090
+            . "$_eis_lib"
+        fi
+    fi
+    if command -v istate_state >/dev/null 2>&1; then
+        # landed state sibling API: existence is checked here first so the
+        # legacy absent-file case stays silent (istate_state warns on absence)
+        _eis_file=$(istate_file)
+        [ -f "$_eis_file" ] || return 0
+        istate_state 2>/dev/null || :
+    else
+        _eis_file="$(sp_etc_dir)/install-state.json"
+        [ -f "$_eis_file" ] || return 0
+        jq -r '.state // empty' "$_eis_file" 2>/dev/null || :
+    fi
+}
+
+# enrl_ensure_gate_skip — G-IL7 (§8.1 ukictl-build row): the build's ensure-once
+# enrollment must NEVER fire while the installation is unfinalized — Stage-1
+# in-chroot provisioning presents the exact trap (reachable volume, zero
+# tokens, SB off). SKIP (warn; caller returns rc 0, bookkeeping stays empty)
+# when the persisted install state exists and is not `finalized`, or when the
+# baseline expected_pcr7 is still pending. Absent install-state file ⇒ legacy
+# context ⇒ proceed. rc 0 ⇒ SKIP, rc 1 ⇒ run the enrollment path.
+enrl_ensure_gate_skip() {
+    _eg_state=$(enrl_install_state)
+    if [ -n "$_eg_state" ] && [ "$_eg_state" != "finalized" ]; then
+        warn "enroll: install state is '$_eg_state' (not finalized) — skipping the ensure-once enrollment; finalize after first boot ('debian-fde audit --init') and rebuild (§8.1)"
+        return 0
+    fi
+    _eg_bl=$(sp_baseline_file)
+    if [ -f "$_eg_bl" ] && ! baseline_is_final "$_eg_bl"; then
+        warn "enroll: baseline expected_pcr7 is pending — skipping the ensure-once enrollment (finalize via 'debian-fde audit --init', §8.1)"
+        return 0
+    fi
+    return 1
+}
+
 # enrl_ensure_once DEVSPEC PUBKEY — the `ukictl build` ensure-once step (G-U1):
 #   * volume unreachable → warn + rc 0 (a build context may not have the target
 #     volume attached; under A'' kernel updates are TPM-free either way, s14)
+#   * G-IL7: install state not finalized / baseline pending → warn + rc 0
+#     (Stage-1 builds must never enroll; ENRL_SKIPPED=1 signals the skip)
 #   * inspect + enroll run UNDER the enrollment lock (§8.3: concurrent builds /
 #     postinst passes must serialize on the one-enrollment decision, HW-3)
 #   * exactly 1 systemd-tpm2 token → info line, ZERO TPM operations (s14)
 #   * 0 tokens → exactly ONE enrollment via enrl_run (ENRL_ENROLLED=1)
 #   * >1 tokens → LOUD refusal rc 1 citing manual intervention (never silently
 #     "stands" — the dead-slot accumulation the invariant exists to prevent)
-# rc 1 only on enrollment failure (caller: marker + fail-closed pipeline).
+# Globals on return: ENRL_ENROLLED (1 = enrolled here), ENRL_SKIPPED (1 = a
+# documented precondition escape fired: unreachable volume or unfinalized
+# install), ENRL_FAIL_REASON. rc 1 only on enrollment failure (caller: marker
+# + fail-closed pipeline).
 enrl_ensure_once() {
     _ee_dev=$1 _ee_pub=$2
     ENRL_ENROLLED=0
+    # shellcheck disable=SC2034  # consumed by the caller (ukictl build, §8.4)
+    ENRL_SKIPPED=0
     ENRL_FAIL_REASON=''
     if [ -z "$_ee_dev" ] || [ ! -e "$_ee_dev" ]; then
+        # shellcheck disable=SC2034  # consumed by the caller (ukictl build)
+        ENRL_SKIPPED=1
         warn "enroll: LUKS2 volume not reachable (${_ee_dev:-<none>}) — skipping the ensure-once enrollment check (kernel updates are TPM-free under A'', s14)"
+        return 0
+    fi
+    if enrl_ensure_gate_skip; then
+        # shellcheck disable=SC2034  # consumed by the caller (ukictl build)
+        ENRL_SKIPPED=1
         return 0
     fi
     if ! enrl_lock_acquire; then

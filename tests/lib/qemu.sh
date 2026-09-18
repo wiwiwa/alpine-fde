@@ -5,16 +5,26 @@
 # minimal and always hard-timeout).
 #
 # Usage (source, then):
-#   qemu_run <run-dir> <esp.img> <disk.img> <vars.fd> <swtpm-dir> [pcrsig.img]
+#   qemu_run <run-dir> <esp.img> <disk.img> <vars.fd> <swtpm-dir> [pcrsig.img] \
+#            [extra-drives]
 #     * boots q35 + OVMF secboot (code readonly, per-scenario VARS copy),
 #       swtpm passthrough (tpm-tis), ESP+LUKS(+payload) virtio drives,
 #       serial on a unix socket with EVERYTHING teed to <run-dir>/console.log
 #       (chardev logfile=), hard timeout kill, PID in <run-dir>/qemu.pid.
+#     * <extra-drives> (G-HW1, opt-in): newline-separated image paths appended
+#       as virtio drives AFTER the pcrsig payload slot — the N-disk mechanism
+#       for multi-drive scenarios. Empty/absent (every current caller) keeps
+#       the historical 2+1-positional argv byte-identical.
+#   qemu_argv <run-dir> <esp.img> <disk.img> <vars.fd> <swtpm-dir> [pcrsig.img] \
+#             [extra-drives]
+#     * pure-argv seam: prints (one per line) exactly the argv qemu_run execs.
+#       No pin checks, no sockets, no accelerator probe — unit-testable (the
+#       once-per-process accelerator choice applies: unset => TCG, no -accel).
 #   qemu_wait <run-dir> <timeout-s>   wait for exit (0 = powered off cleanly)
 #   qemu_kill <run-dir>               hard kill (timeout path)
 #
 # Drive map (fixed contract with the harness /init): vda=ESP, vdb=LUKS disk,
-# vdc=optional pcrsig payload.
+# vdc=optional pcrsig payload, vdd, vde, … = extra-drives list order.
 #
 # EMPIRICAL (verified this sandbox): the tpmdev-emulator chardev must point at
 # swtpm's CONTROL socket (<state-dir>/sock.ctrl — QEMU speaks the swtpm ctrl
@@ -142,33 +152,53 @@ ovmf_pin_check() {
     return "$rc"
 }
 
+# qemu_argv <run-dir> <esp.img> <disk.img> <vars.fd> <swtpm-dir> [pcrsig.img] \
+#           [extra-drives] — the qemu_run argv, one argument per line on
+# stdout. Pure function: the pin check, accelerator choice and socket cleanup
+# stay in qemu_run (here $_qemu_accel is read as-is; unset => TCG argv, the
+# deterministic form the unit assertions pin). The optional 7th argument is
+# the newline-separated extra-drives list (G-HW1): every entry becomes one
+# virtio drive appended after the optional pcrsig payload drive (vdd, vde, …
+# in list order).
+qemu_argv() {
+    local run="$1" esp="$2" disk="$3" vars="$4" swtpmdir="$5" pcrsig="${6:-}" extra="${7:-}"
+    local sock="$run/serial.sock"
+    printf '%s\n' \
+        -machine q35 -m 2048
+    if [[ "$_qemu_accel" == "kvm" ]]; then
+        printf '%s\n' -accel kvm
+    fi
+    printf '%s\n' \
+        -display none -nodefaults \
+        -drive "if=pflash,format=raw,readonly=on,file=$(_qemu_ovmf_code)" \
+        -drive "if=pflash,format=raw,file=$vars" \
+        -drive "file=$esp,format=raw,if=virtio" \
+        -drive "file=$disk,format=raw,if=virtio" \
+        -chardev "socket,id=chrtpm,path=$swtpmdir/sock.ctrl" \
+        -tpmdev emulator,id=tpm0,chardev=chrtpm \
+        -device tpm-tis,tpmdev=tpm0 \
+        -chardev "socket,id=ser0,path=$sock,server=on,wait=off,logfile=$run/console.log" \
+        -serial chardev:ser0
+    if [[ -n "$pcrsig" ]]; then
+        printf '%s\n' "-drive" "file=$pcrsig,format=raw,if=virtio"
+    fi
+    local d
+    while IFS= read -r d; do
+        [[ -z "$d" ]] && continue
+        printf '%s\n' "-drive" "file=$d,format=raw,if=virtio"
+    done <<<"$extra"
+    return 0
+}
+
 qemu_run() {
-    local run="$1" esp="$2" disk="$3" vars="$4" swtpmdir="$5" pcrsig="${6:-}"
+    local run="$1" esp="$2" disk="$3" vars="$4" swtpmdir="$5" pcrsig="${6:-}" extra="${7:-}"
     local sock="$run/serial.sock"
     ovmf_pin_check || return 1
     _qemu_accel_choose || return 1
     rm -f "$sock" "$run/console.log" "$run/qemu.pid"
-    local -a accel_args=()
-    if [[ "$_qemu_accel" == "kvm" ]]; then
-        accel_args+=(-accel kvm)
-    fi
-    local -a args=(
-        -machine q35 -m 2048
-        "${accel_args[@]}"
-        -display none -nodefaults
-        -drive "if=pflash,format=raw,readonly=on,file=$(_qemu_ovmf_code)"
-        -drive "if=pflash,format=raw,file=$vars"
-        -drive "file=$esp,format=raw,if=virtio"
-        -drive "file=$disk,format=raw,if=virtio"
-        -chardev "socket,id=chrtpm,path=$swtpmdir/sock.ctrl"
-        -tpmdev emulator,id=tpm0,chardev=chrtpm
-        -device tpm-tis,tpmdev=tpm0
-        -chardev "socket,id=ser0,path=$sock,server=on,wait=off,logfile=$run/console.log"
-        -serial chardev:ser0
-    )
-    if [[ -n "$pcrsig" ]]; then
-        args+=(-drive "file=$pcrsig,format=raw,if=virtio")
-    fi
+    local -a args=()
+    mapfile -t args < <(qemu_argv "$run" "$esp" "$disk" "$vars" "$swtpmdir" \
+        "$pcrsig" "$extra")
     qemu-system-x86_64 "${args[@]}" >"$run/qemu.stdout" 2>"$run/qemu.stderr" &
     echo $! >"$run/qemu.pid"
     return 0

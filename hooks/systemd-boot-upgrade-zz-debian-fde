@@ -7,19 +7,29 @@
 # Guard for the masked systemd-boot-update.service: the boot manager never
 # self-updates at boot; when the systemd-boot PACKAGE upgrade re-runs
 # `bootctl install` and re-flashes ESP:/EFI/systemd/systemd-bootx64.efi and
-# /EFI/BOOT/BOOTX64.EFI, this hook re-signs them with the release key from the
-# signing medium (DEBIAN_FDE_KEYDIR). Installation of the signed result is
-# GATED on sbverify passing against release.crt — an unverified binary never
-# lands on the ESP.
+# /EFI/BOOT/BOOTX64.EFI, this hook re-signs them with the release key
+# (DEBIAN_FDE_KEYDIR). Installation of the signed result is GATED on sbverify
+# passing against release.crt — an unverified binary never lands on the ESP.
 #
-# ADR-8: a missing key or failed verification is a LOUD failure — rc 64 + the
-# build-failed marker persisted for `debian-fde status`; the previously
-# installed binary stays untouched on the verification path. Operator
-# recovery: attach the signing medium and re-run the hook (or
-# `debian-fde ukictl build <kver>`), then `dpkg --configure -a`.
+# ADR-18 custody: release.pem may be the ENCRYPTED on-target form. This hook
+# unlocks it ONCE via keys_unlock (DEBIAN_FDE_KEY_PASSPHRASE env seam, or the
+# no-echo TTY prompt) and signs with the UNLOCKED tmpfs path; the decrypted
+# copy is zeroized+removed when the hook exits. A plaintext release.pem
+# (offline medium) keeps the previous behavior with no passphrase interaction.
 #
-# Env: DEBIAN_FDE_ESP (ESP mount, default /efi), DEBIAN_FDE_KEYDIR (signing
-# medium), DEBIAN_FDE_ROOT (target root for the marker, default /).
+# ADR-8: a missing key, missing passphrase, wrong passphrase, or failed
+# verification is a LOUD failure — rc 64 + the build-failed marker persisted
+# for `debian-fde status`; the previously installed binary stays untouched on
+# the verification path. Operator recovery: re-run this hook (enter the
+# release-key passphrase when prompted); unattended: provide
+# DEBIAN_FDE_KEY_PASSPHRASE via your credential agent, then
+# `dpkg --configure -a`.
+#
+# Env: DEBIAN_FDE_ESP (ESP mount, default /efi), DEBIAN_FDE_KEYDIR (key
+# directory), DEBIAN_FDE_ROOT (target root for the marker, default /),
+# DEBIAN_FDE_KEY_PASSPHRASE (credential-agent seam, ADR-18),
+# DEBIAN_FDE_LIB_DIR (debian-fde runtime; derived from this script's location,
+# falling back to /usr/share/debian-fde/lib).
 
 set -u
 
@@ -33,15 +43,52 @@ guard_fail() {
     {
         printf 'boot-manager re-sign failed: %s\n' "$1"
         printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'recovery: attach the signing medium (DEBIAN_FDE_KEYDIR) and re-run this hook, then "dpkg --configure -a"\n'
+        printf 'recovery: re-run this hook (enter the release-key passphrase when prompted); unattended: provide DEBIAN_FDE_KEY_PASSPHRASE via your credential agent, then "dpkg --configure -a"\n'
     } >"$marker" 2>/dev/null || true
     exit 64
 }
 
-[ -n "$KEYDIR" ] || guard_fail "no signing medium configured (DEBIAN_FDE_KEYDIR unset)"
+# --- debian-fde runtime (keys.sh: keys_is_encrypted/keys_unlock/keys_scrub) ---
+DEBIAN_FDE_LIB_DIR=${DEBIAN_FDE_LIB_DIR:-}
+if [ -z "$DEBIAN_FDE_LIB_DIR" ]; then
+    _hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    if [ -f "$_hook_dir/../lib/keys.sh" ]; then
+        DEBIAN_FDE_LIB_DIR="$_hook_dir/../lib"
+    else
+        DEBIAN_FDE_LIB_DIR=/usr/share/debian-fde/lib
+    fi
+fi
+if [ ! -f "$DEBIAN_FDE_LIB_DIR/common.sh" ] || [ ! -f "$DEBIAN_FDE_LIB_DIR/keys.sh" ]; then
+    guard_fail "debian-fde runtime not found at $DEBIAN_FDE_LIB_DIR (common.sh/keys.sh) — cannot unlock the release key (ADR-18)"
+fi
+# shellcheck source=../lib/common.sh
+. "$DEBIAN_FDE_LIB_DIR/common.sh"
+# shellcheck source=../lib/keys.sh
+. "$DEBIAN_FDE_LIB_DIR/keys.sh"
+
+[ -n "$KEYDIR" ] || guard_fail "no key directory configured (DEBIAN_FDE_KEYDIR unset)"
 for f in release.pem release.crt; do
     [ -f "$KEYDIR/$f" ] || guard_fail "missing key material: $KEYDIR/$f"
 done
+
+# ADR-18: unlock the release key ONCE (no-op for a plaintext release.pem)
+_hook_keyfile="$KEYDIR/release.pem"
+_hook_unlocked=''
+_hook_unlock_rc=0
+if keys_is_encrypted "$_hook_keyfile"; then
+    _hook_unlocked=$(keys_unlock "$KEYDIR") || _hook_unlock_rc=$?
+    if [ "$_hook_unlock_rc" -ne 0 ]; then
+        if [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+            guard_fail "release.pem unlock failed: wrong passphrase (DEBIAN_FDE_KEY_PASSPHRASE rejected) — release key stays locked (ADR-18)"
+        fi
+        guard_fail "release.pem is encrypted: passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+    fi
+    chmod 600 "$_hook_unlocked" 2>/dev/null || :
+    _hook_keyfile=$_hook_unlocked
+    # zeroize+remove the decrypted copy on EVERY exit path (guard_fail's exit
+    # included); keys_scrub is best effort and never masks the hook's rc
+    trap 'keys_scrub "${_hook_unlocked:-}" 2>/dev/null || true' EXIT
+fi
 
 for rel in EFI/systemd/systemd-bootx64.efi EFI/BOOT/BOOTX64.EFI; do
     src="$ESP/$rel"
@@ -56,7 +103,7 @@ for rel in EFI/systemd/systemd-bootx64.efi EFI/BOOT/BOOTX64.EFI; do
         continue
     fi
     tmp="$src.signed.$$"
-    if ! sbsign --key "$KEYDIR/release.pem" --cert "$KEYDIR/release.crt" --output "$tmp" "$src"; then
+    if ! sbsign --key "$_hook_keyfile" --cert "$KEYDIR/release.crt" --output "$tmp" "$src"; then
         rm -f "$tmp" 2>/dev/null || true
         guard_fail "sbsign failed for $src"
     fi

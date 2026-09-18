@@ -163,9 +163,10 @@ aud_next_steps() {
 PCR 7 drift recovery (§9.4): confirm the drift is benign (firmware/dbx update?
 or tampering?), then:
   debian-fde audit --accept      # re-baseline (operator confirmation)
-  debian-fde ukictl build        # re-sign ALL retained UKIs over the new PCR 7
-                                # (signing medium required, ADR-8) and re-enroll —
-                                # ONE cryptenroll covers all retained UKIs (A″, §9.4)
+  debian-fde enroll-tpm          # re-enroll — ONE cryptenroll covers all retained UKIs;
+                                 # cryptenroll re-captures the new CURRENT PCR 7 into
+                                 # the static policy (A″: no signing medium needed, the
+                                 # UKIs' signatures stay untouched; §9.4)
 EOF
 }
 

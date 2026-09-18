@@ -19,6 +19,11 @@
 #   T7. volume unreachable (no by-uuid device) → rc 0, warning names the
 #       volume, ZERO TPM contact, no marker, NEW entry written with EMPTY
 #       keyslot/token_id (documented precondition escape — pinned)
+#   T11/T12 (G-IL7): install state `installed` / baseline pending → the
+#       ensure-once gate SKIPS (warn + rc 0, ZERO cryptenroll, empty
+#       keyslot/token_id bookkeeping) — the Stage-1 trap (§8.1 build row)
+#   T13/T14 (G-IL7): state `finalized` / ABSENT state file (legacy) → the
+#       enrollment proceeds exactly as before (1 call)
 # cryptenroll/cryptsetup are stubs recording argv / serving LUKS2 metadata;
 # fake /dev/disk/by-uuid + compliant crypttab/cmdline pins per the stub pattern.
 set -u
@@ -355,5 +360,77 @@ assert_rc "T10: second build sees the standing token (rc 0)" 0 "$rc2"
 assert_eq "T10: exactly ONE enrollment across both builds" "1" \
     "$(grep -c 'CALL:' "$CR_LOG" || true)"
 assert_contains "T10: second build took the standing path" "$out2" "already present"
+
+# --- T11 (G-IL7): install state 'installed' → ensure-once SKIPS (§8.1 build row) ----
+# Stage-1 in-chroot provisioning presents the exact trap: reachable volume,
+# ZERO tokens, SB off. The install-state gate must skip the enrollment BEFORE
+# token inspection: warn + rc 0, ZERO cryptenroll calls, no enrolled.json, no
+# marker, manifest entries carrying EMPTY keyslot/token_id (bookkeeping
+# deferred to a build under a finalized install state).
+KVER_D=6.15.0-1-amd64
+cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_D"
+ISTATE="$ROOT/etc/debian-fde/install-state.json"
+printf '{\n  "schema_version": "1",\n  "state": "installed"\n}\n' >"$ISTATE"
+rm -f "$TMP/state/token" "$ENROLLED" "$MARKER"
+luks_json no >"$CS_PRE" # 0 tokens behind the reachable volume
+luks_json yes >"$CS_POST"
+reset_wire
+out=$(debian-fde ukictl build "$KVER_D" 2>&1)
+rc=$?
+assert_rc "T11: stage-1 build (state=installed, reachable volume, 0 tokens) rc 0" 0 $rc
+assert_eq "T11: ZERO cryptenroll calls (gate fired before token inspection)" "0" \
+    "$(grep -c 'CALL:' "$CR_LOG" || true)"
+assert_contains "T11: warn names the unfinalized install state" "$out" "not finalized"
+assert_file_absent "T11: no enrolled.json (nothing enrolled)" "$ENROLLED"
+assert_file_absent "T11: no ADR-8 marker (skip is loud, not fatal)" "$MARKER"
+assert_eq "T11: NEW kver entry carries EMPTY keyslot (bookkeeping deferred)" "" \
+    "$(jq -r --arg kver "$KVER_D" '.digests[] | select(.kernel_version == $kver) | .keyslot' "$M")"
+assert_eq "T11: NEW kver entry carries EMPTY token_id" "" \
+    "$(jq -r --arg kver "$KVER_D" '.digests[] | select(.kernel_version == $kver) | .token_id' "$M")"
+
+# --- T12 (G-IL7): pending baseline → the same skip -----------------------------------
+# No install-state file (legacy shape): the BASELINE half of the gate must
+# still fire when expected_pcr7 is pending (§8.1 "install state is not
+# finalized / baseline is pending").
+KVER_E=6.16.0-1-amd64
+cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_E"
+rm -f "$ISTATE" "$TMP/state/token" "$ENROLLED" "$MARKER"
+jq -n '{expected_pcr7: "pending", status: "pending"}' >"$ROOT/etc/debian-fde/baseline.json"
+reset_wire
+out=$(debian-fde ukictl build "$KVER_E" 2>&1)
+rc=$?
+assert_rc "T12: pending-baseline build rc 0 (gate skip)" 0 $rc
+assert_eq "T12: ZERO cryptenroll calls" "0" "$(grep -c 'CALL:' "$CR_LOG" || true)"
+assert_contains "T12: warn names the pending baseline" "$out" "expected_pcr7 is pending"
+assert_file_absent "T12: no enrolled.json" "$ENROLLED"
+assert_eq "T12: NEW kver entry carries EMPTY keyslot" "" \
+    "$(jq -r --arg kver "$KVER_E" '.digests[] | select(.kernel_version == $kver) | .keyslot' "$M")"
+assert_eq "T12: NEW kver entry carries EMPTY token_id" "" \
+    "$(jq -r --arg kver "$KVER_E" '.digests[] | select(.kernel_version == $kver) | .token_id' "$M")"
+
+# --- T13 (G-IL7): state=finalized + 0 tokens ⇒ exactly ONE enrollment (unchanged) ----
+printf '{\n  "schema_version": "1",\n  "state": "finalized"\n}\n' >"$ISTATE"
+jq -n --arg d7 "$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")" \
+    '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/debian-fde/baseline.json"
+rm -f "$TMP/state/token" "$ENROLLED" "$MARKER"
+luks_json no >"$CS_PRE"
+luks_json yes >"$CS_POST"
+reset_wire
+debian-fde ukictl build "$KVER" >/dev/null 2>&1
+rc=$?
+assert_rc "T13: finalized install state build enrolls (rc 0)" 0 $rc
+assert_eq "T13: exactly ONE enrollment under a finalized install state" "1" \
+    "$(grep -c 'CALL:' "$CR_LOG" || true)"
+assert_file_exists "T13: enrolled.json recorded" "$ENROLLED"
+
+# --- T14 (G-IL7): ABSENT install-state file ⇒ legacy behavior unchanged (T1) ---------
+rm -f "$ISTATE" "$TMP/state/token" "$ENROLLED" "$MARKER"
+luks_json no >"$CS_PRE"
+reset_wire
+debian-fde ukictl build "$KVER" >/dev/null 2>&1
+rc=$?
+assert_rc "T14: absent install-state file ⇒ legacy gate passes (enrolls)" 0 $rc
+assert_eq "T14: exactly ONE enrollment without any install-state file" "1" \
+    "$(grep -c 'CALL:' "$CR_LOG" || true)"
 
 finish

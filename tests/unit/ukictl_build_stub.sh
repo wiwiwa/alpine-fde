@@ -441,4 +441,116 @@ assert_contains "WR-02: marker records the audit failure" \
 [ -n "$(find "$TMP" -maxdepth 1 -name 'debian-fde-build.*' -print)" ]
 assert_rc "WR-02: rm stub actually fired (workdir residue proves the leg is live)" 0 $?
 
+# --- ADR-18/G-KC4: encrypted release.pem unlock seam --------------------------------
+# keys_check only proves release.pem EXISTS. When it is the ADR-18 encrypted
+# form, `ukictl build` must unlock it ONCE via keys_unlock (DEBIAN_FDE_KEY_
+# PASSPHRASE env -> TTY prompt -> loud 64) and hand the UNLOCKED tmpfs path to
+# ukify --pcr-private-key, sbsign --key and policy_sign; the decrypted copy is
+# scrubbed by the build's EXIT-trap net. A plaintext release.pem (offline
+# medium, legacy) keeps the previous behavior with zero passphrase interaction.
+. "$REPO/lib/keys.sh"
+export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+ENC_PASS='ci-unlock-passphrase-600000'
+
+mkdir -p "$TMP/shm"
+ENC_KEYDIR="$TMP/enc-keys"
+mkdir -p "$ENC_KEYDIR"
+cp "$REPO/fixtures/keys/release.pem" "$ENC_KEYDIR/release.pem"
+cp "$REPO/fixtures/keys/release.crt" "$ENC_KEYDIR/release.crt"
+cp "$REPO/fixtures/keys/release.pub" "$ENC_KEYDIR/release.pub"
+DEBIAN_FDE_KEY_PASSPHRASE=$ENC_PASS DEBIAN_FDE_TMPDIR="$TMP/shm" \
+    keys_encrypt_release "$ENC_KEYDIR" >/dev/null 2>&1
+[ "$?" -eq 0 ] || { echo "fixture: encrypting release.pem failed" >&2; exit 1; }
+
+# argv-recording wrappers: log the invocation, then exec the REAL binary
+WRAPBIN="$TMP/wrapbin"
+mkdir -p "$WRAPBIN"
+ARGVLOG="$TMP/signer-argv.log"
+for b in ukify sbsign sbverify; do
+    real=$(command -v "$b")
+    cat >"$WRAPBIN/$b" <<EOF
+#!/bin/sh
+printf '%s %s\n' "$b" "\$*" >>'$ARGVLOG'
+exec $real "\$@"
+EOF
+    chmod +x "$WRAPBIN/$b"
+done
+: >"$ARGVLOG"
+
+enc_debian_fde() { # PASSPHRASE(possibly empty string = unset) args...
+    _enc_pass=$1
+    shift
+    if [ -n "$_enc_pass" ]; then
+        export DEBIAN_FDE_KEY_PASSPHRASE=$_enc_pass
+    else
+        unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    fi
+    DEBIAN_FDE_BIN_TEST=1 \
+        DEBIAN_FDE_ROOT="$ROOT" \
+        DEBIAN_FDE_ESP="$ESP" \
+        DEBIAN_FDE_KEYDIR="$ENC_KEYDIR" \
+        DEBIAN_FDE_TMPDIR="$TMP/shm" \
+        DEBIAN_FDE_NO_INSTALL=1 \
+        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+        INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
+        RETENTION=2 \
+        PATH="$WRAPBIN:$PATH" \
+        "$REPO/bin/debian-fde" "$@" </dev/null
+}
+
+# leg A: encrypted key + NO passphrase env + NO tty -> 64 + ADR-8 marker
+BEFORE_ESP_A=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
+rm -f "$ROOT/etc/debian-fde/build-failed"
+out=$(enc_debian_fde "" ukictl build "$KVER" 2>&1)
+rc=$?
+assert_rc "unlock: encrypted key, no env, no tty -> exit 64" 64 $rc
+assert_contains "unlock: loud message demands a passphrase (env or interactive)" "$out" \
+    "passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively"
+assert_file_exists "unlock: ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
+assert_contains "unlock: marker names the missing credential" \
+    "$(cat "$ROOT/etc/debian-fde/build-failed")" "passphrase required"
+assert_eq "unlock: ESP byte-identical (refusal before any signing)" "$BEFORE_ESP_A" \
+    "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
+assert_eq "unlock: no signer ever saw the encrypted file" "0" \
+    "$(grep -c "$ENC_KEYDIR/release.pem" "$ARGVLOG" 2>/dev/null; true)"
+
+# leg B: WRONG passphrase via the env seam -> 64 + marker naming wrong-passphrase
+rm -f "$ROOT/etc/debian-fde/build-failed"
+out=$(enc_debian_fde "definitely-not-the-passphrase" ukictl build "$KVER" 2>&1)
+rc=$?
+assert_rc "unlock: wrong env passphrase -> exit 64" 64 $rc
+assert_contains "unlock: wrong-passphrase message is distinct" "$out" "wrong passphrase"
+assert_file_exists "unlock: wrong-passphrase ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
+assert_contains "unlock: marker names wrong-passphrase" \
+    "$(cat "$ROOT/etc/debian-fde/build-failed")" "wrong passphrase"
+
+# leg C: correct env passphrase -> build proceeds over the UNLOCKED tmpfs path
+rm -f "$ROOT/etc/debian-fde/build-failed" "$ARGVLOG"
+out=$(enc_debian_fde "$ENC_PASS" ukictl build "$KVER" 2>&1)
+rc=$?
+assert_rc "unlock: correct env passphrase -> build succeeds" 0 $rc
+assert_eq "unlock: no failure marker after the successful build" "0" \
+    "$([ -e "$ROOT/etc/debian-fde/build-failed" ] && echo 1 || echo 0)"
+ARGV_CONTENT=$(cat "$ARGVLOG")
+assert_contains "unlock: ukify got the UNLOCKED tmpfs key (--pcr-private-key)" "$ARGV_CONTENT" \
+    "--pcr-private-key=$TMP/shm/"
+assert_contains "unlock: sbsign got the UNLOCKED tmpfs key (--key)" "$ARGV_CONTENT" \
+    "sbsign --key $TMP/shm/"
+assert_eq "unlock: no signer ever saw the encrypted path" "0" \
+    "$(grep -c "$ENC_KEYDIR/release.pem" "$ARGVLOG"; true)"
+assert_eq "unlock: decrypted copy scrubbed after the build (tmpfs clean)" "" \
+    "$(find "$TMP/shm" -maxdepth 1 -name 'debian-fde-unlock.*' -print 2>/dev/null)"
+sbverify --cert "$ENC_KEYDIR/release.crt" "$ESP/EFI/Linux/debian-fde-$KVER.efi" >/dev/null 2>&1
+assert_rc "unlock: installed UKI verifies against the release cert" 0 $?
+
+# leg D: plaintext keydir -> unchanged behavior (no unlock, keydir path used)
+rm -f "$ARGVLOG"
+PATH="$WRAPBIN:$PATH" debian-fde ukictl build "$KVER" >/dev/null 2>&1
+assert_rc "unlock: plaintext release.pem build unchanged (rc 0)" 0 $?
+ARGV_CONTENT=$(cat "$ARGVLOG")
+assert_contains "unlock: plaintext build hands the KEYDIR path to ukify" "$ARGV_CONTENT" \
+    "--pcr-private-key=$KEYDIR/release.pem"
+assert_eq "unlock: plaintext build touched no tmpfs unlock file" "" \
+    "$(find "$TMP/shm" -maxdepth 1 -name 'debian-fde-unlock.*' -print 2>/dev/null)"
+
 finish

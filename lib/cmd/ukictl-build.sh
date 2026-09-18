@@ -155,7 +155,7 @@ cmd_ukictl_build_main() {
     if ! _uk_key_reason=$(keys_check); then
         _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" "$_uk_key_reason"
         err "ukictl build: $_uk_key_reason"
-        err "ukictl build: refusing to touch the ESP — attach the signing medium and re-run (ADR-8)"
+        err "ukictl build: refusing to touch the ESP — restore the scp backup or attach the signing medium and re-run (ADR-8/ADR-18)"
         exit "$DEBIAN_FDE_FAIL_CLOSED"
     fi
 
@@ -177,6 +177,7 @@ cmd_ukictl_build_main() {
     _uk_rs_tmp=''
     _uk_rs_sig_tmp=''
     _uk_rs_pred_tmp=''
+    _uk_unlock_tmp=''
     _uk_fail_reason=''
     _uk_cleanup() {
         _uk_rc=$?
@@ -192,6 +193,12 @@ cmd_ukictl_build_main() {
             [ -z "${_uk_rs_sig_tmp:-}" ] || rm -f "$_uk_rs_sig_tmp" 2>/dev/null || :
             [ -z "${_uk_rs_pred_tmp:-}" ] || rm -f "$_uk_rs_pred_tmp" 2>/dev/null || :
         fi
+        # G-KC4/ADR-18: the decrypted release.pem copy exists only for this
+        # build — zeroize+unlink it on EVERY exit path (tmpfs already, but the
+        # scrub keeps the no-plaintext-left-behind invariant uniform)
+        if [ -n "${_uk_unlock_tmp:-}" ]; then
+            keys_scrub "${_uk_unlock_tmp}" 2>/dev/null || :
+        fi
         if [ "$_uk_rc" -ne 0 ]; then
             _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
                 "${_uk_fail_reason:-build failed (rc=$_uk_rc); full output above}"
@@ -201,6 +208,32 @@ cmd_ukictl_build_main() {
     trap _uk_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+
+    # --- G-KC4/ADR-18: release-key unlock seam (ONCE, before any signer) ---------
+    # keys_check proved release.pem EXISTS. When it is the ADR-18 encrypted
+    # form, decrypt it ONCE via keys_unlock (DEBIAN_FDE_KEY_PASSPHRASE env ->
+    # no-echo TTY prompt -> loud 64) and hand the UNLOCKED tmpfs path to every
+    # signer below (ukify --pcr-private-key, sbsign --key, policy_sign). A
+    # plaintext release.pem (offline medium / legacy) keeps the previous
+    # behavior with ZERO passphrase interaction. The decrypted copy is scrubbed
+    # by the EXIT-trap net above.
+    _uk_keydir=$(keys_dir)
+    _uk_keyfile="$_uk_keydir/release.pem"
+    if keys_is_encrypted "$_uk_keyfile"; then
+        _uk_unlock_tmp=$(keys_unlock "$_uk_keydir") || {
+            if [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+                _uk_fail_reason="release.pem unlock failed: wrong passphrase (DEBIAN_FDE_KEY_PASSPHRASE rejected) — release key stays locked (ADR-18)"
+            else
+                _uk_fail_reason="release.pem is encrypted: passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+            fi
+            err "ukictl build: $_uk_fail_reason"
+            err "ukictl build: refusing to touch the ESP (ADR-8/ADR-18)"
+            exit "$DEBIAN_FDE_FAIL_CLOSED"
+        }
+        chmod 600 "$_uk_unlock_tmp" 2>/dev/null || :
+        _uk_keyfile=$_uk_unlock_tmp
+        info "ukictl build: unlocked encrypted release.pem -> $_uk_keyfile (scrubbed at exit)"
+    fi
 
     # --- re-sign-all path (B-G12; no UKI rebuild, no ESP writes) ------------------
     if [ "$_uk_sign_all" -eq 1 ]; then
@@ -294,7 +327,7 @@ _uk_body() {
         "--uname=$_uk_kver" \
         --pcr-banks=sha256 \
         --phases=enter-initrd \
-        "--pcr-private-key=$_uk_keydir/release.pem" \
+        "--pcr-private-key=$_uk_keyfile" \
         "--pcr-public-key=$_uk_keydir/release.pub" \
         --measure --json=short \
         "--output=$_uk_uki"
@@ -325,10 +358,10 @@ _uk_body() {
     # --- 4. Secure Boot signing + verification --------------------------------------
     # MD-01: explicit guards — sbsign failing must not fall through into sbverify
     # and get misreported as "sbverify rejected the signed UKI".
-    if ! sbsign --key "$_uk_keydir/release.pem" --cert "$_uk_keydir/release.crt" \
+    if ! sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
         --output "$_uk_uki_signed" "$_uk_uki" >/dev/null; then
         _uk_fail_reason="sbsign failed (key/cert: $_uk_keydir)"
-        err "ukictl build: sbsign failed — check the signing medium (key: $_uk_keydir/release.pem)"
+        err "ukictl build: sbsign failed — check the signing key (key: $_uk_keyfile)"
         return 1
     fi
     sbverify --cert "$_uk_keydir/release.crt" "$_uk_uki_signed" >/dev/null || {
@@ -531,8 +564,8 @@ _ukictl_re_sign_all() {
             err "ukictl build --re-sign-all: $_uk_fail_reason"
             exit "$DEBIAN_FDE_FAIL_CLOSED"
         fi
-        if ! policy_sign "$_uk_d7" "$_uk_pcr11" "$_uk_keydir/release.pem" "$_uk_rs_sig_tmp"; then
-            _uk_fail_reason="re-sign-all: signing the policy digest failed for $_uk_kver (key: $_uk_keydir/release.pem)"
+        if ! policy_sign "$_uk_d7" "$_uk_pcr11" "$_uk_keyfile" "$_uk_rs_sig_tmp"; then
+            _uk_fail_reason="re-sign-all: signing the policy digest failed for $_uk_kver (key: $_uk_keyfile)"
             err "ukictl build --re-sign-all: $_uk_fail_reason"
             exit "$DEBIAN_FDE_FAIL_CLOSED"
         fi

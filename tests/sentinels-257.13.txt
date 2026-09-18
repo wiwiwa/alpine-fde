@@ -68,6 +68,13 @@
 #   cryptsetup_nokey: full literal == stored string
 #     "No key available with this passphrase."
 #     [cryptsetup binary, cryptsetup-bin_2.7.5-2]
+#   token_unusable: console-observed rendering of the libcryptsetup format
+#     string "Token %d unusable for segment %d with desired keyslot priority
+#     %d." (byte-verified in libcryptsetup.so.12.10.0, libcryptsetup12_
+#     2.7.5-2, sha256 84f6596296c346c1c8f6bb16b0d4d485215b7a23a23ff21e9c28e
+#     35822d45a7b = the rootfs-fixture pin); rendered literal pinned as
+#     observed (token id 9 / segment 0 / priority 2 = the s22 dead-token
+#     suppressor's values; a different token id needs a new literal)
 #   tpm_absent_nodevice: full literal == stored string
 #     "No TPM2 (tpmrm) device found."
 #     [libsystemd-shared-257.so] (observed live in s10's TPM-less boot)
@@ -130,6 +137,7 @@ tpm_absent_notfound	TPM2 device not found.
 tpm_absent_fallback	No TPM2 hardware discovered and EFI firmware does not see it either, falling back to traditional unlocking.
 tpm2_refused	Failed to unseal secret using TPM2
 da_locked	dictionary attack lockout mode
+token_unusable	Token 9 unusable for segment 0 with desired keyslot priority 2.
 emergency_forbidden	Entering emergency mode.
 ovmf_bds_loading	BdsDxe: loading Boot0002
 ovmf_sb_denied	Access Denied -- rejected probably by Secure Boot

@@ -70,12 +70,16 @@ rc=$?
 assert_rc "unconfigured keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error names the missing configuration" "$out" "release key directory not configured"
 
-# --- case 2: keydir exists but is empty (USB not attached) -----------------------------
+# --- case 2: keydir exists but is empty (USB not attached / backup not restored) ------
 out=$(debian-fde "$TMP/empty-keydir" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "empty keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error explains what is missing" "$out" "release.pem is missing"
+assert_contains "error points at the encrypted key location (ADR-18 semantics, G-KC8)" "$out" \
+    "release.pem is missing (encrypted key expected at $TMP/empty-keydir/release.pem"
+assert_contains "error cites ADR-18" "$out" "ADR-18"
 assert_contains "error tells the operator the ESP was not touched" "$out" "refusing to touch the ESP"
+assert_contains "recovery copy offers the scp backup + medium paths (ADR-18)" "$out" "scp backup"
 
 # --- case 3: keydir has the public key but the private key is offline ------------------
 mkdir -p "$TMP/pubonly"

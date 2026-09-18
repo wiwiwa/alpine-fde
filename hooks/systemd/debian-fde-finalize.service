@@ -1,0 +1,33 @@
+# debian-fde-finalize.service — first-boot trust finalization (§9.1 Stage 3).
+# Oneshot: guard Secure Boot (custom keys ON, SetupMode=0), capture the
+# finalized baseline (audit --init), enroll every crypttab member container to
+# the TPM (Mechanism A''), then mark the install state `finalized`. Every step
+# is idempotent/resumable: a run interrupted mid-way (power loss, reboot)
+# converges on the next boot (§9.1 crash idempotency).
+#
+# Ordering (systemd.special(7)): after all local filesystems are mounted
+# (local-fs.target), after ALL crypttab LUKS devices are set up
+# (cryptsetup.target is pulled in by the systemd-cryptsetup@.service units),
+# and after the TPM device is accessible (tpm2.target, the synchronization
+# point for TPM2 access).
+#
+# No path conditions on the unit: the command itself is state-aware (absent →
+# loud no-op; finalized → no-op; installed → resume).
+#
+# Install: copy to /etc/systemd/system/ and `systemctl enable` (creates the
+# multi-user.target.wants link). ExecStart targets the tooling copy installed
+# at /usr/local/bin/debian-fde.
+
+[Unit]
+Description=Debian FDE first-boot trust finalization (Secure Boot guard + TPM enrollment)
+After=local-fs.target cryptsetup.target tpm2.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/debian-fde finalize
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

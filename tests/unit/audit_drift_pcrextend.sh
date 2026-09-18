@@ -136,7 +136,10 @@ run_audit
 assert_eq "drift -> rc 1" "1" "$AUD_RC"
 assert_contains "pcr2 line shows DRIFT" "$AUD_OUT" "pcr2"
 assert_contains "drift output prints §9.4 next steps (audit --accept)" "$AUD_OUT" "audit --accept"
-assert_contains "drift output prints §9.4 next steps (ukictl build)" "$AUD_OUT" "ukictl build"
+assert_contains "G-XC5: §9.4 A″ next steps point at enroll-tpm (re-enroll)" "$AUD_OUT" \
+    "debian-fde enroll-tpm"
+assert_not_contains "G-XC5: NO re-sign wording in the §9.4 A″ next steps" "$AUD_OUT" \
+    "re-sign"
 assert_contains "L-1: next steps use the A″ single-enrollment wording" "$AUD_OUT" \
     "ONE cryptenroll covers all retained UKIs"
 assert_not_contains "L-1: no Mechanism-A multi-enrollment wording" "$AUD_OUT" \

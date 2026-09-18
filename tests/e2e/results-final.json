@@ -1,27 +1,158 @@
 {
-  "timestamp": "20260918T163328Z",
+  "timestamp": "20260920T001834Z",
   "tcg_only": true,
-  "rows_recorded": 20,
+  "rows_recorded": 24,
   "scenarios": [
-    {"id": "s00", "status": "pass", "seconds": 829, "observed": "20260918T011546Z"},
-    {"id": "s00b", "status": "pass", "seconds": 1398, "observed": "20260918T151124Z", "note": "fresh chain (flock payload + exactly-once enroll, 36 asserts); from-cache re-run pass 20260918T161208Z: standing-token verified, 0 cryptenroll, boot C straight to login, 20 asserts"},
-    {"id": "s01", "status": "pass", "seconds": 109, "pinned_from": "20260914T105713Z"},
-    {"id": "s02", "status": "pass", "seconds": 264, "pinned_from": "20260914T105713Z"},
-    {"id": "s03", "status": "pass", "seconds": 385, "pinned_from": "20260914T105713Z"},
-    {"id": "s04", "status": "pass", "seconds": 298, "pinned_from": "20260914T105713Z"},
-    {"id": "s05", "status": "pass", "seconds": 260, "pinned_from": "20260914T105713Z"},
-    {"id": "s06", "status": "pass", "seconds": 255, "pinned_from": "20260914T105713Z"},
-    {"id": "s07", "status": "pass", "seconds": 286, "pinned_from": "20260914T105713Z"},
-    {"id": "s08", "status": "pass", "seconds": 151, "pinned_from": "20260914T105713Z"},
-    {"id": "s09", "status": "pass", "seconds": 316, "pinned_from": "20260914T105713Z"},
-    {"id": "s10", "status": "pass", "seconds": 188, "pinned_from": "20260914T105713Z"},
-    {"id": "s11", "status": "pass", "seconds": 263, "pinned_from": "20260914T105713Z"},
-    {"id": "s12", "status": "pass", "seconds": 415, "pinned_from": "20260914T105713Z"},
-    {"id": "s13", "status": "pass", "seconds": 644, "pinned_from": "20260914T105713Z"},
-    {"id": "s14", "status": "pass", "seconds": 403, "observed": "20260918T071837Z"},
-    {"id": "s15", "status": "pass", "seconds": 408, "observed": "20260918T072558Z"},
-    {"id": "s16", "status": "pass", "seconds": 456, "observed": "20260918T073323Z"},
-    {"id": "s17", "status": "pass", "seconds": 378, "pinned_from": "20260914T105713Z"},
-    {"id": "s18", "status": "pass", "seconds": 320, "pinned_from": "20260914T105713Z"}
+    {
+      "id": "s00",
+      "status": "pass",
+      "seconds": 829,
+      "observed": "20260918T011546Z"
+    },
+    {
+      "id": "s00b",
+      "status": "pass",
+      "seconds": 1398,
+      "observed": "20260918T151124Z",
+      "note": "fresh chain (flock payload + exactly-once enroll, 36 asserts); from-cache re-run pass 20260918T161208Z: standing-token verified, 0 cryptenroll, boot C straight to login, 20 asserts"
+    },
+    {
+      "id": "s01",
+      "status": "pass",
+      "seconds": 109,
+      "observed": "20260920T023632Z"
+    },
+    {
+      "id": "s02",
+      "status": "pass",
+      "seconds": 264,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s03",
+      "status": "pass",
+      "seconds": 385,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s04",
+      "status": "pass",
+      "seconds": 298,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s05",
+      "status": "pass",
+      "seconds": 260,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s06",
+      "status": "pass",
+      "seconds": 255,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s07",
+      "status": "pass",
+      "seconds": 286,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s08",
+      "status": "pass",
+      "seconds": 151,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s09",
+      "status": "pass",
+      "seconds": 316,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s10",
+      "status": "pass",
+      "seconds": 188,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s11",
+      "status": "pass",
+      "seconds": 263,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s12",
+      "status": "pass",
+      "seconds": 415,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s13",
+      "status": "pass",
+      "seconds": 644,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s14",
+      "status": "pass",
+      "seconds": 403,
+      "observed": "20260918T071837Z"
+    },
+    {
+      "id": "s15",
+      "status": "pass",
+      "seconds": 408,
+      "observed": "20260918T072558Z"
+    },
+    {
+      "id": "s16",
+      "status": "pass",
+      "seconds": 456,
+      "observed": "20260918T073323Z"
+    },
+    {
+      "id": "s17",
+      "status": "pass",
+      "seconds": 378,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s18",
+      "status": "pass",
+      "seconds": 320,
+      "pinned_from": "20260914T105713Z"
+    },
+    {
+      "id": "s19",
+      "status": "pass",
+      "seconds": 992,
+      "asserts": 43,
+      "observed": "20260920T001834Z",
+      "note": "first-ever validation; kernel-honest rescue leg (CLEAN backing never runs cache-less -> raw-offset linear-dm read at BDEV_DATA_START_DEFAULT; pending-backing re-attach via /sys/block/vdb/vdb1/bcache/attach); 512 MiB cache (cache_alloc needs nbuckets > 512)"
+    },
+    {
+      "id": "s20",
+      "status": "pass",
+      "seconds": 912,
+      "asserts": 54,
+      "observed": "20260919T202313Z",
+      "note": "baseline stub staged at <root>/etc/debian-fde (sp_etc_dir); \u00a78.4 install-state=installed staged or finalize is a loud no-op (state gate); both members enter finalize with ZERO standing tokens (\u00a78.3 ensure-once counts any single token as standing \u2014 wipe+reseat is \u00a79.4 enroll-tpm recovery, out of scope)"
+    },
+    {
+      "id": "s21",
+      "status": "pass",
+      "asserts": 28,
+      "observed": "20260919 (prior validation pass, earlier the same day; exact ts/wall not retained in this session's artifacts)",
+      "note": "finalize-guard row \u2014 counts carried from the prior session's run, not re-executed here"
+    },
+    {
+      "id": "s22",
+      "status": "pass",
+      "asserts": 30,
+      "observed": "20260919 (prior validation pass, earlier the same day; exact ts/wall not retained in this session's artifacts)",
+      "note": "handoff-immunity row \u2014 counts carried from the prior session's run, not re-executed here"
+    }
   ]
 }

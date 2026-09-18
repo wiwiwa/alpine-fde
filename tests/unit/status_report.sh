@@ -16,6 +16,8 @@ source "$REPO/lib/common.sh"
 export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
+# shellcheck source=../../lib/install-state.sh
+source "$REPO/lib/install-state.sh"
 
 T=$(mktemp -d /tmp/debian-fde-status.XXXXXX)
 FAKEBIN=$T/bin
@@ -284,5 +286,40 @@ unset TMPDIR
 assert_eq "L-5: mktemp failure: status rc stays 0 (report-only contract)" "0" "$ST_RC"
 assert_contains "L-5: loud skip line for the LUKS2 token section" "$ST_OUT" \
     "token section skipped"
+
+# --- 8. G-IL12 (§8.1/§9.1): install-state row — PROMINENT warning while the
+# ceremony is unfinished (state: installed + resume hint at
+# debian-fde-finalize.service), quiet line when finalized, SILENT when the
+# state file is absent (pre-state-machine installs). Report-only: rc stays 0.
+rm -f "$(istate_file)"
+run_status
+assert_eq "install state absent: rc 0" "0" "$ST_RC"
+assert_not_contains "install state absent: no Install state section (silent)" \
+    "$ST_OUT" "== Install state"
+
+istate_write installed
+run_status
+assert_eq "install state installed: rc stays 0" "0" "$ST_RC"
+assert_contains "installed: prominent warning" "$ST_OUT" \
+    "WARNING: installation is NOT finalized"
+assert_contains "installed: names the state" "$ST_OUT" "install state: installed"
+assert_contains "installed: resume hint at the first-boot service" "$ST_OUT" \
+    "debian-fde-finalize.service"
+assert_contains "installed: resume hint at the CLI" "$ST_OUT" "debian-fde finalize"
+
+istate_write finalized
+run_status
+assert_eq "install state finalized: rc stays 0" "0" "$ST_RC"
+assert_contains "finalized: quiet line" "$ST_OUT" "install state: finalized"
+assert_not_contains "finalized: no warning" "$ST_OUT" "WARNING"
+
+printf '{"schema_version": 1, "state": "garbage", "updated_at": "x"}' >"$(istate_file)"
+run_status
+assert_eq "install state garbage: rc stays 0" "0" "$ST_RC"
+assert_contains "garbage: loud unreadable-state line" "$ST_OUT" "unreadable install state"
+
+rm -f "$(istate_file)"
+run_status
+assert_not_contains "absent again: section gone" "$ST_OUT" "== Install state"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

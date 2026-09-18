@@ -236,10 +236,16 @@ esl_verify() {
 }
 
 # auth_packet_build PRIVKEY CERT VARNAME VARGUID ATTRS PAYLOADFILE TIMESTAMP OUT
-# EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + WIN_CERTIFICATE
-# (dwLength u32le, wRevision u16le 0x0200, wCertificateType u16le 0x0EF7) +
-# PKCS#7 SignedData (DETACHED — the verifier supplies the descriptor, exactly
-# like efitools KeyTool / shim verify EFI variable updates)
+# Full UEFI EFI_VARIABLE_AUTHENTICATION_2 — what efivarfs/firmware/KeyTool
+# parse for a time-based authenticated update:
+#   EFI_TIME(16) + EFI_VARIABLE_DATA{VariableGuid(16, LE), DataSize u32le,
+#   UnicodeName(UTF-16LE, NUL-terminated)} + WIN_CERTIFICATE_UEFI_GUID
+#   (dwLength u32le = 8 + p7, wRevision u16le 0x0200, wCertificateType u16le
+#   0x0EF7) + PKCS#7 SignedData (DETACHED — the verifier supplies the
+#   descriptor, exactly like efitools KeyTool / shim verify EFI updates).
+# The signed descriptor covers name+guid+attrs+time+payload; the envelope
+# (GUID/DataSize/name) is what firmware and fw_var_write's identity preflight
+# read — without it the packet is unparsable (refused as identity mismatch).
 auth_packet_build() {
     _ap_key=$1 _ap_cert=$2 _ap_var=$3 _ap_guid=$4 _ap_attrs=$5 _ap_pay=$6 _ap_ts=$7 _ap_out=$8
     for _ap_f in "$_ap_key" "$_ap_cert" "$_ap_pay"; do
@@ -259,8 +265,14 @@ auth_packet_build() {
         die "auth_packet_build: openssl smime -sign failed for var $_ap_var"
     fi
     _ap_p7sz=$(($(wc -c <"$_ap_p7") + 0))
+    _ap_name_hex=$(ascii_utf16le_hex "$_ap_var")0000 # UTF-16LE + NUL terminator
+    _ap_name_bytes=$(( (${#_ap_var} + 1) * 2 ))
+    _ap_data_sz_hex=$(le32_hex $(( _ap_name_bytes + 8 + _ap_p7sz )))
     {
-        efi_time_hex "$_ap_ts" | hex_to_bin
+        efi_time_hex "$_ap_ts" | hex_to_bin                 # EFI_TIME
+        guid_le_hex "$_ap_guid" | hex_to_bin                # VariableGuid
+        printf '%s' "$_ap_data_sz_hex" | hex_to_bin         # EFI_VARIABLE_DATA.DataSize
+        printf '%s' "$_ap_name_hex" | hex_to_bin            # UnicodeName + NUL
         printf '%s%s%s' "$(le32_hex $((8 + _ap_p7sz)))" "$(le16_hex 512)" "$(le16_hex 3831)" | hex_to_bin
         cat "$_ap_p7"
     } >"$_ap_out"
@@ -271,14 +283,24 @@ auth_packet_build() {
 
 prov_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde provision stage1 [--keydir DIR] [--force]
+Usage: debian-fde provision stage1 [--keydir DIR] [--mode in-chroot|offline] [--force]
        debian-fde provision stage2 | debian-fde provision --capture-baseline
 
-stage1  on the OFFLINE signing medium (I4): release keypair (RSA-3072, signs
-        UKIs and policy digests, ADR-11) + PK/KEK/db enrollment keypairs;
-        EFI_SIGNATURE_LISTs + authenticated update packets; firmware
-        enrollment guidance; writes the PENDING baseline (expected_pcr7
-        pending until first boot in the final SB state).
+stage1  key ceremony (ADR-18):
+        --mode offline (default)
+            on the OFFLINE signing medium (I4): release keypair (RSA-3072,
+            signs UKIs and policy digests, ADR-11) + PK/KEK/db enrollment
+            keypairs; EFI_SIGNATURE_LISTs + authenticated update packets;
+            firmware enrollment guidance; writes the PENDING baseline
+            (expected_pcr7 pending until first boot in the final SB state).
+        --mode in-chroot
+            the §9.1 step-3 ceremony on the target's encrypted root volume:
+            keydir defaults to $DEBIAN_FDE_ROOT/etc/debian-fde/keys; after the
+            packet build the release.pem is ENCRYPTED (AES-256 PBKDF2
+            HMAC-SHA256, >=600000 iterations, §13 passphrase floor; ADR-18) and
+            the PK/KEK/db private keys are shredded — the target keeps certs +
+            packets + the encrypted release.pem ONLY. Passphrase:
+            DEBIAN_FDE_KEY_PASSPHRASE or interactive prompt.
 stage2  capture live PCR 0..3+7 + Secure Boot fingerprints + event log and
         finalize the baseline (same path as `audit --init`).
 EOF
@@ -307,11 +329,24 @@ prov_stage1() {
     # arg handling done by caller; $@ contains stage1 args from index 1
     _s1_keydir='' _s1_force=0
     _s1_revoke=''
+    # ADR-18/RESOLVED-2: the ceremony defaults to the offline signing medium;
+    # --mode in-chroot runs the §9.1 step-3 flow on the target's encrypted root
+    _s1_mode=offline
     while [ $# -gt 0 ]; do
         case $1 in
             --keydir)
                 [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --keydir requires an argument"
                 _s1_keydir=$2
+                shift
+                ;;
+            --mode)
+                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --mode requires an argument"
+                case $2 in
+                    in-chroot | offline) _s1_mode=$2 ;;
+                    *)
+                        die -r "$DEBIAN_FDE_USAGE" "stage1: --mode must be 'in-chroot' or 'offline' (got: $2)"
+                        ;;
+                esac
                 shift
                 ;;
             --revoke-cert)
@@ -328,12 +363,24 @@ prov_stage1() {
         shift
     done
     _s1_keydir=${_s1_keydir:-${DEBIAN_FDE_KEYDIR:-}}
-    if [ -z "$_s1_keydir" ]; then
-        die "stage1: no key directory — mount the offline signing medium and pass --keydir (I4)"
+    if [ -z "$_s1_keydir" ] && [ "$_s1_mode" = "in-chroot" ]; then
+        # ADR-18: the in-chroot ceremony lives at the target's key-holding dir
+        [ -n "${DEBIAN_FDE_ROOT:-}" ] \
+            || die "stage1: --mode in-chroot requires DEBIAN_FDE_ROOT (or an explicit --keydir) — the keydir defaults to \$DEBIAN_FDE_ROOT/etc/debian-fde/keys (ADR-18)"
+        _s1_keydir="${DEBIAN_FDE_ROOT}/etc/debian-fde/keys"
     fi
-    # I4 custody: private keys must never be generated inside the protected
-    # machine's root (fails closed before ANY key material is written)
-    keys_offline_guard "$_s1_keydir"
+    if [ -z "$_s1_keydir" ]; then
+        die "stage1: no key directory — pass --keydir (offline signing medium, I4) or use --mode in-chroot (ADR-18)"
+    fi
+    # I4 custody: the OFFLINE ceremony must never target the protected root —
+    # the guard refuses a keydir under the root that holds no encrypted
+    # release.pem (fails closed before ANY key material is written). The
+    # in-chroot ceremony is the ADR-18-sanctioned exception: it generates on
+    # the target's ENCRYPTED root volume and encrypts+shreds before reboot
+    # (§9.1 steps 3+6), so the guard does not apply to it.
+    if [ "$_s1_mode" = "offline" ]; then
+        keys_offline_guard "$_s1_keydir"
+    fi
     require_pkgs openssl:openssl
 
     for _s1_f in release.pem release.pub release.crt \
@@ -416,8 +463,39 @@ EOF
             dbx "$PROV_GUID_DBASE" "$PROV_EFI_ATTRS" "$_s1_keydir/dbx.esl" "$_s1_ts" "$_s1_keydir/dbx.auth"
     fi
 
-    info "custody checklist (I4): keep release.pem OFF the target machine;"
-    info "  the medium also holds pk/kek/db private keys — needed only for re-provisioning"
+    # --- ADR-18 in-chroot custody finalization (§9.1 step 6, RESOLVED-3) ---------
+    # Before reboot NO plaintext signing key may remain on the target: encrypt
+    # release.pem in place (PBES2 aes-256-cbc / hmacWithSHA256 / iter
+    # 600000, §13 passphrase floor; keys_encrypt_release also scrubs the
+    # release.priv.pem duplicate + staging), then zeroize+rm the enrollment
+    # private keys — the target keeps certs + packets + the encrypted
+    # release.pem ONLY. Post-asserts fail closed (64) on any violation.
+    if [ "$_s1_mode" = "in-chroot" ]; then
+        info "ADR-18 custody: encrypting release.pem on the target (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER) before reboot"
+        keys_encrypt_release "$_s1_keydir"
+        keys_scrub "$_s1_keydir/release.priv.pem" \
+            "$_s1_keydir/pk.priv.pem" "$_s1_keydir/kek.priv.pem" "$_s1_keydir/db.priv.pem"
+        if ! keys_is_encrypted "$_s1_keydir/release.pem"; then
+            die "stage1: custody post-assert failed: $_s1_keydir/release.pem is not ADR-18-encrypted — refusing to finish (I4/ADR-18)"
+        fi
+        for _s1_p in release.priv.pem pk.priv.pem kek.priv.pem db.priv.pem; do
+            if [ -e "$_s1_keydir/$_s1_p" ]; then
+                die "stage1: custody post-assert failed: plaintext $_s1_p survived on the target (I4/ADR-18)"
+            fi
+        done
+    fi
+
+    if [ "$_s1_mode" = "in-chroot" ]; then
+        info "custody checklist (ADR-18): release.pem ENCRYPTED at $_s1_keydir/release.pem — confirmed (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER)"
+        info "  pk/kek/db private keys shredded after the packet build — the target keeps certs +"
+        info "  packets + the encrypted release.pem ONLY"
+        info "  back up $_s1_keydir (certs + packets + encrypted release.pem) off-machine via scp (ADR-18)"
+    else
+        info "custody checklist (I4/ADR-18): the medium holds the keypairs; the target must never"
+        info "  receive plaintext private keys — the only private key that may live on the target"
+        info "  is the ENCRYPTED release.pem (ADR-18); the medium also holds pk/kek/db private keys"
+        info "  — needed only for re-provisioning"
+    fi
     info "firmware enrollment (CI, offline vars):"
     printf '  virt-fw-vars --input OVMF_VARS.fd --output OVMF_VARS.debian-fde.fd \\\n' >&2
     printf '      --secure-boot --set-pk  "PK,%s" %s/pk.esl \\\n' "$PROV_GUID_GLOBAL" "$_s1_keydir" >&2

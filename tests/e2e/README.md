@@ -34,6 +34,26 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
   G-T13 prediction check (ukify's enter-initrd pol == the pre-unlock PCR 11
   state, never the final register) → ESP-size assertion (§13). Prints
   `RUNDIR <path>` for s00b.
+- **G-HW5 wave (2026-09-19, btrfs-default BASE matrix)**: the populated
+  rootfs follows the revised-design default — Btrfs on the LUKS volume with
+  the §9.1 subvolume layout `@` / `@home` / `@snapshots` (mkfs.btrfs +
+  `btrfs` from the pinned btrfs-progs deb; verified on-console via
+  `btrfs subvolume list` and the verbatim fstab echo). The installer writes
+  the §9.1 fstab forms (`UUID=<fs-uuid> /|/home|/.snapshots btrfs
+  subvol=@…`) — production-exact. Making them RESOLVE required the dracut
+  initrd pattern in the harness initrd: systemd-udevd runs from init start
+  so the LUKS attach is udev-registered, and login_stage moves
+  /dev + /proc + /sys + /run onto the new root before switch_root (busybox
+  switch_root buries them otherwise — the /run udev db is what the installed
+  system's fstab device units resolve through; both observed live, console
+  evidence in the run dirs). Measured size under btrfs-default:
+  **680 MiB / 322 packages** (du of `@` incl. the shipped btrfs-progs
+  binaries) — the budget pin stays the §3.3 planning target with the
+  measurement recorded at `DEBIAN_FDE_ROOTFS_BUDGET_MIB` (s00). The legacy
+  flat fs remains production-only (`install --fs ext4`); no scenario
+  exercises it, so the harness carries no ext4 seam. The pristine s00b
+  cache is generation-marked (`FORMAT: btrfs-2`): pre-btrfs disks (ext4
+  era) fail verification and trigger a rebuild.
 - **`s00b-enroll-cache.sh`** — §12 S-00b (+S-01): boot B enrolls FROM THE
   GUEST via the production enroll CLI path (real `systemd-cryptenroll`,
   Mechanism A″, approved D3), asserts ensure-once (exactly ONE systemd-tpm2
@@ -76,7 +96,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 
 | File | Purpose |
 |---|---|
-| `../run-e2e.sh` | Orchestrator: env-check → harness self-test (infra smoke) → named/default scenarios (sequential by default; `-j N` runs up to N concurrent workers, with the s00→s00b chain always first and alone — see tests/README.md "Runner contract details") → per-scenario TAP output → G-T11b artifact scan → aggregated results JSON (`e2e/.runs/results-<ts>.json`) → nonzero exit on failure. Registry inside maps `s00, s00b, s01..s17` (the literal §10/§12 matrix rows) plus `s18` (appended at runtime so the literal table stays exactly 18 rows) → scripts. A registered id with NO scenario file is a FAILURE (`missing`), never a pending pass. |
+| `../run-e2e.sh` | Orchestrator: env-check → harness self-test (infra smoke) → named/default scenarios (sequential by default; `-j N` runs up to N concurrent workers, with the s00→s00b chain always first and alone — see tests/README.md "Runner contract details") → per-scenario TAP output → G-T11b artifact scan → aggregated results JSON (`e2e/.runs/results-<ts>.json`) → nonzero exit on failure. Registry inside maps `s00, s00b, s01..s17` (the original §10/§12 matrix rows) PLUS the literal W2b rows `s19..s22` (§10 BASE matrix + §12 S-19..S-22) plus `s18` (appended at runtime so the literal table stays §10/§12-matrix-only). A registered id with NO scenario file is a FAILURE (`missing`), never a pending pass. The W2b scenarios bootstrap IN-SCENARIO (each builds its own fixtures and consumes no s00/s00b state — they are not in `_STATE_CONSUMERS`), so the `-j` s00/s00b hoist cannot misorder them and they run as ordinary independent workers. |
 | `s00-bootstrap-lite.sh` | Full §12 S-00 (see "Full-bootstrap wave" above): installer UKI boot → passphrase unlock (one documented prompt, zero console input) → pinned-artifact rootfs populate (§3.3) → size budget + package count → disk-side scans → real-CLI `audit --init` baseline finalize (SB-state-guarded) → G-T13 prediction check → ESP-size assertion. Prints `RUNDIR <path>`. |
 | `s00b-enroll-cache.sh` | §12 S-00b + S-01 (continues s00): in-guest production-CLI enroll (ensure-once), pristine-state cache with SHA manifest, then the zero-input `login:` happy path. Consumes `DEBIAN_FDE_S00_STATE` (set by run-e2e.sh when s00 ran in the same invocation), else the verified cache, else self-bootstraps. Prints `RUNDIR <path>` (the ENROLLED state consumed by s01/s05/s06/s07/s09/s12/s13/s18). |
 | `s09-tpm-da-locked.sh` | §10 DA-locked row (G-T15): armed + enforced dictionary-attack lockout on swtpm; boots, refuses, bounded 3-strike fallback, clean poweroff; §7.1 budget-preservation asserted via the enforcement probe (see "Full-bootstrap wave" for the swtpm-leniency caveat). |
@@ -89,9 +109,9 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 | `s13-token-tamper.sh` | Token-tamper suite (I3), SB-enrolled vars, one boot per variant: `pubkey-swap` / `blob-corrupt` / `policy-corrupt` / `version-99` (unknown field) — each host-tampered via `cryptsetup token import`, each must fail closed. |
 | `../lib/keys-fixture.sh` | Throwaway PK/KEK/db ceremony + offline OVMF var enrollment via `virt-fw-vars` (`keys_vars_enrolled/unenrolled/get/secureboot_on`). |
 | `../lib/disk-fixture.sh` | Unprivileged file-backed LUKS2: `disk_make_luks` (slot 0 passphrase, CI-cheap argon2id), `disk_add_slot1`, `disk_metadata`, `disk_token_json`. |
-| `../lib/rootfs-fixture.sh` | SHA256-pinned Debian trixie deb/tarball cache (`tests/.cache/`, 37 pins incl. the 257.13 systemd-cryptsetup + the sentinel-pinned artifacts). `rootfs_ensure/deb_extract/tarball_extract`. |
-| `../lib/uki-build.sh` | Harness UKI builder: guest userspace tree from pinned debs (objdump NEEDED-walk closure gate), busybox `/init` (TPM wait, PCR print, **enter-initrd PCR 11 phase extension**, cmdline print, §S-00 `stage=install` passphrase-unlock + pinned-rootfs populate + §3.3 trims + in-guest key scan, §S-01 `stage=login` switch_root handoff, in-guest enroll, real 257.13 unlock, gated console-passphrase fallback loop, sentinels), ukify PCR-signing (`.pcrsig`/`.pcrpkey`; optional extra-cmdline args for signed UKI variants), sbsign, `.pcrsig` JSON → raw payload drive (`/dev/vdc`), `rootfs_payload_image` (deterministic root-tree payload derived from the pinned cloud image — see its header), plus `vars_set_boot_entry_optdata` (virt-fw-vars-based firmware boot-entry editing, kept for future loader-tamper work) and the G-T13 policy-digest helpers. |
-| `../lib/qemu.sh` | q35 + OVMF secboot (per-scenario VARS copy) + swtpm passthrough (`-tpmdev emulator` on the swtpm **ctrl** socket) + serial chardev socket with full console logfile. Drive contract: vda=ESP, vdb=LUKS, vdc=pcrsig payload. Hard timeout, PID file. |
+| `../lib/rootfs-fixture.sh` | SHA256-pinned Debian trixie deb/tarball cache (`tests/.cache/`, 41 pins incl. the 257.13 systemd-cryptsetup, the sentinel-pinned artifacts, and the G-HW4/G-HW5 btrfs + udev suite: btrfs-progs, liblzo2, bcache-tools, udev, dmsetup). `rootfs_ensure/deb_extract/tarball_extract`. |
+| `../lib/uki-build.sh` | Harness UKI builder: guest userspace tree from pinned debs (objdump NEEDED-walk closure gate), busybox `/init` (TPM wait, PCR print, **enter-initrd PCR 11 phase extension**, cmdline print, §S-00 `stage=install` passphrase-unlock + pinned-rootfs populate + §3.3 trims + in-guest key scan, §S-01 `stage=login` switch_root handoff, in-guest enroll, real 257.13 unlock, gated console-passphrase fallback loop, sentinels). G-HW3/G-HW5: the module closure now covers the btrfs-default matrix (btrfs + zstd/xor/raid6_pq deps + bcache, dependency-ordered for the bare-insmod loop) and the initrd carries the §9.1 Btrfs installer pieces (mkfs.btrfs + `btrfs`) plus the udev pieces (systemd-udevd/udevadm + 55-dm.rules — the LUKS attach must be udev-registered for the fstab UUID= submounts to resolve; see the G-HW5 wave note above), ukify PCR-signing (`.pcrsig`/`.pcrpkey`; optional extra-cmdline args for signed UKI variants), sbsign, `.pcrsig` JSON → raw payload drive (`/dev/vdc`), `rootfs_payload_image` (deterministic root-tree payload derived from the pinned cloud image — see its header), plus `vars_set_boot_entry_optdata` (virt-fw-vars-based firmware boot-entry editing, kept for future loader-tamper work) and the G-T13 policy-digest helpers. |
+| `../lib/qemu.sh` | q35 + OVMF secboot (per-scenario VARS copy) + swtpm passthrough (`-tpmdev emulator` on the swtpm **ctrl** socket) + serial chardev socket with full console logfile. Drive contract (G-HW1): vda=ESP, vdb=LUKS disk, vdc=pcrsig payload, vdd… = the opt-in 7th `qemu_run` argument (newline-separated images appended as virtio drives in list order; `qemu_argv` is the pure-argv seam the unit smoke pins — every current caller passes ≤6 positional args). Hard timeout, PID file. |
 | `../lib/serial.py` / `serial.sh` | stdlib-only serial-socket client (`read_until`, `write_line`, `drain`). No pexpect/expect on this sandbox. |
 | `../unit/e2e_infra_smoke.sh` | Host-side harness self-test (keys roundtrip, disk fixture, full UKI build + section/pcrsig assertions, serial loopback, rootfs pins, registry completeness). Runs as part of `tests/run-unit.sh`. |
 
@@ -360,7 +380,11 @@ per §6.1.1 (the PCR-11-only signing limitation stands).
 `tests/run-e2e.sh` maps `s00, s00b, s01..s17` (the §10/§12 matrix — the
 letter-suffixed `s00b` continues S-00 and does not inflate the literal
 18-row table the infra smoke pins) plus `s18` (a §6.1 extension row,
-appended at runtime). Registration is by FILENAME CONVENTION: an id is
+appended at runtime). W2b will append the s19–s22 multi-drive rows (§10
+BASE matrix) to the literal table; the infra smoke's count pin went dynamic
+for that (per-id §10/§12 coverage + no-duplicates + an 18-row floor), so
+the appended rows keep the smoke green. Registration is by FILENAME
+CONVENTION: an id is
 runnable iff `tests/e2e/s<nn>[b]-*.sh` matches (glob, lowest name wins); a
 REGISTERED id with no file is a FAILURE (`missing`), never a pending pass —
 a run with zero scenarios executed is also a failure. The literal table in
@@ -393,12 +417,47 @@ scenario was executed in a tracked run, `pinned_from` when the row was carried
 over unchanged from an earlier verified run. A row with `pinned_from` is a
 pinned historical status, not a fresh measurement.
 
+## W2b multi-drive rows (s19–s22) — validation fidelity notes
+
+Validated green under TCG: s20 2026-09-19 (54 asserts, wall 912 s), s19
+2026-09-20 (43 asserts, wall 992 s; first-ever validation), s21/s22 in the
+prior same-day pass (28/30 asserts). The validation surfaced three
+kernel/tooling realities the scenarios now encode (all documented in the
+scenario headers, none silent):
+
+- **§8.4 state gate is real** (both s19/s20): `finalize` without
+  `/etc/debian-fde/install-state.json` is a LOUD NO-OP (rc 0, "nothing to
+  finalize") — the scenarios stage the state doc at `installed` in the
+  tooling tail; the `finalized` write stays scenario-ephemeral in-guest.
+  The host-side baseline stub must live at `<root>/etc/debian-fde/`
+  (`sp_etc_dir` resolution), not `<root>/debian-fde/`.
+- **§8.3 ensure-once counts, never verifies** (s20): a member entering
+  finalize with ANY single systemd-tpm2 token takes the zero-op "token
+  already stands" branch (it never tries to unseal, so a DEAD token reads
+  as standing). Both members therefore enter finalize with ZERO tokens;
+  the §9.4 wipe+reseat recovery belongs to `enroll-tpm --reseat`, out of
+  scope here.
+- **bcache recovery is raw-offset, not standalone-bcache0** (s19): a CLEAN
+  backing device never runs without its cache set (register_bdev runs
+  NONE/STALE only — asserted as a fail-closed negative), the registered
+  member is held exclusively (foreign dm tables get EBUSY — release it
+  with `bcache/stop` first), and the cache partition must exceed the
+  kernel's `nbuckets > 512` floor (512 MiB at make-bcache's 512 KiB
+  default bucket). Replacement-cache re-attach goes through the pending
+  device's own kobject: `/sys/block/vdb/vdb1/bcache/attach` (bcache0 does
+  not exist until the attach lands). TCG's 16550 emulation can
+  drop/duplicate console bytes under printk load, so sentinel waits
+  re-derive from live guest state instead of replaying markers, and fed
+  markers stay arithmetic (`$((..))`) so the tty echo can never satisfy a
+  wait.
+
 ## Remaining gaps / follow-ups
 
 - **Pinned 2026-09-14 statuses pending a full-matrix re-run**: s01–s08,
   s10–s13, s17 carry their 2026-09-14 pinned statuses (`pinned_from` in
   `results-final.json`); wave 3b (2026-09-18) re-observed only s00, s00b,
-  s14, s15, s16.
+  s14, s15, s16. The W2b multi-drive rows s19–s22 are validated as of
+  2026-09-19/20 (see the W2b section above and `results-final.json`).
 - **s18 sentinel-table follow-up (deb byte-check)**: the foreign-signer
   refusal logs `Failed to validate signature in TPM` — a refusal class
   distinct from the stale-pol `pcr_sig_missing` shape — which needs a
@@ -434,7 +493,9 @@ pinned historical status, not a fresh measurement.
 - The rootfs payload derivation (`rootfs_payload_image`) is documented and
   deterministic but its SWTPM/QEMU timing under the s00 installer boot
   (untar of the ~670 MiB tree under TCG) needs CI-grade soak: the
-  QEMU_TIMEOUT for s00 defaults to 900 s for this reason.
+  QEMU_TIMEOUT for s00 defaults to 1200 s for this reason (the btrfs-default
+  scan varies ~±40% between runs; 900 s was exceeded once — see the s00
+  timeout comment).
 
 ## Budget / accelerator
 
@@ -446,9 +507,12 @@ records it in the results JSON (`"accel"`). The two accelerators are NOT
 comparable numerically — all wall times below are TCG numbers, and any
 expectation-setting should name the accelerator it was measured under.
 
-TCG reference (this sandbox, no `/dev/kvm`): one s00-lite boot (build + boot
-+ poweroff) ≈ 134 s; hard timeout `QEMU_TIMEOUT=420` s. Scenario scripts
-must always hard-timeout and always leave a run dir for post-mortem.
+TCG reference (this sandbox, no `/dev/kvm`): one s00 full bootstrap (payload
+build + UKI build + installer boot + asserts) ≈ 870 s; one s00b fresh chain
+(boot B enroll + boot C login) ≈ 2060 s; a from-cache s00b (boot C only)
+boot ≈ 265 s + UKI build; s01 ≈ 300 s. Hard timeouts: s00
+`QEMU_TIMEOUT=1200`, s00b `QEMU_TIMEOUT=1800`. Scenario scripts must always
+hard-timeout and always leave a run dir for post-mortem.
 Parallel `-j` runs shrink WALL time but each concurrent guest runs slower
 than solo (shared cores); per-scenario `seconds` under `-j` therefore reads
 higher than the solo baseline — compare walls, not per-row seconds, across

@@ -36,9 +36,12 @@
 #     budget (tests/lib/uki-build.sh, uki_initrd_pack), so the artifact rides
 #     the payload drive and is hash-verified in-guest against the build-time
 #     pin (@@ROOTFS_SHA@@) before use.
-#   * the populated rootfs is ext2 (busybox mke2fs; the pinned kernel's ext4
-#     module mounts it, CONFIG_EXT4_USE_FOR_EXT2=y) — production is ext4
-#     (§13); the unlock path under test does not depend on the fs type.
+#   * the populated rootfs follows the revised-design BASE matrix default
+#     (G-HW5, 2026-09-19): Btrfs on the LUKS volume with the §9.1 subvolume
+#     layout @ / @home / @snapshots (mkfs.btrfs from the pinned btrfs-progs
+#     deb). The legacy flat fs remains production-only (`install --fs ext4`,
+#     §9.1); no harness scenario exercises it, so the harness carries no ext4
+#     seam. The unlock path under test does not depend on the fs type.
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -61,12 +64,20 @@ source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown
 
 # §3.3 size budget: THE PIN OF RECORD IS THIS HARNESS VAR (default = the 1.4 GB
 # planning target, §3.3). CI overrides it via the environment.
+# G-HW5 re-derive (2026-09-19): under the btrfs-default §9.1 layout the
+# installed rootfs (du of the @ subvolume incl. the shipped btrfs-progs
+# binaries) measured 695460 KiB ≈ 680 MiB / 322 packages (run
+# s00-bootstrap-1789761343) — the ceiling stays the §3.3 planning target,
+# the measured value is the recorded baseline.
 DEBIAN_FDE_ROOTFS_BUDGET_MIB="${DEBIAN_FDE_ROOTFS_BUDGET_MIB:-1434}"
 # §13/§9.3 ESP sizing: measured UKI × retention (current + 2 old) + headroom.
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
-# the installer boot dd's 319 MB + untars ~1.3 GB + scans the tree under TCG
-export QEMU_TIMEOUT="${DEBIAN_FDE_S00_TIMEOUT:-900}"
+# the installer boot dd's 319 MB + untars ~1.3 GB + btrfs metadata + the
+# G-T11b tree scan under TCG — the scan wall time varies ~±40% between runs
+# (900 s was exceeded once, 2026-09-19 run s00-bootstrap-1789763382: killed
+# mid-scan), so the hard timeout carries headroom
+export QEMU_TIMEOUT="${DEBIAN_FDE_S00_TIMEOUT:-1200}"
 
 RUN="$TESTS/e2e/.runs/s00-bootstrap-$(date +%s)"
 mkdir -p "$RUN"
@@ -178,6 +189,34 @@ assert_contains "rootfs populated (§3.3)" "$LOG" \
     "debian-fde-install: populating rootfs from the pinned Debian artifact"
 assert_contains "getty/networkd configured (§3.3)" "$LOG" \
     "debian-fde-install: getty/networkd configured"
+# stage 3b: §9.1 Btrfs default (G-HW5) — mkfs.btrfs + @/@home/@snapshots
+# subvolumes + subvol=@ mount + the fstab subvolume forms, all proven on the
+# console (harness-owned markers; `btrfs subvolume list` output is the
+# on-disk evidence, the /etc/fstab lines are echoed verbatim)
+assert_contains "§9.1 btrfs rootfs created on the LUKS volume" "$LOG" \
+    "debian-fde-install: btrfs rootfs created (uuid="
+assert_contains "§9.1 subvolumes created (@ @home @snapshots)" "$LOG" \
+    "debian-fde-install: subvolumes created (@ @home @snapshots)"
+assert_contains "root mounted rw with subvol=@" "$LOG" \
+    "debian-fde-install: root mounted (btrfs subvol=@)"
+for sv in '@' '@home' '@snapshots'; do
+    # NB: no bare $ end-anchor — the serial chardev log carries a trailing CR
+    # on every line (same trap as the kib= parse below); [[:space:]] eats it
+    if grep -qE "path ${sv}[[:space:]]" "$CONSOLE" 2>/dev/null; then
+        _assert_result ok "btrfs subvolume ${sv} present on disk (subvolume list)" ""
+    else
+        _assert_result not-ok "btrfs subvolume ${sv} present on disk (subvolume list)" \
+            "no 'path ${sv}' line in console"
+    fi
+done
+if grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} / btrfs subvol=@,defaults 0 1[[:space:]]*$' "$CONSOLE" 2>/dev/null \
+    && grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /home btrfs subvol=@home,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null \
+    && grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /.snapshots btrfs subvol=@snapshots,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null; then
+    _assert_result ok "§9.1 fstab subvolume forms written (/ /home /.snapshots)" ""
+else
+    _assert_result not-ok "§9.1 fstab subvolume forms written (/ /home /.snapshots)" \
+        "no debian-fde-btrfs: fstab| lines in console"
+fi
 assert_not_contains "install stage never failed" "$LOG" "debian-fde: INSTALL-FAILED"
 
 # stage 4: §3.3 size budget + package count (parsed from the console print)

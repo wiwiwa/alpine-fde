@@ -39,6 +39,19 @@ _DEB_BASE="http://deb.debian.org/debian"
 # symlink — latest/ drifted under us once already (20260914 build ≠ pinned bytes).
 _CLOUD_BASE="https://cloud.debian.org/images/cloud/trixie"
 
+# G-HW4 (btrfs-default BASE matrix) pins: btrfs-progs + its only closure gap
+# (liblzo2 — objdump NEEDED of usr/bin/btrfs + usr/sbin/mkfs.btrfs 6.14-1:
+# libuuid/libblkid/libudev/libz/libzstd/libc are already pinned) + bcache-tools
+# (userspace of the §8.2 bcache topology; pinned for dated-suite discipline —
+# the harness boots single-LUKS volumes and packs only btrfs-progs into the
+# initrd). G-HW5 (initrd udev, the dracut pattern): the LUKS attach must be
+# udev-registered or the installed system's §9.1 fstab UUID= submounts never
+# resolve (systemd device units require the udev db; 55-dm.rules drops events
+# for dm devices created with udev sync disabled). udev carries systemd-udevd
+# + udevadm + the base rules (same pinned systemd version); dmsetup carries
+# 55-dm.rules + 60-persistent-storage-dm.rules. Versions are the trixie (main)
+# suite at pin time, verified against dists/trixie/main/binary-amd64/Packages.
+# NB: the table below must stay comment-free — every line is read as a pin row.
 # cache-name <TAB> sha256 <TAB> url
 _ROOTFS_PINS="
 busybox-static_1.37.0_amd64.deb	598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53	$_DEB_BASE/pool/main/b/busybox/busybox-static_1.37.0-6+b9_amd64.deb
@@ -76,6 +89,11 @@ libudev1.deb	5d41c284f5a93b05bc7d648b61a02dd2bb9ff05b2261ad1a8b7d96044a0cfa88	$_
 libz1.deb	015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d	$_DEB_BASE/pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_amd64.deb
 libzstd1.deb	2f6a2aeacfc925eba8b00ac9139bc4bfccf8cacb09eb93de067074b26948eef9	$_DEB_BASE/pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-1_amd64.deb
 libaudit1.deb	3d1dd3f031a56f01b747e2acc0e14575212580e6fa63d800c44cb0a31f1edfd7	$_DEB_BASE/pool/main/a/audit/libaudit1_4.0.2-2+deb13u1_amd64.deb
+btrfs-progs_6.14_amd64.deb	ae3ab86d467b8b765ea1ea3e264c11a07a6f8a73e6b3df665c787d45b9b3491f	$_DEB_BASE/pool/main/b/btrfs-progs/btrfs-progs_6.14-1_amd64.deb
+liblzo2-2.deb	f3032201fe2928a87e13f05ce256ff3ac2a7860c7e594dc51ae6d7348a4466ce	$_DEB_BASE/pool/main/l/lzo2/liblzo2-2_2.10-3+b1_amd64.deb
+bcache-tools_1.0.8_amd64.deb	18dc4abae5cedbf2303efda579e09960d0e89adada2b536e8d897234c886c837	$_DEB_BASE/pool/main/b/bcache-tools/bcache-tools_1.0.8-5_amd64.deb
+udev_257.13_amd64.deb	a9d751b4d73a489120ef68a21caedf0b58fba80598fb22a17f85060f308bfe7e	$_DEB_BASE/pool/main/s/systemd/udev_257.13-1~deb13u1_amd64.deb
+dmsetup.deb	4771f7ab0a907a8e5d02a6358ff016ae7cb49124906bada02fa882e141b615a0	$_DEB_BASE/pool/main/l/lvm2/dmsetup_1.02.205-2_amd64.deb
 debian-13-generic-amd64.tar.xz	700067e09ac7059f556eb8cf041575828b4f9a3c35d1544463fb600c08c70bf1	$_CLOUD_BASE/20260831-2587/debian-13-generic-amd64-20260831-2587.tar.xz
 "
 

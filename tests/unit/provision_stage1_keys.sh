@@ -82,18 +82,28 @@ GOLDEN_DESC+='cbb219d73a3d9645a3bcdad00e67656f'
 GOLDEN_DESC+='07000000'
 GOLDEN_DESC+='ea07090e010203000000000000000000'
 GOLDEN_DESC+='11223344'
-assert_eq "packet size = 16 (EFI_TIME) + 8 (WIN_CERT hdr) + pkcs7" "1" \
-    "$(( $(wc -c <"$T/db.auth") >= 16 + 8 + 50 ? 1 : 0 ))"
+# packet = EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + EFI_VARIABLE_DATA
+# {GUID(16) + DataSize(4) + UTF-16 name incl NUL (6 for 'db')} + WIN_CERT(8) + p7
+assert_eq "packet size = full EFI_VARIABLE_AUTHENTICATION_2 envelope" "1" \
+    "$(( $(wc -c <"$T/db.auth") >= 16 + 16 + 4 + 6 + 8 + 50 ? 1 : 0 ))"
 assert_eq "EFI_TIME prefix" "ea07090e010203000000000000000000" \
     "$(bin_to_hex <"$T/db.auth" | cut -c 1-32)"
-assert_eq "wRevision 0x0200 + wCertificateType 0x0EF7 (LE)" "0002f70e" \
-    "$(bin_to_hex <"$T/db.auth" | cut -c 41-48)"
-DWLEN=$((16#$(bin_to_hex <"$T/db.auth" | cut -c 33-40 | awk '{print substr($0,7,2) substr($0,5,2) substr($0,3,2) substr($0,1,2)}')))
-PKCS7_LEN=$(( $(wc -c <"$T/db.auth") - 24 ))
+assert_eq "EFI_VARIABLE_DATA GUID at bytes 17-32 (LE)" \
+    "cbb219d73a3d9645a3bcdad00e67656f" \
+    "$(bin_to_hex <"$T/db.auth" | cut -c 33-64)"
+assert_eq "UnicodeName 'db'+NUL at byte 37" "640062000000" \
+    "$(bin_to_hex <"$T/db.auth" | cut -c 73-84)"
+assert_eq "wRevision 0x0200 + wCertificateType 0x0EF7 (LE, after envelope)" "0002f70e" \
+    "$(bin_to_hex <"$T/db.auth" | cut -c 93-100)"
+DWLEN=$((16#$(bin_to_hex <"$T/db.auth" | cut -c 85-92 | awk '{print substr($0,7,2) substr($0,5,2) substr($0,3,2) substr($0,1,2)}')))
+PKCS7_LEN=$(( $(wc -c <"$T/db.auth") - 24 - 26 ))
 assert_eq "dwLength = 8 + CertData" "$((8 + PKCS7_LEN))" "$DWLEN"
+# DataSize covers the name + WIN_CERT body; packet = 36 + DataSize exactly
+DS=$((16#$(bin_to_hex <"$T/db.auth" | cut -c 65-72 | awk '{print substr($0,7,2) substr($0,5,2) substr($0,3,2) substr($0,1,2)}')))
+assert_eq "DataSize = name(6) + 8 + CertData" "$((6 + 8 + PKCS7_LEN))" "$DS"
 # extract CertData (PKCS#7 is DETACHED) and verify it over the reconstructed
 # descriptor — the same data a firmware/KeyTool verifier would use
-tail -c +25 "$T/db.auth" >"$T/db.p7"
+tail -c +51 "$T/db.auth" >"$T/db.p7"
 printf '%s' "$GOLDEN_DESC" | hex_to_bin >"$T/desc.bin"
 openssl smime -verify -inform DER -in "$T/db.p7" -content "$T/desc.bin" \
     -CAfile "$T/signer.pem" -out /dev/null 2>"$T/verify.err"
@@ -212,9 +222,13 @@ EXPECTED_DBX+=$TBS                                 # sha256(vendor cert TBS)
 EXPECTED_DBX+='00000000000000000000000000000000'   # TimeOfRevocation zero
 assert_eq "dbx.esl golden (vendor cert TBS, zero revocation time)" "$EXPECTED_DBX" "$(bin_to_hex <"$T/keys/dbx.esl")"
 # the auth packet is a KEK-signed EFI_VARIABLE_AUTHENTICATION_2 over dbx
+# (envelope: TIME(32) + GUID(32) + DataSize(8) + 'dbx'+NUL(16) hex chars)
 assert_eq "dbx.auth wRevision 0x0200 + wCertificateType 0x0EF7 (LE)" "0002f70e" \
-    "$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 41-48)"
-tail -c +25 "$T/keys/dbx.auth" >"$T/dbx.p7"
+    "$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 97-104)"
+assert_eq "dbx.auth EFI_VARIABLE_DATA GUID at bytes 17-32 (LE)" \
+    "cbb219d73a3d9645a3bcdad00e67656f" \
+    "$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 33-64)"
+tail -c +53 "$T/keys/dbx.auth" >"$T/dbx.p7"
 # descriptor = name + guid + attrs + EFI_TIME (read from the packet header, as
 # a firmware/KeyTool verifier does) + payload
 TS_HEX=$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 1-32)
@@ -274,6 +288,78 @@ assert_contains "L-03: openssl failure message is visible (was: 2>/dev/null)" "$
 RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-norevoke" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 without --revoke-cert rc 0" "0" "$RC"
 assert_eq "no dbx.esl without --revoke-cert" "0" "$([ -e "$T/keys-norevoke/dbx.esl" ] && echo 1 || echo 0)"
+
+# --- ADR-18/G-KC3: provision stage1 --mode in-chroot|offline (default offline) ------
+# in-chroot mode: keydir defaults to $DEBIAN_FDE_ROOT/etc/debian-fde/keys; the
+# ceremony REQUIRES encryption at the end (keys_encrypt_release, PBES2
+# aes-256-cbc/hmacWithSHA256/iter 600000) and SHREDS the pk/kek/db (+release
+# duplicate) plaintext private keys after the ESL/auth-packet build — the
+# target keeps certs + packets + the encrypted release.pem ONLY. Offline mode
+# (the default) is byte-for-byte unchanged: plaintext keys stay on the medium.
+IC_PASS='ci-inchroot-passphrase-600000'
+enc_rc() { ( keys_is_encrypted "$1" ) >/dev/null 2>&1; echo $?; }
+
+# usage pin: --mode validates its value (usage-class rc 2)
+RC=$( ( "$REPO/bin/debian-fde" provision stage1 --mode garbage --keydir "$T/mode-garbage" ) >/dev/null 2>&1; echo $? )
+assert_eq "stage1 --mode garbage -> usage rc 2" "2" "$RC"
+
+# the in-chroot ceremony end-to-end with the env credential seam (RESOLVED-4)
+IC_OUT=$(DEBIAN_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/debian-fde" provision stage1 --mode in-chroot 2>&1)
+IC_RC=$?
+assert_eq "stage1 --mode in-chroot rc 0 (default keydir = \$DEBIAN_FDE_ROOT/etc/debian-fde/keys)" "0" "$IC_RC"
+ICK="$DEBIAN_FDE_ROOT/etc/debian-fde/keys"
+assert_file_exists "in-chroot: release.pem at the default keydir" "$ICK/release.pem"
+assert_eq "in-chroot: release.pem is ENCRYPTED (ADR-18)" "0" "$(enc_rc "$ICK/release.pem")"
+assert_eq "in-chroot: encrypted release.pem mode 600" "600" "$(stat -c %a "$ICK/release.pem")"
+openssl pkcs8 -in "$ICK/release.pem" -passin pass:"$IC_PASS" -out /dev/null 2>/dev/null
+assert_eq "in-chroot: release.pem decrypts with the ceremony passphrase (standard PKCS#8)" "0" "$?"
+# custody: NO plaintext private key survives anywhere in the keydir
+for f in release.priv.pem pk.priv.pem kek.priv.pem db.priv.pem; do
+    assert_eq "in-chroot: no plaintext $f on the target" "0" "$([ -e "$ICK/$f" ] && echo 1 || echo 0)"
+done
+PLAIN_REMNANT=$(find "$ICK" -name '*priv*' -print 2>/dev/null)
+assert_eq "in-chroot: readdir finds NO *priv* plaintext anywhere under the keydir" "" "$PLAIN_REMNANT"
+# the target keeps certs + packets + public material
+for f in release.pub release.crt release.cert.der \
+    pk.pub.pem pk.cert.pem pk.cert.der \
+    kek.pub.pem kek.cert.pem kek.cert.der \
+    db.pub.pem db.cert.pem db.cert.der \
+    db.esl kek.esl pk.esl db.auth kek.auth pk.auth; do
+    assert_file_exists "in-chroot: kept $f (certs + packets survive)" "$ICK/$f"
+done
+# stage-end checklist pins (G-KC8): encrypted-confirmed + iter count + scp
+# backup reminder; the stale "keep release.pem OFF the target machine" line is GONE
+assert_contains "in-chroot: checklist confirms the ENCRYPTED release.pem" "$IC_OUT" "ENCRYPTED"
+assert_contains "in-chroot: checklist pins the 600000 iteration count" "$IC_OUT" "600000"
+assert_contains "in-chroot: checklist reminds the scp off-machine backup" "$IC_OUT" "scp"
+assert_not_contains "in-chroot: stale 'keep release.pem OFF the target machine' line removed" \
+    "$IC_OUT" "keep release.pem OFF the target machine"
+# the PENDING baseline still lands (§9.1 step 2 semantics)
+assert_eq "in-chroot: baseline expected_pcr7 pending" "pending" \
+    "$(baseline_get "$(sp_baseline_file)" expected_pcr7)"
+
+# explicit --keydir wins over the default
+IC2="$T/inchroot-explicit"
+IC2_OUT=$(DEBIAN_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC2" 2>&1)
+assert_eq "stage1 --mode in-chroot --keydir DIR rc 0" "0" "$?"
+assert_eq "in-chroot explicit keydir: release.pem encrypted there" "0" "$(enc_rc "$IC2/release.pem")"
+
+# credential seam: in-chroot without env passphrase and without a tty -> loud 64
+IC3="$T/inchroot-nocred"
+IC3_RC=$( ( unset DEBIAN_FDE_KEY_PASSPHRASE; "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC3" ) </dev/null >/dev/null 2>&1; echo $? )
+assert_eq "in-chroot without credential -> 64 (loud, ADR-18)" "64" "$IC3_RC"
+assert_eq "in-chroot without credential: no ciphertext produced" "1" "$(enc_rc "$IC3/release.pem" 2>/dev/null || echo 1)"
+# floor-violating passphrase: rc 2 BEFORE any ciphertext exists
+IC4="$T/inchroot-floor"
+IC4_RC=$(DEBIAN_FDE_KEY_PASSPHRASE=short "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC4" >/dev/null 2>&1; echo $?)
+assert_eq "in-chroot floor-violating passphrase -> rc 2" "2" "$IC4_RC"
+assert_eq "in-chroot floor violation: no ciphertext written" "1" "$(enc_rc "$IC4/release.pem" 2>/dev/null || echo 1)"
+
+# explicit --mode offline (the documented default) is unchanged: plaintext on the medium
+OF3="$T/keys-offline-explicit"
+RC=$( ( "$REPO/bin/debian-fde" provision stage1 --mode offline --keydir "$OF3" ) >/dev/null 2>&1; echo $? )
+assert_eq "stage1 --mode offline rc 0" "0" "$RC"
+assert_eq "offline mode: release.pem stays PLAINTEXT on the medium" "1" "$(enc_rc "$OF3/release.pem")"
 
 # --- stage2 finalization on the swtpm fixture --------------------------------------
 # baseline_finalize_from_live (§8.1/§9.1 guard) refuses to finalize unless
