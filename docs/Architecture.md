@@ -219,8 +219,8 @@ Ceremony and lifecycle orchestration around verified boot and storage primitives
 |---|---|
 | `doctor` | Environment readiness check: missing binaries/packages, apk/network reachability, TPM presence, SB state readout (including `SetupMode` detection), OVMF/QEMU prereqs (CI) — no changes, exit 0/1 |
 | `provision` | Two stages. **stage1**: generate release keypair (in-chroot or on offline signing medium, ADR-18); create PK/KEK/db certificates; repeatable `--revoke-cert <cert>` builds dbx `EFI_CERT_X509_SHA256` revocation entries (KEK-signed) so removed vendor certs can't verify — after stage1, PCR 7 is **fully ours** (§6); enroll into firmware via efivarfs in strict order `db → KEK → PK (last)` (requires `SetupMode=1`) or KeyTool/efitools; record baseline **marked pending**. **stage2** (= `--capture-baseline`): guarded baseline capture — refuses any non-final SB state (§8.4 guard). (In Wave 2, `install` runs these steps integrated in-chroot; `provision` remains available for standalone/offline key ceremonies) |
-| `install` | Guided: partition, block layer setup (single-disk, `--bcache`, or RAID1), format LUKS2 keyslot 0 with recovery passphrase (Argon2id + entropy floor), format root filesystem (Btrfs default or ext4), `apk add --root` minimal base system (§3.3), minimal package set, user account, OpenRC network config, `bootctl install` to ESP **followed by signing the boot manager** (sbsign; ESP writes happen only via signed flows). Stage 1 in-chroot sets `OsIndications` bit 0 to signal firmware setup on next reboot |
-| `finalize` | First-boot trust-finalization entry point (shipped as `/etc/init.d/alpine-fde-finalize` OpenRC service, §9.1 Stage 3): install-state guard (runs only in state `installed`), `fw_sb_state` guard (halts exit 64 with **no enrollment and no wiping** when Secure Boot is off), crash-idempotent `audit --init` + per-member enroll (RAID1), writes state `finalized` |
+| `install` | Fully automated unattended install (§9.1 Stage 1): preflight checks, partition, block layer setup (single-disk, `--bcache`, or RAID1), format LUKS2 keyslot 0 with internal ephemeral install key (staged on tmpfs, never persisted), format root filesystem (Btrfs default or ext4), `apk add --root` minimal base system (§3.3), minimal package set, user account, OpenRC network config, `bootctl install` to ESP followed by signing the boot manager. In-chroot provisioning enrolls custom keys into UEFI NVRAM (`db -> KEK -> PK`), builds signed UKI, and seals a **provisional TPM 2.0 token (PCR 11 only)** into keyslot 1, writes state `installed`, drops unfinalized MOTD banner, and triggers direct reboot to the target disk |
+| `finalize` | Trust finalization entry point (guided command, §9.1 Stage 3): prompts operator to set permanent recovery passphrase (Argon2id + §13 entropy floor) in keyslot 0 (purging the ephemeral install key), prompts to encrypt `release.pem` with AES-256 PBKDF2 (ADR-18), verifies firmware Secure Boot is active (`setup_mode == 0 && secureboot == 1`), captures baseline (`audit --init`), upgrades keyslot 1 TPM token to **{PCR 7, PCR 11}** (Mechanism B, for each member container in RAID1 topologies), clears MOTD warning banner, and writes state `finalized` |
 | `ukictl build` | Per kernel: initramfs generation → `ukify build --measure` (phase `enter-initrd`) with the release key (ukify natively embeds the UKI's own `.pcrsig`/`.pcrpkey`) → combined {7,11} policy digest computed for manifest/audit display → `sbsign` + `sbverify` → atomic UKI install to ESP → manifest upsert → **ensure-once enroll**: an active token already standing ⇒ metadata read only, **zero TPM operations**; token absent and state finalized ⇒ enrolls static PCR 7 + release-pubkey-signed PCR 11 → prune beyond current + 2 old (ESP file + manifest entry together) |
 | `pcrsign` | Standalone signer: combined {7,11} policy digest → PolicyAuthorize verification structure → release-key signature JSON (§6.1.1) |
 | `enroll-tpm` | The enrollment step of `ukictl build` (shared core). Binds keyslot 1 to static PCR 7 + release-pubkey-signed PCR 11 via TPM 2.0 authorized policy. Takes `--uuid <LUKS_UUID>` (or target block device). TPM-clear recovery (§9.4) uses the same path |
@@ -257,28 +257,29 @@ Ceremony and lifecycle orchestration around verified boot and storage primitives
 - **LUKS2 Token Metadata:** Keyslot 0 holds the recovery passphrase (Argon2id). Keyslot 1 holds the TPM-sealed passphrase bound to {PCR 7, PCR 11}.
 - **Digest manifest** `/etc/alpine-fde/digests.json` — written by `ukictl build`; per retained UKI: `kernel_version`, `pcr11_digest` (enter-initrd phase), `policy_digest` (combined {7,11}), `signature`, plus `keyslot` and `token_id`.
 - **Baseline file** `/etc/alpine-fde/baseline.json` — written at `provision` with `pcr7: "pending"`, finalized by `audit --init` after the first boot into the verified custom Secure Boot state (`secureboot=1 setup_mode=0`).
-- **Installation state file** `/etc/alpine-fde/install-state.json` — tracks the install ceremony state machine: `installed` → `[reboot to BIOS]` → `finalized`. Prevents premature enrollment and guarantees crash recovery across the first-boot reboot.
+- **Installation state file** `/etc/alpine-fde/install-state.json` — tracks the install ceremony state machine: `installed` → `provisional-booted` → `finalized`. Prevents premature enrollment, guards the provisional window, and guarantees crash recovery across boots.
 - **ESP layout convention:**
   ```
   ESP:/EFI/systemd/systemd-bootx64.efi
   ESP:/EFI/Linux/alpine-fde-<kernel-version>.efi     (one UKI per kernel)
   ```
   Persisted as `ESP_PATH` in `/etc/alpine-fde/alpine-fde.conf` (default `/efi`).
-- **Key material** `/etc/alpine-fde/keys/` — release public key, db/KEK/PK certs; private release key (`release.pem`) is encrypted at rest (AES-256 PBKDF2) and backed up off-machine (I4, ADR-18).
+- **Key material** `/etc/alpine-fde/keys/` — release public key, db/KEK/PK certs; private release key (`release.pem`) is encrypted at rest (AES-256 PBKDF2) upon finalization and backed up off-machine (I4, ADR-18).
 
 ## 9. Lifecycle flows
 
-### 9.1 Provision & install lifecycle (chroot provisioning + single-reboot finalization) [Wave 2 Architecture — Design Approved, Implementation In Progress]
+### 9.1 Provision & install lifecycle (unattended install + provisional sealing + deferred finalization) [Wave 2 Architecture — Design Approved, Implementation In Progress, ADR-20]
 
-The lifecycle is modeled as an explicit, crash-safe state machine: `installed` → `[reboot to BIOS]` → `finalized`, recorded in `/etc/alpine-fde/install-state.json`.
+The lifecycle is modeled as an explicit, crash-safe state machine: `installed` → `provisional-booted` → `finalized`, recorded in `/etc/alpine-fde/install-state.json`.
 
 #### Keyslot Choreography by Lifecycle State
 | State | Keyslot 0 | Keyslot 1 | Token 0 | Notes |
 |---|---|---|---|---|
-| `installed` | Permanent Recovery Passphrase | (Empty) | (None) | Recovery passphrase only; immune to PCR-replay; ESP has no secrets |
-| `finalized` | Permanent Recovery Passphrase | Finalized Sealed TPM Passphrase | Bound to PCR 7 + PCR 11 | Mechanism A″ active; passwordless happy path |
+| `installed` | Ephemeral Install Key (RAM-staged) | Sealed Provisional Secret | **Provisional Token**: `PolicyAuthorize` over **PCR 11 only** | Unattended live install completes; reboots directly to disk; no secrets on ESP |
+| `provisional-booted` | Ephemeral Install Key (unprompted) | Sealed Provisional Secret | **Provisional Token**: `PolicyAuthorize` over **PCR 11 only** | Automatic zero-password first boot; boots straight to login; MOTD warning banner active |
+| `finalized` | Permanent Recovery Passphrase | Finalized Sealed TPM Passphrase | **Mechanism B Token**: Bound to **PCR 7 + PCR 11** | Mechanism B active; `release.pem` encrypted; MOTD cleared; passwordless happy path |
 
-1. **Stage 1: Host Bootstrap & In-Chroot Provisioning (from live USB; Secure Boot OFF, Setup Mode ON):**
+1. **Stage 1: Unattended Host Bootstrap & In-Chroot Provisioning (from live USB; Secure Boot OFF, Setup Mode ON):**
    * **Host preflight check:**
      - Asserts firmware is in **Setup Mode** (`SetupMode=1`, vendor PK cleared). If `SetupMode != 1`, fails closed (`exit 64`) with instructions to clear vendor PK in BIOS before disk partitioning (preventing NVRAM write failures, §9.1 preflight).
      - Asserts presence of required host utilities (`apk`, `sfdisk`, `cryptsetup`, `mkfs.vfat`, filesystem utilities `btrfs-progs` or `e2fsprogs`, optional `bcache-tools` if `--bcache`, and `lsblk`) **before any disk mutation**. On Alpine live hosts, missing packages are installed on demand via `apk` (unless `ALPINE_FDE_NO_INSTALL=1`); missing tools trigger an immediate fail-closed abort (`exit 64`) instructing the operator to install them.
@@ -287,9 +288,9 @@ The lifecycle is modeled as an explicit, crash-safe state machine: `installed` �
         - *Single-disk topology:* Partitions target disk into ESP (`p1`) and LUKS2 container (`p2`).
         - *Accelerated hybrid topology (`--bcache CACHE_DEV`):*
           - *Single backing disk (`--disk DEV`):* Partitions fast caching SSD (`CACHE_DEV`) into ESP (`p1`) and bcache caching set (`p2`, `make-bcache -C`); partitions backing disk (`--disk`) into backing set (`p1`, `make-bcache -B`); registers and attaches `/dev/bcache0` in `writethrough` mode (ensuring backing disk is always crash-safe and consistent). LUKS2 container is created directly on `/dev/bcache0`.
-          - *Multiple backing disks (`--disk DEV1 --disk DEV2 ...`):* Partitions fast caching SSD (`CACHE_DEV`) into ESP (`p1`) and shared bcache caching set (`p2`, `make-bcache -C`); partitions each backing disk into a backing set (`p1`, `make-bcache -B`); registers each backing device (`/dev/bcache0`, `/dev/bcache1`, ...) and attaches them to the shared cache set UUID in `writethrough` mode. Creates an independent LUKS2 container directly on each `/dev/bcacheN` device with matching recovery passphrase in keyslot 0. Formats the root pool across opened dm-crypt containers with `mkfs.btrfs -d raid1 -m raid1`.
+          - *Multiple backing disks (`--disk DEV1 --disk DEV2 ...`):* Partitions fast caching SSD (`CACHE_DEV`) into ESP (`p1`) and shared bcache caching set (`p2`, `make-bcache -C`); partitions each backing disk into a backing set (`p1`, `make-bcache -B`); registers each backing device (`/dev/bcache0`, `/dev/bcache1`, ...) and attaches them to the shared cache set UUID in `writethrough` mode. Creates an independent LUKS2 container directly on each `/dev/bcacheN` device. Formats the root pool across opened dm-crypt containers with `mkfs.btrfs -d raid1 -m raid1`.
         - *Multi-disk Btrfs RAID1 (multiple `--disk` without `--bcache`):* Partitions primary disk into ESP (`p1`) and LUKS2 container (`p2`), and all secondary disks into LUKS2 containers (`p1`). Formats root pool with `mkfs.btrfs -d raid1 -m raid1`.
-      - **LUKS2 creation:** Formats target LUKS container(s) directly with the operator's **permanent recovery passphrase** in keyslot 0 (`luksFormat --key-slot 0`, enforcing Argon2id and §13 entropy floor). No provisional TPM token is created during Stage 1.
+      - **LUKS2 creation:** Formats target LUKS container(s) with an **internal ephemeral installation key** generated in `/dev/shm` (mode `0600`) in keyslot 0 (`luksFormat --key-slot 0`, Argon2id). Operator is not prompted during installation.
       - **Filesystem setup:** Formats root container(s) with Btrfs (`mkfs.btrfs`) and creates standard subvolumes (`@`, `@home`, `@snapshots`); mounts `@` to `<mnt>`, `@home` to `<mnt>/home`, `@snapshots` to `<mnt>/.snapshots`, and ESP to `<mnt>/efi`. (If `--fs ext4` is passed, formats ext4 and mounts flat).
      - Runs `apk add --root <mnt> --initdb alpine-base` to install minimal base Alpine.
      - Drops initial system configurations (`repositories`, `fstab`, `crypttab`).
@@ -297,32 +298,37 @@ The lifecycle is modeled as an explicit, crash-safe state machine: `installed` �
    * **In-chroot provisioning (strictly ordered sequence):**
       1. `apk add --no-cache` installs the §3.1 explicit-additions set (`cryptsetup`, `systemd-boot`, `systemd-efistub`, `ukify`, `linux-lts`, `tpm2-tools`, `tpm2-tss-policy`, `tpm2-tss-tcti-device`, `sbsigntool`, `openssl`, `jq`, `btrfs-progs` or `e2fsprogs`, optional `bcache-tools`), user account, and OpenRC networking.
       2. Writes initial baseline with `pcr7: "pending"` (following `provision stage1` semantics).
-      3. Provisions platform keys: generates `PK`, `KEK`, `db`, and `release.pem` on the encrypted root volume (ADR-18).
+      3. Provisions platform keys: generates `PK`, `KEK`, `db`, and `release.pem` on the encrypted root volume (mode `0600`).
       4. Enrolls authenticated variable update packets (`.auth`) into UEFI NVRAM via `efivarfs` in **strict order**: `db → KEK → PK (last)` (writing PK last cleanly transitions firmware out of Setup Mode, I-3).
       5. Builds signed `systemd-bootx64.efi` and initial signed UKI with `.pcrsig` via `ukictl build`.
-      6. Encrypts `release.pem` with AES-256 (PBKDF2 HMAC-SHA256, ≥ 600,000 iterations; enforces §13 entropy floor on passphrase, ADR-18), eliminating plaintext signing keys on disk before reboot.
+      6. **Provisional TPM enrollment:** Derives `PolicyAuthorize` policy digest over **PCR 11 only** matching the UKI signature. Invokes Mechanism B (`tpm2_create` under PCR 11 policy) to seal keyslot 1 with a random volume passphrase, enabling automatic passwordless unlock on first boot.
       7. Installs `/etc/apk/triggers/alpine-fde.trigger` and `/etc/init.d/alpine-fde-finalize`.
-      8. Writes state `installed` to `/etc/alpine-fde/install-state.json`.
-   * **Teardown & Reboot:** Unmounts targets, signals firmware to enter setup on next boot (setting `OsIndications` bit 0), and executes reboot.
+      8. Writes unfinalized warning banner to `/etc/motd` and `/etc/issue`.
+      9. Writes state `installed` to `/etc/alpine-fde/install-state.json`.
+   * **Teardown & Direct Reboot:** Unmounts targets, securely scrubs ephemeral key from `/dev/shm`, and executes direct reboot to disk.
 
-2. **Stage 2: BIOS Setup (One-Time Toggle):**
-   * Machine reboots directly into the BIOS/UEFI setup interface.
-   * Operator toggles **Secure Boot: ON** (activating the enrolled custom keys; firmware transitions to User Mode) and exits BIOS.
+2. **Stage 2: Automatic First Boot (Provisional UKI Unseal):**
+   * Machine powers on under custom Secure Boot keys. Firmware verifies `systemd-boot` and the UKI.
+   * `systemd-efistub` measures UKI sections into **PCR 11**.
+   * In the initramfs, the early-boot unseal hook evaluates the **Provisional Token** in keyslot 1 against PCR 11 and unseals the root container **100% automatically with zero password prompts**.
+   * System mounts root and boots directly into OpenRC multi-user login.
+   * First-boot service `/etc/init.d/alpine-fde-finalize` checks firmware Secure Boot state:
+     - If Secure Boot is ON (`setup_mode == 0 && secureboot == 1`): transitions state to **`provisional-booted`**.
+     - If Secure Boot is OFF: halts fail-closed (`exit 64`) with actionable instructions to enable Secure Boot in BIOS.
+   * The login prompt displays the active MOTD reminder banner instructing the operator to run `alpine-fde finalize`.
 
-3. **Stage 3: First Boot from Disk (Trust Finalization):**
-   * Machine boots into the target system under verified Secure Boot. Initramfs prompts the operator for the keyslot 0 recovery passphrase (the single documented manual passphrase unlock during provisioning).
-   * **Secure Boot verification guard & TPM sealing:**
-     - The first-boot OpenRC service (`/etc/init.d/alpine-fde-finalize`) reads `install-state.json` and evaluates firmware Secure Boot state (`fw_sb_state`).
-     - **If Secure Boot is NOT active (`secureboot != 1` or `setup_mode != 0`):**
-       - Halts (`exit 64`) with actionable instructions: *"Secure Boot is not enabled with your custom keys. Reboot into BIOS setup and toggle Secure Boot ON to complete TPM enrollment."* Volume remains safely locked by the keyslot 0 recovery passphrase.
-     - **If Secure Boot is ON (`secureboot == 1` and `setup_mode == 0`):**
-       - Captures the finalized baseline (`audit --init` records the verified custom Secure Boot PCR 7).
-       - Performs the single Mechanism A″ enrollment into keyslot 1 bound to **{PCR 7, PCR 11}** (`enroll-tpm`, for each member container in RAID1 topologies).
-       - Writes state `finalized` to `/etc/alpine-fde/install-state.json`, displays audit status, and prompts operator to back up `/etc/alpine-fde/keys/` off-machine via `scp`.
-       - *Crash idempotency:* If interrupted before completion, the service resumes on next boot after recovery passphrase entry.
+3. **Stage 3: Trust Finalization (`alpine-fde finalize`):**
+   * The operator logs in and executes `alpine-fde finalize` on demand:
+     1. **Set Permanent Recovery Passphrase:** Prompts operator for permanent recovery passphrase (enforcing Argon2id and §13 entropy floor). Enrolls into keyslot 0 and purges the internal ephemeral install key.
+     2. **Encrypt Release Signing Key:** Prompts operator for a passphrase to encrypt `release.pem` with AES-256 PBKDF2 ($\ge$ 600,000 iterations, ADR-18), tightening permissions to `0400`.
+     3. **Capture Baseline & Upgrade TPM Seal:** Runs `audit --init` to capture actual custom Secure Boot PCR 7; replaces provisional token in keyslot 1 with permanent **Mechanism B token bound to {PCR 7, PCR 11}**.
+     4. **Cleanup:** Removes unfinalized MOTD warning banner from `/etc/motd` and `/etc/issue`.
+     5. **Off-Machine Backup:** Writes state `finalized` to `/etc/alpine-fde/install-state.json` and prompts operator to back up `/etc/alpine-fde/keys/` off-machine via `scp`.
+   * *Crash idempotency:* If interrupted before completion, the service resumes on next run; the provisional token and keyslot 0 remain safe until successfully replaced.
 
 4. **Stage 4: Normal Operation:**
    * **Subsequent boots:** 100% passwordless automatic unlock bound to PCR 7 and PCR 11.
+   * **Drift Recovery:** If PCR 7 drifts (BIOS update) or PCR 11 drifts (kernel update anomaly), initramfs prompts for the keyslot 0 **recovery passphrase**. If entered correctly, system unlocks and allows re-baselining (`audit --accept && enroll-tpm`). After 3 failed attempts, system executes immediate `poweroff -f`.
 
 ### 9.2 Kernel update (the common case)
 `linux-lts` upgrade → `/etc/apk/triggers/alpine-fde.trigger` → `ukictl build`: initramfs → `ukify build` with the release key as `--pcr-private-key/--pcr-public-key` (embeds this kernel's own `.pcrsig` — the single token pins only the pubkey, so **no TPM operation and no re-enrollment occur**; verified in s14) → `sbsign` → install UKI to ESP → append to manifest → prune the oldest retained kernel (ESP file + manifest entry together). Release private key required (I4, ADR-18): prompts operator interactively for `release.pem` passphrase (or non-interactively via the `ALPINE_FDE_KEY_PASSPHRASE` credential seam) during `apk upgrade` (or loaded from an offline signing workstation); absence or wrong passphrase = loud failure. Next boot remains 100% passwordless.
@@ -368,9 +374,10 @@ Two ordering constraints drive the sequence: db/dbx changes reach PCR 7 only aft
 | Disk moved to another machine | — | ❌ | sealed to *this* TPM's SRK — unseals nowhere else |
 | Passphrase forgotten + TPM refuses | — | ❌ | **data loss** (documented) |
 | Cache SSD physical failure (Hybrid bcache, single or multi-disk) | ❌ (ESP lost on dead SSD) | ❌ | Data intact on all backing drives under writethrough. Boot live media → assemble backing device(s) standalone → attach replacement SSD in writethrough mode → rebuild ESP in chroot (Runbook 1) |
-| Single drive failure (Btrfs RAID1, standalone or multi-disk bcache) | ❌ (sysroot stalls fail-closed) | ❌ | Boot live media with recovery passphrase (or signed rescue UKI) → mount degraded → `btrfs replace` (Runbook 2) |
-| First boot with Secure Boot OFF | ✅ (firmware loads bootloader) | ❌ (no TPM token exists yet; prompts for recovery passphrase) | Unlock via keyslot 0 recovery passphrase → guard detects Secure Boot OFF, halts (exit 64) with instructions to enable Secure Boot in BIOS |
-| Mid-finalization crash / power loss | ✅ | ❌ (keyslot 0 established) | `install-state.json` detects unfinished state → resume wizard with recovery passphrase |
+| First boot under custom Secure Boot | ✅ | ✅ | Unseals via Provisional Token (PCR 11). Boots to login with MOTD banner active |
+| First boot with Secure Boot OFF | ✅ (firmware loads bootloader) | ❌ (or halts at OpenRC guard) | OpenRC service detects `secureboot != 1`, halts fail-closed (`exit 64`) with instructions to enable Secure Boot in BIOS |
+| PCR 7 or PCR 11 drift after finalization | ✅ | ❌ | Initramfs prompts for recovery passphrase; 3 failed attempts power off immediately (`poweroff -f`); unlock enables `audit --accept` + `enroll-tpm` re-baseline |
+| Mid-finalization crash / power loss | ✅ | ✅ | `install-state.json` detects `provisional-booted` or unfinished state → resume finalization via `alpine-fde finalize` |
 
 ## 11. Invariants
 
@@ -400,6 +407,9 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
   - **S-21 (Stage 3 Secure Boot verification guard):** simulate first boot with Secure Boot OFF; assert user unlocks via keyslot 0 recovery passphrase, and first-boot service detects `secureboot != 1`, halts fail-closed (exit 64), and prevents TPM enrollment until Secure Boot is enabled in BIOS.
   - **S-22 (Handoff window immunity):** assert that no TPM token exists during the handoff window; foreign OS/USB media cannot unseal the volume, and volume key remains exclusively protected by keyslot 0 Argon2id passphrase.
   - **S-23 (Accelerated multi-disk hybrid crash consistency & degraded recovery):** simulate cache SSD detachment in a multi-backing-disk hybrid setup; assert both backing drives mount standalone in clean state; assert single backing drive detachment retains bootability/mountability under surviving backing drive and bcache cache.
+  - **S-24 (Unattended install & provisional UKI unseal):** run `alpine-fde install --disk ... --yes` non-interactively; assert zero interactive prompts, exit 0, direct reboot; assert first boot unlocks automatically with zero keystrokes; assert state is `provisional-booted` and MOTD warning banner is present.
+  - **S-25 (First-boot finalization & PCR 7 upgrade):** run `alpine-fde finalize` non-interactively with scripted passphrases; assert keyslot 0 is set to Argon2id recovery passphrase and ephemeral install key purged; assert `release.pem` encrypted; assert keyslot 1 upgraded to {PCR 7, PCR 11}; assert MOTD banner cleared and state is `finalized`; assert subsequent reboot unseals passwordlessly under {PCR 7, PCR 11}.
+  - **S-26 (Provisional tamper negative control):** in `provisional-booted` state, boot tampered UKI; assert provisional unseal fails and system halts fail-closed without interactive shell.
 
 ## 13. Prerequisites (checked by `alpine-fde doctor` — a **read-only** check, no installs; the commands that need missing packages auto-install them on demand, §8.1/ADR-15)
 
@@ -436,3 +446,4 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
 | ADR-16 | **Key algorithms: RSA (RSA-3072 release key, RSA-2048 PK/KEK/db) over ECC** | While TPM 2.0 and Linux userspace (`tpm2-tools`, `ukify`, `openssl`) support NIST P-256/P-384 ECDSA, UEFI Secure Boot firmware support for ECC certificates in NVRAM (`db`) and ECDSA Authenticode PE/COFF verification is notoriously incomplete or broken across commodity x86_64 PC motherboards. Because ADR-11 binds the release-key identity to both UEFI Secure Boot and TPM policy authorization, RSA is mandatory for universal firmware compatibility. |
 | ADR-17 | **Accelerated hybrid storage: bcache under LUKS2 (LUKS over bcache, writethrough)** [Wave 2 Architecture — Design Approved, Implementation In Progress] | When `--bcache <cache_dev>` is specified to cache backing storage (single `--disk` or multiple `--disk` drives), LUKS2 dm-crypt sits on top of each `/dev/bcacheN` device. The cache mode is pinned to `writethrough` for strict crash safety and data integrity (backing storage remains 100% consistent if cache SSD fails). All blocks written to the caching SSD are ciphertext (zero plaintext leakage, I2). In single-disk mode, `/dev/bcache0` presents a single LUKS2 header so Mechanism A″ single-token TPM 2.0 unsealing and single-passphrase recovery apply cleanly. In multi-disk mode (`--bcache <cache_dev> --disk <dev1> --disk <dev2>`), a single SSD cache set accelerates all backing drives, each backing drive is encrypted as an independent LUKS2 container with matching Argon2id passphrase / TPM 2.0 policy, and Btrfs RAID1 aggregates them into a redundant root pool. |
 | ADR-18 | **Key custody: on-target encrypted `release.pem` (AES-256 PBKDF2) with interactive upgrade passphrase** | To support single-machine autonomy without requiring an offline host during installation while preventing unencrypted private key material on disk, `release.pem` is generated in-chroot on the encrypted root volume and encrypted with AES-256 (PBKDF2 HMAC-SHA256, ≥ 600,000 iterations, entropy floor enforced; PBKDF2 conforms to standard OpenSSL PKCS#8 interoperability while Argon2id is pinned for LUKS2) in Stage 1 before reboot, with mandatory off-machine backup via `scp`. Consequently, post-install signing operations (`apk upgrade`, `ukictl build`) prompt the operator interactively for the release key passphrase. Non-interactive updates fail loudly (ADR-8) unless unlocked via a credential agent. |
+| ADR-20 | **Fully automated unattended install with provisional PCR-11 sealing and deferred first-login trust finalization** [Wave 2 Architecture — Design Approved, Implementation In Progress] | To support zero-touch automated installations (`alpine-fde install --disk ...`) in cloud, bare-metal CI, and appliance pipelines without interactive passphrase pauses or manual console interventions across the first boot, `install` formats LUKS2 with an internal ephemeral key (staged on tmpfs, never persisted) and seals a provisional TPM token in keyslot 1 bound via `PolicyAuthorize` to the signed UKI (PCR 11 only). First boot unlocks 100% automatically via PCR 11, presents the normal login prompt, and displays an active MOTD warning banner. The operator runs `alpine-fde finalize` on demand to set their permanent Argon2id recovery passphrase in keyslot 0, encrypt `release.pem` with AES-256 PBKDF2, record the verified Secure Boot PCR 7 baseline (`audit --init`), upgrade the TPM token to {PCR 7, PCR 11}, and clear the MOTD banner. |

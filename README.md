@@ -45,10 +45,10 @@ In the happy path you type **no password at boot**, ever.
 ./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
-The installer prompts for your disk recovery passphrase and signing key passphrase, installs Alpine base system via `apk`, enrolls your custom Secure Boot keys into firmware, and automatically reboots into BIOS.
-* In BIOS: Toggle **Secure Boot: ON** and exit BIOS.
-* On first boot: Enter your recovery passphrase once. The system verifies Secure Boot, securely seals your disk to the TPM via OpenRC trust finalization (`alpine-fde-finalize`), and prompts you to back up your keys off-machine.
-* From now on: **Zero passwords at boot.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered.
+The installer runs completely unattended (zero prompts), installs Alpine base system via `apk`, enrolls your custom Secure Boot keys into firmware, seals a provisional PCR-11 TPM token, and reboots directly to disk.
+* On first boot: **Zero passwords at boot.** The disk unseals automatically via the provisional TPM token and presents the standard login prompt with an MOTD reminder.
+* Trust finalization: Log in and run `alpine-fde finalize` on demand to set your recovery passphrase, encrypt your signing key, and permanently seal to {PCR 7, PCR 11}.
+* From now on: **100% passwordless verified boot.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered.
 
 #### Option B: Shipped Wave 1 Installation (Single-disk ext4, offline signing medium)
 ```sh
