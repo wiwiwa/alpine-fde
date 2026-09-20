@@ -166,14 +166,47 @@ require_pkgs() {
     _sp_pkgs="$_sp_pkgs ${_sp_pair#*:}"
   done
 
-  # shellcheck disable=SC2086  # package names never contain spaces
-  apk update
-  for _sp_pkg in $_sp_pkgs; do
-    info "installing missing package: $_sp_pkg"
-    apk add "$_sp_pkg" ||
+  if [ -n "${DEBIAN_FDE_NO_INSTALL:-}" ]; then
+    die \
+      "missing packages but DEBIAN_FDE_NO_INSTALL is set — install manually:$_sp_pkgs (apk add$_sp_pkgs | apt-get install -y --no-install-recommends$_sp_pkgs)"
+  fi
+
+  # dual backend: apk (Alpine live host) or apt-get (Debian) — whichever the
+  # host actually has; NEITHER must fail closed 64 naming the packages, never
+  # an accidental 127 from invoking an absent manager (ADR-15: loud failures)
+  if command -v apk >/dev/null 2>&1; then
+    if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
+      info "apk update ..."
+      apk update || die \
+        "apk update failed (no network?) — install manually: apk add$_sp_pkgs"
+      _SP_PKGS_UPDATED=1
+    fi
+    # shellcheck disable=SC2086  # package names never contain spaces
+    for _sp_pkg in $_sp_pkgs; do
+      info "installing missing package: $_sp_pkg"
+      apk add "$_sp_pkg" || \
+        die \
+          "apk add $_sp_pkg failed — install manually: apk add$_sp_pkgs"
+    done
+  else
+    if ! command -v apt-get >/dev/null 2>&1; then
       die \
-        "apt-get install $_sp_pkg failed — install manually: apt-get install -y --no-install-recommends$_sp_pkgs"
-  done
+        "no package manager (apk|apt-get) found (non-Debian system?) for missing:$_sp_pkgs — install manually: apk add$_sp_pkgs | apt-get install -y --no-install-recommends$_sp_pkgs"
+    fi
+    if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
+      info "apt-get update ..."
+      apt-get update || die \
+        "apt-get update failed (no network?) — install manually: apt-get install -y --no-install-recommends$_sp_pkgs"
+      _SP_PKGS_UPDATED=1
+    fi
+    # shellcheck disable=SC2086  # package names never contain spaces
+    for _sp_pkg in $_sp_pkgs; do
+      info "installing missing package: $_sp_pkg"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_sp_pkg" || \
+        die \
+          "apt-get install $_sp_pkg failed — install manually: apt-get install -y --no-install-recommends$_sp_pkgs"
+    done
+  fi
 
   # install claims success — the binary must now exist (catches wrong/missing pairs)
   _sp_still=''
