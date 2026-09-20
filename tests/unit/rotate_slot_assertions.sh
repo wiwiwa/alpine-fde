@@ -5,7 +5,9 @@
 #   * luksChangeKey argv: --key-slot 0 + Argon2id KDF pins
 #   * post-assertions: token count unchanged, keyslots != 0 byte-identical,
 #     keyslot 0 changed (stubbed luksDump pre/post)
-#   * --reseat-tpm delegates to enroll-tpm: wipe+enroll in ONE cryptenroll call
+#   * --reseat-tpm delegates to enroll-tpm: the Mechanism B seal (fresh
+#     keyslot + token, standing enrollment retired in the same run; ADR-19 —
+#     no systemd-cryptenroll anywhere)
 #   * passphrase temp files live on tmpfs (/dev/shm, §11 I1 — never plaintext
 #     on disk), mode 0600 at call time, removed after the run
 
@@ -33,7 +35,7 @@ export DEBIAN_FDE_BY_UUID_DIR=$T/by-uuid
 export DEBIAN_FDE_NO_INSTALL=1
 export PATH="$FAKEBIN:$PATH"
 export COUNTER=$T/counter PRE_JSON=$T/luks-pre.json POST_JSON=$T/luks-post.json
-export CS_STAT=$T/cs-stat.log CS_SLOW=$T/cs-slow POSTFAIL=$T/postfail
+export CS_STAT=$T/cs-stat.log CS_SLOW=$T/cs-slow POSTFAIL=$T/postfail PRE_AT3=$T/pre-at3 PRE3_JSON=$T/luks-pre3.json
 export DEBIAN_FDE_OLD_PASSPHRASE='old-passphrase-here'
 export DEBIAN_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
 
@@ -52,8 +54,15 @@ case "$1" in
         n=$(cat "$COUNTER")
         n=$((n + 1))
         echo "$n" >"$COUNTER"
+        echo "DUMP$n" >>"$CS_LOG"
         if [ -e "$POSTFAIL" ] && [ "$n" = "2" ]; then exit 1; fi
-        if [ "$n" = "1" ]; then cat "$PRE_JSON"; else cat "$POST_JSON"; fi
+        if [ "$n" = "1" ]; then
+            cat "$PRE_JSON"                       # rotate pre-view (slot0 OLD)
+        elif [ -e "$PRE_AT3" ] && [ "$n" = "3" ]; then
+            cat "$PRE3_JSON"                      # enroll pre-view: standing old token, slot0 NEW
+        else
+            cat "$POST_JSON"                      # everything after the change
+        fi
         exit 0
         ;;
     luksChangeKey)
@@ -70,6 +79,10 @@ case "$1" in
         stat -c 'MODE %a %n' "$_last" >>"$CS_STAT" 2>/dev/null
         # M-2 test seam: linger so the driver can SIGINT mid-luksChangeKey
         [ -e "$CS_SLOW" ] && sleep 3
+        exit 0
+        ;;
+    *)
+        echo "CALL $*" >>"$CS_LOG"
         exit 0
         ;;
 esac
@@ -222,7 +235,7 @@ assert_contains "luksChangeKey argv: --key-slot 0" "$CALLS" "--key-slot 0"
 assert_contains "luksChangeKey argv: argon2id" "$CALLS" "--pbkdf argon2id"
 assert_contains "luksChangeKey argv: memory pin" "$CALLS" "--pbkdf-memory 1048576"
 assert_contains "luksChangeKey argv: iter pin" "$CALLS" "--iter-time 2000"
-assert_eq "exactly one luksChangeKey invocation" "1" "$(wc -l <"$CS_LOG")"
+assert_eq "exactly one luksChangeKey invocation" "1" "$(grep -c luksChangeKey "$CS_LOG")"
 
 # --- 6b. §11 I1: passphrase temp files on tmpfs, 0600, removed after ----------------
 TMP_PATHS=$(sed -n 's/^MODE [0-9]* //p' "$CS_STAT")
@@ -317,31 +330,59 @@ assert_eq "dry-run rc 0" "0" "$ROT_RC"
 assert_contains "dry-run prints the luksChangeKey plan" "$ROT_OUT" "luksChangeKey --key-slot 0"
 assert_eq "dry-run: cryptsetup not invoked" "0" "$(wc -l <"$CS_LOG")"
 
-# --- 11. --reseat-tpm delegates to enroll-tpm (swtpm + stub cryptenroll) ------------------------------
+# --- 11. --reseat-tpm delegates to enroll-tpm (swtpm + stub cryptsetup: the
+# Mechanism B seal path, ADR-19/ADR-20 — no systemd-cryptenroll anywhere) ------
 assert_rc "swtpm fixture starts" 0 swtpm_start "$T/swtpm"
 export DEBIAN_FDE_TCTI=$SWTPM_TCTI
 LIVE=$(swtpm_pcrread "$T/swtpm" 7)
 mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$DEBIAN_FDE_EFIVARS_DIR/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 mkvar SecureBoot 1
 mkvar SetupMode 0
-printf 'PUBKEY' >"$T/keys/release.pub.pem"
+# the enrollment anchors the release key from the KEYDIR (G-B7) — a REAL key so
+# the token pubkey post-assert can DER-encode it
+DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys"
+export DEBIAN_FDE_KEYDIR
+cp "$REPO/fixtures/keys/release.pub" "$T/keys/release.pub.pem"
 BL_PCR0="$LIVE" BL_PCR1="$LIVE" BL_PCR2="$LIVE" BL_PCR3="$LIVE" BL_PCR7="$LIVE" \
     BL_KEYS_RELEASE_PUB_PATH="$T/keys/release.pub.pem" BL_TARGET_LUKS_UUID="$UUID" \
     baseline_write "$(sp_baseline_file)"
-cat >"$FAKEBIN/systemd-cryptenroll" <<EOF
-#!/bin/sh
-echo "CALL: \$*" >>'$T/cryptenroll.log'
-for a in "\$@"; do [ "\$a" = "--tpm2-device=list" ] && exit 0; done
-exit 0
-EOF
-chmod +x "$FAKEBIN/systemd-cryptenroll"
+# LUKS metadata for the enrollment path: PRE carries ONE standing token (the
+# reseat retires it in the same run); POST mirrors what the fresh enrollment
+# produces — token on the free slot 2, pubkey = the keydir release key
+DER_B64=$(openssl pkey -pubin -in "$REPO/fixtures/keys/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 reset_state
+# PRE (rotate's own pre-view, n=1): slot-0 with the OLD salt - rotate asserts
+#   the change took effect (slot0 differs pre/post)
+# PRE3 (the enroll's pre-view, n=3): slot-0 ALREADY the new salt (rotate ran
+#   first) + the STANDING old-keyslot-1 token the reseat must retire
+# POST (n>=2): the fresh enrollment - token on the FREE slot over {0,1,2} = 3,
+#   slot-0 identical to the enroll's pre-view (the enroll must not touch it)
+cat >"$PRE_JSON" <<'PRE11'
+{"keyslots":{"0":{"type":"luks2","kdf":{"type":"argon2id","salt":"AAA"}},"1":{"type":"luks2","kdf":{"type":"argon2id","salt":"BBB"}}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"AAEAC0RhdGE="}}}
+PRE11
+cat >"$PRE3_JSON" <<'PRE311'
+{"keyslots":{"0":{"type":"luks2","kdf":{"type":"argon2id","salt":"ZZZ"}},"1":{"type":"luks2","kdf":{"type":"argon2id","salt":"BBB"}}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"AAEAC0RhdGE="}}}
+PRE311
+cat >"$POST_JSON" <<POST11
+{"keyslots":{"0":{"type":"luks2","kdf":{"type":"argon2id","salt":"ZZZ"}},"1":{"type":"luks2","kdf":{"type":"argon2id","salt":"BBB"}},"2":{"type":"luks2","kdf":{"type":"argon2id","salt":"CCC"}}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["3"],"tpm2-blob":"AAEAC0RhdGE=","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"$DER_B64","tpm2-signature":"U0lH"}}}
+POST11
+touch "$PRE_AT3"
 run_rotate --reseat-tpm
+rm -f "$PRE_AT3"
 assert_eq "rotate --reseat-tpm rc 0" "0" "$ROT_RC"
-assert_eq "luksChangeKey ran" "1" "$(wc -l <"$CS_LOG")"
-CREAT_CALLS=$(sed -n 's/^CALL: //p' "$T/cryptenroll.log" | grep -v 'tpm2-device=list')
-assert_contains "reseat: cryptenroll --wipe-slot=tpm2 (one invocation)" "$CREAT_CALLS" "--wipe-slot=tpm2"
-assert_contains "reseat: A'' static PCR7 term" "$CREAT_CALLS" "--tpm2-pcrs=7"
+assert_eq "luksChangeKey ran" "1" "$(grep -c luksChangeKey "$CS_LOG")"
+assert_contains "reseat: the Mechanism B enrollment added a fresh keyslot" "$(cat "$CS_LOG")" "luksAddKey"
+assert_contains "reseat: the fresh token was imported" "$(cat "$CS_LOG")" "token import"
+assert_contains "reseat: the standing enrollment was retired (token)" "$(cat "$CS_LOG")" "token remove"
+assert_contains "reseat: the standing enrollment was retired (slot)" "$(cat "$CS_LOG")" "luksKillSlot"
+assert_eq "reseat: NO cryptenroll anywhere (ADR-19)" "" \
+    "$(find "$FAKEBIN" -name 'systemd-cryptenroll' -print -quit)"
+assert_file_exists "reseat: enrolled.json recorded" "$(sp_enrolled_file)"
+assert_eq "reseat: enrolled.json policy_mode is b" "b" "$(baseline_get "$(sp_enrolled_file)" policy_mode)"
+assert_eq "reseat: enrolled.json token keyslot (free slot)" "3" "$(baseline_get "$(sp_enrolled_file)" token_keyslot)"
 
 # --- 12. M-2: SIGINT mid-luksChangeKey -> zeroized + removed, rotation aborted ------
 # The stubbed luksChangeKey lingers (CS_SLOW); the driver backgrounds rotate under

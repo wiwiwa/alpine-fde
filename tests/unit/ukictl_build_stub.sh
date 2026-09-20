@@ -35,26 +35,26 @@ trap 'rm -rf "$TMP"' EXIT
 # --- fixture environment: stub root tree + ESP with retained old UKIs -------------
 ROOT="$TMP/root"
 ESP="$TMP/esp"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
-cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/debian-fde/cmdline.txt"
+cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/alpine-fde/cmdline.txt"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
 # G-U4 (§8.2): the crypttab guard requires the tpm2-device= option at build time
 printf '%s\n' 'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
 # finalized baseline: golden PCR 7 (the value paired with the golden vector)
 jq -n --arg d7 "$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")" \
-    '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/debian-fde/baseline.json"
+    '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/alpine-fde/baseline.json"
 
 # pre-existing retained UKIs (older kernels) + matching manifest entries,
 # so prune + upsert behavior is exercised against real prior state
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
-    printf 'pre-existing-uki-%s' "$k" >"$ESP/EFI/Linux/debian-fde-$k.efi"
+    printf 'pre-existing-uki-%s' "$k" >"$ESP/EFI/Linux/alpine-fde-$k.efi"
 done
 . "$REPO/lib/common.sh"
 . "$REPO/lib/manifest.sh"
 . "$REPO/lib/keys.sh"
-M="$ROOT/etc/debian-fde/digests.json"
+M="$ROOT/etc/alpine-fde/digests.json"
 manifest_new "6.2.0-1-amd64" "fp-old" | manifest_atomic_write "$M"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
     manifest_upsert "$M" "$k" "p11-old-$k" "pd-old-$k" "sig-old-$k"
@@ -78,8 +78,8 @@ rc=$?
 assert_rc "ukictl build succeeds over stub inputs" 0 $rc
 
 # --- ESP: canonical layout, .pcrsig/.pcrpkey embedded, SB signature valid ----------
-UKI="$ESP/EFI/Linux/debian-fde-$KVER.efi"
-assert_file_exists "UKI installed at ESP:/EFI/Linux/debian-fde-<kver>.efi" "$UKI"
+UKI="$ESP/EFI/Linux/alpine-fde-$KVER.efi"
+assert_file_exists "UKI installed at ESP:/EFI/Linux/alpine-fde-<kver>.efi" "$UKI"
 ukify_inspect=$(ukify inspect "$UKI" 2>/dev/null || objdump -h "$UKI")
 assert_contains "UKI carries a .pcrsig section (Mechanism A'' signed PCR 11)" "$ukify_inspect" ".pcrsig"
 assert_contains "UKI carries a .pcrpkey section" "$ukify_inspect" ".pcrpkey"
@@ -96,22 +96,23 @@ assert_contains "manifest entry: signature recorded (a2 default)" "$entry" '"sig
 assert_eq "manifest: rebuilt entry replaced the seeded one (single entry for kver)" "1" \
     "$(jq --arg kver "$KVER" '[.digests[] | select(.kernel_version == $kver)] | length' "$M")"
 assert_eq "prune: ESP keeps current + 2 (5.15.0 dropped)" "absent" \
-    "$([ -f "$ESP/EFI/Linux/debian-fde-5.15.0-3-amd64.efi" ] && echo present || echo absent)"
+    "$([ -f "$ESP/EFI/Linux/alpine-fde-5.15.0-3-amd64.efi" ] && echo present || echo absent)"
 assert_eq "prune: kept 6.2.0" "present" \
-    "$([ -f "$ESP/EFI/Linux/debian-fde-6.2.0-1-amd64.efi" ] && echo present || echo absent)"
+    "$([ -f "$ESP/EFI/Linux/alpine-fde-6.2.0-1-amd64.efi" ] && echo present || echo absent)"
 assert_eq "prune: manifest matches ESP (5.15.0 entry dropped)" "absent" \
     "$(jq -r 'if any(.digests[]; .kernel_version == "5.15.0-3-amd64") then "present" else "absent" end' "$M")"
 
-# --- ladder fail-closed (ADR-14/G-B3): ap is documented-absent ----------------------
-# ADR-14: A'' is the only pipeline mode; ap/a/b exit 64 with an ADR-8 marker and
-# never touch the ESP or the manifest (the combined-signature path is unreachable).
-M="$ROOT/etc/debian-fde/digests.json"
+# --- ladder fail-closed (ADR-19/ADR-20/G-B3): ap is documented-absent ---------------
+# ADR-19/ADR-20: Mechanism B (rung b) is the normative pipeline; a2 is an
+# accepted alias; ap/a exit 64 with an ADR-8 marker and never touch the ESP or
+# the manifest (the combined-signature path is unreachable).
+M="$ROOT/etc/alpine-fde/digests.json"
 BEFORE_ESP_AP=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 BEFORE_MANIFEST_AP=$(cat "$M")
 POLICY_MODE=ap debian-fde ukictl build "$KVER" >/dev/null 2>&1
 rc=$?; assert_rc "ap-mode rebuild fails closed (64, documented-absent)" 64 $rc
-assert_file_exists "ap mode: ADR-8 failure marker persisted" "$ROOT/etc/debian-fde/build-failed"
-assert_contains "ap mode: marker cites ADR-14" "$(cat "$ROOT/etc/debian-fde/build-failed")" "ADR-14"
+assert_file_exists "ap mode: ADR-8 failure marker persisted" "$ROOT/etc/alpine-fde/build-failed"
+assert_contains "ap mode: marker cites ADR-19/ADR-20" "$(cat "$ROOT/etc/alpine-fde/build-failed")" "ADR-19"
 assert_eq "ap mode: ESP byte-identical (refusing to touch the ESP)" \
     "$BEFORE_ESP_AP" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
 assert_eq "ap mode: manifest untouched" "$BEFORE_MANIFEST_AP" "$(cat "$M")"
@@ -119,14 +120,14 @@ assert_eq "ap mode: manifest untouched" "$BEFORE_MANIFEST_AP" "$(cat "$M")"
 # (and verify a successful build clears the failure marker, §8.3 recovery)
 POLICY_MODE=a2 debian-fde ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "a2-mode rebuild restores canonical state" 0 $?
-[ ! -e "$ROOT/etc/debian-fde/build-failed" ]
+[ ! -e "$ROOT/etc/alpine-fde/build-failed" ]
 assert_rc "a2 rebuild cleared the failure marker" 0 $?
-M="$ROOT/etc/debian-fde/digests.json"
+M="$ROOT/etc/alpine-fde/digests.json"
 
 # --- policy_digest correctness: golden d7 paired with the REAL predicted pcr11 -----
 P11=$(jq -r --arg kver "$KVER" '.digests[] | select(.kernel_version == $kver) | .pcr11_digest' "$M")
 . "$REPO/lib/policy.sh"
-D7=$(jq -r .expected_pcr7 "$ROOT/etc/debian-fde/baseline.json")
+D7=$(jq -r .expected_pcr7 "$ROOT/etc/alpine-fde/baseline.json")
 assert_eq "manifest pcr11 is a 64-hex sha256 digest (ukify prediction)" "64" "${#P11}"
 assert_eq "manifest policy_digest == golden formula(d7, pcr11)" \
     "$(policy_digest "$D7" "$P11")" \
@@ -137,7 +138,7 @@ SIG=$(jq -r --arg kver "$KVER" '.digests[] | select(.kernel_version == $kver) | 
 assert_eq "a2: manifest signature empty (pcrsign skipped)" "" "$SIG"
 
 # --- predictions.json (B-G11) --------------------------------------------------------
-P="$ROOT/etc/debian-fde/predictions.json"
+P="$ROOT/etc/alpine-fde/predictions.json"
 assert_file_exists "predictions.json emitted" "$P"
 assert_eq "predictions: phase pinned to enter-initrd" "enter-initrd" "$(jq -r .phase "$P")"
 assert_eq "predictions: pcr11 matches manifest" "$P11" "$(jq -r .pcr11_digest "$P")"
@@ -149,10 +150,11 @@ assert_eq "predictions: uki_size == installed UKI size" \
 assert_contains "predictions: section digests include .pcrsig" "$(jq -r '.sections | keys | join(" ")' "$P")" "pcrsig"
 [ -n "$(jq -r .tools.ukify "$P")" ]
 assert_rc "predictions: tool versions recorded (ukify non-empty)" 0 $?
-assert_eq "predictions: policy_mode recorded" "a2" "$(jq -r .policy_mode "$P")"
+assert_eq "predictions: policy_mode recorded (normalized b; a2 is an alias)" "b" \
+    "$(jq -r .policy_mode "$P")"
 
 # --- failure marker cleared on success ------------------------------------------------
-[ ! -e "$ROOT/etc/debian-fde/build-failed" ]
+[ ! -e "$ROOT/etc/alpine-fde/build-failed" ]
 rc=$?
 assert_rc "no failure marker after a successful build" 0 "$rc"
 
@@ -178,7 +180,7 @@ assert_eq "a2: policy_digest still computed (audit/display data)" "$(policy_dige
 debian-fde ukictl remove "6.2.0-1-amd64" >/dev/null 2>&1
 assert_rc "ukictl remove succeeds" 0 $?
 assert_eq "remove: ESP file gone" "absent" \
-    "$([ -f "$ESP/EFI/Linux/debian-fde-6.2.0-1-amd64.efi" ] && echo present || echo absent)"
+    "$([ -f "$ESP/EFI/Linux/alpine-fde-6.2.0-1-amd64.efi" ] && echo present || echo absent)"
 assert_eq "remove: manifest entry gone" "absent" \
     "$(jq -r 'if any(.digests[]; .kernel_version == "6.2.0-1-amd64") then "present" else "absent" end' "$M")"
 
@@ -195,27 +197,27 @@ D7_GOLDEN=$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")
 manifest_upsert "$M" "6.1.0-1-amd64" "$P11_610" "$(policy_digest "$D7_GOLDEN" "$P11_610")" ""
 
 ESP_BEFORE=$(find "$ESP" -type f -name '*.efi' -exec sha256sum {} + | sort)
-UKI_CUR="$ESP/EFI/Linux/debian-fde-$KVER.efi"
+UKI_CUR="$ESP/EFI/Linux/alpine-fde-$KVER.efi"
 objcopy -O binary --only-section=.pcrsig "$UKI_CUR" "$TMP/pcrsig.before" 2>/dev/null
 PCRSIG_BEFORE=$(sha256sum "$TMP/pcrsig.before" | awk '{print $1}')
-: >"$ROOT/etc/debian-fde/build-failed" # stale marker must be cleared by re-sign-all
-D7OLD=$(jq -r .expected_pcr7 "$ROOT/etc/debian-fde/baseline.json")
+: >"$ROOT/etc/alpine-fde/build-failed" # stale marker must be cleared by re-sign-all
+D7OLD=$(jq -r .expected_pcr7 "$ROOT/etc/alpine-fde/baseline.json")
 D7NEW=$(printf 'ukictl-build-stub: rotated baseline pcr7' | sha256sum | awk '{print $1}')
 assert_ne "re-sign-all: sanity — rotated d7 differs from the seeded one" "$D7NEW" "$D7OLD"
 jq -n --arg d7 "$D7NEW" '{expected_pcr7: $d7, status: "finalized"}' \
-    >"$ROOT/etc/debian-fde/baseline.json"
+    >"$ROOT/etc/alpine-fde/baseline.json"
 
 debian-fde ukictl build --re-sign-all >/dev/null 2>&1
 assert_rc "ukictl build --re-sign-all succeeds" 0 $?
 
-[ ! -e "$ROOT/etc/debian-fde/build-failed" ]
+[ ! -e "$ROOT/etc/alpine-fde/build-failed" ]
 assert_rc "re-sign-all: failure marker cleared" 0 $?
 
 # MD-03: predictions.json is refreshed in the SAME pass — a stale policy_digest
 # would trip the harness prediction checks (§12) after every re-sign-all.
 assert_eq "re-sign-all: predictions.json policy_digest refreshed over the new d7" \
     "$(jq -r --arg kver "$KVER" '.digests[] | select(.kernel_version == $kver) | .policy_digest' "$M")" \
-    "$(jq -r .policy_digest "$ROOT/etc/debian-fde/predictions.json")"
+    "$(jq -r .policy_digest "$ROOT/etc/alpine-fde/predictions.json")"
 
 assert_eq "re-sign-all: ESP UKI bytes unchanged (no rebuild)" "$ESP_BEFORE" \
     "$(find "$ESP" -type f -name '*.efi' -exec sha256sum {} + | sort)"
@@ -246,7 +248,7 @@ cp "$M" "$TMP/man.canonical"
 ESP_BEFORE_NEG=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 
 # (a) invalid stored pcr11 in the manifest -> die 64, marker written, rest untouched
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 jq '.digests |= map(.pcr11_digest = "zz-invalid-pcr11-placeholder")' "$M" >"$TMP/man.bad" \
     && mv "$TMP/man.bad" "$M"
 cp "$M" "$TMP/man.bad.snapshot"   # the comparison baseline: corrupt-but-untouched
@@ -254,9 +256,9 @@ out=$(debian-fde ukictl build --re-sign-all 2>&1)
 rc=$?
 assert_rc "re-sign-all: invalid stored pcr11 -> exit 64" 64 $rc
 assert_contains "re-sign-all: message names the corrupt entry" "$out" "has no stored pcr11_digest"
-assert_file_exists "re-sign-all: ADR-8 marker persisted by the failing flow" "$ROOT/etc/debian-fde/build-failed"
-assert_contains "re-sign-all: marker names the kernel" "$(cat "$ROOT/etc/debian-fde/build-failed")" "$KVER"
-assert_contains "re-sign-all: marker records the reason" "$(cat "$ROOT/etc/debian-fde/build-failed")" "re-sign-all"
+assert_file_exists "re-sign-all: ADR-8 marker persisted by the failing flow" "$ROOT/etc/alpine-fde/build-failed"
+assert_contains "re-sign-all: marker names the kernel" "$(cat "$ROOT/etc/alpine-fde/build-failed")" "$KVER"
+assert_contains "re-sign-all: marker records the reason" "$(cat "$ROOT/etc/alpine-fde/build-failed")" "re-sign-all"
 assert_eq "re-sign-all: manifest byte-identical (die precedes any upsert)" \
     "$(cat "$TMP/man.bad.snapshot")" "$(cat "$M")"
 assert_eq "re-sign-all: ESP byte-identical (no rebuild, no writes)" \
@@ -275,23 +277,23 @@ mv "$TMP/man.hold" "$M"
 cp "$TMP/man.canonical" "$M"
 debian-fde ukictl build --re-sign-all >/dev/null 2>&1
 assert_rc "re-sign-all: canonical manifest restored (re-sign succeeds)" 0 $?
-[ ! -e "$ROOT/etc/debian-fde/build-failed" ]
+[ ! -e "$ROOT/etc/alpine-fde/build-failed" ]
 assert_rc "re-sign-all: restored success clears the stale marker" 0 $?
 
 # --- MD-03: pending baseline d7 -> the precheck refuses BEFORE the loop -------------
 # (a pending d7 used to die inside the FIRST policy_digest call — after earlier
 # entries had already been upserted: a torn manifest + leaked temps + marker gap)
-PRED_P="$ROOT/etc/debian-fde/predictions.json"
-jq '.expected_pcr7 = ""' "$ROOT/etc/debian-fde/baseline.json" >"$TMP/bl.pending" \
-    && mv "$TMP/bl.pending" "$ROOT/etc/debian-fde/baseline.json"
+PRED_P="$ROOT/etc/alpine-fde/predictions.json"
+jq '.expected_pcr7 = ""' "$ROOT/etc/alpine-fde/baseline.json" >"$TMP/bl.pending" \
+    && mv "$TMP/bl.pending" "$ROOT/etc/alpine-fde/baseline.json"
 cp "$M" "$TMP/man.pre-pending"
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 PRED_BEFORE=$(cat "$PRED_P")
 out=$(TMPDIR="$TMP" debian-fde ukictl build --re-sign-all 2>&1)
 rc=$?
 assert_rc "re-sign-all: pending baseline PCR 7 -> exit 64" 64 $rc
 assert_contains "re-sign-all: precheck points at audit --init" "$out" "audit --init"
-assert_file_exists "re-sign-all: pending precheck persists the ADR-8 marker" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "re-sign-all: pending precheck persists the ADR-8 marker" "$ROOT/etc/alpine-fde/build-failed"
 assert_eq "re-sign-all: manifest NOT torn by the refused loop" \
     "$(cat "$TMP/man.pre-pending")" "$(cat "$M")"
 assert_eq "re-sign-all: predictions.json untouched by the refusal" "$PRED_BEFORE" "$(cat "$PRED_P")"
@@ -299,7 +301,7 @@ assert_eq "re-sign-all: no resign temp files leaked" "" \
     "$(find "$TMP" -maxdepth 1 -name 'debian-fde-resign.*' -print)"
 # restore the finalized baseline
 jq -n --arg d7 "$D7NEW" '{expected_pcr7: $d7, status: "finalized"}' \
-    >"$ROOT/etc/debian-fde/baseline.json"
+    >"$ROOT/etc/alpine-fde/baseline.json"
 
 # --- MD-03: transactional re-sign — a MID-LOOP failure rewrites NOTHING --------------
 # corrupt ONLY the second entry: the first is processable, so a non-transactional
@@ -307,13 +309,13 @@ jq -n --arg d7 "$D7NEW" '{expected_pcr7: $d7, status: "finalized"}' \
 jq '(.digests[] | select(.kernel_version == "6.1.0-1-amd64") | .pcr11_digest) = "zz-invalid-midloop"' \
     "$M" >"$TMP/man.mid" && mv "$TMP/man.mid" "$M"
 cp "$M" "$TMP/man.mid.snapshot"
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 out=$(debian-fde ukictl build --re-sign-all 2>&1)
 rc=$?
 assert_rc "re-sign-all: mid-loop invalid pcr11 -> exit 64" 64 $rc
 assert_eq "re-sign-all: live manifest byte-identical across the mid-loop die" \
     "$(cat "$TMP/man.mid.snapshot")" "$(cat "$M")"
-assert_file_exists "re-sign-all: mid-loop failure persists the marker" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "re-sign-all: mid-loop failure persists the marker" "$ROOT/etc/alpine-fde/build-failed"
 # restore canonical state for the remaining legs
 cp "$TMP/man.canonical" "$M"
 debian-fde ukictl build --re-sign-all >/dev/null 2>&1
@@ -345,7 +347,7 @@ DEBIAN_FDE_BIN_TEST=1 \
     RETENTION=2 \
     "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "build with a SPACED keydir succeeds (ukify argv intact)" 0 $?
-sbverify --cert "$KEYDIR_SP/release.crt" "$ESP/EFI/Linux/debian-fde-$KVER.efi" >/dev/null 2>&1
+sbverify --cert "$KEYDIR_SP/release.crt" "$ESP/EFI/Linux/alpine-fde-$KVER.efi" >/dev/null 2>&1
 assert_rc "spaced-keydir build still ships a validly signed UKI" 0 $?
 # restore the canonical keydir build (marker cleared)
 debian-fde ukictl build "$KVER" >/dev/null 2>&1
@@ -356,7 +358,7 @@ assert_rc "canonical build after the spaced-keydir leg" 0 $?
 ESP_BAD="$TMP/esp-bad"
 mkdir -p "$ESP_BAD"
 printf 'not-a-directory' >"$ESP_BAD/EFI" # ESP/EFI is a FILE -> mkdir ESP/EFI/Linux fails -> esp_install_uki dies
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 out=$(env -u DEBIAN_FDE_ESP TMPDIR="$TMP" \
     DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP_BAD" \
     DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
@@ -365,18 +367,18 @@ out=$(env -u DEBIAN_FDE_ESP TMPDIR="$TMP" \
     RETENTION=2 "$REPO/bin/debian-fde" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "ESP-install die fails the build closed (64)" 64 "$rc"
-assert_file_exists "ESP-install die persists the ADR-8 marker (HW-1)" "$ROOT/etc/debian-fde/build-failed"
-assert_contains "marker records the failure" "$(cat "$ROOT/etc/debian-fde/build-failed")" "ukictl build failed"
+assert_file_exists "ESP-install die persists the ADR-8 marker (HW-1)" "$ROOT/etc/alpine-fde/build-failed"
+assert_contains "marker records the failure" "$(cat "$ROOT/etc/alpine-fde/build-failed")" "ukictl build failed"
 assert_eq "build workdir wiped on the die path (no leak)" "" \
     "$(find "$TMP" -maxdepth 1 -name 'debian-fde-build.*' -print)"
 assert_file_exists "previously installed UKI untouched by the failed build" \
-    "$ESP/EFI/Linux/debian-fde-$KVER.efi"
+    "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
 
 # --- LO-04: ESP-prune failure is a MARKED build failure (no silent divergence) -------
 FAKEBIN2="$TMP/bin2"
 ESP2="$TMP/esp-prunefail"
 mkdir -p "$FAKEBIN2" "$ESP2/EFI/Linux"
-VICTIM="$ESP2/EFI/Linux/debian-fde-5.15.0-3-amd64.efi"
+VICTIM="$ESP2/EFI/Linux/alpine-fde-5.15.0-3-amd64.efi"
 cat >"$FAKEBIN2/rm" <<EOF
 #!/bin/sh
 for a in "\$@"; do
@@ -386,9 +388,9 @@ exec /bin/rm "\$@"
 EOF
 chmod +x "$FAKEBIN2/rm"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
-    printf 'seed-%s' "$k" >"$ESP2/EFI/Linux/debian-fde-$k.efi"
+    printf 'seed-%s' "$k" >"$ESP2/EFI/Linux/alpine-fde-$k.efi"
 done
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 env PATH="$FAKEBIN2:$PATH" TMPDIR="$TMP" \
     DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP2" \
     DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
@@ -398,7 +400,7 @@ env PATH="$FAKEBIN2:$PATH" TMPDIR="$TMP" \
     "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
 rc=$?
 assert_rc "prune failure fails the build loudly (64)" 64 "$rc"
-assert_file_exists "prune failure persists the ADR-8 marker" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "prune failure persists the ADR-8 marker" "$ROOT/etc/alpine-fde/build-failed"
 assert_file_exists "failed prune left the victim file on the ESP (fail-safe)" "$VICTIM"
 assert_eq "prune-failure build wiped its workdir" "" \
     "$(find "$TMP" -maxdepth 1 -name 'debian-fde-build.*' -print)"
@@ -423,9 +425,9 @@ done
 exec /bin/rm "\$@"
 EOF
 chmod +x "$FAKEBIN3/rm"
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 env PATH="$FAKEBIN3:$PATH" TMPDIR="$TMP" \
-    LSINITRD_CMD=/bin/false \
+    INITRD_LISTER_CMD=/bin/false \
     DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
     DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
     DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
@@ -435,9 +437,9 @@ env PATH="$FAKEBIN3:$PATH" TMPDIR="$TMP" \
 rc=$?
 assert_rc "WR-02: audit-failed build still exits 64 when the workdir rm fails" 64 "$rc"
 assert_file_exists "WR-02: ADR-8 marker written even though the workdir rm failed" \
-    "$ROOT/etc/debian-fde/build-failed"
+    "$ROOT/etc/alpine-fde/build-failed"
 assert_contains "WR-02: marker records the audit failure" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "initrd audit"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "initrd audit"
 [ -n "$(find "$TMP" -maxdepth 1 -name 'debian-fde-build.*' -print)" ]
 assert_rc "WR-02: rm stub actually fired (workdir residue proves the leg is live)" 0 $?
 
@@ -500,37 +502,37 @@ enc_debian_fde() { # PASSPHRASE(possibly empty string = unset) args...
 
 # leg A: encrypted key + NO passphrase env + NO tty -> 64 + ADR-8 marker
 BEFORE_ESP_A=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 out=$(enc_debian_fde "" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "unlock: encrypted key, no env, no tty -> exit 64" 64 $rc
 assert_contains "unlock: loud message demands a passphrase (env or interactive)" "$out" \
     "passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively"
-assert_file_exists "unlock: ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "unlock: ADR-8 marker persisted" "$ROOT/etc/alpine-fde/build-failed"
 assert_contains "unlock: marker names the missing credential" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "passphrase required"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "passphrase required"
 assert_eq "unlock: ESP byte-identical (refusal before any signing)" "$BEFORE_ESP_A" \
     "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
 assert_eq "unlock: no signer ever saw the encrypted file" "0" \
     "$(grep -c "$ENC_KEYDIR/release.pem" "$ARGVLOG" 2>/dev/null; true)"
 
 # leg B: WRONG passphrase via the env seam -> 64 + marker naming wrong-passphrase
-rm -f "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/alpine-fde/build-failed"
 out=$(enc_debian_fde "definitely-not-the-passphrase" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "unlock: wrong env passphrase -> exit 64" 64 $rc
 assert_contains "unlock: wrong-passphrase message is distinct" "$out" "wrong passphrase"
-assert_file_exists "unlock: wrong-passphrase ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "unlock: wrong-passphrase ADR-8 marker persisted" "$ROOT/etc/alpine-fde/build-failed"
 assert_contains "unlock: marker names wrong-passphrase" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "wrong passphrase"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "wrong passphrase"
 
 # leg C: correct env passphrase -> build proceeds over the UNLOCKED tmpfs path
-rm -f "$ROOT/etc/debian-fde/build-failed" "$ARGVLOG"
+rm -f "$ROOT/etc/alpine-fde/build-failed" "$ARGVLOG"
 out=$(enc_debian_fde "$ENC_PASS" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "unlock: correct env passphrase -> build succeeds" 0 $rc
 assert_eq "unlock: no failure marker after the successful build" "0" \
-    "$([ -e "$ROOT/etc/debian-fde/build-failed" ] && echo 1 || echo 0)"
+    "$([ -e "$ROOT/etc/alpine-fde/build-failed" ] && echo 1 || echo 0)"
 ARGV_CONTENT=$(cat "$ARGVLOG")
 assert_contains "unlock: ukify got the UNLOCKED tmpfs key (--pcr-private-key)" "$ARGV_CONTENT" \
     "--pcr-private-key=$TMP/shm/"
@@ -540,7 +542,7 @@ assert_eq "unlock: no signer ever saw the encrypted path" "0" \
     "$(grep -c "$ENC_KEYDIR/release.pem" "$ARGVLOG"; true)"
 assert_eq "unlock: decrypted copy scrubbed after the build (tmpfs clean)" "" \
     "$(find "$TMP/shm" -maxdepth 1 -name 'debian-fde-unlock.*' -print 2>/dev/null)"
-sbverify --cert "$ENC_KEYDIR/release.crt" "$ESP/EFI/Linux/debian-fde-$KVER.efi" >/dev/null 2>&1
+sbverify --cert "$ENC_KEYDIR/release.crt" "$ESP/EFI/Linux/alpine-fde-$KVER.efi" >/dev/null 2>&1
 assert_rc "unlock: installed UKI verifies against the release cert" 0 $?
 
 # leg D: plaintext keydir -> unchanged behavior (no unlock, keydir path used)

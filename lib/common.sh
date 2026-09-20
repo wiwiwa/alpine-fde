@@ -259,16 +259,20 @@ require_pkgs() {
 }
 
 # policy_mode_normalize MODE — canonicalize the ladder naming across commands.
-# ADR-14: the ladder is RESOLVED — Mechanism A″ (a2) is the proven pipeline
-# mode; rungs a / ap / b are documented-absent and fail closed HERE (rc 64)
-# so every entry point (ukictl build, enroll-tpm, ...) inherits the same loud
-# rejection citing ADR-14. Canonical: a2 (aliases: a-prime-prime, native).
+# ADR-19/ADR-20: on Alpine, Mechanism B (rung b) is the NORMATIVE sealing
+# pipeline — systemd-cryptenroll is not packaged on Alpine, so Mechanism A is
+# unavailable and rung b is the only implementable mechanism. b is canonical;
+# the A″ spellings (a2 / a-prime-prime / native) remain accepted as aliases —
+# same policy construction (static-PCR7 + release-key-signed PCR11 under
+# PolicyAuthorize). Rungs a / ap / a-prime / combined stay documented-absent
+# and fail closed HERE (rc 64) so every entry point (ukictl build, enroll-tpm,
+# ...) inherits the same loud rejection citing ADR-19.
 # Unknown garbage → rc 1 (caller decides usage vs fail-closed).
 policy_mode_normalize() {
   case ${1:-} in
-  a2 | a-prime-prime | native) printf '%s\n' a2 ;;
-  ap | a-prime | combined | a | b)
-    err "POLICY_MODE=${1:-} is documented-absent (ADR-14): Mechanism A'' is the proven path"
+  b | a2 | a-prime-prime | native) printf '%s\n' b ;;
+  a | ap | a-prime | combined)
+    err "POLICY_MODE=${1:-} is documented-absent (ADR-19): Mechanism B (rung b) is the normative path on Alpine"
     return "$DEBIAN_FDE_FAIL_CLOSED"
     ;;
   *) return 1 ;;
