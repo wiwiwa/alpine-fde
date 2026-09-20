@@ -6,7 +6,9 @@
 set -eu
 umask 077
 
-PROG=debian-fde
+# Invoked-name seam: bin/alpine-fde execs us with DEBIAN_FDE_PROG=alpine-fde
+# (POSIX ash has no `exec -a`); direct invocation keeps the historical name.
+PROG=${DEBIAN_FDE_PROG:-debian-fde}
 DEBIAN_FDE_VERSION='0.1.0'
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -26,7 +28,7 @@ $PROG $DEBIAN_FDE_VERSION — TPM 2.0-backed verified boot & full-disk-encryptio
 
 Subcommands:
   provision      one-time: release keys, firmware key enrollment, pending baseline
-  install        guided disk setup, minimal Debian rootfs, signed boot chain
+  install        guided disk setup, minimal Alpine rootfs (apk), signed boot chain
   ukictl         build / sign / enroll / prune unified kernel images
   pcrsign        release-key signature over the combined PCR 7+11 policy digest
    enroll-tpm     re-enroll the TPM seal for all manifest kernels (TPM-clear recovery)
@@ -57,7 +59,8 @@ Global flags (must precede the subcommand):
 
 Exit codes: 0 ok | 1 drift/check failed | 2 usage | 3 not implemented | 64 fail-closed
 
-Config: KEY=VALUE pairs from \$DEBIAN_FDE_CONF or /etc/debian-fde/debian-fde.conf (optional;
+Config: KEY=VALUE pairs from \$ALPINE_FDE_CONF (or \$DEBIAN_FDE_CONF) or
+/etc/alpine-fde/alpine-fde.conf (optional;
 the environment and explicit flags always win over the file).
 EOF
 }
@@ -90,6 +93,11 @@ cmd_to_fn() {
         printf 'cmd_%s_%s_main' "$_head" "${1#*-}"
     fi
 }
+
+# ALPINE_FDE_* env aliases (§8.1/ADR-15) apply before config loading; sourcing
+# common.sh itself stays side-effect-free. Resolution: flags > ALPINE_FDE_* >
+# DEBIAN_FDE_* > config file.
+env_alias_apply
 
 load_config
 
@@ -191,7 +199,7 @@ fi
 
 sp_cmd_file="$DEBIAN_FDE_CMD_DIR/$sp_cmd.sh"
 if [ ! -f "$sp_cmd_file" ]; then
-    err "$PROG: $sp_cmd: not implemented yet"
+    err "$sp_cmd: not implemented yet"
     exit "$DEBIAN_FDE_NOT_IMPLEMENTED"
 fi
 # shellcheck disable=SC1090
@@ -199,7 +207,7 @@ fi
 
 sp_fn=$(cmd_to_fn "$sp_cmd")
 if ! command -v "$sp_fn" >/dev/null 2>&1; then
-    err "$PROG: $sp_cmd: not implemented yet"
+    err "$sp_cmd: not implemented yet"
     exit "$DEBIAN_FDE_NOT_IMPLEMENTED"
 fi
 

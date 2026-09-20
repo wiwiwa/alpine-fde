@@ -26,9 +26,11 @@ strict_mode() {
 }
 
 # --- logging (all to stderr; stdout stays clean for data) ----------------------
-info() { printf 'debian-fde: info: %s\n' "$*" >&2; }
-warn() { printf 'debian-fde: warn: %s\n' "$*" >&2; }
-err() { printf 'debian-fde: error: %s\n' "$*" >&2; }
+# The prefix carries the INVOKED program name: bin/alpine-fde signals
+# DEBIAN_FDE_PROG=alpine-fde (§8.1); unset → historical "debian-fde".
+info() { printf '%s: info: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
+warn() { printf '%s: warn: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
+err() { printf '%s: error: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
 
 # die [-r RC] message... — log an error and exit; default exit code: fail-closed
 die() {
@@ -42,9 +44,11 @@ die() {
 }
 
 # --- config ---------------------------------------------------------------------
-# config_path — effective config file path ($DEBIAN_FDE_CONF overrides the default)
+# config_path — effective config file path (§8.4). $DEBIAN_FDE_CONF (typically
+# via the ALPINE_FDE_CONF alias, §8.1) overrides the default; clean rename to
+# the Alpine path — no legacy /etc/debian-fde fallback.
 config_path() {
-  printf '%s\n' "${DEBIAN_FDE_CONF:-/etc/debian-fde/debian-fde.conf}"
+  printf '%s\n' "${DEBIAN_FDE_CONF:-/etc/alpine-fde/alpine-fde.conf}"
 }
 
 # load_config — parse the KEY=VALUE config into the environment.
@@ -114,6 +118,24 @@ load_config() {
   return 0
 }
 
+# --- environment aliases (§8.1, ADR-15) -------------------------------------------
+# env_alias_apply — ALPINE_FDE_* is the canonical spelling of the DEBIAN_FDE_*
+# environment surface (Debian→Alpine pivot). Copies every set ALPINE_FDE_<NAME>
+# onto its DEBIAN_FDE_<NAME> twin, so ALPINE_FDE_* WINS over a co-set
+# DEBIAN_FDE_* twin; CLI flags are parsed later and beat both. Sourcing this
+# library stays side-effect-free: entry points call this explicitly BEFORE
+# load_config. Resolution order: CLI flags > ALPINE_FDE_* > DEBIAN_FDE_* > conf.
+env_alias_apply() {
+  # shellcheck disable=SC2046  # deliberate word split over the alias table
+  for _sp_a in NO_INSTALL ROOT ESP DISK DISKS BCACHE FS TCTI KEYDIR CONF; do
+    eval "test \"\${ALPINE_FDE_${_sp_a}+x}\"" || continue
+    eval "DEBIAN_FDE_${_sp_a}=\$ALPINE_FDE_${_sp_a}"
+    # shellcheck disable=SC2163  # deliberate dynamic export
+    eval "export DEBIAN_FDE_${_sp_a}"
+  done
+  return 0
+}
+
 # --- TPM access ------------------------------------------------------------------
 # tpm — run tpm2-tools with the configured TCTI.
 # DEBIAN_FDE_TCTI empty/unset → TPM2TOOLS_TCTI set to empty → tctildr default discovery.
@@ -136,17 +158,19 @@ require_cmds() {
   fi
 }
 
-# require_pkgs binary:debian-package ... — require_cmds plus on-demand install of the
-# corresponding Debian package (debian-fde must run from a Debian live ISO).
+# require_pkgs binary:package ... — require_cmds plus on-demand install of the
+# corresponding package on the live host (ADR-15: runs from an Alpine live ISO,
+# with a Debian live launcher as fallback).
 #   * binary already on PATH → satisfied, no package manager touched
-#   * else, if apt-get exists and DEBIAN_FDE_NO_INSTALL is unset: `apt-get update`
-#     (once per process), then `DEBIAN_FRONTEND=noninteractive apt-get install -y
-#     --no-install-recommends <pkg>` per missing pair; binary re-checked after install
-#   * any failure (no apt-get / non-Debian, DEBIAN_FDE_NO_INSTALL set, apt error, or
-#     binary still absent after install) ⇒ die(64, fail-closed) with the exact manual
-#     install line (ADR-8: fail loudly, never degrade silently). Only apt-get is ever
-#     attempted. Environment failures are NOT usage errors: 64 = missing tools, 2 =
-#     bad CLI usage (G-I7).
+#   * else, if a backend exists and *_FDE_NO_INSTALL unset: `apk update` or
+#     `apt-get update` (once per process), then `apk add <pkg>` or
+#     `DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+#     <pkg>` per missing pair; binary re-checked after install
+#   * any failure (no backend, DEBIAN_FDE_NO_INSTALL set, backend error, or
+#     binary still absent after install) ⇒ die(64, fail-closed) with the exact
+#     manual install line for the backend that ran (ADR-8: fail loudly, never
+#     degrade silently). Environment failures are NOT usage errors: 64 = missing
+#     tools, 2 = bad CLI usage (G-I7).
 require_pkgs() {
   _sp_missing=''
   for _sp_pair in "$@"; do
@@ -175,6 +199,7 @@ require_pkgs() {
   # host actually has; NEITHER must fail closed 64 naming the packages, never
   # an accidental 127 from invoking an absent manager (ADR-15: loud failures)
   if command -v apk >/dev/null 2>&1; then
+    _SP_PKGS_BACKEND=apk
     if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
       info "apk update ..."
       apk update || die \
@@ -193,6 +218,7 @@ require_pkgs() {
       die \
         "no package manager (apk|apt-get) found (non-Debian system?) for missing:$_sp_pkgs — install manually: apk add$_sp_pkgs | apt-get install -y --no-install-recommends$_sp_pkgs"
     fi
+    _SP_PKGS_BACKEND=apt-get
     if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
       info "apt-get update ..."
       apt-get update || die \
@@ -223,6 +249,10 @@ require_pkgs() {
     for _sp_pair in $_sp_still; do
       _sp_still_pkgs="$_sp_still_pkgs ${_sp_pair#*:}"
     done
+    if [ "$_SP_PKGS_BACKEND" = apk ]; then
+      die \
+        "package install did not provide the expected binary (for:$_sp_still) — install manually: apk add$_sp_still_pkgs"
+    fi
     die \
       "package install did not provide the expected binary (for:$_sp_still) — install manually: apt-get install -y --no-install-recommends$_sp_still_pkgs"
   fi

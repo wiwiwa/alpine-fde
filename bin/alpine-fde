@@ -1,0 +1,11 @@
+#!/bin/sh
+# alpine-fde — dispatcher CLI for the Alpine FDE verified-boot / FDE lifecycle (§8.1).
+# Thin entry point: exec the shared dispatcher, signalling the invoked name via
+# DEBIAN_FDE_PROG (POSIX ash has no `exec -a`) so usage/--version/error banners
+# say "alpine-fde". bin/debian-fde stays as a backwards-compatible alias (§8.1).
+set -eu
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+DEBIAN_FDE_PROG=alpine-fde
+export DEBIAN_FDE_PROG
+exec "$SCRIPT_DIR/debian-fde" "$@"

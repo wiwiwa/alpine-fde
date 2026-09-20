@@ -66,7 +66,8 @@ assert_rc "require_cmds dies fail-closed on missing command" "64" "$rc"
 assert_contains "require_cmds names the missing command" "$msg" "__no_such_binary_xyz"
 
 # --- config_path ---
-assert_eq "config_path default" "/etc/debian-fde/debian-fde.conf" "$(DEBIAN_FDE_CONF='' config_path)"
+# §8.4: clean rename to the Alpine conf path — no legacy /etc/debian-fde fallback
+assert_eq "config_path default" "/etc/alpine-fde/alpine-fde.conf" "$(DEBIAN_FDE_CONF='' config_path)"
 assert_eq "config_path DEBIAN_FDE_CONF override" "/x/y.conf" "$(DEBIAN_FDE_CONF=/x/y.conf config_path)"
 
 # --- load_config: missing file ---

@@ -213,7 +213,7 @@ Negative controls (all mechanisms): a signature over pcrs ≠ {7,11}, or over a 
 
 ### 8.1 `alpine-fde` CLI — the user-facing tool
 
-Ceremony and lifecycle orchestration around verified boot and storage primitives (`bin/alpine-fde`, with `bin/debian-fde` provided as a backwards-compatible alias). Missing host packages are installed on demand via `apk` (or the command fails loudly with the manual install list, ADR-15). `DEBIAN_FDE_NO_INSTALL=1` / `ALPINE_FDE_NO_INSTALL=1` disables auto-install. `alpine-fde doctor` reports environment readiness without changing anything. All commands accept overrides for scripting/tests: `--root <dir>` (target root/`/etc/alpine-fde`), `--esp <dir|file>`, `--disk <dev|file>` (repeatable for RAID1), `--bcache <dev>` (for hybrid acceleration), `--fs <btrfs|ext4>`, `--tcti <conf>`, `--keydir <dir>`.
+Ceremony and lifecycle orchestration around verified boot and storage primitives (`bin/alpine-fde`, with `bin/debian-fde` provided as a backwards-compatible alias). Missing host packages are installed on demand via `apk` (or the command fails loudly with the manual install list, ADR-15). `DEBIAN_FDE_NO_INSTALL=1` / `ALPINE_FDE_NO_INSTALL=1` disables auto-install. When both spellings of a variable are set, the `ALPINE_FDE_*` name wins (canonical); CLI flags override both. `alpine-fde doctor` reports environment readiness without changing anything. All commands accept overrides for scripting/tests: `--root <dir>` (target root/`/etc/alpine-fde`), `--esp <dir|file>`, `--disk <dev|file>` (repeatable for RAID1), `--bcache <dev>` (for hybrid acceleration), `--fs <btrfs|ext4>`, `--tcti <conf>`, `--keydir <dir>`.
 
 | Command | Purpose |
 |---|---|

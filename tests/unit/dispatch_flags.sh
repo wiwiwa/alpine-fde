@@ -74,6 +74,13 @@ out=$(sp status --fs btrfs --disk /dev/sda)
 assert_eq "flags after the subcommand pass through untouched" \
     "STUB|DISK=|DISKS=|BCACHE=|FS=|ARGS=--fs btrfs --disk /dev/sda" "$out"
 
+# --- ALPINE_FDE_* env alias layer (§8.1 canonical spelling; ADR-15) -----------------
+# One representative flag env: ALPINE_FDE_DISK must reach the cmd as DEBIAN_FDE_DISK.
+out=$(ALPINE_FDE_DISK=/dev/alpine-live-disk sp status)
+unset ALPINE_FDE_DISK
+assert_eq "ALPINE_FDE_DISK env alias reaches the cmd as DEBIAN_FDE_DISK" \
+    "STUB|DISK=/dev/alpine-live-disk|DISKS=|BCACHE=|FS=|ARGS=" "$out"
+
 # --- finalize is a registered subcommand ------------------------------------------
 rc=0
 out=$(sp finalize 2>&1 >/dev/null) || rc=$?
