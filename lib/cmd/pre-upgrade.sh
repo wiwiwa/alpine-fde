@@ -35,13 +35,37 @@ EOF
     esac
     [ $# -eq 0 ] || die -r "$DEBIAN_FDE_USAGE" "pre-upgrade: unexpected arguments: $*"
     # Root fstype detection (DEBIAN_FDE_ROOT_FSTYPE overrides, for tests).
-    # IN-03: like every other command, honor --root/DEBIAN_FDE_ROOT — stat the
+    # G-D9: derive the fstype from /proc/self/mountinfo FIRST — busybox stat
+    # (the §3.1 Alpine host toolchain) has no `-f -c %T`, so a stat-first probe
+    # degrades to `unknown` and silently skips every btrfs snapshot. `stat -f`
+    # is only the FALLBACK (non-Linux mounts absent from mountinfo); the result
+    # and its source are announced loudly either way.
+    # IN-03: like every other command, honor --root/DEBIAN_FDE_ROOT — detect the
     # TARGET root, not unconditionally the live /.
+    _pu_mif=${DEBIAN_FDE_MOUNTINFO:-/proc/self/mountinfo}
     if [ -n "${DEBIAN_FDE_ROOT_FSTYPE:-}" ]; then
         _pu_fstype=$DEBIAN_FDE_ROOT_FSTYPE
+        _pu_fssrc=override
     else
-        _pu_fstype=$(stat -f -c %T "${DEBIAN_FDE_ROOT:-}/" 2>/dev/null) || _pu_fstype=unknown
+        _pu_root=${DEBIAN_FDE_ROOT:-}
+        # mountinfo mount points carry no trailing slash (except the root "/")
+        _pu_mp=${_pu_root%/}
+        [ -n "$_pu_mp" ] || _pu_mp=/
+        _pu_fstype=$(awk -v mp="$_pu_mp" '{
+            fs = ""
+            for (i = 7; i <= NF; i++) if ($i == "-") { fs = $(i + 1); break }
+            if ($5 == mp && fs != "") { print fs; exit }
+        }' "$_pu_mif" 2>/dev/null) || _pu_fstype=""
+        if [ -n "$_pu_fstype" ]; then
+            _pu_fssrc=mountinfo
+        else
+            _pu_fstype=$(stat -f -c %T "${_pu_root:-/}/" 2>/dev/null) || _pu_fstype=unknown
+            [ -n "$_pu_fstype" ] || _pu_fstype=unknown
+            _pu_fssrc=stat
+        fi
     fi
+    # G-D9: loud either way — never degrade silently to an unchecked fstype.
+    info "pre-upgrade: root fstype: $_pu_fstype ($_pu_fssrc)"
     # ext4 (and unknown) roots are a graceful no-op: reporting them as
     # failures would flag every `--fs ext4` install. Only btrfs snapshots.
     if [ "$_pu_fstype" != "btrfs" ]; then

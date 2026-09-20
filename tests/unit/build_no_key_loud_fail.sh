@@ -36,19 +36,19 @@ trap 'rm -rf "$TMP"' EXIT
 
 ROOT="$TMP/root"
 ESP="$TMP/esp"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux" "$TMP/empty-keydir"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux" "$TMP/empty-keydir"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
-cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/debian-fde/cmdline.txt"
+cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/alpine-fde/cmdline.txt"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
 # G-U4 (§8.2): the crypttab guard requires the tpm2-device= option at build time
 printf '%s\n' 'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
 jq -n --arg d7 "$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")" \
-    '{pcr7_digest: $d7, status: "finalized"}' >"$ROOT/etc/debian-fde/baseline.json"
+    '{pcr7_digest: $d7, status: "finalized"}' >"$ROOT/etc/alpine-fde/baseline.json"
 
 # prior good state: an old UKI and a manifest the build must not touch
-printf 'pre-existing-uki' >"$ESP/EFI/Linux/debian-fde-6.1.0-1-amd64.efi"
-M="$ROOT/etc/debian-fde/digests.json"
+printf 'pre-existing-uki' >"$ESP/EFI/Linux/alpine-fde-6.1.0-1-amd64.efi"
+M="$ROOT/etc/alpine-fde/digests.json"
 manifest_new "6.1.0-1-amd64" "fp" | manifest_atomic_write "$M"
 manifest_upsert "$M" "6.1.0-1-amd64" "p11" "pd" "sig"
 BEFORE_ESP=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
@@ -94,11 +94,11 @@ AFTER_ESP=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 assert_eq "ESP byte-identical after failed builds (no UKI installed, nothing pruned)" \
     "$BEFORE_ESP" "$AFTER_ESP"
 assert_eq "manifest untouched by failed builds" "$BEFORE_MANIFEST" "$(cat "$M")"
-[ ! -e "$ROOT/etc/debian-fde/predictions.json" ]
+[ ! -e "$ROOT/etc/alpine-fde/predictions.json" ]
 rc=$?
 assert_rc "no predictions.json emitted on failure" 0 "$rc"
 
-marker="$ROOT/etc/debian-fde/build-failed"
+marker="$ROOT/etc/alpine-fde/build-failed"
 assert_file_exists "failure marker persisted for debian-fde status" "$marker"
 assert_contains "marker names the kernel" "$(cat "$marker")" "$KVER"
 assert_contains "marker records the reason" "$(cat "$marker")" "reason:"
@@ -111,6 +111,6 @@ assert_rc "recovery build with the key attached succeeds" 0 $rc
 [ ! -e "$marker" ]
 rc=$?
 assert_rc "successful build cleared the failure marker" 0 "$rc"
-assert_file_exists "UKI now installed" "$ESP/EFI/Linux/debian-fde-$KVER.efi"
+assert_file_exists "UKI now installed" "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
 
 finish

@@ -1,0 +1,46 @@
+# features.d/alpine-fde.files — mkinitfs feature file list for the
+# alpine-fde Early-Boot Unseal Hook (docs/Architecture.md §8.2; ADR-13,
+# gap G-C8). `alpine-fde install` copies this file to
+# /etc/mkinitfs/features.d/alpine-fde.files and registers the `alpine-fde`
+# feature in /etc/mkinitfs/mkinitfs.conf; every file the unseal hook needs
+# inside the initramfs is listed here (absolute target-root paths, globs
+# allowed):
+#   * the hook script itself
+#   * cryptsetup + libcrypto (openssl) for the unlock + signature gate
+#   * the exact tpm2-tools verbs the hook runs + libtss2 (ESYS stack incl.
+#     the device TCTI)
+#   * TPM kernel modules + the TPM udev rule (creates /dev/tpmrm0)
+#   * root filesystem drivers (btrfs default, ext4 optional) and the bcache
+#     block driver + its udev rule for hybrid topologies (§4.1)
+/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
+/usr/bin/cryptsetup
+/usr/lib/libcryptsetup.so*
+/usr/bin/openssl
+/usr/lib/libcrypto.so*
+/usr/lib/libssl.so*
+/usr/bin/tpm2_pcrextend
+/usr/bin/tpm2_startauthsession
+/usr/bin/tpm2_policypcr
+/usr/bin/tpm2_policyauthorize
+/usr/bin/tpm2_loadexternal
+/usr/bin/tpm2_verifysignature
+/usr/bin/tpm2_createprimary
+/usr/bin/tpm2_load
+/usr/bin/tpm2_unseal
+/usr/bin/tpm2_flushcontext
+/usr/lib/libtss2-esys.so*
+/usr/lib/libtss2-mu.so*
+/usr/lib/libtss2-rc.so*
+/usr/lib/libtss2-sys.so*
+/usr/lib/libtss2-tctildr.so*
+/usr/lib/libtss2-tcti-device.so*
+/lib/modules/*/kernel/drivers/char/tpm/tpm.ko*
+/lib/modules/*/kernel/drivers/char/tpm/tpm_tis.ko*
+/lib/modules/*/kernel/drivers/char/tpm/tpm_crb.ko*
+/usr/lib/udev/rules.d/*tpm*.rules
+/lib/modules/*/kernel/fs/btrfs/btrfs.ko*
+/lib/modules/*/kernel/fs/ext4/ext4.ko*
+/lib/modules/*/kernel/fs/jbd2/jbd2.ko*
+/lib/modules/*/kernel/fs/mbcache/mbcache.ko*
+/lib/modules/*/kernel/drivers/md/bcache/bcache.ko*
+/usr/lib/udev/rules.d/69-bcache.rules

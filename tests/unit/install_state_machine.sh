@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/unit/install_state_machine.sh — G-IL1 (§8.4, §9.1): the install-state
-# document install-state.json and its state machine `installed` → `finalized`
-# (no provisional token anywhere):
+# tests/unit/install_state_machine.sh — G-IL1/G-D11 (§8.4, §9.1, ADR-20): the
+# install-state document install-state.json and its state machine
+# `installed` → `provisional-booted` → `finalized`:
 #   * atomic write: a fault or crash mid-write leaves the previous document
 #     intact — readers never observe partial content
 #   * fail-closed validation: unknown states are refused (die 64), never written
@@ -55,7 +55,27 @@ run_write finalized
 assert_eq "finalized: reads back" "finalized" "$(istate_state)"
 assert_rc "finalized: istate_is_finalized rc 0" 0 istate_is_finalized
 
-# --- 4. unknown states fail closed (no provisional token anywhere) --------------
+# --- 3b. G-D11: `provisional-booted` is first-class vocabulary (ADR-20) ----------
+# Stage 2 (automatic first boot under the provisional token) writes it; the
+# guards accept it and it is NOT finalized.
+run_write provisional-booted
+assert_eq "provisional-booted: writes (rc 0)" "0" "$W_RC"
+assert_eq "provisional-booted: reads back" "provisional-booted" "$(istate_state)"
+assert_rc "provisional-booted: istate_is_finalized rc 1" 1 istate_is_finalized
+assert_rc "provisional-booted: istate_is_provisional_booted rc 0" 0 \
+    istate_is_provisional_booted
+run_write installed
+assert_rc "installed: istate_is_provisional_booted rc 1" 1 istate_is_provisional_booted
+assert_rc "finalized: istate_is_provisional_booted rc 1" 1 istate_is_provisional_booted
+run_write provisional-booted
+assert_eq "provisional-booted: schema_version stays 1" "1" \
+    "$(jq -r '.schema_version' "$F")"
+assert_eq "provisional-booted: state field round-trips" "provisional-booted" \
+    "$(jq -r '.state' "$F")"
+assert_eq "provisional-booted: document mode pinned 600" "600" "$(stat -c %a "$F")"
+
+# --- 4. unknown states fail closed (the vocabulary is exactly the ADR-20
+# machine: installed | provisional-booted | finalized — nothing else) --------------
 BEFORE=$(cat "$F")
 run_write 'sb_pending'
 assert_eq "provisional vocabulary 'sb_pending' refused (64)" "64" "$W_RC"
@@ -76,8 +96,8 @@ OLD_PATH=$PATH
 export PATH="$FAKEBIN:$PATH"
 run_write installed
 assert_eq "interrupted rename -> 64" "64" "$W_RC"
-assert_eq "rename fault: previous document intact (atomic replace)" "finalized" "$(istate_state)"
-assert_contains "rename fault: document still valid JSON" "$(cat "$F")" '"state": "finalized"'
+assert_eq "rename fault: previous document intact (atomic replace)" "provisional-booted" "$(istate_state)"
+assert_contains "rename fault: document still valid JSON (never partial)" "$(cat "$F")" '"state": "provisional-booted"'
 assert_eq "no temp litter after the failed write" "" \
     "$(find "$(sp_etc_dir)" -maxdepth 1 -name '.install-state.*' -print -quit)"
 export PATH="$OLD_PATH"

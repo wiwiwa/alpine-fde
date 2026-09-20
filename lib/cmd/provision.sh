@@ -33,6 +33,11 @@ if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
     . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../keys.sh"
 fi
 
+if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
+    # shellcheck disable=SC1090
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../firmware.sh"
+fi
+
 # --- EFI binary primitives (pure sh; byte output via awk "%c", gawk/mawk OK) ---
 
 # bin_to_hex — binary stdin → lowercase hex string
@@ -295,12 +300,18 @@ stage1  key ceremony (ADR-18):
             (expected_pcr7 pending until first boot in the final SB state).
         --mode in-chroot
             the §9.1 step-3 ceremony on the target's encrypted root volume:
-            keydir defaults to $DEBIAN_FDE_ROOT/etc/debian-fde/keys; after the
+            keydir defaults to $DEBIAN_FDE_ROOT/etc/alpine-fde/keys; after the
             packet build the release.pem is ENCRYPTED (AES-256 PBKDF2
             HMAC-SHA256, >=600000 iterations, §13 passphrase floor; ADR-18) and
             the PK/KEK/db private keys are shredded — the target keeps certs +
             packets + the encrypted release.pem ONLY. Passphrase:
             DEBIAN_FDE_KEY_PASSPHRASE or interactive prompt.
+        --enroll-efivars [DIR]
+            after the packet build, push the db/KEK/PK .auth packets into the
+            efivarfs directory DIR via fw_auth_enroll (db -> KEK -> PK, PK
+            last; SetupMode=1-gated, fail-closed 64 otherwise). Default DIR:
+            $DEBIAN_FDE_EFIVARS_DIR / $ALPINE_FDE_EFIVARS_DIR when set, else
+            the leg is skipped with an info line.
 stage2  capture live PCR 0..3+7 + Secure Boot fingerprints + event log and
         finalize the baseline (same path as `audit --init`).
 EOF
@@ -318,7 +329,7 @@ prov_keygen() {
         die "prov_keygen: openssl pkey -pubout failed for $_pk_prefix"
     openssl req -new -x509 -key "$_pk_dir/$_pk_prefix.priv.pem" \
         -out "$_pk_dir/$_pk_prefix.cert.pem" -days 3650 -sha256 \
-        -subj "/O=Debian FDE/CN=$_pk_cn" ||
+        -subj "/O=Alpine FDE/CN=$_pk_cn" ||
         die "prov_keygen: openssl req failed for $_pk_prefix"
     openssl x509 -in "$_pk_dir/$_pk_prefix.cert.pem" -outform DER -out "$_pk_dir/$_pk_prefix.cert.der" ||
         die "prov_keygen: openssl x509 -outform DER failed for $_pk_prefix"
@@ -329,6 +340,8 @@ prov_stage1() {
     # arg handling done by caller; $@ contains stage1 args from index 1
     _s1_keydir='' _s1_force=0
     _s1_revoke=''
+    _s1_enroll_efivars=0
+    _s1_efivars_dir=''
     # ADR-18/RESOLVED-2: the ceremony defaults to the offline signing medium;
     # --mode in-chroot runs the §9.1 step-3 flow on the target's encrypted root
     _s1_mode=offline
@@ -349,6 +362,18 @@ prov_stage1() {
                 esac
                 shift
                 ;;
+            --enroll-efivars)
+                # G-D5 (§8.1 provision row): the DIR argument is OPTIONAL — a
+                # following non-flag word is the directory, a flag (or end of
+                # args) falls back to the env seam at run time.
+                _s1_enroll_efivars=1
+                if [ $# -ge 2 ]; then
+                    case $2 in
+                        -*) : ;;
+                        *) _s1_efivars_dir=$2; shift ;;
+                    esac
+                fi
+                ;;
             --revoke-cert)
                 [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --revoke-cert requires an argument"
                 # L-02: accumulate NEWLINE-separated (space-joined paths would
@@ -366,8 +391,8 @@ prov_stage1() {
     if [ -z "$_s1_keydir" ] && [ "$_s1_mode" = "in-chroot" ]; then
         # ADR-18: the in-chroot ceremony lives at the target's key-holding dir
         [ -n "${DEBIAN_FDE_ROOT:-}" ] \
-            || die "stage1: --mode in-chroot requires DEBIAN_FDE_ROOT (or an explicit --keydir) — the keydir defaults to \$DEBIAN_FDE_ROOT/etc/debian-fde/keys (ADR-18)"
-        _s1_keydir="${DEBIAN_FDE_ROOT}/etc/debian-fde/keys"
+            || die "stage1: --mode in-chroot requires DEBIAN_FDE_ROOT (or an explicit --keydir) — the keydir defaults to \$DEBIAN_FDE_ROOT/etc/alpine-fde/keys (ADR-18)"
+        _s1_keydir="${DEBIAN_FDE_ROOT}/etc/alpine-fde/keys"
     fi
     if [ -z "$_s1_keydir" ]; then
         die "stage1: no key directory — pass --keydir (offline signing medium, I4) or use --mode in-chroot (ADR-18)"
@@ -406,7 +431,7 @@ prov_stage1() {
     mkdir -p "$_s1_keydir"
 
     info "generating release key (RSA-3072; the one identity for UKI + policy signatures, ADR-11)"
-    prov_keygen "$_s1_keydir" release 3072 "Debian FDE Release Key"
+    prov_keygen "$_s1_keydir" release 3072 "Alpine FDE Release Key"
     # release key also under the keys.sh convention (keys_check/sbsign/enroll
     # read release.pem/release.crt/release.pub — ADR-11 single identity)
     cp "$_s1_keydir/release.priv.pem" "$_s1_keydir/release.pem"
@@ -414,9 +439,9 @@ prov_stage1() {
     cp "$_s1_keydir/release.cert.pem" "$_s1_keydir/release.crt"
     chmod 600 "$_s1_keydir/release.pem"
     info "generating enrollment-only keys (PK, KEK, db — RSA-2048)"
-    prov_keygen "$_s1_keydir" pk 2048 "Debian FDE Platform Key"
-    prov_keygen "$_s1_keydir" kek 2048 "Debian FDE Key Exchange Key"
-    prov_keygen "$_s1_keydir" db 2048 "Debian FDE Database Key"
+    prov_keygen "$_s1_keydir" pk 2048 "Alpine FDE Platform Key"
+    prov_keygen "$_s1_keydir" kek 2048 "Alpine FDE Key Exchange Key"
+    prov_keygen "$_s1_keydir" db 2048 "Alpine FDE Database Key"
     # ESLs must embed DER certificates — fail loudly on a malformed cert (ADR-8)
     for _s1_p in release pk kek db; do
         if ! openssl x509 -inform DER -in "$_s1_keydir/$_s1_p.cert.der" -noout >/dev/null 2>&1; then
@@ -463,6 +488,31 @@ EOF
             dbx "$PROV_GUID_DBASE" "$PROV_EFI_ATTRS" "$_s1_keydir/dbx.esl" "$_s1_ts" "$_s1_keydir/dbx.auth"
     fi
 
+    # --- G-D5 (§8.1 provision row): efivarfs enrollment leg ------------------------
+    # Push the freshly built .auth packets straight into an efivarfs directory:
+    # fw_auth_enroll enrolls db -> KEK -> PK (PK LAST — a PK enrolled first
+    # would lock out the later db/KEK writes), gated on SetupMode=1 and
+    # fail-closed 64 otherwise (never a half-enrolled trust root). Explicit DIR
+    # wins; default is the host efivars when the env seam is set; a requested
+    # leg with no resolvable directory is skipped LOUDLY (info line) — never a
+    # silent no-op, never an error.
+    if [ "$_s1_enroll_efivars" -eq 1 ]; then
+        _s1_ev=$_s1_efivars_dir
+        if [ -z "$_s1_ev" ]; then
+            if [ -n "${DEBIAN_FDE_EFIVARS_DIR:-}" ]; then
+                _s1_ev=$DEBIAN_FDE_EFIVARS_DIR
+            elif [ -n "${ALPINE_FDE_EFIVARS_DIR:-}" ]; then
+                _s1_ev=$ALPINE_FDE_EFIVARS_DIR
+            fi
+        fi
+        if [ -z "$_s1_ev" ]; then
+            info "stage1: --enroll-efivars requested but no efivars directory available (DEBIAN_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR unset) — skipping the efivarfs enrollment leg"
+        else
+            info "stage1: efivarfs enrollment leg: db -> KEK -> PK from $_s1_keydir into $_s1_ev (SetupMode-gated)"
+            fw_auth_enroll "$_s1_ev" "$_s1_keydir"
+        fi
+    fi
+
     # --- ADR-18 in-chroot custody finalization (§9.1 step 6, RESOLVED-3) ---------
     # Before reboot NO plaintext signing key may remain on the target: encrypt
     # release.pem in place (PBES2 aes-256-cbc / hmacWithSHA256 / iter
@@ -497,7 +547,7 @@ EOF
         info "  — needed only for re-provisioning"
     fi
     info "firmware enrollment (CI, offline vars):"
-    printf '  virt-fw-vars --input OVMF_VARS.fd --output OVMF_VARS.debian-fde.fd \\\n' >&2
+    printf '  virt-fw-vars --input OVMF_VARS.fd --output OVMF_VARS.alpine-fde.fd \\\n' >&2
     printf '      --secure-boot --set-pk  "PK,%s" %s/pk.esl \\\n' "$PROV_GUID_GLOBAL" "$_s1_keydir" >&2
     printf '      --set-kek "KEK,%s" %s/kek.esl --set-db "db,%s" %s/db.esl\n' "$PROV_GUID_GLOBAL" "$_s1_keydir" "$PROV_GUID_DBASE" "$_s1_keydir" >&2
     info "firmware enrollment (real hardware): copy pk.esl/kek.esl/db.esl (+ .auth packets) to a"

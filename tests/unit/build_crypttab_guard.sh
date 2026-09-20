@@ -41,9 +41,9 @@ KVER=6.12.8-1-amd64
 ROOT="$TMP/root"
 ESP="$TMP/esp"
 CALLS="$TMP/initramfs.calls"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
-cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/debian-fde/cmdline.txt"
+cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/alpine-fde/cmdline.txt"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
 
 # recording INITRAMFS_CMD stub: appends the kver per invocation, writes output
@@ -78,12 +78,12 @@ build() {
 }
 
 # --- 1. crypttab missing entirely --------------------------------------------------
-rm -f "$ROOT/etc/crypttab" "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$ROOT/etc/crypttab" "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 1: missing crypttab fails closed (64)" 64 $?
-assert_file_exists "crypttab 1: ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "crypttab 1: ADR-8 marker persisted" "$ROOT/etc/alpine-fde/build-failed"
 assert_contains "crypttab 1: marker names the crypttab guard" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "crypttab guard"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "crypttab guard"
 assert_eq "crypttab 1: initramfs builder never invoked" "0" "$(calls)"
 assert_eq "crypttab 1: no ESP mutation" "" "$(find "$ESP" -type f -name '*.efi' -print)"
 
@@ -92,11 +92,11 @@ printf '%s\n' \
     '# root UUID=11111111-1111-1111-1111-111111111111 none luks,tpm2-device=auto,discard' \
     'root UUID=22222222-2222-2222-2222-222222222222 none luks,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 2: root line without tpm2-device= fails closed (64)" 64 $?
 assert_contains "crypttab 2: marker names the missing tpm2-device option" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "tpm2-device"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "tpm2-device"
 assert_eq "crypttab 2: initramfs builder never invoked" "0" "$(calls)"
 
 # --- 3. tpm2-device= only on a non-root line ----------------------------------------
@@ -114,12 +114,12 @@ printf '%s\n' \
     '# comment lines ignored' \
     'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 4: compliant crypttab lets the build succeed" 0 $?
 assert_eq "crypttab 4: initramfs builder invoked at least once" "1" "$(calls)"
-assert_file_exists "crypttab 4: UKI installed" "$ESP/EFI/Linux/debian-fde-$KVER.efi"
-assert_file_absent "crypttab 4: failure marker cleared" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "crypttab 4: UKI installed" "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
+assert_file_absent "crypttab 4: failure marker cleared" "$ROOT/etc/alpine-fde/build-failed"
 
 # --- 5. RAID1 crypttab (root1/root2, tpm2-device + password-cache) -> proceeds ------
 printf '%s\n' \
@@ -127,7 +127,7 @@ printf '%s\n' \
     'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
     'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 5: RAID1 root1/root2 with tpm2-device+password-cache passes" 0 $?
 assert_eq "crypttab 5: initramfs builder invoked" "1" "$(calls)"
@@ -137,11 +137,11 @@ printf '%s\n' \
     'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
     'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,password-cache=yes,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 6: RAID1 member without tpm2-device= fails closed (64)" 64 $?
 assert_contains "crypttab 6: marker names the missing tpm2-device option" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "tpm2-device"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "tpm2-device"
 assert_eq "crypttab 6: initramfs builder never invoked" "0" "$(calls)"
 
 # --- 7. RAID1 members WITHOUT password-cache=yes -> fails closed ---------------------
@@ -149,18 +149,18 @@ printf '%s\n' \
     'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,discard' \
     'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 7: RAID1 members without password-cache=yes fail closed (64)" 64 $?
 assert_contains "crypttab 7: marker names the missing password-cache option" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "password-cache"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "password-cache"
 assert_eq "crypttab 7: initramfs builder never invoked" "0" "$(calls)"
 
 # --- 8. single-disk entry WITH password-cache=yes -> passes (allowed, not required) --
 printf '%s\n' \
     'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,password-cache=yes,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 8: single-disk entry MAY carry password-cache=yes" 0 $?
 assert_eq "crypttab 8: initramfs builder invoked" "1" "$(calls)"
@@ -170,7 +170,7 @@ printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' >"$TMP/debian-fde.conf"
 printf '%s\n' \
     'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 9: BCACHE=1 with a single root entry (bcache shape) passes" 0 $?
 assert_eq "crypttab 9: initramfs builder invoked" "1" "$(calls)"
@@ -180,11 +180,11 @@ printf '%s\n' \
     'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
     'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
     >"$ROOT/etc/crypttab"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "crypttab 10: BCACHE=1 refuses a multi-entry (RAID1) crypttab (64)" 64 $?
 assert_contains "crypttab 10: marker names the bcache single-entry requirement" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "bcache"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "bcache"
 assert_eq "crypttab 10: initramfs builder never invoked" "0" "$(calls)"
 rm -f "$TMP/debian-fde.conf" # restore the absent-conf default for later legs
 

@@ -65,6 +65,38 @@ assert_eq "btrfs argv: exact (subvolume snapshot -r /@ <root>/.snapshots/<ts>)" 
 assert_contains "output names the created snapshot path" "$PU_OUT" "$ROOT/.snapshots/$TS"
 assert_file_exists "snapshot materialized under /.snapshots/<ts>" "$ROOT/.snapshots/$TS"
 
+# --- 3b. G-D9: fstype comes from /proc/self/mountinfo BEFORE the stat fallback ----
+# busybox stat (Alpine host, §3.1) has no `-f -c %T`: the GNU-only probe used to
+# degrade the fstype to `unknown` and SILENTLY SKIP every btrfs snapshot. The
+# mountinfo entry of the root mount is already parsed in this file for the
+# subvol — derive the fstype from it first, loud info line either way. Seam:
+# DEBIAN_FDE_MOUNTINFO overrides the mountinfo path for tests.
+# Leg 1: mountinfo says btrfs while the fixture dir is an ORDINARY directory
+# (stat would answer tmpfs/ext2 — never btrfs). The snapshot must happen: this
+# proves mountinfo takes precedence over the stat fallback.
+MI=$TMP/mountinfo.btrfs
+printf '42 41 0:42 / %s rw,relatime - btrfs /dev/sda1 rw,ssd,subvol=/@\n' "$ROOT" >"$MI"
+PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs-mi.argv" DEBIAN_FDE_ROOT="$ROOT" \
+    DEBIAN_FDE_MOUNTINFO="$MI" "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_RC=$?
+assert_eq "mountinfo btrfs -> rc 0 (snapshot, no stat needed)" "0" "$PU_RC"
+assert_contains "info line cites the mountinfo source" "$PU_OUT" "(mountinfo)"
+assert_contains "snapshot argv logged" "$(cat "$TMP/btrfs-mi.argv")" "subvolume snapshot -r"
+assert_eq "btrfs invoked exactly once (mountinfo leg)" "1" "$(wc -l <"$TMP/btrfs-mi.argv")"
+# Leg 2: mountinfo says ext4 -> graceful skip rc 0, with the loud info line
+# naming BOTH the fstype (ext4 can only have come from the fixture) and source.
+MI2=$TMP/mountinfo.ext4
+printf '43 41 0:43 / %s rw,relatime - ext4 /dev/sdb2 rw\n' "$ROOT" >"$MI2"
+PU_OUT=$(DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_MOUNTINFO="$MI2" \
+    "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_RC=$?
+assert_eq "mountinfo ext4 -> rc 0 (skip)" "0" "$PU_RC"
+assert_contains "skip message names the mountinfo-detected fstype" "$PU_OUT" \
+    "skipped (ext4 root; snapshots need btrfs, ADR-13)"
+assert_contains "ext4 info line cites the mountinfo source" "$PU_OUT" \
+    "(mountinfo)"
+unset DEBIAN_FDE_MOUNTINFO
+
 # --- 4. btrfs with /.snapshots missing -> loud 64 with the §9.1 layout hint ----------
 ROOT2="$TMP/root2"
 mkdir -p "$ROOT2"

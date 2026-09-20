@@ -56,26 +56,54 @@ assert_eq "esp_dir: conf value quotes are stripped (load_config parity)" "/efi q
 export DEBIAN_FDE_ESP="$TMP/esp"
 mkdir -p "$(esp_uki_dir)"
 for k in 6.12.8-1-amd64 6.12.10-1-amd64 6.1.0-1-amd64 5.15.0-2-amd64 6.12.9-1-amd64; do
-    printf 'dummy-uki-%s' "$k" >"$(esp_uki_dir)/debian-fde-$k.efi"
+    printf 'dummy-uki-%s' "$k" >"$(esp_uki_dir)/alpine-fde-$k.efi"
 done
 keep=$(esp_compute_keep "6.12.10-1-amd64" 2)
 assert_eq "keep set = current first, then 2 newest others by Debian version sort" \
     "$(printf '6.12.10-1-amd64\n6.12.9-1-amd64\n6.12.8-1-amd64')" "$keep"
 
+# --- G-C22: busybox-safe version sort (no `sort -V`; ADR-20 §3.1) -------------------
+# busybox sort (the Alpine host toolchain, §3.1) has NO -V. If the comparator
+# still shells out to `sort -V`, a busybox PATH silently degrades esp_compute_keep
+# to "current only" and prune deletes the rollback UKIs. Pin: with a busybox-
+# shaped `sort` stub on PATH (refuses -V, delegates everything else), both the
+# comparator and the keep-set math stay correct.
+SORT_FAKEBIN="$TMP/bin-busybox-sort"
+mkdir -p "$SORT_FAKEBIN"
+REAL_SORT=$(command -v sort)
+cat >"$SORT_FAKEBIN/sort" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+    [ "\$a" = "-V" ] && { echo "sort: unrecognized option: -V (busybox shape)" >&2; exit 1; }
+done
+exec "$REAL_SORT" "\$@"
+EOF
+chmod +x "$SORT_FAKEBIN/sort"
+SORTED=$(printf '6.12.9-1-amd64\n6.1.0-0-amd64\n6.12.10-1-amd64\n' \
+    | PATH="$SORT_FAKEBIN:$PATH" esp_version_sort)
+assert_eq "comparator: 6.12.10 > 6.12.9 > 6.1.0 without sort -V" \
+    "$(printf '6.1.0-0-amd64\n6.12.9-1-amd64\n6.12.10-1-amd64')" "$SORTED"
+SORTED2=$(printf '6.6.0-10-lts\n6.6.0-9-lts\n' | PATH="$SORT_FAKEBIN:$PATH" esp_version_sort)
+assert_eq "comparator: numeric fields compare as numbers (9 < 10, 3- vs 2-digit)" \
+    "$(printf '6.6.0-9-lts\n6.6.0-10-lts')" "$SORTED2"
+STUB_KEEP=$(PATH="$SORT_FAKEBIN:$PATH" esp_compute_keep "6.12.10-1-amd64" 2)
+assert_eq "keep set under a sort-without--V PATH: current + 2 newest others" \
+    "$(printf '6.12.10-1-amd64\n6.12.9-1-amd64\n6.12.8-1-amd64')" "$STUB_KEEP"
+
 # --- prune removes exactly the non-keep files --------------------------------------
 # shellcheck disable=SC2046  # word split intended: one kver per line
 esp_prune_ukis $(esp_compute_keep "6.12.10-1-amd64" 2)
-assert_eq "prune: kept 6.12.10" "1" "$([ -f "$(esp_uki_dir)/debian-fde-6.12.10-1-amd64.efi" ] && echo 1 || echo 0)"
-assert_eq "prune: kept 6.12.9" "1" "$([ -f "$(esp_uki_dir)/debian-fde-6.12.9-1-amd64.efi" ] && echo 1 || echo 0)"
-assert_eq "prune: kept 6.12.8" "1" "$([ -f "$(esp_uki_dir)/debian-fde-6.12.8-1-amd64.efi" ] && echo 1 || echo 0)"
-assert_eq "prune: removed 6.1.0" "0" "$([ -f "$(esp_uki_dir)/debian-fde-6.1.0-1-amd64.efi" ] && echo 1 || echo 0)"
-assert_eq "prune: removed 5.15.0" "0" "$([ -f "$(esp_uki_dir)/debian-fde-5.15.0-2-amd64.efi" ] && echo 1 || echo 0)"
+assert_eq "prune: kept 6.12.10" "1" "$([ -f "$(esp_uki_dir)/alpine-fde-6.12.10-1-amd64.efi" ] && echo 1 || echo 0)"
+assert_eq "prune: kept 6.12.9" "1" "$([ -f "$(esp_uki_dir)/alpine-fde-6.12.9-1-amd64.efi" ] && echo 1 || echo 0)"
+assert_eq "prune: kept 6.12.8" "1" "$([ -f "$(esp_uki_dir)/alpine-fde-6.12.8-1-amd64.efi" ] && echo 1 || echo 0)"
+assert_eq "prune: removed 6.1.0" "0" "$([ -f "$(esp_uki_dir)/alpine-fde-6.1.0-1-amd64.efi" ] && echo 1 || echo 0)"
+assert_eq "prune: removed 5.15.0" "0" "$([ -f "$(esp_uki_dir)/alpine-fde-5.15.0-2-amd64.efi" ] && echo 1 || echo 0)"
 
 # --- current kernel always kept even when an older version sorts lowest ------------
 export DEBIAN_FDE_ESP="$TMP/esp2"
 mkdir -p "$(esp_uki_dir)"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 6.3.0-1-amd64 6.4.0-1-amd64; do
-    printf 'dummy-%s' "$k" >"$(esp_uki_dir)/debian-fde-$k.efi"
+    printf 'dummy-%s' "$k" >"$(esp_uki_dir)/alpine-fde-$k.efi"
 done
 # running kernel is 6.1.0 (rollback to it): it must survive despite sorting oldest;
 # the retained others fill newest-first

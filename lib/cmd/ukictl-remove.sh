@@ -1,7 +1,9 @@
 #!/bin/sh
-# cmd/ukictl-remove.sh — `debian-fde ukictl remove <kver>` (gap B-G6 postrm wire):
+# cmd/ukictl-remove.sh — `debian-fde ukictl remove <kver>` (gap B-G6 wire):
 # remove one kernel's UKI from the ESP and its entry from the digest manifest.
-# Wire: /etc/kernel/postrm.d/zz-debian-fde (postrm passes the removed ABI version).
+# Wire: hooks/kernel-hooks.d/alpine-fde-remove.hook (invoked by the Alpine
+# kernel hook on remove; the APK trigger at hooks/apk/triggers/alpine-fde.trigger
+# fans kernel add/update/remove out to this toolchain).
 # Safe without the signing key — removal cannot create an unsigned-ESP state; a
 # retained manifest entry without a file is harmless (fail-closed at boot, §10).
 #
@@ -35,7 +37,7 @@ cmd_ukictl_remove_main() {
         exit "$DEBIAN_FDE_USAGE"
     fi
 
-    _ukrm_etc="${DEBIAN_FDE_ROOT:-}/etc/debian-fde"
+    _ukrm_etc="${DEBIAN_FDE_ROOT:-}/etc/alpine-fde"
     _ukrm_manifest="$_ukrm_etc/digests.json"
 
     _ukrm_path=$(esp_uki_path "$_ukrm_kver")

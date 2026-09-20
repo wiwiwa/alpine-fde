@@ -198,6 +198,12 @@ assert_eq "unconfirmed --accept -> 64" "64" "$AUD_RC"
 assert_contains "refusal says not confirmed" "$AUD_OUT" "not confirmed"
 assert_eq "unconfirmed --accept leaves baseline untouched" "$BL_SHA_BEFORE" "$(md5sum "$BL" | cut -d' ' -f1)"
 
+# --- 13b. --accept with piped ACCEPT: confirmation accepted via non-tty stdin ------
+AUD_OUT=$(printf 'ACCEPT\n' | "$REPO/bin/debian-fde" audit --accept 2>&1)
+AUD_RC=$?
+assert_eq "piped ACCEPT confirmation -> rc 0" "0" "$AUD_RC"
+assert_contains "piped ACCEPT updates baseline" "$AUD_OUT" "accepted"
+
 # --- 14. bad usage -> rc 2 ------------------------------------------------------------------------------------
 run_audit --bogus
 assert_eq "unknown flag -> usage rc 2" "2" "$AUD_RC"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# manifest.sh — /etc/debian-fde/digests.json (docs/Architecture.md §8.4, gap B-G4):
+# manifest.sh — /etc/alpine-fde/digests.json (docs/Architecture.md §8.4, gap B-G4):
 # the signed combined-policy digest set for all retained UKIs. Written by
 # `ukictl build`, consumed by enroll-tpm / audit / the test harness; bridges the
 # build→enroll hand-off including on first install.

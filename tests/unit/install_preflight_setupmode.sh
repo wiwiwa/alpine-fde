@@ -6,9 +6,13 @@
 #     (fw_sb_state over the DEBIAN_FDE_EFIVARS_DIR seam)
 #   * SetupMode=0        ⇒ fail-closed 64, "clear vendor PK in BIOS" guidance,
 #                          ZERO plan records (no destructive command executed)
-#   * SetupMode=1        ⇒ proceed (full chroot plan runs under stubs)
+#   * SetupMode=1        ⇒ proceed — the full ADR-20 unattended plan runs
+#                          under stubs: G-C23 ephemeral key, G-C25 banner,
+#                          state `installed`, G-C26 (no OsIndications)
 #   * absent efivars     ⇒ fail-closed 64
 #   * SetupMode variable absent (attrs-only/missing) ⇒ fail-closed 64
+#   * the §13 passphrase-floor preflight step is RETIRED (the floor moved to
+#     finalize — ADR-20); the run is unattended end to end
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -35,7 +39,6 @@ export DEBIAN_FDE_HOOKS_DIR=$T/hooks
 export DEBIAN_FDE_ROOT=$T/root
 export DEBIAN_FDE_TMPDIR=$T
 export DEBIAN_FDE_TEST_LOG=$T/cmd.log
-export DEBIAN_FDE_DISK_PASSPHRASE='correct-horse-battery-stapler-42'
 export DEBIAN_FDE_INSTALL_NO_REBOOT=1
 export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
 
@@ -48,13 +51,13 @@ mkdir -p "$T/stub"
 make_stub() { # NAME
     cat >"$T/stub/$1" <<EOF
 #!/bin/sh
-printf '%s %s\n' "$1" "\$*" >>"\$DEBIAN_FDE_TEST_LOG"
+printf '%s %s\n' "$1" "\$*" >>"$DEBIAN_FDE_TEST_LOG"
 exit 0
 EOF
     chmod +x "$T/stub/$1"
 }
-for s in sfdisk mkfs.btrfs mkfs.vfat mount umount debootstrap chroot \
-    apt-get useradd usermod passwd systemctl bootctl lsblk btrfs reboot; do
+for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
+    bootctl lsblk btrfs reboot chroot; do
     make_stub "$s"
 done
 cat >"$T/stub/id" <<'EOF'
@@ -72,14 +75,26 @@ esac
 exit 0
 EOF
 chmod +x "$T/stub/lsblk"
+# openssl: deterministic 256-bit hex body (G-C23 ephemeral key)
+cat >"$T/stub/openssl" <<'EOF'
+#!/bin/sh
+printf 'openssl %s\n' "$*" >>"$DEBIAN_FDE_TEST_LOG"
+case " $* " in
+    *" rand "*) printf 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' ;;
+esac
+exit 0
+EOF
+chmod +x "$T/stub/openssl"
 # cryptsetup: log only (no key-file existence check needed here)
 make_stub cryptsetup
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR"
-for h in postinst.d-zz-debian-fde postrm.d-zz-debian-fde \
-    systemd-boot-upgrade-zz-debian-fde post-update.d-zz-debian-fde; do
+mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc"
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
     chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
 done
@@ -91,7 +106,7 @@ mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte (efivars fixture)
 run_install() {
     : >"$DEBIAN_FDE_TEST_LOG"
     rm -rf "$DEBIAN_FDE_INSTALL_MNT"
-    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
     RC=$?
 }
 
@@ -114,7 +129,7 @@ assert_eq "SetupMode=0: mountpoint never created" "0" \
 # even with a target disk that would independently fail the disk check.
 # =============================================================================
 : >"$DEBIAN_FDE_TEST_LOG"
-OUT=$("$REPO/bin/debian-fde" install --disk "$T/does-not-exist.img" 2>&1)
+OUT=$("$REPO/bin/debian-fde" install --disk "$T/does-not-exist.img" 2>&1 </dev/null)
 RC=$?
 assert_eq "ordering: bad disk + SetupMode=0 -> still the SetupMode 64" "64" "$RC"
 assert_contains "ordering: SetupMode gate is FIRST (disk check not reached)" "$OUT" \
@@ -138,19 +153,26 @@ assert_eq "SetupMode variable absent: ZERO destructive commands" "0" \
     "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
 
 # =============================================================================
-# SetupMode=1 -> proceed: the full chroot plan runs under stubs
+# SetupMode=1 -> proceed: the full ADR-20 unattended plan runs under stubs
 # =============================================================================
 mkvar SetupMode 1
 
 run_install
-assert_eq "SetupMode=1 -> chroot install rc 0" "0" "$RC"
+assert_eq "SetupMode=1 -> chroot install rc 0 (unattended)" "0" "$RC"
 assert_contains "SetupMode=1: partitioning ran" "$(cat "$DEBIAN_FDE_TEST_LOG")" "sfdisk"
-assert_contains "SetupMode=1: luksFormat ran" "$(cat "$DEBIAN_FDE_TEST_LOG")" "luksFormat"
-assert_file_exists "SetupMode=1: OsIndications set post-install (§9.1)" \
-    "$DEBIAN_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL"
+assert_contains "SetupMode=1: luksFormat ran (ephemeral keyslot 0, G-C23)" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" "luksFormat"
+assert_file_exists "SetupMode=1: MOTD banner dropped (G-C25)" \
+    "$DEBIAN_FDE_INSTALL_MNT/etc/motd"
+assert_contains "SetupMode=1: MOTD banner says NOT finalized" \
+    "$(cat "$DEBIAN_FDE_INSTALL_MNT/etc/motd")" "NOT finalized"
 assert_file_exists "SetupMode=1: install-state written" \
-    "$DEBIAN_FDE_INSTALL_MNT/etc/debian-fde/install-state.json"
+    "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
 assert_contains "SetupMode=1: state=installed" \
-    "$(cat "$DEBIAN_FDE_INSTALL_MNT/etc/debian-fde/install-state.json")" '"installed"'
+    "$(cat "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
+assert_eq "SetupMode=1: NO OsIndications write (G-C26)" "0" \
+    "$(find "$DEBIAN_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
+assert_not_contains "SetupMode=1: NO passphrase-floor prompt (retired to finalize)" "$OUT" \
+    "entropy floor"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

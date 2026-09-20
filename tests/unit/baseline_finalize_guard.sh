@@ -177,7 +177,7 @@ cat >"$FAKEBIN/awk" <<EOF
 #!/bin/sh
 for _a in "\$@"; do
     case \$_a in
-        $T/root/etc/debian-fde/.baseline-finalize.*)
+        $T/root/etc/alpine-fde/.baseline-finalize.*)
             echo 'awk fault injection: staged document unwritable' >&2
             exit 2
             ;;

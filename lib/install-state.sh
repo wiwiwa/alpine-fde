@@ -1,19 +1,33 @@
 #!/bin/sh
 # install-state.sh — /etc/debian-fde/install-state.json: the install ceremony
-# state machine (§8.4, §9.1, gap G-IL1). The vocabulary is exactly
-# `installed` → `finalized` — no provisional token/state anywhere:
+# state machine (§8.4, §9.1, ADR-20; gaps G-IL1/G-D11). The vocabulary is
+# exactly `installed` → `provisional-booted` → `finalized`:
 #
-#   `installed`  Stage 1 done (chroot provisioning + reboot-to-BIOS pending);
-#                volume protected by the keyslot 0 recovery passphrase only
-#   `finalized`  Stage 3 done (Secure Boot verified, baseline final, TPM
-#                enrollment standing for every crypttab member)
+#   `installed`            Stage 1 done (unattended in-chroot provisioning +
+#                          provisional PCR-11 seal + direct reboot pending);
+#                          volume protected by the ephemeral install key plus
+#                          the provisional token
+#   `provisional-booted`   Stage 2 done (first boot unlocked via the
+#                          provisional token; Secure Boot verified ON by the
+#                          first-boot service); MOTD warning banner active;
+#                          awaiting `alpine-fde finalize`
+#   `finalized`            Stage 3 done (recovery passphrase set, release.pem
+#                          encrypted, Secure Boot verified, baseline final,
+#                          {PCR 7, PCR 11} Mechanism B token standing for
+#                          every crypttab member, MOTD cleared)
 #
 # Document schema v1 (every value quoted except schema_version):
-#   { "schema_version": 1, "state": "installed|finalized", "updated_at": "<ISO8601 UTC>" }
+#   { "schema_version": 1, "state": "installed|provisional-booted|finalized", "updated_at": "<ISO8601 UTC>" }
 #
 # Writes are ATOMIC (temp document next to the target + mv) so a crash
 # mid-write leaves the previous state readable — the §9.1 crash idempotency
 # depends on it. Library only: sourcing has no side effects.
+#
+# Also owns the ADR-20 unfinalized MOTD warning banner helpers
+# (fde_motd_banner / fde_motd_strip): `install` drops the banner into
+# /etc/motd + /etc/issue at Stage 1 step 8; `finalize` strips the exact same
+# line at Stage 3 step 4. Single source here so the two commands can never
+# drift apart.
 
 if [ -n "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
     return 0
@@ -79,16 +93,23 @@ istate_is_finalized() {
     [ "$(istate_state 2>/dev/null)" = "finalized" ]
 }
 
-# istate_write STATE — validate (installed|finalized, fail-closed 64 on
-# anything else) and atomically install the state document (temp next to the
-# target + chmod 600 BEFORE the rename — no partial document, no umask window;
-# same pattern as enrl_record / baseline finalize).
+# istate_is_provisional_booted — rc 0 iff the state reads exactly
+# `provisional-booted` (Stage 2 done, finalize pending — the ADR-20 window
+# `finalize` and `status` must recognize)
+istate_is_provisional_booted() {
+    [ "$(istate_state 2>/dev/null)" = "provisional-booted" ]
+}
+
+# istate_write STATE — validate (installed|provisional-booted|finalized,
+# fail-closed 64 on anything else) and atomically install the state document
+# (temp next to the target + chmod 600 BEFORE the rename — no partial
+# document, no umask window; same pattern as enrl_record / baseline finalize).
 istate_write() {
     _is_new=$1
     case $_is_new in
-        installed | finalized) : ;;
+        installed | provisional-booted | finalized) : ;;
         *)
-            die "istate_write: unknown install state '$_is_new' (want: installed|finalized)"
+            die "istate_write: unknown install state '$_is_new' (want: installed|provisional-booted|finalized)"
             ;;
     esac
     _is_f=$(istate_file)
@@ -114,6 +135,35 @@ istate_write() {
         rm -f "$_is_tmp"
         die "istate_write: atomic replace of $_is_f failed"
     fi
+    return 0
+}
+
+# --- ADR-20 unfinalized MOTD warning banner (Stage 1 step 8 / Stage 3 step 4) ---
+# The banner is ONE exact line so it can be dropped by `install` and stripped
+# line-exactly by `finalize` without ever touching operator content around it.
+
+# fde_motd_banner — print the unfinalized warning banner (single source;
+# consumed by `install` (write) and `finalize` (strip))
+fde_motd_banner() {
+    printf '%s\n' \
+        'WARNING: Alpine FDE trust is NOT finalized. This system boots via a provisional auto-unlock seal (PCR 11 only). Run "alpine-fde finalize" to set your permanent recovery passphrase, verify Secure Boot, and complete TPM enrollment. Until then, treat this machine as untrusted.'
+}
+
+# fde_motd_strip FILE — remove the banner line from FILE (other content
+# preserved byte-for-byte); missing FILE is a silent no-op; the rewrite is
+# atomic (temp next to the target + mv). rc 0 always: a banner that cannot be
+# stripped (unreadable file) is reported by the CALLER, never a hard stop —
+# the trust state lives in install-state.json, not in the MOTD.
+fde_motd_strip() {
+    _fms_f=$1
+    [ -n "$_fms_f" ] && [ -f "$_fms_f" ] || return 0
+    _fms_dir=${_fms_f%/*}
+    _fms_tmp=$(mktemp "$_fms_dir/.debian-fde-motd.XXXXXX") || return 0
+    grep -F -v -x -- "$(fde_motd_banner)" "$_fms_f" >"$_fms_tmp" 2>/dev/null
+    mv -f "$_fms_tmp" "$_fms_f" 2>/dev/null || {
+        rm -f "$_fms_tmp"
+        return 0
+    }
     return 0
 }
 

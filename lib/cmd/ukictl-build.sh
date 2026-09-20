@@ -1,12 +1,13 @@
 #!/bin/sh
 # cmd/ukictl-build.sh — `debian-fde ukictl build` (docs/Architecture.md §8.1, §9.2;
-# gap report B-G1/G3/G4/G5/G10/G11/G12; mechanism ladder §6.1 resolved by
-# ADR-14: Mechanism A″ (mode a2) is the ONLY pipeline mode — rungs a/ap/b are
-# documented-absent and fail closed at the policy_mode_normalize boundary).
+# gap report B-G1/G3/G4/G5/G10/G11/G12; mechanism ladder resolved by ADR-19/
+# ADR-20: Mechanism B (rung b) is the normative Alpine seal path — a2 remains
+# an accepted alias; documented-absent rungs fail closed at the
+# policy_mode_normalize boundary).
 #
 # Sequence (no partial ESP state survives a failure; ADR-8 loud failure):
 #   0. config + loud-fail precondition: release key material checked BEFORE any
-#      ESP mutation; failure persists the /etc/debian-fde/build-failed marker
+#      ESP mutation; failure persists the /etc/alpine-fde/build-failed marker
 #   1. initramfs via the lib/initramfs.sh seam (default dracut --hostonly)
 #   2. ukify build: assemble + offline PCR 11 prediction in one pass
 #      (--measure --json=short --pcr-banks=sha256 --phases=enter-initrd) and
@@ -113,7 +114,7 @@ cmd_ukictl_build_main() {
 
     # --- paths / config ---------------------------------------------------------
     _uk_root=${DEBIAN_FDE_ROOT:-}
-    _uk_etc="${_uk_root}/etc/debian-fde"
+    _uk_etc="${_uk_root}/etc/alpine-fde"
     _uk_marker="$_uk_etc/build-failed"
     _uk_manifest="$_uk_etc/digests.json"
     _uk_predictions="$_uk_etc/predictions.json"
@@ -128,19 +129,21 @@ cmd_ukictl_build_main() {
         cmd_ukictl_build_usage
         exit "$DEBIAN_FDE_USAGE"
     fi
-    # G-B3/ADR-14: the ladder is resolved — a2 is the only mode. Documented-
-    # absent rungs fail closed (64) WITH the ADR-8 marker (a build context
-    # exists here); unknown garbage stays a plain invalid-policy_mode error.
+    # G-B3/ADR-19/ADR-20: the ladder is resolved — Mechanism B (rung b) is the
+    # normative Alpine seal path; a2 / a-prime-prime / native remain accepted
+    # aliases. Documented-absent rungs fail closed (64) WITH the ADR-8 marker
+    # (a build context exists here); unknown garbage stays an invalid
+    # policy_mode error.
     _uk_pm_rc=0
     _uk_policy_mode=$(policy_mode_normalize "${POLICY_MODE:-${policy_mode:-a2}}") || _uk_pm_rc=$?
     if [ "$_uk_pm_rc" -ne 0 ]; then
         if [ "$_uk_pm_rc" -eq "$DEBIAN_FDE_FAIL_CLOSED" ]; then
             _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
-                "POLICY_MODE documented-absent (ADR-14): Mechanism A'' is the proven path; refusing to build"
-            err "ukictl build: refusing to build — see the POLICY_MODE error above (ADR-14)"
+                "POLICY_MODE documented-absent (ADR-19/ADR-20): Mechanism B (rung b) is the normative seal path; refusing to build"
+            err "ukictl build: refusing to build — see the POLICY_MODE error above (ADR-19/ADR-20)"
             exit "$DEBIAN_FDE_FAIL_CLOSED"
         fi
-        die "ukictl build: invalid policy_mode (expected: a2|a-prime-prime, native)"
+        die "ukictl build: invalid policy_mode (expected: b — a2 / a-prime-prime / native accepted as aliases; ADR-19/ADR-20)"
     fi
     _uk_retention=${RETENTION:-2}
     case $_uk_retention in
@@ -384,14 +387,16 @@ _uk_body() {
     manifest_upsert "$_uk_manifest" "$_uk_kver" "$_uk_pcr11" "$_uk_policy_digest" "$_uk_signature"
     manifest_set_meta "$_uk_manifest" "$_uk_kver" "$_uk_pubkey_fp"
 
-    # --- 6b. ENSURE-ONCE TPM enrollment (A''; §6.1/§8.1, s14 semantics, G-U1) ---------
+    # --- 6b. ENSURE-ONCE TPM enrollment (Mechanism B; §6.1/§8.1, s14 semantics,
+    # ADR-19/ADR-20, G-U1) --------------------------------------------
     # Kernel updates are TPM-free: when the LUKS2 volume already carries a
     # systemd-tpm2 token this step is a metadata read only (ZERO TPM operations)
     # and the standing enrollment's keyslot/token_id are stamped onto every
     # manifest entry (§8.4: repeated per entry — the NEW kver's upserted entry
-    # starts empty). A fresh volume gets exactly ONE enrollment (static PCR 7 +
-    # release-pubkey-signed PCR 11; §6.1 flag precision), then enrolled.json is
-    # written and the manifest records the enrollment's keyslot/token_id (§8.4).
+    # starts empty). A fresh volume gets exactly ONE Mechanism B enrollment
+    # (seal under static PCR 7 + release-pubkey-signed PCR 11; §6.1/§7.2), then
+    # enrolled.json is written and the manifest records the enrollment's
+    # keyslot/token_id (§8.4).
     # An unreachable volume is the documented precondition escape (warn + empty
     # bookkeeping). Prune (6c/7) runs only after this succeeded — an enroll
     # failure lands on the ADR-8 marker path with the pre-enroll ESP/manifest
@@ -403,7 +408,7 @@ _uk_body() {
     fi
     ENRL_ENROLLED=0
     if ! enrl_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub"; then
-        _uk_fail_reason="TPM enrollment failed (A'' ensure-once; device: ${_uk_luks_dev:-<none>})${ENRL_FAIL_REASON:+: $ENRL_FAIL_REASON}"
+        _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: ${_uk_luks_dev:-<none>})${ENRL_FAIL_REASON:+: $ENRL_FAIL_REASON}"
         err "ukictl build: $_uk_fail_reason"
         return 1
     fi

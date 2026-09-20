@@ -48,9 +48,10 @@ sp_cmd_dir() {
     printf '%s\n' "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}"
 }
 
-# sp_etc_dir — <root>/etc/debian-fde (root empty → absolute /etc/debian-fde)
+# sp_etc_dir — <root>/etc/alpine-fde (root empty → absolute /etc/alpine-fde;
+# ADR-20 §8.4 clean rename — no legacy fallback)
 sp_etc_dir() {
-    printf '%s/etc/debian-fde\n' "${DEBIAN_FDE_ROOT:-}"
+    printf '%s/etc/alpine-fde\n' "${DEBIAN_FDE_ROOT:-}"
 }
 
 sp_baseline_file() { printf '%s/baseline.json\n' "$(sp_etc_dir)"; }
@@ -116,7 +117,7 @@ sbverify_boot_binaries() {
     # M-1: on the installed target the signing medium is offline (I4) and
     # `install` writes no debian-fde.conf — without this fallback the §8.3
     # boot-manager check would be permanently dormant exactly where it matters
-    # most. The cert path recorded at provision (§8.4, /etc/debian-fde/keys/)
+    # most. The cert path recorded at provision (§8.4, /etc/alpine-fde/keys/)
     # is read back when the env-based resolution points at nothing.
     if [ ! -f "$_sv_cert" ] && [ -r "$(sp_baseline_file)" ]; then
         _sv_bl_cert=$(baseline_get_in "$(sp_baseline_file)" keys release_cert_path)
@@ -141,7 +142,7 @@ sbverify_boot_binaries() {
         return 0
     fi
     if ! command -v sbverify >/dev/null 2>&1; then
-        printf 'sbverify: not installed (apt-get install sbsigntool) — skipped\n'
+        printf 'sbverify: not installed (apk add sbsigntool) — skipped\n'
         return 0
     fi
     for _sv_pair in \

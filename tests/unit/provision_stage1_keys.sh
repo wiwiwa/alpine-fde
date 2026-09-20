@@ -148,6 +148,11 @@ assert_file_exists "stage1 wrote baseline" "$BL"
 assert_rc "stage1 baseline validates" 0 baseline_validate "$BL"
 assert_eq "baseline expected_pcr7 pending" "pending" "$(baseline_get "$BL" expected_pcr7)"
 assert_eq "baseline keys.release_pub_path" "$T/keys/release.pub" "$(baseline_get_in "$BL" keys release_pub_path)"
+# G-D8: cert subjects carry the Alpine identity (format-tolerant: openssl 1/3
+# print subjects differently, the DN strings themselves are pinned)
+SUBJ=$(openssl x509 -in "$T/keys/release.crt" -noout -subject)
+assert_contains "release cert subject names Alpine FDE" "$SUBJ" "Alpine FDE Release Key"
+assert_not_contains "release cert subject carries no Debian remnant" "$SUBJ" "Debian"
 # refuse overwrite without --force
 RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 refuses existing keydir (rc 64)" "64" "$RC"
@@ -289,8 +294,86 @@ RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-norevoke" ) >/
 assert_eq "stage1 without --revoke-cert rc 0" "0" "$RC"
 assert_eq "no dbx.esl without --revoke-cert" "0" "$([ -e "$T/keys-norevoke/dbx.esl" ] && echo 1 || echo 0)"
 
+# --- G-D5 (§8.1 provision row): stage1 --enroll-efivars [DIR] -----------------------
+# stage1 can push the freshly built .auth packets straight into an efivarfs
+# directory via fw_auth_enroll: db -> KEK -> PK (PK LAST — a PK enrolled first
+# would lock out the later db/KEK writes on real firmware), gated on
+# SetupMode=1 (fail-closed 64 when SetupMode=0). Default DIR: the host efivars
+# when DEBIAN_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR is set; skipped with an
+# info line when the leg is requested but no directory resolves.
+E5_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
+E5_GUID_DBASE='d719b2cb-3d3a-4596-a3bc-dad00e67656f'
+mk_efivars() { # DIR SETUPMODE_BYTE
+    mkdir -p "$1"
+    # two-step printf (status_report mkvar idiom): the inner printf emits the
+    # octal ESCAPE TEXT, the outer printf interprets it as the raw byte
+    printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$1/SetupMode-$E5_GUID_GLOBAL"
+}
+# leg 1: explicit DIR, SetupMode=1 -> rc 0, all three vars enrolled, PK last
+E5=$T/enroll-efivars
+mk_efivars "$E5" 1
+E5_OUT=$(env -u DEBIAN_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/debian-fde" \
+    provision stage1 --keydir "$T/keys-e5" --enroll-efivars "$E5" 2>&1)
+E5_RC=$?
+assert_eq "stage1 --enroll-efivars DIR rc 0" "0" "$E5_RC"
+assert_file_exists "enrolled: db (image-security database namespace)" \
+    "$E5/db-$E5_GUID_DBASE"
+assert_file_exists "enrolled: KEK (global namespace)" "$E5/KEK-$E5_GUID_GLOBAL"
+assert_file_exists "enrolled: PK (global namespace)" "$E5/PK-$E5_GUID_GLOBAL"
+E5_DB=$(printf '%s\n' "$E5_OUT" | grep -n 'enrolled db ' | cut -d: -f1)
+E5_KEK=$(printf '%s\n' "$E5_OUT" | grep -n 'enrolled KEK ' | cut -d: -f1)
+E5_PK=$(printf '%s\n' "$E5_OUT" | grep -n 'enrolled PK ' | cut -d: -f1)
+if [ -n "$E5_DB" ] && [ -n "$E5_KEK" ] && [ -n "$E5_PK" ] \
+    && [ "$E5_DB" -lt "$E5_KEK" ] && [ "$E5_KEK" -lt "$E5_PK" ]; then
+    assert_eq "enrollment order db -> KEK -> PK (PK last)" "ok" "ok"
+else
+    assert_eq "enrollment order db -> KEK -> PK (PK last)" "db<KEK<PK" \
+        "${E5_DB:-?}<${E5_KEK:-?}<${E5_PK:-?}"
+fi
+# leg 2: flag without DIR, env seam set -> enrolls into the env directory
+E5B=$T/enroll-efivars-env
+mk_efivars "$E5B" 1
+E5B_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR DEBIAN_FDE_EFIVARS_DIR="$E5B" \
+    "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5b" --enroll-efivars ) \
+    >/dev/null 2>&1; echo $? )
+assert_eq "stage1 --enroll-efivars (no DIR) uses DEBIAN_FDE_EFIVARS_DIR" "0" "$E5B_RC"
+assert_file_exists "env-seam leg: PK enrolled into the env directory" \
+    "$E5B/PK-$E5_GUID_GLOBAL"
+# leg 3: ALPINE_FDE_EFIVARS_DIR spelling works too
+E5C=$T/enroll-efivars-alpine
+mk_efivars "$E5C" 1
+E5C_RC=$( ( env -u DEBIAN_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5C" \
+    "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5c" --enroll-efivars ) \
+    >/dev/null 2>&1; echo $? )
+assert_eq "stage1 --enroll-efivars honors ALPINE_FDE_EFIVARS_DIR" "0" "$E5C_RC"
+assert_file_exists "ALPINE spelling: PK enrolled" "$E5C/PK-$E5_GUID_GLOBAL"
+# leg 4: SetupMode=0 -> fail-closed 64, nothing enrolled (no half trust root)
+E5D=$T/enroll-efivars-setup0
+mk_efivars "$E5D" 0
+E5D_RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5d" \
+    --enroll-efivars "$E5D" ) >/dev/null 2>&1; echo $? )
+assert_eq "stage1 --enroll-efivars with SetupMode=0 -> 64" "64" "$E5D_RC"
+assert_eq "SetupMode=0: nothing enrolled (fail-closed before any write)" "0" \
+    "$([ -e "$E5D/db-$E5_GUID_DBASE" ] && echo 1 || echo 0)"
+# leg 5: leg requested, no DIR, no env -> rc 0 with the loud skip info line
+E5E_OUT=$(env -u DEBIAN_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/debian-fde" \
+    provision stage1 --keydir "$T/keys-e5e" --enroll-efivars 2>&1)
+E5E_RC=$?
+assert_eq "stage1 --enroll-efivars without any efivars dir -> rc 0 (skip)" "0" "$E5E_RC"
+assert_contains "skip is announced with an info line" "$E5E_OUT" \
+    "skipping the efivarfs enrollment leg"
+# leg 6: flag NOT given -> no leg at all (no enrollment, no skip line)
+E5F=$T/enroll-efivars-notrequested
+mk_efivars "$E5F" 1
+E5F_OUT=$(DEBIAN_FDE_EFIVARS_DIR="$E5F" "$REPO/bin/debian-fde" \
+    provision stage1 --keydir "$T/keys-e5f" 2>&1)
+E5F_RC=$?
+assert_eq "stage1 without --enroll-efivars rc 0" "0" "$E5F_RC"
+assert_eq "no flag: nothing enrolled even with env set" "0" \
+    "$([ -e "$E5F/PK-$E5_GUID_GLOBAL" ] && echo 1 || echo 0)"
+
 # --- ADR-18/G-KC3: provision stage1 --mode in-chroot|offline (default offline) ------
-# in-chroot mode: keydir defaults to $DEBIAN_FDE_ROOT/etc/debian-fde/keys; the
+# in-chroot mode: keydir defaults to $DEBIAN_FDE_ROOT/etc/alpine-fde/keys; the
 # ceremony REQUIRES encryption at the end (keys_encrypt_release, PBES2
 # aes-256-cbc/hmacWithSHA256/iter 600000) and SHREDS the pk/kek/db (+release
 # duplicate) plaintext private keys after the ESL/auth-packet build — the
@@ -306,8 +389,8 @@ assert_eq "stage1 --mode garbage -> usage rc 2" "2" "$RC"
 # the in-chroot ceremony end-to-end with the env credential seam (RESOLVED-4)
 IC_OUT=$(DEBIAN_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/debian-fde" provision stage1 --mode in-chroot 2>&1)
 IC_RC=$?
-assert_eq "stage1 --mode in-chroot rc 0 (default keydir = \$DEBIAN_FDE_ROOT/etc/debian-fde/keys)" "0" "$IC_RC"
-ICK="$DEBIAN_FDE_ROOT/etc/debian-fde/keys"
+assert_eq "stage1 --mode in-chroot rc 0 (default keydir = \$DEBIAN_FDE_ROOT/etc/alpine-fde/keys)" "0" "$IC_RC"
+ICK="$DEBIAN_FDE_ROOT/etc/alpine-fde/keys"
 assert_file_exists "in-chroot: release.pem at the default keydir" "$ICK/release.pem"
 assert_eq "in-chroot: release.pem is ENCRYPTED (ADR-18)" "0" "$(enc_rc "$ICK/release.pem")"
 assert_eq "in-chroot: encrypted release.pem mode 600" "600" "$(stat -c %a "$ICK/release.pem")"

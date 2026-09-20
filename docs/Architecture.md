@@ -169,7 +169,7 @@ The policy is the design's core trick — **resolved to a systemd/ukify-native c
 
 ### 6.1 Mechanism decision ladder (spike, first implementation task)
 
-**Status (resolved, ADR-14):** Mechanism A″ is PROVEN and is the **only pipeline mode** — in code, `policy_mode_normalize` (lib/common.sh) rejects rungs a/ap/b fail-closed (exit 64, "documented-absent") at every entry point (`ukictl build`, `enroll-tpm`, …). `pcrsign` ships as a standalone, fully unit-tested CLI with **no pipeline consumer** under A″ (ukify embeds each UKI's `.pcrsig` natively); it is kept for the §6.1.1 contract tests, manual re-sign tooling, and future deliberate rung work. The rung descriptions below are retained as design documentation.
+**Status (resolved, ADR-14; superseded by ADR-19/ADR-20):** Mechanism A″ is PROVEN, and on Alpine the normative pipeline mode is **Mechanism B (rung b)** per ADR-19/ADR-20 (`systemd-cryptenroll` is not packaged on Alpine, so the cryptenroll rungs are unavailable). In code, `policy_mode_normalize` (lib/common.sh) accepts `b` as canonical (A″'s `a2` remains an accepted alias — same policy construction) and still rejects rungs a/ap fail-closed (exit 64) at every entry point (`ukictl build`, `enroll-tpm`, …). `pcrsign` ships as a standalone, fully unit-tested CLI; its signature construction is unchanged and consumed by the Mechanism B seal path. The rung descriptions below are retained as design documentation.
 
 **Mechanism A″ (preferred — standard stub/ukify, zero custom crypto):** the static-7 + signed-11 construction above. Spike on a swtpm guest (systemd 257.x / Alpine equivalent): enroll → happy boot shows `Adding PCR signature policy.` sentinel → SB-off boot falls back to prompt → **kernel update with zero TPM operations boots passwordless** (H-G7: token-digest gating is release-sensitive — if the token stores a digest list, the trigger falls back to conditional re-enroll while the signing key is mounted).
 
@@ -312,9 +312,7 @@ The lifecycle is modeled as an explicit, crash-safe state machine: `installed` �
    * `systemd-efistub` measures UKI sections into **PCR 11**.
    * In the initramfs, the early-boot unseal hook evaluates the **Provisional Token** in keyslot 1 against PCR 11 and unseals the root container **100% automatically with zero password prompts**.
    * System mounts root and boots directly into OpenRC multi-user login.
-   * First-boot service `/etc/init.d/alpine-fde-finalize` checks firmware Secure Boot state:
-     - If Secure Boot is ON (`setup_mode == 0 && secureboot == 1`): transitions state to **`provisional-booted`**.
-     - If Secure Boot is OFF: halts fail-closed (`exit 64`) with actionable instructions to enable Secure Boot in BIOS.
+   * First-boot service `/etc/init.d/alpine-fde-finalize` is ADVISORY ONLY (ADR-20 resolution): it prints the current Secure Boot state plus finalize guidance and always exits 0 — it never blocks boot, never enrolls, and never wipes; the fail-closed Secure Boot gate lives in the guided `alpine-fde finalize` command (Stage 3).
    * The login prompt displays the active MOTD reminder banner instructing the operator to run `alpine-fde finalize`.
 
 3. **Stage 3: Trust Finalization (`alpine-fde finalize`):**

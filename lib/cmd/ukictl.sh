@@ -18,7 +18,8 @@ Verbs:
                                 build (alias of enroll-tpm; TPM-clear
                                 recovery) — passes through its flags
   remove <kver>                 remove that kernel's UKI and manifest entry
-                                (wire: /etc/kernel/postrm.d/zz-debian-fde)
+                                (wire: hooks/kernel-hooks.d/alpine-fde-remove.hook
+                                + hooks/apk/triggers/alpine-fde.trigger)
 EOF
 }
 

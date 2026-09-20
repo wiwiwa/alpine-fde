@@ -1,14 +1,34 @@
 #!/bin/sh
-# install.sh — `debian-fde install`: guided disk setup + minimal Debian rootfs +
-# the §9.1 Stage-1 ceremony (chroot provisioning + single-reboot finalization).
+# install.sh — `alpine-fde install`: fully automated unattended Stage-1
+# install (§9.1/ADR-20): partition + block layer, LUKS2 keyslot 0 formatted
+# with the internal ephemeral install key (never persisted, I1), minimal
+# Alpine rootfs (§3.3 apk populate), and the in-chroot provisioning ceremony
+# ending in a provisional TPM token (PCR 11 only) + direct reboot to disk.
 #
 # TOPOLOGIES (§4.1):
-#   single  --disk DISK                      ESP p1 + LUKS2 p2, Btrfs default
-#   bcache  --disk BACKING --bcache CACHE    ESP p1 + cache p2 on CACHE, backing
-#                                            p1 on BACKING, /dev/bcache0 under
-#                                            LUKS2, writethrough pinned (ADR-17)
-#   raid1   --disk D1 --disk D2 [--disk Dn]  D1: ESP p1 + LUKS p2; Dn: LUKS p1
-#                                            only; mkfs.btrfs -d raid1 -m raid1
+#   single       --disk DISK                       ESP p1 + LUKS2 p2, Btrfs
+#   bcache       --disk BACKING --bcache CACHE     ESP p1 + cache p2 on CACHE,
+#                                                  backing p1 on BACKING,
+#                                                  /dev/bcache0 under LUKS2,
+#                                                  writethrough pinned (ADR-17)
+#   bcache-multi --disk D1 --disk D2 --bcache C    shared cache set on C p2,
+#                                                  backing p1 per disk, ONE
+#                                                  independent LUKS2 container
+#                                                  per /dev/bcacheN, btrfs
+#                                                  raid1 pool across members,
+#                                                  ESP only on the cache dev
+#   raid1        --disk D1 --disk D2 [--disk Dn]   D1: ESP p1 + LUKS p2;
+#                                                  Dn: LUKS p1 only;
+#                                                  mkfs.btrfs -d raid1 -m raid1
+#
+# SLOT CONTRACT (ADR-20 keyslot choreography, §8.1 finalize row; consumed by
+# finalize's slot discovery — NO marker is ever written to disk):
+#   keyslot 0 = internal ephemeral install key (luksFormat --key-slot 0)
+#   keyslot 1 = provisional token slot (Mechanism B, PCR 11 only)
+# finalize adds the operator recovery passphrase to the NEXT FREE keyslot
+# (authorized by the handed-over ephemeral key) and then kills keyslot 0 (the
+# ephemeral slot) on EVERY member container — leaving exactly ONE passphrase
+# slot beyond the token-referenced slots (the recovery slot).
 #
 # RUNNER SEAM (DEBIAN_FDE_INSTALL_RUNNER):
 #   dry-run (default)  print the complete action plan, execute nothing
@@ -21,7 +41,7 @@
 # host-side at $MNT (chroot) or emitted as guest printf lines (qemu).
 #
 # DEBIAN_FDE_INSTALL_NO_REBOOT=1 (or --no-reboot) suppresses the final reboot
-# record (CI seam): the plan ends after teardown.
+# record (CI seam): the plan ends after teardown + ephemeral-key scrub.
 
 if [ -n "${DEBIAN_FDE_INSTALL_LOADED:-}" ]; then
   return 0
@@ -47,7 +67,9 @@ if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
   unset _spci_state_lib
 fi
 
-# firmware seam (fw_sb_state/fw_var_write/fw_auth_enroll/fw_osindications_set)
+# firmware seam (fw_sb_state/fw_var_present/fw_efivars_dir — the §9.1
+# Setup Mode preflight gate; the OsIndications firmware trip is RETIRED,
+# ADR-20 Teardown & Direct Reboot)
 if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
   . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../firmware.sh"
@@ -57,8 +79,7 @@ SPC_INSTALL_RUNNERS='dry-run chroot qemu'
 
 inst_runner() { printf '%s\n' "${DEBIAN_FDE_INSTALL_RUNNER:-dry-run}"; }
 inst_mnt() { printf '%s\n' "${DEBIAN_FDE_INSTALL_MNT:-/mnt}"; }
-inst_suite() { printf '%s\n' "${DEBIAN_FDE_SUITE:-trixie}"; }
-inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-http://deb.debian.org/debian}"; }
+inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"; }
 # --- resolved topology (§4.1): fs + bcache flags ------------------------------
 # ROOT_FS: btrfs (default) | ext4. BCACHE: 0 | 1. Recorded into the target's
 # /etc/debian-fde/debian-fde.conf; an ABSENT conf file (or absent keys) means
@@ -119,23 +140,11 @@ inst_esp_size() {
 }
 inst_user() { printf '%s\n' "${DEBIAN_FDE_INSTALL_USER:-admin}"; }
 
-# inst_microcode_pkgs [CPUINFO] — CPU-vendor microcode package(s) for the apt
-# transaction, resolved HOST-side at plan-build time (I-H2: the bare chroot has
-# no /proc, so in-guest detection provably no-ops — every chroot install
-# silently got amd64-microcode, even on Intel). GenuineIntel ->
-# intel-microcode; AuthenticAMD -> amd64-microcode; unreadable/unknown -> BOTH
-# (safe superset — §3.1: microcode is security-relevant, never skip it).
-inst_microcode_pkgs() {
-  _imp_f=${1:-/proc/cpuinfo}
-  _imp_v=''
-  if [ -r "$_imp_f" ]; then
-    _imp_v=$(grep -m1 -E 'vendor_id|vendor' "$_imp_f" 2>/dev/null || true)
-  fi
-  case $_imp_v in
-  *GenuineIntel*) printf '%s\n' 'intel-microcode' ;;
-  *AuthenticAMD*) printf '%s\n' 'amd64-microcode' ;;
-  *) printf '%s\n' 'intel-microcode amd64-microcode' ;;
-  esac
+# inst_repo_lines — the /etc/apk/repositories drop (§3.3): the configured
+# mirror (main component) plus its community twin (same URL stem).
+inst_repo_lines() {
+  _irl_m=$(inst_mirror)
+  printf '%s\n' "$_irl_m" "${_irl_m%/main}/community"
 }
 
 # inst_shell_safe LABEL VALUE — M-02 boundary validation: every value below is
@@ -153,7 +162,7 @@ inst_shell_safe() {
   return 0
 }
 
-# the self-contained Debian FDE tree (parent of lib/) — hooks/ + bin/ live here
+# the self-contained FDE tree (parent of lib/) — hooks/ + bin/ live here
 inst_tree() {
   _it_lib=$(sp_cmd_dir)
   printf '%s\n' "${_it_lib%/*/*}"
@@ -183,32 +192,41 @@ inst_tooling_copy_cmd() {
 
 install_usage() {
   cat >&2 <<'EOF'
-Usage: debian-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
+Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
                           [--bcache CACHE_DEV] [--no-reboot] [--yes]
 
-Guided Stage-1 install (§9.1): firmware Setup Mode gate (SetupMode=1 required —
-clear the vendor PK in BIOS first), partition + LUKS2 (Argon2id, recovery
-passphrase keyslot 0, §13 entropy floor), Btrfs root with subvolumes
-@/@home/@snapshots (default; --fs ext4 for a flat ext4 root; snapshots are
-retained until pruned by the operator), debootstrap --variant=minbase trixie
-(§3.3), apt policy, minimal package set, then the in-chroot provisioning
-sequence (package set, pending baseline, platform-key ceremony, firmware NVRAM
-enrollment db -> KEK -> PK, signed boot manager + UKI via `ukictl build`,
-release.pem encryption, kernel hooks, install-state=installed), OsIndications
-bit 0 and a reboot straight into BIOS setup: toggle Secure Boot ON and the
-first boot finalizes (audit --init + TPM enrollment).
+Fully automated unattended Stage-1 install (§9.1/ADR-20): firmware Setup Mode
+gate (SetupMode=1 required — clear the vendor PK in BIOS first), partition +
+block layer, LUKS2 keyslot 0 formatted with the INTERNAL EPHEMERAL INSTALL
+KEY (openssl rand, >=256-bit, staged on tmpfs mode 0600, scrubbed at
+teardown — the operator is NEVER prompted during install; the recovery
+passphrase and the §13 entropy floor move to `finalize`), a
+Btrfs root with subvolumes @/@home/@snapshots (default; --fs ext4 gives a
+flat ext4 root), apk populate of a minimal Alpine base (§3.3: apk add --root
+<mnt> --initdb alpine-base, one in-chroot apk additions transaction),
+repositories/network config, then the in-chroot provisioning sequence
+(§9.1 steps 1-9): additions set, user account, pending baseline,
+platform-key ceremony, firmware NVRAM enrollment db -> KEK -> PK, bootctl
+install + signed boot manager and UKI via `ukictl build`, PROVISIONAL TPM
+token sealed into keyslot 1 (Mechanism B, PCR 11 only, from the UKI's
+.pcrsig), unfinalized MOTD/issue banner, install-state=installed — then
+teardown (unmount + ephemeral-key scrub) and a direct reboot to disk (no
+firmware trip): enable Secure Boot and run `alpine-fde finalize` at first
+login.
 
-Topologies (§4.1): --disk (repeatable for Btrfs RAID1: primary ESP+LUKS,
+Topologies (§4.1): --disk repeatable for Btrfs RAID1 (primary ESP+LUKS,
 secondaries LUKS only); --bcache CACHE_DEV for hybrid acceleration (ESP+cache
-on the cache dev, LUKS2 on /dev/bcache0, writethrough pinned). --fs ext4 is
-single-disk only.
+on the cache dev, LUKS2 on /dev/bcache0, writethrough pinned); --bcache with
+MULTIPLE --disk: shared cache set, one independent LUKS2 container per
+/dev/bcacheN, Btrfs RAID1 pool across the members, ESP only on the cache dev.
+--fs ext4 is single-disk only.
 
 Runner (DEBIAN_FDE_INSTALL_RUNNER): dry-run (default) prints the plan;
 chroot executes (root, live ISO, --yes required); qemu emits a guest script.
-Passphrase for luksFormat: DEBIAN_FDE_DISK_PASSPHRASE or interactive prompt
-(§13 entropy floor enforced). Env: DEBIAN_FDE_ESP_SIZE (default 512M),
-DEBIAN_FDE_MIRROR, DEBIAN_FDE_SUITE (default trixie), DEBIAN_FDE_INSTALL_MNT,
-DEBIAN_FDE_INSTALL_USER, DEBIAN_FDE_DISKS (dispatcher-provided disk list).
+Env: DEBIAN_FDE_ESP_SIZE (default 512M), DEBIAN_FDE_MIRROR,
+DEBIAN_FDE_INSTALL_MNT, DEBIAN_FDE_INSTALL_USER, DEBIAN_FDE_DISKS
+(dispatcher-provided disk list), DEBIAN_FDE_TMPDIR (ephemeral-key staging
+seam, default /dev/shm).
 EOF
 }
 
@@ -218,15 +236,6 @@ inst_part() {
   *[0-9]) printf '%sp%s\n' "$1" "$2" ;;
   *) printf '%s%s\n' "$1" "$2" ;;
   esac
-}
-
-# passphrase_floor_ok lives in rotate.sh; install needs it too. Source
-# rotate.sh for the shared function (include guard makes this idempotent).
-inst_ensure_passphrase_floor() {
-  if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
-    # shellcheck disable=SC1090
-    . "$(sp_cmd_dir)/rotate.sh"
-  fi
 }
 
 # --- plan records -----------------------------------------------------------
@@ -247,10 +256,10 @@ inst_plan_add() {
 }
 
 # inst_plan_write RELPATH LINE... — drop a file into the target root.
-# Config drops execute IN PLAN ORDER (§3.3: after mount + debootstrap, before
-# the first apt use): the chroot runner defers them as host plan records
-# (eager writes would land before the target is mounted, G-I1); dry-run prints
-# them; qemu emits guest printf lines.
+# Config drops execute IN PLAN ORDER (§3.3: after mount + apk populate,
+# before the first in-guest apk use): the chroot runner defers them as host
+# plan records (eager writes would land before the target is mounted, G-I1);
+# dry-run prints them; qemu emits guest printf lines.
 inst_plan_write() {
   _ipw_p=$1
   shift
@@ -294,16 +303,16 @@ inst_execute_plan() {
   case $(inst_runner) in
   chroot)
     # plan on fd3: executed commands keep the real stdin (tty) so
-    # interactive prompts (passwd, luksFormat) never eat plan lines
+    # interactive prompts never eat plan lines
     _ie_plan=$(mktemp "${DEBIAN_FDE_TMPDIR:-${TMPDIR:-/tmp}}/debian-fde-plan.XXXXXX")
     printf '%s' "$SPC_PLAN" >"$_ie_plan"
     # L-04a + WR-02: a die mid-plan must leave NOTHING behind — one
-    # combined EXIT trap scrubs the plan file AND the staged passphrase
+    # combined EXIT trap scrubs the plan file AND the staged ephemeral
     # key-file, then tears the H-02 binds down best-effort (never
     # masking the real exit code; skipped when we died before the
     # mountpoint was even resolved)
     trap '
-                rm -f "$_ie_plan" "${_ird_kf:-}" 2>/dev/null
+                rm -f "$_ie_plan" "${_ime_kf:-}" 2>/dev/null
                 if [ -n "${_im_mnt:-}" ]; then
                     umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" \
                         "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
@@ -318,8 +327,10 @@ inst_execute_plan() {
       else
         info "guest: $_ie_cmd"
         # shellcheck disable=SC2086
-        # L-04b: strip the passphrase variable at the boundary —
-        # chroot(1) passes the parent environment to the guest
+        # L-04b: strip the legacy passphrase variable at the boundary —
+        # chroot(1) passes the parent environment to the guest (the
+        # unattended flow stages no operator passphrase at all; the
+        # strip stays as defense against stale operator environments)
         chroot "$(inst_mnt)" /usr/bin/env -u DEBIAN_FDE_DISK_PASSPHRASE /bin/sh -c "$_ie_cmd" ||
           die "install: guest step failed: $_ie_cmd"
       fi
@@ -328,9 +339,9 @@ inst_execute_plan() {
     rm -f "$_ie_plan"
     ;;
   qemu)
-    _ie_out=${DEBIAN_FDE_INSTALL_SCRIPT:-/tmp/debian-fde-install-guest.sh}
+    _ie_out=${DEBIAN_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}
     {
-      printf '#!/bin/sh\n# debian-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eu\n'
+      printf '#!/bin/sh\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eu\n'
       printf '%s' "$SPC_PLAN" | while IFS='	' read -r _ie_kind _ie_cmd; do
         [ -n "$_ie_cmd" ] || continue
         if [ "$_ie_kind" = "guest" ]; then
@@ -341,7 +352,7 @@ inst_execute_plan() {
       done
     } >"$_ie_out"
     chmod 700 "$_ie_out"
-    printf 'debian-fde: guest install script written: %s\n' "$_ie_out" >&2
+    printf 'alpine-fde: guest install script written: %s\n' "$_ie_out" >&2
     ;;
   esac
   return 0
@@ -382,8 +393,8 @@ inst_baseline_members_set() {
 # runner): resolve the ESP PARTUUID, patch the fstab placeholder and populate
 # the ON-TARGET pending baseline's target.* fields. luks_uuid stays the
 # PRIMARY member's container UUID for compatibility; the full per-member list
-# rides additively in target.member_uuids (space-separated; RAID1 consumers
-# enroll/audit per member later).
+# rides additively in target.member_uuids (space-separated; RAID1/multi-bcache
+# consumers enroll/audit per member later).
 inst_resolve_target_metadata() {
   _irt_esp=$1
   _irt_mnt=$2
@@ -412,17 +423,11 @@ inst_resolve_target_metadata() {
 }
 
 # --- static package set (§3.3) — lint target for the harness -----------------
-# Topology-conditional (§3.3/§13): btrfs-progs by default, e2fsprogs for
+# The §3.3 explicit additions (Alpine): one in-chroot `apk add --no-cache`
+# transaction. Topology-conditional: btrfs-progs by default, e2fsprogs for
 # --fs ext4, bcache-tools when --bcache is given.
 install_package_list() {
-  # one transaction so linux-image-amd64's linux-initramfs-tool resolves to
-  # dracut, not initramfs-tools; microcode is appended separately (CPU-dependent);
-  # jq is the debian-fde CLI's own dependency — the /opt/debian-fde tooling copy
-  # must be runnable in-guest for the §9.1 in-chroot ceremony (§3.3)
-  # systemd-resolved ships SEPARATE from systemd on trixie (Debian 12+);
-  # the §9.1 plan enables systemd-resolved.service — without this package
-  # the guest enable step dies ("Unit ... does not exist")
-  _ipl='systemd-cryptsetup systemd-boot systemd-boot-tools systemd-ukify systemd-resolved dracut linux-image-amd64 tpm2-tools cryptsetup sbsigntool openssl zram-tools jq sudo'
+  _ipl='cryptsetup systemd-boot systemd-efistub ukify linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq'
   case $(inst_root_fs) in
   ext4) _ipl="$_ipl e2fsprogs" ;;
   *) _ipl="$_ipl btrfs-progs" ;;
@@ -453,20 +458,6 @@ inst_setupmode_gate() {
   return 0
 }
 
-# inst_bootstrap_bin — the bootstrap tool: debootstrap, or mmdebstrap as the
-# accepted alternative (§13 host tools). Neither present => debootstrap (the
-# canonical name; preflight installs it on demand, ADR-15).
-inst_bootstrap_bin() {
-  if command -v debootstrap >/dev/null 2>&1; then
-    printf '%s\n' debootstrap
-  elif command -v mmdebstrap >/dev/null 2>&1; then
-    printf '%s\n' mmdebstrap
-  else
-    printf '%s\n' debootstrap
-  fi
-  return 0
-}
-
 # inst_preflight DISKS... — fail-closed checks for a real run. ORDER IS
 # NORMATIVE (§9.1): the firmware Setup Mode gate FIRST (zero disk mutation
 # before it), then environment/tool checks.
@@ -476,91 +467,101 @@ inst_preflight() {
   for _if_disk in "$@"; do
     [ -b "$_if_disk" ] || [ -f "$_if_disk" ] || die "install: target disk not found: $_if_disk"
   done
-  # hooks/ ships FLAT templates: <name> maps to its run-parts destination
-  # (§8.3) — postinst.d-zz-debian-fde → /etc/kernel/postinst.d/zz-debian-fde
-  for _if_h in postinst.d-zz-debian-fde postrm.d-zz-debian-fde \
-    systemd-boot-upgrade-zz-debian-fde post-update.d-zz-debian-fde; do
+  # hooks/ ships the Alpine layout (ADR-13/ADR-19, G-C16): kernel-hooks.d
+  # build/remove hooks → /etc/kernel-hooks.d/, the mkinitfs unseal hook +
+  # features.d entry → /etc/mkinitfs/, the apk trigger → /etc/apk/triggers/,
+  # and the first-boot finalize ADVISORY oneshot → /etc/init.d/ (ADR-20
+  # Stage 3: `finalize` itself is a GUIDED command — the boot artifact only
+  # advises, it never runs it)
+  for _if_h in kernel-hooks.d/alpine-fde-build.hook \
+    kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     [ -f "$(inst_hooks_dir)/$_if_h" ] || die "install: hook template missing: $(inst_hooks_dir)/$_if_h"
   done
-  # §13 host tool set — topology-conditional. mmdebstrap is an accepted
-  # debootstrap alternative; sbsign/ukify are NOT host-required (the boot
-  # manager + UKI are built + signed IN-CHROOT by ukictl build, §9.1 step 5).
-  require_pkgs sfdisk:util-linux cryptsetup:cryptsetup mkfs.vfat:dosfstools \
-    lsblk:util-linux
+  # §13 host tool set — topology-conditional. apk populates the rootfs;
+  # openssl generates the ephemeral install key; sbsign/ukify are NOT
+  # host-required (the boot manager + UKI are built + signed IN-CHROOT by
+  # ukictl build, §9.1 step 5).
+  require_pkgs apk:apk-tools sfdisk:util-linux cryptsetup:cryptsetup \
+    mkfs.vfat:dosfstools lsblk:util-linux openssl:openssl
   case $(inst_root_fs) in
   ext4) require_pkgs mkfs.ext4:e2fsprogs ;;
   *) require_pkgs mkfs.btrfs:btrfs-progs ;;
   esac
-  if ! command -v debootstrap >/dev/null 2>&1 && ! command -v mmdebstrap >/dev/null 2>&1; then
-    require_pkgs debootstrap:debootstrap
-  fi
   if [ "$(inst_bcache)" = "1" ]; then
     require_pkgs make-bcache:bcache-tools
   fi
   return 0
 }
 
-# inst_read_passphrase PROMPT — read one passphrase line from stdin without
-# echo (stty -echo when stdin is a tty); prompt on stderr, value on stdout.
-inst_read_passphrase() {
-  _irp_prompt=$1
-  printf '%s' "$_irp_prompt" >&2
-  _irp_restore=0
-  if [ -t 0 ] && stty -echo 2>/dev/null; then
-    _irp_restore=1
-  fi
-  _irp_val=''
-  IFS= read -r _irp_val || _irp_val=''
-  if [ "$_irp_restore" = 1 ]; then
-    stty echo 2>/dev/null
-  fi
-  printf '\n' >&2
-  printf '%s' "$_irp_val"
-  return 0
-}
-
-# inst_resolve_disk_passphrase — the §13 passphrase contract: env variable or
-# interactive no-echo prompt (asked twice); BOTH paths pass passphrase_floor_ok
-# before a key-file for scripted luksFormat/open is staged. Sets the global
-# _IRD_KEYFILE to the staged key-file path (empty for dry-run) and returns rc;
-# dies 2 on floor violation.
-# BR-01: callers MUST invoke this DIRECTLY — never in command substitution.
-# The EXIT trap scrubbing the key-file has to be armed in the MAIN shell; a
-# subshell call (`x=$(inst_resolve_disk_passphrase)`) fired the trap at
-# subshell exit, deleting the key-file before any plan step ran, and the
-# unset of DEBIAN_FDE_DISK_PASSPHRASE never reached the caller.
-inst_resolve_disk_passphrase() {
-  _IRD_KEYFILE=''
+# inst_stage_ephemeral_key — G-C23 (§9.1 Stage 1 LUKS2 creation, ADR-20):
+# generate the INTERNAL EPHEMERAL INSTALL KEY (openssl rand, 256-bit hex) and
+# stage it under the tmpfs seam (${DEBIAN_FDE_TMPDIR:-/dev/shm}), mode 0600.
+# The key is the ONLY credential of keyslot 0 between luksFormat and finalize:
+# it drives luksFormat --key-slot 0 and every `cryptsetup open` via --key-file
+# (the existing key-file staging machinery), and the provisional enrollment's
+# luksAddKey authorization. The operator is NEVER prompted; the §13 recovery
+# passphrase + entropy floor move to `finalize` (Stage 3). I1: the key NEVER
+# persists — scrubbed by the explicit teardown plan record and on ANY exit
+# path by the EXIT trap armed here (BR-01: callers MUST invoke this DIRECTLY
+# in the main shell — inst_execute_plan's combined L-04a/WR-02 trap replaces
+# it mid-plan and keeps scrubbing via the ${_ime_kf:-} carrier).
+# Sets the global _IME_KEYFILE (empty for dry-run: nothing staged).
+inst_stage_ephemeral_key() {
+  _IME_KEYFILE=''
   if [ "$(inst_runner)" = "dry-run" ]; then
     return 0
   fi
-  if [ -n "${DEBIAN_FDE_DISK_PASSPHRASE:-}" ]; then
-    _ird_pass=$DEBIAN_FDE_DISK_PASSPHRASE
-  else
-    _ird_p1=$(inst_read_passphrase 'Set disk encryption passphrase (§13: >=12 chars with 3 character classes, or >=16 chars): ')
-    _ird_p2=$(inst_read_passphrase 'Repeat passphrase: ')
-    if [ -z "$_ird_p1" ] || [ "$_ird_p1" != "$_ird_p2" ]; then
-      die -r "$DEBIAN_FDE_USAGE" "install: passphrases empty or do not match"
-    fi
-    _ird_pass=$_ird_p1
+  _ime_dir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
+  _IME_KEYFILE=$(mktemp "$_ime_dir/debian-fde-ephkey.XXXXXX") ||
+    die "install: cannot stage the ephemeral install key ($_ime_dir usable?)"
+  chmod 600 "$_IME_KEYFILE"
+  if ! openssl rand -hex 32 | tr -d '\n' >"$_IME_KEYFILE"; then
+    rm -f "$_IME_KEYFILE"
+    die "install: generating the ephemeral install key failed"
   fi
-  passphrase_floor_ok "$_ird_pass" ||
-    die -r "$DEBIAN_FDE_USAGE" "install: disk passphrase below entropy floor (§13: ≥12 chars/3 classes or ≥16; not a common pattern)"
-  # M-01 (§11 I1): the plaintext passphrase lives ONLY on tmpfs — same rule
-  # as rotate.sh: DEBIAN_FDE_TMPDIR seam, default /dev/shm, NEVER /tmp
-  _IRD_KEYFILE=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-diskkey.XXXXXX")
-  printf '%s' "$_ird_pass" >"$_IRD_KEYFILE"
-  chmod 600 "$_IRD_KEYFILE"
+  _ime_len=$(wc -c <"$_IME_KEYFILE" | tr -d '[:space:]')
+  [ "$_ime_len" = "64" ] || {
+    rm -f "$_IME_KEYFILE"
+    die "install: staged ephemeral key has unexpected length ($_ime_len) — refusing"
+  }
   # scrub on any exit path; cleared after a successful execute. THIS shell:
   # inst_execute_plan's combined L-04a/WR-02 trap replaces it mid-plan, and
-  # the `${_ird_kf:-}` in that trap only expands to this key-file because we
+  # the `${_ime_kf:-}` in that trap only expands to this key-file because we
   # never left this shell (BR-01).
-  _ird_kf=$_IRD_KEYFILE
-  trap 'rm -f "$_ird_kf" 2>/dev/null' EXIT
-  # L-04b: the key-file above is the only carrier from here on — the
-  # plaintext must not ride the environment into guest steps
-  unset DEBIAN_FDE_DISK_PASSPHRASE _ird_pass
+  _ime_kf=$_IME_KEYFILE
+  trap 'rm -f "$_ime_kf" 2>/dev/null' EXIT
+  info "install: ephemeral install key staged ($_IME_KEYFILE, mode 0600, 256-bit) — never persisted (I1)"
   return 0
+}
+
+# G-C25 (§9.1 step 8): the unfinalized warning banner dropped to /etc/motd AND
+# /etc/issue on the target is the SHARED SINGLE-SOURCE line from
+# lib/install-state.sh (fde_motd_banner — consumed below at step 8 and stripped
+# line-exactly by finalize's fde_motd_strip). Exactly ONE banner definition
+# exists in the tree; install writes it, finalize strips it.
+
+# inst_provisional_enroll_line EPHEMERAL_KEYFILE MAPPER_NAME... — G-C24
+# (§9.1 step 6): the single-line GUEST command performing the provisional TPM
+# enrollment per member container, mirroring the lib guest-line pattern
+# (export cmd-dir; source the libs; call the seal contract). Mechanics:
+#   1. extract the .pcrsig from the just-built UKI (stage-1 `ukictl build`
+#      output on the ESP; objcopy section extraction, pcrsign contract)
+#   2. per member: seal_provisional (Mechanism B, PCR 11 only) -> token JSON;
+#      luksAddKey the sealed random passphrase into the token keyslot
+#      (slot contract: keyslot 0 = ephemeral install key, keyslot 1 =
+#      provisional token — token_free_slot returns 1 on the fresh container),
+#      authorized by the staged ephemeral key; then token_import
+inst_provisional_enroll_line() {
+  _pel_key=$1
+  shift
+  _pel_ms=''
+  for _pel_m in "$@"; do
+    _pel_ms="$_pel_ms $_pel_m"
+  done
+  _pel_ms=${_pel_ms# }
+  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls /efi/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && rm -rf /run/alpine-fde # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1"
 }
 
 # inst_baseline_pending_write MNT — §9.1 Stage-1 step 2: write the initial
@@ -581,11 +582,13 @@ inst_baseline_pending_write() {
   return 0
 }
 
-# inst_state_write STATE — §9.1 Stage-1 step 8: record the ceremony state
-# machine (installed → [reboot to BIOS] → finalized) in
+# inst_state_write STATE — §9.1 Stage-1 step 9: record the ceremony state
+# machine (installed → provisional-booted → finalized) in
 # <mnt>/etc/debian-fde/install-state.json. Consumes the install-state module's
 # istate_write STATE (target root via DEBIAN_FDE_ROOT, atomic write); if the
 # module is not landed, the additive documented schema is written in place.
+# NOTE (§9.1): install writes only `installed` — the `provisional-booted`
+# middle state is written by the first-boot finalize service (Stage 2).
 inst_state_write() {
   _isw_state=$1
   if command -v istate_write >/dev/null 2>&1; then
@@ -701,9 +704,6 @@ cmd_install_main() {
     inst_shell_safe '--disk' "$_im_d"
     _im_n=$((_im_n + 1))
   done
-  if [ "$INST_BCACHE" = "1" ] && [ "$_im_n" -gt 1 ]; then
-    die -r "$DEBIAN_FDE_USAGE" "install: --bcache takes exactly one backing --disk (multi-disk root requires Btrfs RAID1)"
-  fi
   if [ "$INST_ROOT_FS" = "ext4" ] && [ "$_im_n" -gt 1 ]; then
     die -r "$DEBIAN_FDE_USAGE" "install: --fs ext4 is single-disk only — multi-disk root requires Btrfs RAID1"
   fi
@@ -713,7 +713,6 @@ cmd_install_main() {
     ;;
   esac
   inst_shell_safe 'DEBIAN_FDE_INSTALL_MNT' "$(inst_mnt)"
-  inst_shell_safe 'DEBIAN_FDE_SUITE' "$(inst_suite)"
   inst_shell_safe 'DEBIAN_FDE_MIRROR' "$(inst_mirror)"
   inst_shell_safe 'DEBIAN_FDE_ESP_SIZE' "$(inst_esp_size)"
   inst_shell_safe 'DEBIAN_FDE_HOOKS_DIR' "$(inst_hooks_dir)"
@@ -734,28 +733,65 @@ cmd_install_main() {
   _im_user=$(inst_user)
   _im_topology=single
   if [ "$INST_BCACHE" = "1" ]; then
-    _im_topology=bcache
+    if [ "$_im_n" -ge 2 ]; then
+      _im_topology=bcache-multi
+    else
+      _im_topology=bcache
+    fi
   elif [ "$_im_n" -ge 2 ]; then
     _im_topology=raid1
   fi
 
-  # per-role devices (§4.1)
+  # per-role devices (§4.1). Multi-member topologies (raid1, bcache-multi)
+  # accumulate the member LUKS devices, mapper paths, mapper NAMES (the
+  # provisional-seal loop input) and container uuids; the PRIMARY member is
+  # always member 1.
   set -- $_im_disks
   _im_disk=$1
   _im_esp=$(inst_part "$_im_disk" 1)
   _im_luks=$(inst_part "$_im_disk" 2)
   _im_mapper=/dev/mapper/root-crypt
+  _im_mapper_names=root-crypt
   _im_close='cryptsetup close root-crypt'
   _im_members_devs=''
   _im_members_mappers=''
+  _im_members_names=''
   _im_members_uuids=''
   if [ "$_im_topology" = "bcache" ]; then
     _im_esp=$(inst_part "$_im_bcache" 1)
     _im_cache=$(inst_part "$_im_bcache" 2)
     _im_backing=$(inst_part "$_im_disk" 1)
     _im_luks=/dev/bcache0
+  elif [ "$_im_topology" = "bcache-multi" ]; then
+    # G-C27/§4.1 topology 4: shared cache set; one LUKS2 container per
+    # /dev/bcacheN; primary member (bcache0) = root1
+    _im_esp=$(inst_part "$_im_bcache" 1)
+    _im_cache=$(inst_part "$_im_bcache" 2)
+    _im_luks=/dev/bcache0
+    _im_mapper=/dev/mapper/root1
+    _im_mapper_names=root1
+    _im_close='cryptsetup close root1'
+    _im_i=1
+    for _im_d in $_im_disks; do
+      [ "$_im_i" -eq 1 ] && {
+        _im_i=2
+        continue
+      }
+      _im_mu=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || _im_mu="<luks-uuid-$_im_i>"
+      _im_members_devs="$_im_members_devs /dev/bcache$((_im_i - 1))"
+      _im_members_mappers="$_im_members_mappers /dev/mapper/root$_im_i"
+      _im_members_names="$_im_members_names root$_im_i"
+      _im_members_uuids="$_im_members_uuids $_im_mu"
+      _im_close="$_im_close && cryptsetup close root$_im_i"
+      _im_i=$((_im_i + 1))
+    done
+    _im_members_devs=${_im_members_devs# }
+    _im_members_mappers=${_im_members_mappers# }
+    _im_members_names=${_im_members_names# }
+    _im_members_uuids=${_im_members_uuids# }
   elif [ "$_im_topology" = "raid1" ]; then
     _im_mapper=/dev/mapper/root1
+    _im_mapper_names=root1
     _im_close='cryptsetup close root1'
     _im_i=1
     for _im_d in $_im_disks; do
@@ -767,28 +803,31 @@ cmd_install_main() {
       _im_mu=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || _im_mu="<luks-uuid-$_im_i>"
       _im_members_devs="$_im_members_devs $_im_md"
       _im_members_mappers="$_im_members_mappers /dev/mapper/root$_im_i"
+      _im_members_names="$_im_members_names root$_im_i"
       _im_members_uuids="$_im_members_uuids $_im_mu"
       _im_close="$_im_close && cryptsetup close root$_im_i"
       _im_i=$((_im_i + 1))
     done
     _im_members_devs=${_im_members_devs# }
     _im_members_mappers=${_im_members_mappers# }
+    _im_members_names=${_im_members_names# }
     _im_members_uuids=${_im_members_uuids# }
   fi
 
   info "install plan: topology=$_im_topology fs=$(inst_root_fs) disks=$_im_disks esp=$_im_esp luks=$_im_luks mnt=$_im_mnt runner=$(inst_runner)"
 
-  # --- 0. §13/T2b: passphrase resolution BEFORE any destructive step ---------
-  # entropy floor enforced on BOTH paths (env + interactive prompt asked
-  # twice); the verified passphrase is staged as a key-file so luksFormat/
-  # open run scripted (no re-prompt). BR-01: DIRECT call (no command
-  # substitution) — the resolver arms the key-file scrub trap in THIS shell.
-  inst_ensure_passphrase_floor
-  inst_resolve_disk_passphrase ||
-    die -r "$DEBIAN_FDE_USAGE" "install: cannot resolve the disk passphrase"
-  _im_lukskey=$_IRD_KEYFILE
+  # --- 0. G-C23/ADR-20: ephemeral install key staged BEFORE any destructive
+  #     step. Unattended: NO operator prompt, NO passphrase env consumption
+  #     (the §13 recovery passphrase + floor moved to finalize). BR-01:
+  #     DIRECT call (no command substitution) — the stager arms the key-file
+  #     scrub trap in THIS shell.
+  inst_stage_ephemeral_key || die "install: cannot stage the ephemeral install key"
+  _im_lukskey=$_IME_KEYFILE
   _im_keyfile_arg=''
   [ -n "$_im_lukskey" ] && _im_keyfile_arg="--key-file $_im_lukskey"
+  # plan-level display path: the real staged path (dry-run: literal
+  # placeholder — nothing is staged, nothing persists)
+  _im_lukskey_disp=${_im_lukskey:-'<ephemeral-keyfile>'}
 
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
   case $_im_topology in
@@ -804,6 +843,32 @@ cmd_install_main() {
     inst_plan_run host "echo $_im_cache > /sys/fs/bcache/register && echo $_im_backing > /sys/fs/bcache/register"
     inst_plan_run host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}') && echo \"\$CSET_UUID\" > /sys/block/bcache0/bcache/attach && echo writethrough > /sys/block/bcache0/bcache/cache_mode # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
     ;;
+  bcache-multi)
+    # G-C27/§4.1 topology 4 (18f1213): ESP p1 + SHARED cache set p2 on the
+    # fast dev; EACH backing disk partitioned into a backing set (p1); every
+    # backing device registered (/dev/bcache0, /dev/bcache1, ...) and
+    # attached to the shared cset UUID, writethrough pinned.
+    inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    for _im_d in $_im_disks; do
+      inst_plan_run host "printf 'label: gpt\nstart=2048, type=linux, name=\"backing\"\n' | sfdisk $_im_d"
+    done
+    inst_plan_run host "make-bcache -C $_im_cache"
+    for _im_d in $_im_disks; do
+      inst_plan_run host "make-bcache -B $(inst_part "$_im_d" 1)"
+    done
+    _im_reg="echo $_im_cache > /sys/fs/bcache/register"
+    for _im_d in $_im_disks; do
+      _im_reg="$_im_reg && echo $(inst_part "$_im_d" 1) > /sys/fs/bcache/register"
+    done
+    inst_plan_run host "$_im_reg"
+    _im_att=''
+    _im_i=0
+    for _im_d in $_im_disks; do
+      _im_att="$_im_att && echo \"\$CSET_UUID\" > /sys/block/bcache$_im_i/bcache/attach && echo writethrough > /sys/block/bcache$_im_i/bcache/cache_mode"
+      _im_i=$((_im_i + 1))
+    done
+    inst_plan_run host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}')$_im_att # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
+    ;;
   raid1)
     inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
     # secondaries: LUKS2 container p1 ONLY (no ESP on member disks)
@@ -817,17 +882,16 @@ cmd_install_main() {
       _im_i=$((_im_i + 1))
     done
     ;;
-esac
-# (Alpine mdev coldplug is handled by the guarded inst_wait_node_line records
-# above — a bare `mdev -s` here would die 127 on hosts without mdev.)
+  esac
 
-# --- 2. LUKS2 keyslot 0 — the permanent recovery passphrase (§9.1: NO
-  #        provisional TPM token is created during Stage 1) -------------------
-  inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # passphrase: §13 floor enforced; interactive when no key-file"
+  # --- 2. LUKS2 containers — G-C23: internal ephemeral install key, --------
+  #     keyslot 0 (unattended; see the SLOT CONTRACT at the top of this file)
+  inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 0: ephemeral install key (unattended, ADR-20)"
   inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
-  if [ "$_im_topology" = "raid1" ]; then
-    # close/rename: primary mapper is root1 in RAID1 topologies; members
-    # luksFormat/open zipped with the uuids resolved in the layout block
+  if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
+    # close/rename: primary mapper is root1 in multi-member topologies;
+    # member luksFormat/open zipped with the uuids resolved in the layout
+    # block — ONE independent LUKS2 container per member device (G-C27)
     inst_plan_run host "cryptsetup close root-crypt && cryptsetup open $_im_keyfile_arg $_im_luks root1"
     _im_i=1
     set -- $_im_members_uuids
@@ -842,7 +906,7 @@ esac
 
   # --- 3. filesystem + subvolumes (§4/§9.1) ----------------------------------
   if [ "$(inst_root_fs)" = "btrfs" ]; then
-    if [ "$_im_topology" = "raid1" ]; then
+    if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
       inst_plan_run host "mkfs.btrfs -U $_im_rootfs_uuid -d raid1 -m raid1 $_im_mapper $_im_members_mappers"
     else
       inst_plan_run host "mkfs.btrfs -U $_im_rootfs_uuid $_im_mapper"
@@ -863,24 +927,16 @@ esac
     inst_plan_run host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt/efi && mount $_im_esp $_im_mnt/efi"
   fi
 
-  # --- 4. minimal rootfs (§3.3) ---------------------------------------------
-  inst_plan_run host "$(inst_bootstrap_bin) --variant=minbase $(inst_suite) $_im_mnt $(inst_mirror)"
+  # --- 4. minimal rootfs (§3.3): apk populate replaces debootstrap -----------
+  inst_plan_run host "apk add --root $_im_mnt --initdb alpine-base"
 
   # --- 5. config drops (host-side writes; guest printf lines under qemu) -----
-  inst_plan_write /etc/apt/apt.conf.d/90debian-fde \
-    'APT::Install-Recommends "false";' \
-    'APT::Install-Suggests "false";' \
-    'Acquire::Languages "none";'
-  inst_plan_write /etc/apt/sources.list.d/debian-fde.sources \
-    'Types: deb' \
-    "URIs: $(inst_mirror)" \
-    "Suites: $(inst_suite)" \
-    'Components: main non-free-firmware' \
-    'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'
+  # §3.3: /etc/apk/repositories replaces the apt sources + dpkg trims
+  inst_plan_write /etc/apk/repositories $(inst_repo_lines)
   # §8.2 crypttab contract: single entry (single/bcache) has NO
-  # password-cache; RAID1 gets one entry PER MEMBER with password-cache=yes
-  # so the recovery passphrase is prompted only once across members.
-  if [ "$_im_topology" = "raid1" ]; then
+  # password-cache; multi-member topologies (raid1, bcache-multi) get one
+  # entry PER MEMBER with password-cache=yes.
+  if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     set -- "root1 UUID=$_im_uuid none luks,tpm2-device=auto,password-cache=yes,discard"
     _im_i=1
     for _im_u in $_im_members_uuids; do
@@ -903,23 +959,20 @@ esac
       "UUID=$_im_rootfs_uuid / ext4 defaults 0 1" \
       'PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2'
   fi
-  inst_plan_write /etc/systemd/network/20-debian-fde.network \
-    '[Match]' \
-    'Name=en* eth*' \
+  # §9.1 step 1: OpenRC networking (Alpine default: ifupdown-ng + udhcpc)
+  inst_plan_write /etc/network/interfaces \
+    'auto lo' \
+    'iface lo inet loopback' \
     '' \
-    '[Network]' \
-    'DHCP=yes'
-  # §3.3 trims: no man pages/docs/locales beyond C.UTF-8 (dpkg path-exclude)
-  inst_plan_write /etc/dpkg/dpkg.cfg.d/90debian-fde-minimal \
-    'path-exclude=/usr/share/doc/*' \
-    'path-include=/usr/share/doc/*/copyright' \
-    'path-exclude=/usr/share/man/*' \
-    'path-exclude=/usr/share/locale/*'
+    'auto eth0' \
+    'iface eth0 inet dhcp'
+  # §3.3 trims: dracut-era initrd pins are dropped verbatim (the target
+  # initramfs generator seam consumes ROOT_FS/BCACHE from the conf below)
   inst_plan_write /etc/dracut.conf.d/10-debian-fde.conf \
     'hostonly=yes' \
     'hostonly_cmdline=no' \
     'omit_dracutmodules+=" crypt "'
-  if [ "$_im_topology" = "bcache" ]; then
+  if [ "$(inst_bcache)" = "1" ]; then
     # §8.2: hostonly chroot collection cannot detect bcache ambiently —
     # force the driver + its udev registration pieces into the initrd
     inst_plan_write /etc/dracut.conf.d/20-bcache.conf \
@@ -942,10 +995,10 @@ esac
     "ROOT_FS=$(inst_root_fs)" \
     "BCACHE=$(inst_bcache)" \
     'ESP_PATH=/efi'
-  # H-02: the bare debootstrap chroot has no /proc /sys /dev — bind them
-  # before the first guest step so maintainer scripts (dracut hostonly in
-  # the apt transaction) and the guest environment behave. §9.1 also binds
-  # the efivars so the in-chroot NVRAM enrollment reaches the live firmware.
+  # H-02: the freshly populated chroot has no /proc /sys /dev — bind them
+  # before the first guest step so the in-chroot ceremony behaves. §9.1 also
+  # binds the efivars so the in-chroot NVRAM enrollment reaches the live
+  # firmware.
   inst_plan_run host "mkdir -p $_im_mnt/proc $_im_mnt/sys $_im_mnt/dev && mount -t proc proc $_im_mnt/proc && mount --bind /sys $_im_mnt/sys && mount --bind /dev $_im_mnt/dev"
   inst_plan_run host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
 
@@ -956,52 +1009,74 @@ esac
   # only ever written by our SIGNED flow (§8.3)
   inst_plan_run host "mkdir -p $_im_mnt/etc/systemd/system && ln -sf /dev/null $_im_mnt/etc/systemd/system/systemd-boot-update.service"
 
-  # --- 7. in-chroot provisioning (§9.1, STRICTLY ORDERED) --------------------
-  # step 1: apt §3.3 set + user + network services
-  inst_plan_run guest 'apt-get update'
-  # H-02: microcode resolved HOST-side and emitted as a literal — in-chroot
-  # detection provably no-ops (no /proc in the chroot)
-  inst_plan_run guest "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $(install_package_list) $(inst_microcode_pkgs)"
-  inst_plan_run guest "useradd -m -s /bin/bash $_im_user"
-  # §3.3: the admin user is created WITH its sudo grant
-  inst_plan_run guest "usermod -aG sudo $_im_user"
-  inst_plan_run guest "passwd $_im_user # interactive password prompt"
-  inst_plan_run guest 'systemctl enable systemd-networkd.service systemd-resolved.service'
+  # --- 7. in-chroot provisioning (§9.1 steps 1-9, STRICTLY ORDERED) ----------
+  # step 1: apk §3.3 additions set (one --no-cache transaction), user account
+  # (ADR-20 zero-touch: created with a LOCKED password — credentials are the
+  # operator's business at first login; no interactive passwd step exists),
+  # and OpenRC networking.
+  inst_plan_run guest "apk add --no-cache $(install_package_list)"
+  inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
+  inst_plan_run guest 'rc-update add networking boot'
   # step 2: pending baseline written ON-TARGET via the baseline writer
   inst_plan_run host "inst_baseline_pending_write $_im_mnt"
   # step 3: platform-key ceremony — PK/KEK/db + release.pem generated on the
   # encrypted root (ADR-18) by the custody flow (CLI invoked in-chroot)
-  inst_plan_run guest '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/debian-fde/keys'
+  inst_plan_run guest '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight)
-  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/debian-fde/keys'
-  # ESP layout for the in-chroot build (systemd-boot binaries from the apt
+  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
+  # ESP layout for the in-chroot build (systemd-boot binaries from the apk
   # transaction; ukictl build signs them, §9.1 step 5)
   inst_plan_run guest 'bootctl install --esp-path=/efi --boot-path=/efi'
-  # step 5: signed boot manager + initial UKI (baseline pending ⇒ enrollment
-  # skipped by the state gate — kernel updates are TPM-free either way)
+  # step 5: signed boot manager + initial UKI (baseline pending ⇒ the build's
+  # ensure-once enrollment is state-gated OFF — the PROVISIONAL seal below
+  # is the only enrollment of Stage 1)
   inst_plan_run guest '/opt/debian-fde/bin/debian-fde ukictl build'
-  # step 6: release.pem encrypted at rest before the reboot (ADR-18, I4)
-  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/keys.sh && keys_encrypt_release /etc/debian-fde/keys'
-  # step 7: kernel hooks (flat templates → run-parts destinations, §8.3)
-  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel/postinst.d $_im_mnt/etc/kernel/postrm.d $_im_mnt/etc/initramfs/post-update.d && cp $_im_hooks/postinst.d-zz-debian-fde $_im_mnt/etc/kernel/postinst.d/zz-debian-fde && cp $_im_hooks/postrm.d-zz-debian-fde $_im_mnt/etc/kernel/postrm.d/zz-debian-fde && cp $_im_hooks/systemd-boot-upgrade-zz-debian-fde $_im_mnt/etc/kernel/postinst.d/zz-debian-fde-systemd-boot-upgrade && cp $_im_hooks/post-update.d-zz-debian-fde $_im_mnt/etc/initramfs/post-update.d/zz-debian-fde && chmod +x $_im_mnt/etc/kernel/postinst.d/zz-debian-fde $_im_mnt/etc/kernel/postrm.d/zz-debian-fde $_im_mnt/etc/kernel/postinst.d/zz-debian-fde-systemd-boot-upgrade $_im_mnt/etc/initramfs/post-update.d/zz-debian-fde"
+  # step 6: PROVISIONAL TPM enrollment (G-C24) — Mechanism B, PCR 11 only,
+  # .pcrsig from the just-built UKI; keyslot 1 per member container
+  inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_mapper_names $_im_members_names)"
+  # step 7: hooks + trigger + first-boot finalize advisory (§9.1 step 7;
+  # ADR-13/ADR-19/ADR-20, G-C16 Alpine layout — flat templates copied to
+  # their run-parts destinations; the advisory oneshot ships to /etc/init.d/
+  # and is enabled for the default runlevel. ADR-20 Stage 3: `finalize` is a
+  # GUIDED command — the boot artifact NEVER runs it, it only advises.)
+  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize"
+  inst_plan_run guest 'rc-update add alpine-fde-finalize default'
   # §8.4: resolve the ESP PARTUUID into fstab + target metadata on the
   # on-target pending baseline (luks_uuid = primary; member_uuids additive)
-  if [ "$_im_topology" = "raid1" ]; then
+  if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid $_im_members_uuids"
   else
     inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid"
   fi
-  # step 8: ceremony state machine — `installed` (reboot → BIOS → finalize)
+  # step 8 (G-C25): unfinalized warning banner to /etc/motd AND /etc/issue —
+  # the shared single-source line (fde_motd_banner, lib/install-state.sh;
+  # fail closed if the module did not load). The banner is expanded LINE BY
+  # LINE into separate plan-write args — the plan file is line-oriented, so
+  # embedded newlines would corrupt it (the shared banner is exactly one line).
+  command -v fde_motd_banner >/dev/null 2>&1 ||
+    die "install: banner helper fde_motd_banner missing (lib/install-state.sh not loaded?)"
+  set --
+  while IFS= read -r _im_bl; do
+    set -- "$@" "$_im_bl"
+  done <<EOF
+$(fde_motd_banner)
+EOF
+  inst_plan_write /etc/motd "$@"
+  inst_plan_write /etc/issue "$@"
+  # step 9 (G-C28): ceremony state machine — `installed` (AFTER the banner;
+  # the provisional-booted middle state is written by the first-boot service)
   inst_plan_run host "inst_state_write installed"
-  inst_plan_run guest 'printf "debian-fde: first boot finalizes trust (§9.1): unlock with the recovery passphrase — the finalize service verifies Secure Boot ON, captures the baseline (audit --init) and enrolls the TPM\n" >> /etc/issue'
 
-  # --- 8. OsIndications bit 0 → teardown → reboot (§9.1 teardown) -----------
-  inst_plan_run host "fw_osindications_set $(fw_efivars_dir)"
+  # --- 8. teardown + scrub + DIRECT reboot (§9.1 Teardown; G-C26) -----------
+  # The OsIndications bit-0 write / reboot-into-BIOS-setup firmware trip is
+  # RETIRED (ADR-20): the plan ends with unmount, container close, the
+  # explicit ephemeral-key scrub (I1), and a plain reboot to disk.
   inst_plan_run host "umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc $_im_mnt/sys/firmware/efi/efivars && umount -R $_im_mnt && $_im_close"
+  inst_plan_run host "rm -f $_im_lukskey_disp # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
   if [ "$_im_no_reboot" = "0" ] && [ "${DEBIAN_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
-    inst_plan_run host 'reboot # §9.1: next boot enters BIOS setup — toggle Secure Boot ON'
+    inst_plan_run host 'reboot # §9.1: direct reboot to disk (ADR-20)'
   else
     info "install: reboot suppressed (DEBIAN_FDE_INSTALL_NO_REBOOT/--no-reboot) — CI seam"
   fi
@@ -1010,9 +1085,9 @@ esac
     inst_execute_plan
     trap - EXIT
     rm -f "$_im_lukskey" 2>/dev/null
-    printf 'debian-fde: install complete — the machine reboots into BIOS setup: toggle Secure Boot ON; the first boot finalizes (§9.1)\n' >&2
+    printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token; run `alpine-fde finalize` after enabling Secure Boot (§9.1/ADR-20)\n' >&2
   else
-    printf 'debian-fde: dry-run plan complete (%s) — execute with DEBIAN_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
+    printf 'alpine-fde: dry-run plan complete (%s) — execute with DEBIAN_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
   fi
   return 0
 }

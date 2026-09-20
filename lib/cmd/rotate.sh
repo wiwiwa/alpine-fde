@@ -4,8 +4,9 @@
 # re-encryption; TPM seals are untouched — no re-seal needed.
 #
 # Optional --reseat-tpm additionally wipes + re-creates the TPM enrollment in
-# ONE systemd-cryptenroll invocation (never a bare wipe — delegated to
-# enroll-tpm.sh's precondition-checked flow).
+# ONE Mechanism B sealing run (never a bare wipe — delegated to
+# enroll-tpm.sh's precondition-checked flow; ADR-19: no systemd-cryptenroll
+# anywhere — the seal is tpm2-tools + the LUKS2 token choreography).
 #
 # Passphrase floor (§13 / C-G12, enforced fail-closed):
 #   >= 12 chars with >= 3 character classes, or >= 16 chars (any classes);
@@ -75,8 +76,8 @@ Usage: debian-fde rotate [--reseat-tpm] [--dry-run]
 Change the keyslot-0 (recovery) passphrase: cryptsetup luksChangeKey on the
 baseline's LUKS device, Argon2id KDF pins preserved. The volume key and all
 TPM seals are untouched (no re-encryption, no re-seal, §9.4).
-  --reseat-tpm   additionally wipe+re-enroll the TPM seal in ONE cryptenroll
-                 invocation (enroll-tpm preconditions apply)
+  --reseat-tpm   additionally wipe+re-enroll the TPM seal in ONE Mechanism B
+                 sealing run (enroll-tpm preconditions apply; ADR-19)
 Passphrases: DEBIAN_FDE_OLD_PASSPHRASE / DEBIAN_FDE_NEW_PASSPHRASE env or
 interactive prompt. New passphrase must meet the §13 floor (>=12 chars/3
 classes or >=16 chars, no common-password blocklist hits).
@@ -253,7 +254,7 @@ cmd_rotate_main() {
     printf 'debian-fde: keyslot-0 passphrase changed (volume key and TPM seals untouched)\n' >&2
 
     if [ "$_rm_reseat" -eq 1 ]; then
-        info "re-seating the TPM seal (single wipe+enroll cryptenroll invocation)"
+        info "re-seating the TPM seal (single wipe+enroll Mechanism B run, ADR-19)"
         if [ ! -f "$(sp_cmd_dir)/enroll-tpm.sh" ]; then
             die "rotate: enroll-tpm.sh not found next to rotate.sh — cannot --reseat-tpm"
         fi

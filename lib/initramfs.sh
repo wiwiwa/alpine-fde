@@ -1,19 +1,26 @@
 #!/bin/sh
-# initramfs.sh — initramfs-builder seam (docs/Architecture.md §8.1/§8.3, B-G9).
-# `ukictl build` consumes the initrd for the kernel being built; who builds it
-# is swappable:
+# initramfs.sh — initramfs-builder seam (docs/Architecture.md §8.2/§8.3,
+# ADR-13, G-C10). `ukictl build` consumes the initrd for the kernel being
+# built; who builds it is swappable:
 #
-#   default : dracut --hostonly --force --kver <kver> <out>   (Debian trixie)
-#   override: INITRAMFS_CMD in /etc/debian-fde/debian-fde.conf — a command template
-#             in which the literal placeholders {kver} and {out} are replaced
-#             before execution, e.g.
-#               INITRAMFS_CMD="dracut --hostonly --force --kver {kver} {out}"
+#   default : mkinitfs -c /etc/mkinitfs/mkinitfs.conf -F <features> -o <out> <kver>
+#             (Alpine-native builder; ADR-13 — dracut rejected). The feature
+#             set is pinned: base, cryptsetup, the root-fs driver feature
+#             (btrfs default / ext4 per the persisted topology, §4.1) and the
+#             custom `alpine-fde` feature carrying the Early-Boot Unseal Hook
+#             and everything it needs (hooks/mkinitfs/features.d/
+#             alpine-fde.files, G-C8). Bcache artifacts ride the static
+#             features.d list — nothing topology-specific on the argv.
+#   override: INITRAMFS_CMD in /etc/alpine-fde/alpine-fde.conf — a command
+#             template in which the literal placeholders {kver} and {out} are
+#             replaced before execution, e.g.
 #               INITRAMFS_CMD="fixtures/initramfs/stub-generate.sh {out} {kver}"
-#             (sandbox/CI uses the stub: dracut output varies with host state,
-#             which would churn pcr11_digest per build; the stub is deterministic.)
+#             (sandbox/CI uses the stub: builder output varies with host
+#             state, which would churn pcr11_digest per build; the stub is
+#             deterministic.)
 #
-# Determinism contract (B-G9 seam, R3 owns the dracut module set): CI builds MUST
-# use a fixed input set so pcr11_digest is reproducible across runs.
+# Determinism contract (B-G9 seam): CI builds MUST use a fixed input set so
+# pcr11_digest is reproducible across runs.
 
 if [ -n "${DEBIAN_FDE_INITRAMFS_LOADED:-}" ]; then
     return 0
@@ -92,6 +99,15 @@ initramfs_topology() {
     return 0
 }
 
+# initramfs_features — print the pinned mkinitfs feature set for the persisted
+# topology (§4.1): base + cryptsetup + root-fs driver + alpine-fde.
+initramfs_features() {
+    initramfs_topology
+    _inf_fs=btrfs
+    [ "$INI_ROOT_FS" = "ext4" ] && _inf_fs=ext4
+    printf '%s\n' "base cryptsetup $_inf_fs alpine-fde"
+}
+
 # initramfs_build <out> <kver> — produce the initramfs for <kver> at <out>.
 initramfs_build() {
     _ini_out=$1
@@ -102,92 +118,143 @@ initramfs_build() {
         info "initramfs: INITRAMFS_CMD override: $_ini_cmd"
         sh -c "$_ini_cmd" || die "initramfs: INITRAMFS_CMD failed (rc=$?): $_ini_cmd"
     else
-        require_cmds dracut
-        # §8.2/ADR-13: pin the mandated module set — the systemd unlock path
-        # only; the legacy `crypt`/90crypt module is omitted (-m restricts the
-        # set, so no dracut-default or config-added prompt path leaks in).
-        #
-        # Topology modules ride OUTSIDE the pinned -m set (G-ST5, §8.2/§4.1):
-        # the root filesystem driver is appended via --add (add_dracutmodules)
-        # — btrfs explicitly (the default topology); ext4 needs no add (dracut
-        # hostonly collects the active rootfs driver). The bcache
-        # force_drivers/install_items wiring is NEVER passed on this argv: it
-        # rides the installer's /etc/dracut.conf.d/20-bcache.conf drop, which
-        # dracut applies on top of this invocation (nothing removed here).
-        initramfs_topology
-        _ini_add=''
-        if [ "$INI_ROOT_FS" = "btrfs" ]; then
-            _ini_add="--add btrfs"
-        fi
-        # shellcheck disable=SC2086  # deliberate word split; empty ⇒ no arg
-        dracut --hostonly --force \
-            -m "systemd systemd-cryptsetup tpm2-tss kernel-modules" \
-            $_ini_add \
-            --kver "$_ini_kver" "$_ini_out" \
-            || die "initramfs: dracut failed for kernel $_ini_kver"
+        require_cmds mkinitfs
+        # §8.3/ADR-13 (G-C10): the Alpine-native builder with the pinned
+        # feature set — cryptsetup (unlock), the root-fs driver, and the
+        # custom alpine-fde feature (the §8.2 Early-Boot Unseal Hook +
+        # features.d/alpine-fde.files payload). mkinitfs collects every file
+        # the feature lists, so nothing topology-specific rides the argv.
+        _ini_features=$(initramfs_features)
+        info "initramfs: mkinitfs features: $_ini_features"
+        mkinitfs -c /etc/mkinitfs/mkinitfs.conf \
+            -F "$_ini_features" \
+            -o "$_ini_out" "$_ini_kver" \
+            || die "initramfs: mkinitfs failed for kernel $_ini_kver"
     fi
     [ -f "$_ini_out" ] || die "initramfs: builder produced no output at $_ini_out"
 }
 
-# --- initrd inventory audit (§8.2/§12/I6) ---------------------------------------
-# The unlock artifacts are load-bearing: their absence means tokens are silently
-# ignored and every boot prompts (G2 lost). The audit runs on EVERY build and
-# any miss is a loud failure (ADR-8) naming the artifact.
+# --- initrd inventory audit (§8.2/§12/I6, G-C11 — resolution R9) -----------------
+# The unlock artifacts are load-bearing: a missing piece means boots prompt,
+# or worse, the hook cannot run at all (G2 lost). The audit runs on EVERY
+# build and any miss is a loud failure (ADR-8) naming the artifact.
+#
+# Alpine/mkinitfs shape (ADR-13): the unlock path IS the §8.2 hook — so the
+# REQUIRED set is the hook script itself plus every binary/lib/module it
+# needs (mirrors hooks/mkinitfs/features.d/alpine-fde.files, G-C8). busybox
+# and ash are ALLOWED: busybox IS the mkinitfs init framework (ADR-13); the
+# "no interactive shell" guarantee moved to hook level — the unseal hook
+# never offers one and its own unit test proves it (G-C8, resolution R9).
 
-# Required unlock artifacts (§8.2):
-_INITRD_AUDIT_TOKEN_LIB="usr/lib/x86_64-linux-gnu/systemd/libcryptsetup-token-systemd-tpm2.so"
+# Required unlock artifacts (§8.2/G-C8): the hook + its exact tpm2 verbs.
+_INITRD_AUDIT_HOOK="alpine-fde-unseal.sh"
+_INITRD_AUDIT_CRYPT="cryptsetup openssl"
+_INITRD_AUDIT_TPM2_BINS="tpm2_pcrextend tpm2_startauthsession tpm2_policypcr \
+tpm2_policyauthorize tpm2_loadexternal tpm2_verifysignature tpm2_createprimary \
+tpm2_load tpm2_unseal tpm2_flushcontext"
 _INITRD_AUDIT_TSS_LIBS="libtss2-esys libtss2-mu libtss2-rc libtss2-sys libtss2-tctildr libtss2-tcti-device"
 _INITRD_AUDIT_TPM_MODULES="tpm.ko tpm_tis.ko tpm_crb.ko"
 
-# initrd_audit <initrd-img> — audit the lsinitrd inventory of the built
-# initramfs: required unlock artifacts present, deny rules clean (no compilers
-# gcc/clang/ld, incl. Debian triplet-prefixed toolchain binaries, no package
-# tools apt/apt-*/dpkg/dpkg-*, no busybox, no shells beyond the minimal
-# allowlist `sh` — dash allowed: Debian dracut ships it as the initrd shell).
+# initrd_lister <initrd-img> — print the initramfs inventory, one archive
+# path per line (cpio -it shape). Default: the mkinitfs image is a gzipped
+# cpio archive, so the built-in lister is `gzip -dc | cpio -it` (busybox
+# provides both on the Alpine target). INITRD_LISTER_CMD overrides the lister
+# (a single command receiving the image path as its argument).
+initrd_lister() {
+    _il_img=$1
+    if [ -n "${INITRD_LISTER_CMD:-}" ]; then
+        "$INITRD_LISTER_CMD" "$_il_img" 2>/dev/null
+    else
+        gzip -dc "$_il_img" 2>/dev/null | cpio -it 2>/dev/null
+    fi
+}
+
+# initrd_audit <initrd-img> — audit the cpio inventory of the built initramfs
+# (§8.2/I6):
 #   rc 0  inventory compliant
 #   rc 1  miss — one-line reason in $_initrd_audit_reason (and on stderr)
-# LSINITRD_CMD overrides the lister (default: lsinitrd). When no lister exists
-# AND the initramfs came from an INITRAMFS_CMD override (CI stub builders own
-# their contents, §8.1 B-G9), the audit is skipped with a loud warn; on the
-# default dracut path a missing lister is a loud failure (dracut ships it).
+# When no lister is available AND the initramfs came from an INITRAMFS_CMD
+# override (CI stub builders own their contents, §8.1 B-G9), the audit is
+# skipped with a loud warn; on the default mkinitfs path a missing lister is
+# a loud failure.
 initrd_audit() {
     _ia_img=$1
     _initrd_audit_reason=''
-    _ia_cmd=${LSINITRD_CMD:-lsinitrd}
-    if ! command -v "$_ia_cmd" >/dev/null 2>&1; then
+    # an INITRAMFS_CMD override owns the initrd contents (CI stub builders
+    # emit deterministic placeholder payloads the cpio lister cannot parse);
+    # an EXPLICIT INITRD_LISTER_CMD re-enables the audit regardless
+    if [ -n "${INITRAMFS_CMD:-}" ] && [ -z "${INITRD_LISTER_CMD:-}" ]; then
+        warn "initrd audit: skipped — INITRAMFS_CMD override owns the initrd contents (§8.2/I6); set INITRD_LISTER_CMD to audit it"
+        return 0
+    fi
+    if [ -n "${INITRD_LISTER_CMD:-}" ] &&
+        ! command -v "$INITRD_LISTER_CMD" >/dev/null 2>&1; then
         if [ -n "${INITRAMFS_CMD:-}" ]; then
-            warn "initrd audit: skipped — no lsinitrd ($_ia_cmd); INITRAMFS_CMD override owns the initrd contents (§8.2/I6)"
+            warn "initrd audit: skipped — no lister ($INITRD_LISTER_CMD); INITRAMFS_CMD override owns the initrd contents (§8.2/I6)"
             return 0
         fi
-        _initrd_audit_reason="initrd audit: lsinitrd not available ($_ia_cmd) — cannot audit the initramfs inventory (§8.2/I6)"
+        _initrd_audit_reason="initrd audit: lister not available ($INITRD_LISTER_CMD) — cannot audit the initramfs inventory (§8.2/I6)"
         err "$_initrd_audit_reason"
         return 1
     fi
-    _ia_inv=$("$_ia_cmd" "$_ia_img" 2>/dev/null) || {
-        _initrd_audit_reason="initrd audit: lsinitrd failed on $_ia_img"
+    if [ -z "${INITRD_LISTER_CMD:-}" ] &&
+        { ! command -v gzip >/dev/null 2>&1 || ! command -v cpio >/dev/null 2>&1; }; then
+        if [ -n "${INITRAMFS_CMD:-}" ]; then
+            warn "initrd audit: skipped — no gzip/cpio lister; INITRAMFS_CMD override owns the initrd contents (§8.2/I6)"
+            return 0
+        fi
+        _initrd_audit_reason="initrd audit: gzip/cpio not available — cannot audit the initramfs inventory (§8.2/I6)"
+        err "$_initrd_audit_reason"
+        return 1
+    fi
+    _ia_inv=$(initrd_lister "$_ia_img") || {
+        _initrd_audit_reason="initrd audit: lister failed on $_ia_img"
         err "$_initrd_audit_reason"
         return 1
     }
 
-    # required: token lib at the multiarch systemd path, libtss2, TPM modules
+    # _ia_has BASENAME — inventory carries a path whose last component matches
+    _ia_has() {
+        printf '%s\n' "$_ia_inv" | grep -Eq "(^|/)$1\$"
+    }
+
+    # required: the §8.2 unseal hook itself + cryptsetup/openssl + the exact
+    # tpm2 verbs the hook runs + libtss2 + TPM kernel modules
     _ia_missing=''
-    case $_ia_inv in
-        *"$_INITRD_AUDIT_TOKEN_LIB"*) ;;
-        *) _ia_missing=" $_INITRD_AUDIT_TOKEN_LIB" ;;
-    esac
-    for _ia_name in $_INITRD_AUDIT_TSS_LIBS $_INITRD_AUDIT_TPM_MODULES; do
-        case $_ia_inv in
-            *"$_ia_name"*) ;;
-            *) _ia_missing="$_ia_missing $_ia_name" ;;
+    for _ia_name in "$_INITRD_AUDIT_HOOK" $_INITRD_AUDIT_CRYPT $_INITRD_AUDIT_TPM2_BINS \
+        $_INITRD_AUDIT_TSS_LIBS $_INITRD_AUDIT_TPM_MODULES; do
+        case $_ia_name in
+            libtss2-*)
+                # substring match: sonamed shared objects (libtss2-esys.so.0)
+                case $_ia_inv in
+                    *"$_ia_name"*) ;;
+                    *) _ia_missing="$_ia_missing $_ia_name" ;;
+                esac
+                ;;
+            *)
+                case $_ia_name in
+                    alpine-fde-unseal.sh)
+                        case $_ia_inv in
+                            *"$_ia_name"*) ;;
+                            *) _ia_missing="$_ia_missing $_ia_name" ;;
+                        esac
+                        ;;
+                    *)
+                        if ! _ia_has "$_ia_name"; then
+                            _ia_missing="$_ia_missing $_ia_name"
+                        fi
+                        ;;
+                esac
+                ;;
         esac
     done
 
     # required per persisted topology (§8.2/§4.1, G-ST5): the root filesystem
     # driver (btrfs.ko by default; ext4.ko when the conf says ROOT_FS=ext4)
-    # and — for hybrid bcache (BCACHE=1) — bcache.ko + 69-bcache.rules +
-    # bcache-register (without them /dev/bcache0 never registers and
-    # systemd-cryptsetup cannot open the container). A missing fs driver is
-    # the same G2-loss/I6 class: the initrd cannot mount root, ever.
+    # and — for hybrid bcache (BCACHE=1) — bcache.ko + 69-bcache.rules
+    # (without them /dev/bcache0 never registers and cryptsetup cannot open
+    # the container). A missing fs driver is the same G2-loss/I6 class: the
+    # initrd cannot mount root, ever.
     initramfs_topology
     _ia_topo=''
     case $INI_ROOT_FS in
@@ -195,12 +262,21 @@ initrd_audit() {
         *) _ia_topo='btrfs.ko' ;;
     esac
     if [ "$INI_BCACHE" = "1" ]; then
-        _ia_topo="$_ia_topo bcache.ko 69-bcache.rules bcache-register"
+        _ia_topo="$_ia_topo bcache.ko 69-bcache.rules"
     fi
     for _ia_name in $_ia_topo; do
-        case $_ia_inv in
-            *"$_ia_name"*) ;;
-            *) _ia_missing="$_ia_missing $_ia_name" ;;
+        case $_ia_name in
+            69-bcache.rules)
+                case $_ia_inv in
+                    *"$_ia_name"*) ;;
+                    *) _ia_missing="$_ia_missing $_ia_name" ;;
+                esac
+                ;;
+            *)
+                if ! _ia_has "$_ia_name"; then
+                    _ia_missing="$_ia_missing $_ia_name"
+                fi
+                ;;
         esac
     done
     if [ -n "$_ia_missing" ]; then
@@ -217,42 +293,35 @@ initrd_audit() {
         return 1
     fi
 
-    # deny rules: compilers / package tools / shells beyond the allowlist.
-    # Parse the trailing path field (real lsinitrd lines carry a permission
-    # prefix; a bare path list works too).
+    # deny rules: compilers / package tools / foreign shells. Parse the
+    # trailing path field (bare cpio -it paths have no permission prefix).
     #
-    # MD-04: the compiler set also covers clang and Debian's triplet-prefixed
-    # toolchain binaries (the exact naming of native/cross toolchain files:
-    # x86_64-linux-gnu-gcc[-12], x86_64-linux-gnu-ld.bfd, ...; the generic
-    # *-*linux*-* globs subsume every Debian arch triplet and version suffix).
-    # busybox is denied: one binary carries a full shell + coreutils host and
-    # defeats the `sh`-only allowlist.
+    # MD-04 carry-over: the compiler set covers clang, make/gmake and
+    # triplet-prefixed toolchain binaries (the *-*linux*-* globs subsume
+    # every arch triplet and version suffix).
     #
-    # dash is deliberately ALLOWED (MD-04 dash resolution): Debian's dracut
-    # builds every default initrd around the dash module — /bin/sh IS a
-    # (symlink to) usr/bin/dash — so denying dash fails every real production
-    # build on a mandated artifact. The dracut-shaped `base` fixture
-    # (LSINITRD_FAKE_VARIANT=base) pins this. The allowlist intent still holds:
-    # the interactive/fat shells below stay denied, as does the busybox
-    # multiplexer. Revisit only if the dracut module set changes (R3).
+    # Package tools are denied: the initramfs must not be able to mutate or
+    # query the package database (apk/apk-tools/apt/dpkg families).
+    #
+    # Foreign shells (bash/zsh/dash/ksh/...) are denied; busybox, ash and sh
+    # are ALLOWED — busybox IS the mkinitfs init framework (ADR-13) and the
+    # §8.2 hook offers no interactive path of its own (G-C8 resolution R9).
     _ia_deny=$(printf '%s\n' "$_ia_inv" | while IFS= read -r _ia_line; do
         _ia_path=${_ia_line##* }
         [ -n "$_ia_path" ] || continue
         _ia_base=${_ia_path##*/}
         case $_ia_base in
-            gcc | gcc-* | cc | clang | clang-* | tcc | ld | ld.gold | ld.bfd \
+            gcc | gcc-* | cc | clang | clang-* | tcc | make | gmake \
+                | ld | ld.gold | ld.bfd \
                 | *-linux-gnu-gcc | *-linux-gnu-ld \
                 | *-*linux*-gcc | *-*linux*-gcc-* | *-*linux*-ld | *-*linux*-ld-*)
                 printf 'denied compiler: %s\n' "$_ia_path"
                 ;;
-            apt | apt-* | dpkg | dpkg-*)
+            apk | apk-* | apt | apt-* | dpkg | dpkg-*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 ;;
-            bash | zsh | ksh | csh | tcsh | fish | ash)
-                printf 'denied shell (allowlist: sh; dash = Debian dracut initrd shell): %s\n' "$_ia_path"
-                ;;
-            busybox)
-                printf 'denied shell/coreutils host (busybox; allowlist: sh): %s\n' "$_ia_path"
+            bash | zsh | dash | ksh | csh | tcsh | fish)
+                printf 'denied shell (allowlist: busybox/ash — the init framework): %s\n' "$_ia_path"
                 ;;
         esac
     done)
@@ -262,7 +331,7 @@ initrd_audit() {
         return 1
     fi
 
-    info "initrd audit: inventory compliant (token lib, libtss2, TPM modules + udev rules, $INI_ROOT_FS fs driver; no deny hits)"
+    info "initrd audit: inventory compliant (hook, cryptsetup, tpm2 verbs, libtss2, TPM modules + udev rule, $INI_ROOT_FS fs driver; no deny hits)"
     return 0
 }
 
@@ -339,20 +408,26 @@ EOF
     return 0
 }
 
-# --- fail-closed cmdline pins (§8.2 H-G1, G-U6) -----------------------------------
-# systemd's bounded passphrase loop drops to the initrd EMERGENCY SHELL on
-# exhaustion; `rd.shell=0 rd.emergency=poweroff` (pinned in the UKI cmdline,
-# embedded verbatim from /etc/debian-fde/cmdline.txt) ends three strikes in
-# poweroff — never an unauthenticated shell. A user-edited cmdline.txt missing
-# the pins must fail the rebuild closed, not silently embed the escape hatch.
+# --- fail-closed cmdline pins (§8.2 H-G1, G-U6; G-C9 resolution R10) --------------
+# `rd.shell=0 rd.emergency=poweroff` (pinned in the UKI cmdline, embedded
+# verbatim from the cmdline.txt build input) is INERT on the Alpine/mkinitfs
+# target — mkinitfs init processes no rd.* knobs. The pins are kept as
+# DEFENSE-IN-DEPTH for any boot-path component that does honor the systemd
+# dracut-era knobs (e.g. tooling booting the kernel without our UKI). The
+# fail-closed guarantee itself is OWNED by the §8.2 Early-Boot Unseal Hook:
+# 3 failed recovery attempts end in `poweroff -f` and the hook never spawns a
+# shell (tests/unit/hooks_mkinitfs_unseal.sh). A user-edited cmdline.txt
+# missing the pins must still fail the rebuild closed, not silently drop the
+# belt-and-braces layer.
 
 # cmdline_pins_check <cmdline-file> — rc 0 iff BOTH pins are present as
 # standalone words AND no conflicting occurrence of either knob exists in
 # <file>. An overriding duplicate (`rd.shell=1 rd.shell=0`) is morally
-# identical to a removal — the effective value is dracut-getarg-order
-# dependent, so any rd.shell=/rd.emergency= word that is not exactly the pin
-# fails the check (review HW-2). On failure prints a one-line reason (stdout)
-# naming the conflict or the missing pin(s), for the ADR-8 marker.
+# identical to a removal — the effective value would be argument-order
+# dependent for any knob-consuming consumer, so any rd.shell=/rd.emergency=
+# word that is not exactly the pin fails the check (review HW-2). On failure
+# prints a one-line reason (stdout) naming the conflict or the missing pin(s),
+# for the ADR-8 marker.
 cmdline_pins_check() {
     _cp_file=$1
     if [ ! -f "$_cp_file" ]; then

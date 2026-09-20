@@ -19,23 +19,23 @@ trap 'rm -rf "$TMP"' EXIT
 
 ROOT="$TMP/root"
 ESP="$TMP/esp"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
-cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/debian-fde/cmdline.txt"
+cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/alpine-fde/cmdline.txt"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
 # §8.2 crypttab contract (G-U4 guard requires it at build time)
 printf '%s\n' 'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
 jq -n --arg d7 "$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")" \
-    '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/debian-fde/baseline.json"
+    '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/alpine-fde/baseline.json"
 
 # pre-existing retained UKIs + manifest entries (prune must drop 5.15.0)
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
-    printf 'pre-existing-uki-%s' "$k" >"$ESP/EFI/Linux/debian-fde-$k.efi"
+    printf 'pre-existing-uki-%s' "$k" >"$ESP/EFI/Linux/alpine-fde-$k.efi"
 done
 . "$REPO/lib/common.sh"
 . "$REPO/lib/manifest.sh"
-M="$ROOT/etc/debian-fde/digests.json"
+M="$ROOT/etc/alpine-fde/digests.json"
 manifest_new "6.2.0-1-amd64" "fp-old" | manifest_atomic_write "$M"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
     manifest_upsert "$M" "$k" "p11-old-$k" "pd-old-$k" "sig-old-$k"
@@ -54,9 +54,9 @@ assert_rc "ukictl build succeeds over the stub inputs" 0 $?
 
 # --- exactly the retained UKI set -----------------------------------------------------
 EXPECTED=$(printf '%s\n' \
-    "$ESP/EFI/Linux/debian-fde-6.1.0-1-amd64.efi" \
-    "$ESP/EFI/Linux/debian-fde-6.2.0-1-amd64.efi" \
-    "$ESP/EFI/Linux/debian-fde-$KVER.efi" | sort)
+    "$ESP/EFI/Linux/alpine-fde-6.1.0-1-amd64.efi" \
+    "$ESP/EFI/Linux/alpine-fde-6.2.0-1-amd64.efi" \
+    "$ESP/EFI/Linux/alpine-fde-$KVER.efi" | sort)
 ACTUAL=$(find "$ESP" -type f | sort)
 assert_eq "ESP holds exactly the retained UKI set (current + 2)" "$EXPECTED" "$ACTUAL"
 
@@ -86,6 +86,6 @@ env -u DEBIAN_FDE_ESP \
     RETENTION=2 \
     "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "build with conf-persisted ESP_PATH (no env) succeeds" 0 $?
-assert_file_exists "UKI landed on the conf-recorded ESP" "$ESP3/EFI/Linux/debian-fde-$KVER.efi"
+assert_file_exists "UKI landed on the conf-recorded ESP" "$ESP3/EFI/Linux/alpine-fde-$KVER.efi"
 
 finish

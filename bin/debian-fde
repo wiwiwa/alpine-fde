@@ -33,8 +33,8 @@ Subcommands:
   pcrsign        release-key signature over the combined PCR 7+11 policy digest
    enroll-tpm     re-enroll the TPM seal for all manifest kernels (TPM-clear recovery)
    finalize       first-boot trust finalization: Secure Boot guard, baseline capture,
-                  TPM enrollment of every crypttab member (debian-fde-finalize.service
-                  drives it on boot; resumable, §9.1)
+                  TPM enrollment of every crypttab member (guided; the advisory
+                  alpine-fde-finalize OpenRC service only prints guidance; §9.1)
   rotate         change the keyslot-0 passphrase (no re-encryption, no re-seal)
   audit          compare live PCRs + Secure Boot state against the baseline
   status         Secure Boot state, PCR readings, keyslots, manifest vs ESP

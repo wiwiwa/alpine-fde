@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # tests/unit/install_chroot_plan.sh — `debian-fde install` chroot-runner contract
-# (docs/Architecture.md §3.3, §4/§4.1, §8.1-8.4, §9.1, §13): drives the REAL
-# installer with PATH-stubbed collaborators (sfdisk/cryptsetup/mkfs.btrfs/
-# btrfs/mount/debootstrap/chroot/lsblk/...) recording argv to a log file, then
-# asserts OBSERVED effects: the staged target tree contents, §9.1 plan
-# execution order, fail-closed preconditions, and the on-target baseline/state.
+# (docs/Architecture.md §3.3, §4/§4.1, §8.1-8.4, §9.1, §13; ADR-20): drives the
+# REAL installer with PATH-stubbed collaborators (sfdisk/cryptsetup/mkfs.btrfs/
+# btrfs/mount/apk/adduser/...) recording argv to a log file, then asserts
+# OBSERVED effects: the staged target tree contents, §9.1 plan execution
+# order, fail-closed preconditions, and the on-target baseline/state.
+#
+# ADR-20 unattended contract pinned here at EXECUTION level:
+#   * G-C23: the internal ephemeral install key is staged (openssl stub),
+#     used via --key-file for luksFormat/open, and SCRUBBED at teardown —
+#     no passphrase prompt, no DEBIAN_FDE_DISK_PASSPHRASE anywhere
+#   * G-C1/C2/C3: apk populate + in-chroot apk additions txn + repositories
+#     drop (debootstrap/apt retired)
+#   * G-C24: provisional seal guest line runs after the in-chroot build
+#   * G-C25/C28: MOTD/issue banner on target, written BEFORE the state write
+#   * G-C26: NO OsIndications write; teardown scrubs the ephemeral key
+#   * the run completes with stdin CLOSED (</dev/null) — zero prompts
 #
 # Topologies executed here: single-disk (deep) and Btrfs RAID1 (per-member
-# LUKS2 + raid1 mkfs). The bcache hybrid topology is pinned at the record level
-# in install_dryrun.sh (its sysfs attach writes cannot run in a container).
+# LUKS2 + raid1 mkfs). The bcache topologies are pinned at the record level
+# in install_dryrun.sh (their sysfs attach writes cannot run in a container).
 #
 # Conventions (E2E-mock rule): real handler, stubbed collaborators, asserted
 # files/argv/exit codes — never return values of internal helpers.
@@ -23,6 +34,8 @@ source "$REPO/lib/common.sh"
 export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
+# shellcheck source=../../lib/install-state.sh
+source "$REPO/lib/install-state.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
@@ -40,7 +53,6 @@ export DEBIAN_FDE_TMPDIR=$T          # M-01/L-04: secrets + plan temp files live
 export DEBIAN_FDE_TEST_LOG=$T/cmd.log   # PATH stubs append one line per command
 export DEBIAN_FDE_INSTALL_NO_REBOOT=1   # CI seam: no reboot record in unit runs
 export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
-export DEBIAN_FDE_DISK_PASSPHRASE='correct-horse-battery-stapler-42'
 
 PARTUUID_CANON='5f2a9b01-02'            # canned ESP PARTUUID the lsblk stub reports
 GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
@@ -60,15 +72,26 @@ exit 0
 EOF
     chmod +x "$T/stub/$1"
 }
-for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount debootstrap chroot \
-    apt-get useradd usermod passwd systemctl bootctl btrfs; do
+for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
+    rc-update bootctl btrfs reboot chroot; do
     make_stub "$s"
 done
 
+# openssl — log argv; deterministic 256-bit hex body (the staged ephemeral
+# install key; G-C23)
+cat >"$T/stub/openssl" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "openssl" "$*" >>"$DEBIAN_FDE_TEST_LOG"
+case " $* " in
+    *" rand "*) printf 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' ;;
+esac
+exit 0
+EOF
+
 # cryptsetup — log argv; BR-01: fail closed when a --key-file argument names a
 # file that does not exist AT EXECUTION TIME (a scrub trap armed in a subshell
-# deletes the staged passphrase key-file before any plan step can use it —
-# this assert kills the old vacuous find-based L-04a pass)
+# deletes the staged key-file before any plan step can use it — this assert
+# kills the old vacuous find-based L-04a pass)
 cat >"$T/stub/cryptsetup" <<'EOF'
 #!/bin/sh
 prev=''
@@ -100,13 +123,16 @@ esac
 exit 0
 EOF
 
-chmod +x "$T/stub/cryptsetup" "$T/stub/id" "$T/stub/lsblk"
+chmod +x "$T/stub/cryptsetup" "$T/stub/id" "$T/stub/lsblk" "$T/stub/openssl"
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR"
-for h in postinst.d-zz-debian-fde postrm.d-zz-debian-fde \
-    systemd-boot-upgrade-zz-debian-fde post-update.d-zz-debian-fde; do
+# hooks/ Alpine layout (G-C16): the templates install's preflight requires
+mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc"
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
     chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
 done
@@ -138,15 +164,26 @@ mkvar SetupMode 1
 
 # =============================================================================
 # §9.1 Stage 1 execution (single-disk, Btrfs default): plan runs rc 0 under
-# stubs; BR-01: the staged passphrase key-file SURVIVES until the cryptsetup
-# plan steps run.
+# stubs — UNATTENDED (stdin closed). G-C23: the staged ephemeral key SURVIVES
+# until the cryptsetup plan steps run and is SCRUBBED at teardown.
 # =============================================================================
-run_install
-assert_eq "chroot install rc 0" "0" "$RC"
+run_install </dev/null
+assert_eq "unattended chroot install rc 0 (stdin closed, zero prompts)" "0" "$RC"
 assert_not_contains "BR-01: --key-file names an EXISTING file at cryptsetup execution time" \
     "$(cat "$DEBIAN_FDE_TEST_LOG")" "key-file target missing at execution time"
-assert_contains "BR-01: luksFormat ran scripted via the staged key-file" \
+assert_contains "BR-01: luksFormat ran scripted via the staged ephemeral key-file" \
     "$(cat "$DEBIAN_FDE_TEST_LOG")" "cryptsetup luksFormat"
+EPHKEY=$(grep -oE "$T/debian-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
+assert_eq "G-C23: ephemeral key staged under the tmpfs seam" "1" \
+    "$([ -n "$EPHKEY" ] && echo 1 || echo 0)"
+assert_contains "G-C23: keyslot 0 formatted with the ephemeral key via --key-file" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid"
+assert_contains "G-C23: open uses the same staged key-file" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "cryptsetup open --key-file $EPHKEY"
+assert_eq "G-C23: NO operator passphrase consumed anywhere" "0" \
+    "$(grep -c 'DEBIAN_FDE_DISK_PASSPHRASE=' <<<"$OUT")"
+assert_not_contains "G-C23: NO interactive passphrase prompt in the run" "$OUT" \
+    "Set disk encryption passphrase"
 
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$DEBIAN_FDE_TEST_LOG" | head -1 | awk '{print $2}')
 ROOTFS_UUID=$(grep -oE -- '-U [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$DEBIAN_FDE_TEST_LOG" | head -1 | awk '{print $2}')
@@ -165,10 +202,14 @@ assert_contains "G-ST1: @ remounted as root" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
     "mount -o subvol=@ /dev/mapper/root-crypt $DEBIAN_FDE_INSTALL_MNT"
 
 MNT_ETC=$DEBIAN_FDE_INSTALL_MNT/etc
-assert_file_exists "target: apt no-recommends policy" "$MNT_ETC/apt/apt.conf.d/90debian-fde"
-assert_contains "apt policy: recommends off" "$(cat "$MNT_ETC/apt/apt.conf.d/90debian-fde")" 'APT::Install-Recommends "false";'
-assert_file_exists "target: apt sources drop" "$MNT_ETC/apt/sources.list.d/debian-fde.sources"
-assert_contains "apt sources: non-free-firmware" "$(cat "$MNT_ETC/apt/sources.list.d/debian-fde.sources")" "Components: main non-free-firmware"
+# G-C1/C2/C3: apk populate + repositories drop (apt/dpkg retired)
+assert_contains "§3.3: apk populate ran on the target" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "apk add --root $DEBIAN_FDE_INSTALL_MNT --initdb alpine-base"
+assert_file_exists "target: /etc/apk/repositories drop" "$MNT_ETC/apk/repositories"
+assert_contains "repositories: Alpine CDN pinned" "$(cat "$MNT_ETC/apk/repositories")" \
+    "dl-cdn.alpinelinux.org/alpine"
+assert_eq "target: NO apt policy drop" "0" "$([ -e "$MNT_ETC/apt" ] && echo 1 || echo 0)"
+assert_eq "target: NO dpkg trims drop" "0" "$([ -e "$MNT_ETC/dpkg" ] && echo 1 || echo 0)"
 # G-ST4/§8.2: single topology crypttab is ONE root entry, NO password-cache
 assert_eq "crypttab verbatim per §8.2 (single topology, no password-cache)" \
     "root UUID=$LUKS_UUID none luks,tpm2-device=auto,discard" \
@@ -179,9 +220,8 @@ assert_contains "fstab: @home subvol form" "$(cat "$MNT_ETC/fstab")" "UUID=$ROOT
 assert_contains "fstab: @snapshots subvol form" "$(cat "$MNT_ETC/fstab")" "UUID=$ROOTFS_UUID /.snapshots btrfs subvol=@snapshots,defaults 0 2"
 assert_contains "fstab: real ESP PARTUUID (placeholder resolved)" "$(cat "$MNT_ETC/fstab")" "PARTUUID=$PARTUUID_CANON /efi vfat umask=0077 0 2"
 assert_not_contains "fstab: no unresolved placeholder" "$(cat "$MNT_ETC/fstab")" "<esp-partuuid>"
-assert_file_exists "target: networkd drop" "$MNT_ETC/systemd/network/20-debian-fde.network"
-assert_contains "networkd: dhcp" "$(cat "$MNT_ETC/systemd/network/20-debian-fde.network")" "DHCP=yes"
-assert_file_exists "target: dpkg trims drop" "$MNT_ETC/dpkg/dpkg.cfg.d/90debian-fde-minimal"
+assert_file_exists "target: network interfaces drop (OpenRC)" "$MNT_ETC/network/interfaces"
+assert_contains "interfaces: dhcp" "$(cat "$MNT_ETC/network/interfaces")" "dhcp"
 assert_file_exists "target: dracut conf" "$MNT_ETC/dracut.conf.d/10-debian-fde.conf"
 assert_contains "dracut: hostonly" "$(cat "$MNT_ETC/dracut.conf.d/10-debian-fde.conf")" "hostonly=yes"
 assert_not_contains "single topology: no 20-bcache.conf drop" "$(ls "$MNT_ETC/dracut.conf.d/")" "20-bcache.conf"
@@ -196,7 +236,7 @@ assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/debian-f
     "Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0"
 
 # =============================================================================
-# §9.1 step 2/8: pending baseline + install-state ON TARGET (no host copy)
+# §9.1 step 2/8/9: pending baseline + banner + install-state ON TARGET
 # =============================================================================
 TGT_BL=$MNT_ETC/debian-fde/baseline.json
 assert_file_exists "§9.1 step 2: pending baseline written ON TARGET" "$TGT_BL"
@@ -208,69 +248,119 @@ assert_eq "G-I4: target.esp_partuuid resolved" "$PARTUUID_CANON" \
     "$(baseline_get_in "$TGT_BL" target esp_partuuid)"
 assert_eq "§9.1: NO host-baseline copy anywhere" "0" \
     "$(grep -c 'cp .*baseline.json' "$DEBIAN_FDE_TEST_LOG")"
-assert_file_exists "§9.1 step 8: install-state written ON TARGET" \
-    "$MNT_ETC/debian-fde/install-state.json"
+# G-C25: unfinalized banner on /etc/motd AND /etc/issue — the SHARED
+# single-source line (lib/install-state.sh fde_motd_banner; the ONLY banner
+# definition in the tree), dropped line-exactly so finalize's fde_motd_strip
+# removes exactly it
+assert_file_exists "G-C25: MOTD banner on target" "$MNT_ETC/motd"
+assert_eq "G-C25: MOTD banner IS the shared single-source line (fde_motd_banner)" \
+    "$(fde_motd_banner)" "$(cat "$MNT_ETC/motd")"
+assert_eq "G-C25: banner is ONE line (line-exact strip contract)" "1" \
+    "$(wc -l <"$MNT_ETC/motd")"
+assert_eq "G-C25: /etc/issue carries the SAME single line" \
+    "$(cat "$MNT_ETC/motd")" "$(cat "$MNT_ETC/issue")"
+assert_file_exists "§9.1 step 9: install-state written ON TARGET" \
+    "$MNT_ETC/alpine-fde/install-state.json"
 assert_eq "install-state: state=installed" "installed" \
-    "$(istate_get "$MNT_ETC/debian-fde/install-state.json" state)"
-# §9.1 teardown: OsIndications bit 0 set on the (fixture) efivars
-assert_file_exists "§9.1: OsIndications set (reboot into BIOS)" \
-    "$DEBIAN_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL"
-assert_eq "§9.1: OsIndications payload is u64le 1" "070000000100000000000000" \
-    "$(cat "$DEBIAN_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL" | od -An -vtx1 | tr -d ' \n')"
+    "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
+# G-C28: banner BEFORE the state write (observed order of the host-step infos)
+L_MOTD=$(printf '%s\n' "$OUT" | grep -Fnm1 ">$DEBIAN_FDE_INSTALL_MNT/etc/motd" | cut -d: -f1)
+L_STATE=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: inst_state_write installed" | cut -d: -f1)
+assert_eq "G-C28: MOTD banner drop runs BEFORE the state write" "1" \
+    "$(( L_MOTD > 0 && L_STATE > L_MOTD ? 1 : 0 ))"
+# G-C26: NO OsIndications write anywhere (firmware-trip flow retired)
+assert_eq "G-C26: efivars dir holds NO OsIndications variable" "0" \
+    "$(find "$DEBIAN_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
+assert_not_contains "G-C26: NO OsIndications step in the run" "$OUT" "fw_osindications_set"
 
 # =============================================================================
 # §9.1 in-chroot sequence: order + argv as observed through the chroot stub
 # =============================================================================
 LOG=$(cat "$DEBIAN_FDE_TEST_LOG")
-assert_contains "§9.1 step 1: apt transaction ran in-guest" "$LOG" "apt-get install -y --no-install-recommends"
-APT_TXN_LOG=$(grep -m1 'apt-get install' "$DEBIAN_FDE_TEST_LOG")
-assert_contains "apt transaction includes btrfs-progs (default fs, topology-conditional)" \
-    "$APT_TXN_LOG" "btrfs-progs"
-MCU_EXPECT=$(inst_microcode_pkgs)
-assert_contains "H-02: apt txn carries the HOST-resolved microcode ($MCU_EXPECT)" \
-    "$APT_TXN_LOG" "$MCU_EXPECT"
+assert_contains "§9.1 step 1: apk additions txn ran in-guest" "$LOG" "apk add --no-cache"
+APK_TXN_LOG=$(grep -m1 'apk add --no-cache' "$DEBIAN_FDE_TEST_LOG")
+assert_contains "apk txn includes btrfs-progs (default fs, topology-conditional)" \
+    "$APK_TXN_LOG" "btrfs-progs"
+assert_contains "§9.1 step 1: user account created in-guest (locked, unattended)" "$LOG" \
+    "adduser -D -s /bin/ash admin"
+assert_not_contains "ADR-20: NO interactive passwd step anywhere" "$LOG" "passwd"
+assert_contains "§9.1 step 1: OpenRC networking enabled in-guest" "$LOG" \
+    "rc-update add networking boot"
 assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot" "$LOG" \
-    "provision stage1 --mode in-chroot --keydir /etc/debian-fde/keys"
+    "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys"
 assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
-    "fw_auth_enroll /sys/firmware/efi/efivars /etc/debian-fde/keys"
+    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
 assert_contains "ESP layout for the in-chroot build" "$LOG" \
     "bootctl install --esp-path=/efi --boot-path=/efi"
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI)" "$LOG" \
     "debian-fde ukictl build"
-assert_contains "§9.1 step 6: keys_encrypt_release in-chroot" "$LOG" "keys_encrypt_release"
+# G-C24: provisional seal guest line after the build
+assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot" "$LOG" \
+    'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
+assert_contains "§9.1 step 6: guest line pins the provisional slot contract" "$LOG" \
+    "provisional Mechanism B seal (PCR 11) -> keyslot 1"
+assert_not_contains "ADR-20: keys_encrypt_release moved to finalize" "$LOG" "keys_encrypt_release"
 first_line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 L_SFDISK=$(first_line_no "$LOG" "sfdisk")
-L_DEBOOT=$(first_line_no "$LOG" "debootstrap")
-L_POLICY=$(first_line_no "$OUT" "etc/apt/apt.conf.d/90debian-fde")
-L_APTUPD=$(first_line_no "$LOG" "apt-get update")
+L_APKPOP=$(first_line_no "$LOG" "apk add --root")
+L_POLICY=$(first_line_no "$OUT" "etc/apk/repositories")
+L_APKUPD=0
 L_KEYGEN=$(first_line_no "$LOG" "provision stage1 --mode in-chroot")
 L_ENROLL=$(first_line_no "$LOG" "fw_auth_enroll")
 L_BUILD=$(first_line_no "$LOG" "ukictl build")
-L_ENCRYPT=$(first_line_no "$LOG" "keys_encrypt_release")
+L_SEAL=$(first_line_no "$LOG" "seal_provisional")
 L_UMNTR=$(first_line_no "$LOG" "umount -R")
-assert_eq "order: sfdisk before debootstrap" "1" "$(( L_SFDISK < L_DEBOOT ? 1 : 0 ))"
-assert_eq "order: debootstrap before policy write" "1" "$(( L_DEBOOT > 0 && L_POLICY > 0 && L_DEBOOT < L_POLICY ? 1 : 0 ))"
+L_SCRUB=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: rm -f $EPHKEY" | cut -d: -f1)
+assert_eq "order: sfdisk before apk populate" "1" "$(( L_SFDISK < L_APKPOP ? 1 : 0 ))"
+assert_eq "order: populate before repositories drop" "1" \
+    "$(( L_APKPOP > 0 && L_POLICY > 0 && L_APKPOP < L_POLICY ? 1 : 0 ))"
 assert_eq "order: keygen before enrollment" "1" "$(( L_KEYGEN < L_ENROLL ? 1 : 0 ))"
 assert_eq "order: enrollment before ukictl build" "1" "$(( L_ENROLL < L_BUILD ? 1 : 0 ))"
-assert_eq "order: build before keys_encrypt_release" "1" "$(( L_BUILD < L_ENCRYPT ? 1 : 0 ))"
-assert_eq "order: keys_encrypt_release before teardown" "1" "$(( L_ENCRYPT < L_UMNTR ? 1 : 0 ))"
+assert_eq "order: build before the provisional seal (.pcrsig source)" "1" \
+    "$(( L_BUILD < L_SEAL ? 1 : 0 ))"
+assert_eq "order: teardown before the ephemeral-key scrub (G-C26/I1)" "1" \
+    "$(( L_UMNTR > 0 && L_SCRUB > L_UMNTR ? 1 : 0 ))"
+# G-C23/I1: the ephemeral key does NOT survive the run
+assert_eq "G-C23: ephemeral key-file scrubbed at teardown" "0" \
+    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-ephkey.*' 2>/dev/null | wc -l)"
 # G-IL8: NO installer-side signing machinery executed
 assert_eq "zero sbsign/ukify/sbverify executions" "0" \
     "$(grep -Ec '^(sbsign|ukify|sbverify)' <<<"$LOG")"
 # G-U7 (§8.3): boot-manager self-update masked
 assert_eq "target: systemd-boot-update.service masked" "1" \
     "$([ -L "$MNT_ETC/systemd/system/systemd-boot-update.service" ] && [ "$(readlink "$MNT_ETC/systemd/system/systemd-boot-update.service")" = "/dev/null" ] && echo 1 || echo 0)"
-# §9.1 step 7 / G-I2: flat hook templates installed executable
-for d in postinst.d postrm.d; do
-    assert_file_exists "target: kernel hook installed: $d/zz-debian-fde" "$MNT_ETC/kernel/$d/zz-debian-fde"
-    assert_eq "target kernel hook executable: $d/zz-debian-fde" "1" "$([ -x "$MNT_ETC/kernel/$d/zz-debian-fde" ] && echo 1 || echo 0)"
+# §9.1 step 7 / ADR-20 / G-I2: hooks shipped to their Alpine destinations,
+# executable; the first-boot finalize ADVISORY ships to /etc/init.d/ and is
+# enabled for the default runlevel (the GUIDED finalize command itself is
+# never run at boot)
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook; do
+    assert_file_exists "target: kernel hook shipped: $h" "$MNT_ETC/$h"
+    assert_eq "target kernel hook executable: $h" "1" "$([ -x "$MNT_ETC/$h" ] && echo 1 || echo 0)"
 done
-assert_file_exists "target: boot-manager re-sign hook" "$MNT_ETC/kernel/postinst.d/zz-debian-fde-systemd-boot-upgrade"
-assert_file_exists "target: initramfs post-update hook" "$MNT_ETC/initramfs/post-update.d/zz-debian-fde"
+assert_file_exists "target: mkinitfs unseal hook shipped" "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh"
+assert_eq "target: mkinitfs unseal hook executable" "1" \
+    "$([ -x "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
+assert_file_exists "target: mkinitfs features.d entry shipped" "$MNT_ETC/mkinitfs/features.d/alpine-fde.files"
+assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"
+assert_eq "target: apk trigger executable" "1" \
+    "$([ -x "$MNT_ETC/apk/triggers/alpine-fde.trigger" ] && echo 1 || echo 0)"
+assert_file_exists "target: finalize advisory shipped to /etc/init.d" \
+    "$MNT_ETC/init.d/alpine-fde-finalize"
+assert_eq "target: finalize advisory executable" "1" \
+    "$([ -x "$MNT_ETC/init.d/alpine-fde-finalize" ] && echo 1 || echo 0)"
+assert_eq "target: advisory is the shipped hook, byte-for-byte" \
+    "$(cat "$DEBIAN_FDE_HOOKS_DIR/openrc/alpine-fde-finalize")" \
+    "$(cat "$MNT_ETC/init.d/alpine-fde-finalize")"
+assert_contains "target: finalize advisory enabled for the default runlevel" "$LOG" \
+    "rc-update add alpine-fde-finalize default"
+assert_eq "target: NO systemd finalize unit shipped (ADR-20 Stage 3)" "0" \
+    "$([ -e "$MNT_ETC/systemd/system/debian-fde-finalize.service" ] && echo 1 || echo 0)"
+assert_eq "target: NO multi-user.target.wants enable record" "0" \
+    "$(grep -c 'multi-user.target.wants' <<<"$LOG")"
 
 # =============================================================================
 # H-02: binds (incl. the §9.1 efivars bind) run BEFORE guest steps and are
-# torn down BEFORE `umount -R`; microcode resolved HOST-side.
+# torn down BEFORE `umount -R`.
 # =============================================================================
 assert_contains "H-02: /proc bound into the target" "$LOG" \
     "mount -t proc proc $DEBIAN_FDE_INSTALL_MNT/proc"
@@ -285,20 +375,19 @@ L_BINDU=$(first_line_no "$LOG" "umount $DEBIAN_FDE_INSTALL_MNT/dev")
 assert_eq "H-02: binds torn down before umount -R" "1" "$(( L_BINDT > 0 && L_BINDU > L_BINDT && L_UMNTR > L_BINDU ? 1 : 0 ))"
 assert_contains "H-02: teardown umounts the efivars bind" "$LOG" \
     "umount $DEBIAN_FDE_INSTALL_MNT/dev $DEBIAN_FDE_INSTALL_MNT/sys $DEBIAN_FDE_INSTALL_MNT/proc $DEBIAN_FDE_INSTALL_MNT/sys/firmware/efi/efivars"
-assert_not_contains "H-02: no in-chroot vendor detection left in the plan" "$OUT" \
-    'grep -m1 vendor_id /proc/cpuinfo'
-# L-04b: guest steps never see DEBIAN_FDE_DISK_PASSPHRASE
+# L-04b: guest steps never see DEBIAN_FDE_DISK_PASSPHRASE (defensive strip stays)
 assert_contains "L-04b: chroot invocation strips the passphrase variable" \
     "$LOG" "-u DEBIAN_FDE_DISK_PASSPHRASE"
 
 # =============================================================================
-# G-ST3: RAID1 execution — per-role partitioning, per-member LUKS2, raid1
-# mkfs, per-member crypttab with password-cache=yes, member_uuids metadata.
+# G-ST3: RAID1 execution — per-role partitioning, per-member LUKS2 (ephemeral
+# key each), raid1 mkfs, per-member crypttab with password-cache=yes,
+# member_uuids metadata, per-member provisional seal loop.
 # =============================================================================
 DISK2=$T/disk2.img
 : >"$DISK2"
-run_install --disk "$DISK2"
-assert_eq "raid1 chroot install rc 0" "0" "$RC"
+run_install --disk "$DISK2" </dev/null
+assert_eq "raid1 chroot install rc 0 (unattended)" "0" "$RC"
 LOG2=$(cat "$DEBIAN_FDE_TEST_LOG")
 assert_contains "raid1: primary partitioned (ESP + LUKS)" "$LOG2" "sfdisk $DISK"
 assert_contains "raid1: secondary partitioned (root only)" "$LOG2" "sfdisk $DISK2"
@@ -325,10 +414,17 @@ assert_eq "raid1: baseline target.member_uuids (additive schema)" "$MEM1_UUID $M
     "$(baseline_get_in "$MNT_ETC/debian-fde/baseline.json" target member_uuids)"
 assert_contains "raid1: cmdline rootflags pins verbatim" "$(cat "$MNT_ETC/debian-fde/cmdline.txt")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+# G-C24: the provisional seal loop covers BOTH members in raid1
+SEAL_LINE2=$(grep -m1 'seal_provisional' <<<"$LOG2")
+assert_contains "raid1: provisional seal loop covers root1 and root2" "$SEAL_LINE2" \
+    "for m in root1 root2"
 L_CLOSE1=$(first_line_no "$LOG2" "cryptsetup close root1")
 L_CLOSE2=$(first_line_no "$LOG2" "cryptsetup close root2")
 assert_eq "raid1: teardown closes both members (primary first)" "1" \
     "$(( L_CLOSE1 > 0 && L_CLOSE2 > L_CLOSE1 ? 1 : 0 ))"
+EPHKEY2=$(grep -oE "$T/debian-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
+assert_eq "raid1: ephemeral key scrubbed at teardown" "0" \
+    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-ephkey.*' 2>/dev/null | wc -l)"
 
 # =============================================================================
 # G4/F-1 (§8.1/§3.3): the tooling copy into /opt/debian-fde ships ONLY the
@@ -348,7 +444,7 @@ truncate -s 20M "$DEBIAN_FDE_TREE/tests/.cache/blob-20M"
 
 run_install_tree() { # TREE — run_install against a different tooling tree
     : >"$DEBIAN_FDE_TEST_LOG"
-    OUT=$(DEBIAN_FDE_CMD_DIR="$1/lib/cmd" "$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+    OUT=$(DEBIAN_FDE_CMD_DIR="$1/lib/cmd" "$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
     RC=$?
 }
 
@@ -358,7 +454,7 @@ assert_eq "tooling copy from seeded tree: rc 0" "0" "$RC"
 OPT=$DEBIAN_FDE_INSTALL_MNT/opt/debian-fde
 assert_file_exists "tooling copy: bin/debian-fde shipped" "$OPT/bin/debian-fde"
 assert_file_exists "tooling copy: lib/ shipped" "$OPT/lib/cmd/install.sh"
-assert_file_exists "tooling copy: hooks/ shipped" "$OPT/hooks/postinst.d-zz-debian-fde"
+assert_file_exists "tooling copy: hooks/ shipped (Alpine layout)" "$OPT/hooks/kernel-hooks.d/alpine-fde-build.hook"
 assert_file_exists "tooling copy: docs/ shipped" "$OPT/docs/Architecture.md"
 
 RESIDUE=$(find "$OPT" \( -name '.git' -o -name 'tests' -o -name 'fixtures' \
@@ -370,50 +466,6 @@ COPY_LINE=$(grep -m1 'cp -r' <<<"$OUT")
 assert_contains "tooling copy step: enumerates bin" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE/bin"
 assert_contains "tooling copy step: enumerates docs" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE/docs"
 assert_not_contains "tooling copy step: never the whole tree root" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE "
-
-# =============================================================================
-# G-I3 (§13/T2b): the entropy floor is enforced on the INTERACTIVE path too —
-# no-echo prompt x2, passphrase_floor_ok, then a key-file for scripted
-# luksFormat/open — before any destructive step.
-# =============================================================================
-run_install_stdin() { # STDIN_FILE — drive `install` with piped "prompts"
-    : >"$DEBIAN_FDE_TEST_LOG"
-    rm -rf "$DEBIAN_FDE_INSTALL_MNT"
-    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" <"$1" 2>&1)
-    RC=$?
-}
-unset DEBIAN_FDE_DISK_PASSPHRASE
-
-printf 'weakpass\nweakpass\n' >"$T/pass-weak"
-run_install_stdin "$T/pass-weak"
-assert_eq "interactive weak passphrase -> rc 2" "2" "$RC"
-assert_contains "interactive weak: floor error" "$OUT" "entropy floor"
-assert_eq "interactive weak: zero destructive commands" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
-
-printf 'short\nshort\n' >"$T/pass-short"
-run_install_stdin "$T/pass-short"
-assert_eq "interactive short passphrase -> rc 2" "2" "$RC"
-
-printf 'Tr0ub4dor&extra-long\nother-passphrase-entirely\n' >"$T/pass-mismatch"
-run_install_stdin "$T/pass-mismatch"
-assert_eq "interactive passphrase mismatch -> rc 2" "2" "$RC"
-assert_contains "interactive mismatch: error explains" "$OUT" "do not match"
-assert_eq "interactive mismatch: zero destructive commands" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
-
-printf 'correct-horse-battery-stapler-42\ncorrect-horse-battery-stapler-42\n' >"$T/pass-strong"
-run_install_stdin "$T/pass-strong"
-assert_eq "interactive strong passphrase -> rc 0" "0" "$RC"
-assert_contains "interactive strong: luksFormat scripted via key-file (M-01: tmpfs seam)" \
-    "$(cat "$DEBIAN_FDE_TEST_LOG")" "--key-file $DEBIAN_FDE_TMPDIR/debian-fde-diskkey"
-assert_not_contains "interactive passphrase never echoed into output" "$OUT" "correct-horse-battery-stapler-42"
-assert_not_contains "interactive passphrase never logged by stubs" "$(cat "$DEBIAN_FDE_TEST_LOG")" "correct-horse-battery-stapler-42"
-
-# env-passphrase weak case stays fail-closed with zero destructive commands
-export DEBIAN_FDE_DISK_PASSPHRASE='weak'
-run_install
-assert_eq "env weak passphrase -> rc 2" "2" "$RC"
-assert_eq "env weak: zero destructive commands" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
-unset DEBIAN_FDE_DISK_PASSPHRASE
 
 # =============================================================================
 # M-02: operator-controlled values are validated at the boundary BEFORE any
@@ -445,33 +497,32 @@ assert_eq "WR-01: injected --keydir: zero commands executed" "0" "$(wc -l <"$DEB
 assert_eq "WR-01: injected --keydir executed nothing (no /tmp/pwned)" "0" \
     "$([ -e /tmp/pwned ] && echo 1 || echo 0)"
 rm -f /tmp/pwned
-OUT=$(DEBIAN_FDE_DISK_PASSPHRASE='correct-horse-battery-stapler-42' \
-    "$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
+OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
 RC=$?
 assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$RC"
 
 # =============================================================================
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort
-# trap tears the binds down. The failing step is a LATE host record
-# (fw_osindications_set, made failing via the efivars seam: the OsIndications
-# target file is removed and the directory made unwritable) so the plan's own
+# trap tears the binds down. The failing step is a LATE host record (the
+# §9.1 step 9 state write, made failing by chmod 555 on the target's
+# debian-fde config dir — istate_write's atomic mv dies) so the plan's own
 # teardown never runs — the ONLY bind-umount line in the log is the trap's.
 # =============================================================================
-rm -f "$DEBIAN_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL"
-chmod 555 "$DEBIAN_FDE_EFIVARS_DIR"
-export DEBIAN_FDE_DISK_PASSPHRASE='correct-horse-battery-stapler-42'
+run_install
+assert_eq "L-04a fixture: clean run wrote the state" "installed" \
+    "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
+chmod 555 "$MNT_ETC/debian-fde"
 run_install
 assert_eq "L-04a: failed host step -> fail-closed 64" "64" "$RC"
-assert_contains "L-04a: the failing step is named" "$OUT" "cannot write"
+assert_contains "L-04a: the failing step is named" "$OUT" "baseline_set_field"
 assert_eq "L-04a: plan temp file scrubbed on failed step" "0" \
     "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-plan.*' 2>/dev/null | wc -l)"
-assert_eq "L-04a: passphrase key-file scrubbed on failed step" "0" \
-    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-diskkey.*' 2>/dev/null | wc -l)"
+assert_eq "L-04a: ephemeral key-file scrubbed on failed step (I1)" "0" \
+    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-ephkey.*' 2>/dev/null | wc -l)"
 assert_eq "WR-02 fixture: plan teardown never ran (die before teardown)" "0" \
     "$(grep -c 'umount -R' "$DEBIAN_FDE_TEST_LOG")"
 assert_eq "WR-02: abort trap tore the binds down (incl. efivars)" "1" \
     "$(grep -c "^umount $DEBIAN_FDE_INSTALL_MNT/dev $DEBIAN_FDE_INSTALL_MNT/sys $DEBIAN_FDE_INSTALL_MNT/proc $DEBIAN_FDE_INSTALL_MNT/sys/firmware/efi/efivars\$" "$DEBIAN_FDE_TEST_LOG")"
-chmod 755 "$DEBIAN_FDE_EFIVARS_DIR"
-unset DEBIAN_FDE_DISK_PASSPHRASE
+chmod 755 "$MNT_ETC/debian-fde"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

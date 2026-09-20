@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# tests/unit/initrd_audit.sh — G-U3 (§8.2/§12/I6): initrd inventory audit on
-# every build. Required unlock artifacts (token lib at the multiarch systemd
-# path, libtss2 libs, TPM kernel modules + tpmrm0 udev rules) and deny rules
-# (no compilers, package tools, unnecessary shells). Any miss is a loud ADR-8
+# tests/unit/initrd_audit.sh — G-C11 (§8.2/§12/I6, orchestrator resolution R9):
+# initrd inventory audit of the mkinitfs initramfs on every build. Required
+# unlock artifacts (Alpine shape): the alpine-fde-unseal.sh hook itself,
+# cryptsetup, openssl, the exact tpm2 verbs the hook runs, libtss2 libs, TPM
+# kernel modules + the tpmrm0 udev rule, and per persisted topology the root
+# fs driver (btrfs default / ext4) and — for BCACHE=1 — bcache.ko +
+# 69-bcache.rules. Deny rules: no compilers (gcc/cc/make/clang, triplet
+# toolchains), no package tools (apk/apt/dpkg), no foreign shells
+# (bash/zsh/dash) — busybox/ash/sh are ALLOWED: busybox IS the mkinitfs init
+# framework; the "no interactive shell" guarantee moved to hook level
+# (tests/unit/hooks_mkinitfs_unseal.sh, G-C8). Any miss is a loud ADR-8
 # build failure (rc 64 + build-failed marker naming the artifact, no ESP
-# mutation). The lsinitrd collaborator is the configurable fake
-# fixtures/initramfs/lsinitrd-fake.sh.
+# mutation). The lister is the configurable fake
+# fixtures/initramfs/cpio-lister-fake.sh (cpio-shaped inventory).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -37,235 +44,241 @@ trap 'rm -rf "$TMP"' EXIT
 # below override this for ROOT_FS=ext4 / BCACHE=1)
 export DEBIAN_FDE_CONF="$TMP/conf-default-absent"
 
-FAKE="$REPO/fixtures/initramfs/lsinitrd-fake.sh"
+FAKE="$REPO/fixtures/initramfs/cpio-lister-fake.sh"
+IMG="$TMP/whatever.img"
+AUDIT_CONF='' # optional per-call DEBIAN_FDE_CONF override (topology legs)
 
-# --- inventories -----------------------------------------------------------------
-inv_complete="$TMP/inv-complete.txt"
-cat >"$inv_complete" <<'EOF'
--rw-r--r--   1 root root  22k usr/lib/x86_64-linux-gnu/systemd/libcryptsetup-token-systemd-tpm2.so
--rw-r--r--   1 root root 500k usr/lib/x86_64-linux-gnu/libtss2-esys.so.0.0.0
--rw-r--r--   1 root root  20k usr/lib/x86_64-linux-gnu/libtss2-mu.so.0.0.0
--rw-r--r--   1 root root  12k usr/lib/x86_64-linux-gnu/libtss2-rc.so.0.0.0
--rw-r--r--   1 root root  30k usr/lib/x86_64-linux-gnu/libtss2-sys.so.0.0.0
--rw-r--r--   1 root root  10k usr/lib/x86_64-linux-gnu/libtss2-tctildr.so.0.0.0
--rw-r--r--   1 root root  10k usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0.0.0
--rw-r--r--   1 root root  15k kernel/drivers/char/tpm/tpm.ko
--rw-r--r--   1 root root  15k kernel/drivers/char/tpm/tpm_tis.ko
--rw-r--r--   1 root root  15k kernel/drivers/char/tpm/tpm_crb.ko
--rw-r--r--   1 root root  383 usr/lib/udev/rules.d/60-tpm-udev.rules
--rw-r--r--   1 root root  950k kernel/fs/btrfs/btrfs.ko
--rwxr-xr-x   1 root root  60k usr/bin/systemd-cryptsetup
--rwxr-xr-x   1 root root  90k bin/sh
+# run_audit <inventory-file | V:variant> — drive the audit in THIS shell with
+# literal var-prefix assignments (they export to the lister child). rc lands
+# in $RUN_AUDIT_RC, the failure reason in $_initrd_audit_reason.
+RUN_AUDIT_RC=0
+run_audit() {
+    _initrd_audit_reason=''
+    local spec=$1
+    if [ -n "$AUDIT_CONF" ]; then
+        if [ "${spec#V:}" != "$spec" ]; then
+            DEBIAN_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+                LISTER_FAKE_VARIANT="${spec#V:}" initrd_audit "$IMG" 2>/dev/null
+        else
+            DEBIAN_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+                LISTER_FAKE_INV="$spec" initrd_audit "$IMG" 2>/dev/null
+        fi
+    else
+        if [ "${spec#V:}" != "$spec" ]; then
+            INITRD_LISTER_CMD="$FAKE" LISTER_FAKE_VARIANT="${spec#V:}" initrd_audit "$IMG" 2>/dev/null
+        else
+            INITRD_LISTER_CMD="$FAKE" LISTER_FAKE_INV="$spec" initrd_audit "$IMG" 2>/dev/null
+        fi
+    fi
+    RUN_AUDIT_RC=$?
+}
+
+# =============================================================================
+# 1. required artifact classes — each missing class fails the audit and the
+#    reason names the artifact
+# =============================================================================
+inv="$TMP/inv-base.txt"
+cat >"$inv" <<'EOF'
+usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
+usr/bin/cryptsetup
+usr/lib/libcryptsetup.so.2
+usr/bin/openssl
+usr/lib/libcrypto.so.3
+usr/bin/tpm2_pcrextend
+usr/bin/tpm2_startauthsession
+usr/bin/tpm2_policypcr
+usr/bin/tpm2_policyauthorize
+usr/bin/tpm2_loadexternal
+usr/bin/tpm2_verifysignature
+usr/bin/tpm2_createprimary
+usr/bin/tpm2_load
+usr/bin/tpm2_unseal
+usr/bin/tpm2_flushcontext
+usr/lib/libtss2-esys.so.0
+usr/lib/libtss2-mu.so.0
+usr/lib/libtss2-rc.so.0
+usr/lib/libtss2-sys.so.0
+usr/lib/libtss2-tctildr.so.0
+usr/lib/libtss2-tcti-device.so.0
+kernel/drivers/char/tpm/tpm.ko
+kernel/drivers/char/tpm/tpm_tis.ko
+kernel/drivers/char/tpm/tpm_crb.ko
+usr/lib/udev/rules.d/60-tpm.rules
+kernel/fs/btrfs/btrfs.ko
+bin/busybox
+bin/ash
+bin/sh
 EOF
-# scenario 1: complete minus the systemd-tpm2 token lib
-grep -v 'libcryptsetup-token-systemd-tpm2' "$inv_complete" >"$TMP/inv-missing-token.txt"
-# scenario 2: complete + compiler, package tool, and a shell beyond the allowlist
-{ cat "$inv_complete"
-  printf '%s\n' \
-      '-rwxr-xr-x 1 root root 900k usr/bin/gcc-12' \
-      '-rwxr-xr-x 1 root root 200k usr/bin/dpkg-query' \
-      '-rwxr-xr-x 1 root root 800k usr/bin/bash'
-} >"$TMP/inv-deny.txt"
 
-# --- scenario 1: missing token lib -> rc != 0, reason names the artifact ----------
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$TMP/inv-missing-token.txt" \
-    initrd_audit "$TMP/whatever.img"
-assert_rc "audit 1: missing token lib fails the audit" 1 $?
-assert_contains "audit 1: reason names the missing artifact" \
-    "$_initrd_audit_reason" "libcryptsetup-token-systemd-tpm2.so"
+grep -v 'alpine-fde-unseal\.sh$' "$inv" >"$TMP/inv-m1.txt"
+run_audit "$TMP/inv-m1.txt"
+assert_rc "audit 1a: missing unseal hook fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1a: reason names the hook" "$_initrd_audit_reason" "alpine-fde-unseal.sh"
 
-# --- scenario 2: compiler/package-tool/shell present -> rc != 0 --------------------
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$TMP/inv-deny.txt" \
-    initrd_audit "$TMP/whatever.img"
-assert_rc "audit 2: compiler present fails the audit" 1 $?
-assert_contains "audit 2: reason names the denied compiler" "$_initrd_audit_reason" "gcc-12"
+grep -v 'usr/bin/tpm2_unseal$' "$inv" >"$TMP/inv-m2.txt"
+run_audit "$TMP/inv-m2.txt"
+assert_rc "audit 1b: missing tpm2_unseal fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1b: reason names tpm2_unseal" "$_initrd_audit_reason" "tpm2_unseal"
 
-# --- scenario 3: complete multiarch inventory -> rc 0 -------------------------------
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$inv_complete" \
-    initrd_audit "$TMP/whatever.img"
-assert_rc "audit 3: complete multiarch inventory passes" 0 $?
-assert_eq "audit 3: no failure reason on success" "" "$_initrd_audit_reason"
+grep -v 'libtss2-tcti-device' "$inv" >"$TMP/inv-m3.txt"
+run_audit "$TMP/inv-m3.txt"
+assert_rc "audit 1c: missing libtss2 TCTI fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1c: reason names libtss2-tcti-device" "$_initrd_audit_reason" "libtss2-tcti-device"
 
-# --- audit invokes the lister on the built initrd -----------------------------------
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$inv_complete" \
-    LSINITRD_FAKE_ARGV="$TMP/ls.argv" \
-    initrd_audit "$TMP/workdir/initrd.img" 2>/dev/null
-assert_eq "audit runs the lister with the initrd image as its argument" \
-    "initrd.img" "$(basename "$(head -n 1 "$TMP/ls.argv" 2>/dev/null)")"
+grep -v 'kernel/drivers/char/tpm/tpm_tis\.ko$' "$inv" >"$TMP/inv-m4.txt"
+run_audit "$TMP/inv-m4.txt"
+assert_rc "audit 1d: missing TPM kernel module fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1d: reason names tpm_tis.ko" "$_initrd_audit_reason" "tpm_tis.ko"
 
-# --- MD-04: fixture-variant inventories (dracut-shaped deny rules) -------------------
-# LSINITRD_FAKE_VARIANT emits dracut-shaped inventories (fixtures/initramfs/
-# lsinitrd-fake.sh): `base` is a compliant Debian dracut inventory INCLUDING
-# usr/bin/dash + the /bin/sh -> dash symlink (Debian's dracut ships dash as the
-# initrd shell — allowed, see the dash resolution in lib/initramfs.sh); the
-# other variants add exactly one denied artifact class. Audit-level: each deny
-# variant fails rc 1 naming the artifact; base passes.
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=base \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 5: dracut-shaped base inventory (dash shell) passes" 0 $?
-assert_eq "audit 5: no reason on the dracut-shaped base" "" "$_initrd_audit_reason"
+grep -v '60-tpm\.rules$' "$inv" >"$TMP/inv-m5.txt"
+run_audit "$TMP/inv-m5.txt"
+assert_rc "audit 1e: missing TPM udev rule fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1e: reason names the TPM udev rule requirement" "$_initrd_audit_reason" "udev rule"
 
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=clang \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 6: clang present fails the audit" 1 $?
-assert_contains "audit 6: reason names the denied clang" "$_initrd_audit_reason" "usr/bin/clang"
+grep -v 'btrfs\.ko$' "$inv" >"$TMP/inv-m6.txt"
+run_audit "$TMP/inv-m6.txt"
+assert_rc "audit 1f: missing btrfs.ko fails the audit (default topology)" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1f: reason names btrfs.ko" "$_initrd_audit_reason" "btrfs.ko"
 
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=triplet-gcc \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 7: triplet-prefixed toolchain present fails the audit" 1 $?
-assert_contains "audit 7: reason names the denied triplet gcc" "$_initrd_audit_reason" "x86_64-linux-gnu-gcc-12"
+# =============================================================================
+# 2. deny classes — compilers, package tools, foreign shells (busybox/ash OK)
+# =============================================================================
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/gcc)
+assert_rc "audit 2a: gcc present fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2a: reason names the denied compiler" "$_initrd_audit_reason" "usr/bin/gcc"
 
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=busybox \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 8: busybox present fails the audit" 1 $?
-assert_contains "audit 8: reason names the denied busybox" "$_initrd_audit_reason" "usr/bin/busybox"
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/make)
+assert_rc "audit 2b: make present fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2b: reason names the denied make" "$_initrd_audit_reason" "usr/bin/make"
 
-# --- G-ST5: filesystem drivers + bcache artifacts are topology-required (§8.2/§4.1) ---
-# A root filesystem driver missing from the initrd means the unlock path can
-# mount NOTHING (G2 lost / I6 class) — btrfs.ko is required by default,
-# ext4.ko when the persisted conf says ROOT_FS=ext4; BCACHE=1 additionally
-# requires bcache.ko + 69-bcache.rules + bcache-register (without them
-# /dev/bcache0 never registers and cryptsetup cannot open the container).
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=btrfs-ok \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 9: btrfs-ok inventory passes (default topology)" 0 $?
-assert_eq "audit 9: no reason on the btrfs-ok inventory" "" "$_initrd_audit_reason"
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/x86_64-linux-gnu-gcc-12)
+assert_rc "audit 2c: triplet-prefixed toolchain fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2c: reason names the triplet gcc" "$_initrd_audit_reason" "x86_64-linux-gnu-gcc-12"
 
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=missing-btrfs \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 10: missing btrfs.ko fails the audit (default topology)" 1 $?
-assert_contains "audit 10: reason names btrfs.ko" "$_initrd_audit_reason" "btrfs.ko"
+run_audit <(cat "$inv"; printf '%s\n' usr/sbin/apk)
+assert_rc "audit 2d: apk present fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2d: reason names the denied package tool" "$_initrd_audit_reason" "usr/sbin/apk"
+
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/bash usr/bin/zsh usr/bin/dash)
+assert_rc "audit 2e: foreign shells fail the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2e: reason names the denied bash" "$_initrd_audit_reason" "usr/bin/bash"
+assert_contains "audit 2e: reason names the denied dash" "$_initrd_audit_reason" "usr/bin/dash"
+
+# =============================================================================
+# 3. compliant inventories pass — busybox/ash/sh allowed (I6 resolution R9)
+# =============================================================================
+run_audit "$inv"
+assert_rc "audit 3a: compliant Alpine inventory (busybox+ash+sh) passes" 0 "$RUN_AUDIT_RC"
+assert_eq "audit 3a: no failure reason on success" "" "$_initrd_audit_reason"
+
+run_audit V:alpine-base
+assert_rc "audit 3b: alpine-base variant passes (busybox is the init framework)" 0 "$RUN_AUDIT_RC"
+
+# =============================================================================
+# 4. topology-driven requirements (§8.2/§4.1)
+# =============================================================================
+run_audit V:ext4-ok
+assert_rc "audit 4a: ext4-only inventory fails under the default (btrfs) topology" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 4a: reason names btrfs.ko" "$_initrd_audit_reason" "btrfs.ko"
 
 printf 'ROOT_FS=ext4\n' >"$TMP/conf-ext4"
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=ext4-ok DEBIAN_FDE_CONF="$TMP/conf-ext4" \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 11: ext4-ok inventory passes under ROOT_FS=ext4" 0 $?
-assert_eq "audit 11: no reason on the ext4-ok inventory" "" "$_initrd_audit_reason"
-
-_initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=missing-btrfs DEBIAN_FDE_CONF="$TMP/conf-ext4" \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 12: no fs driver fails under ROOT_FS=ext4" 1 $?
-assert_contains "audit 12: reason names ext4.ko (conf-driven requirement)" \
+AUDIT_CONF=$TMP/conf-ext4
+run_audit V:ext4-ok
+assert_rc "audit 4b: ext4-ok passes under ROOT_FS=ext4" 0 "$RUN_AUDIT_RC"
+AUDIT_CONF=$TMP/conf-ext4
+run_audit V:alpine-base
+assert_rc "audit 4c: btrfs-shaped inventory fails under ROOT_FS=ext4" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 4c: reason names ext4.ko (conf-driven requirement)" \
     "$_initrd_audit_reason" "ext4.ko"
 
 printf 'ROOT_FS=btrfs\nBCACHE=1\n' >"$TMP/conf-bcache"
+AUDIT_CONF=$TMP/conf-bcache
+run_audit V:bcache-ok
+assert_rc "audit 4d: bcache-ok passes under BCACHE=1" 0 "$RUN_AUDIT_RC"
+AUDIT_CONF=$TMP/conf-bcache
+run_audit V:bcache-missing
+assert_rc "audit 4e: BCACHE=1 without bcache artifacts fails" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 4e: reason names bcache.ko" "$_initrd_audit_reason" "bcache.ko"
+AUDIT_CONF=''
+run_audit V:bcache-missing
+assert_rc "audit 4f: bcache artifacts NOT required without BCACHE=1" 0 "$RUN_AUDIT_RC"
+
+# =============================================================================
+# 5. lister invocation + missing-lister semantics
+# =============================================================================
 _initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-ok DEBIAN_FDE_CONF="$TMP/conf-bcache" \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 13: bcache-ok inventory passes under BCACHE=1" 0 $?
-assert_eq "audit 13: no reason on the bcache-ok inventory" "" "$_initrd_audit_reason"
+INITRD_LISTER_CMD="$FAKE" LISTER_FAKE_INV="$inv" LISTER_FAKE_ARGV="$TMP/ls.argv" \
+    initrd_audit "$IMG" 2>/dev/null
+assert_eq "audit 5a: the lister ran against the initrd image argument" \
+    "whatever.img" "$(basename "$(head -n 1 "$TMP/ls.argv" 2>/dev/null)")"
 
 _initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-missing DEBIAN_FDE_CONF="$TMP/conf-bcache" \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 14: BCACHE=1 without bcache artifacts fails the audit" 1 $?
-assert_contains "audit 14: reason names bcache.ko" "$_initrd_audit_reason" "bcache.ko"
+INITRD_LISTER_CMD="$TMP/no-such-lister" initrd_audit "$TMP/img" 2>/dev/null
+assert_rc "audit 5b: no lister + no INITRAMFS_CMD override = loud failure" 1 $?
+assert_contains "audit 5b: reason names the lister seam" "$_initrd_audit_reason" "lister"
 
 _initrd_audit_reason=''
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT=bcache-missing \
-    initrd_audit "$TMP/whatever.img" 2>/dev/null
-assert_rc "audit 15: bcache artifacts NOT required without BCACHE=1" 0 $?
-assert_eq "audit 15: no reason on the default-topology bcache-missing" "" "$_initrd_audit_reason"
+INITRD_LISTER_CMD="$TMP/no-such-lister" INITRAMFS_CMD="stub {out} {kver}" \
+    initrd_audit "$TMP/img" 2>/dev/null
+assert_rc "audit 5c: no lister + INITRAMFS_CMD override = loud skip (override owns contents)" 0 $?
+assert_eq "audit 5c: no failure reason on the skipped audit" "" "$_initrd_audit_reason"
 
-# --- scenario 4: full real `ukictl build` over the fake inventory --------------------
-KVER=6.12.8-1-amd64
+# =============================================================================
+# 6. full real `ukictl build` over the fake inventory (audit is wired)
+# =============================================================================
+KVER=6.6.63-0-lts
 ROOT="$TMP/root"
 ESP="$TMP/esp"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
-cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/debian-fde/cmdline.txt"
+cp "$REPO/fixtures/uki/cmdline.txt" "$ROOT/etc/alpine-fde/cmdline.txt"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
-# compliant crypttab: the G-U4 guard owns that precondition; this file tests
-# the initrd inventory audit (§8.2/I6) in isolation
-printf '%s\n' 'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
+printf '%s\n' "root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard" \
     >"$ROOT/etc/crypttab"
 
-# 4a: non-compliant inventory (missing token lib) -> rc 64 + marker, ESP untouched
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$TMP/inv-missing-token.txt" \
-LSINITRD_FAKE_ARGV="$TMP/build-ls.argv" \
-DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
-INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
-RETENTION=1 \
-    "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
-assert_rc "audit 4a: full build fails closed (64) on a non-compliant inventory" 64 $?
-assert_file_exists "audit 4a: ADR-8 failure marker persisted" "$ROOT/etc/debian-fde/build-failed"
-assert_contains "audit 4a: marker names the missing artifact" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "libcryptsetup-token-systemd-tpm2.so"
-assert_eq "audit 4a: no ESP mutation (no UKI installed)" "" \
-    "$(find "$ESP" -type f -name '*.efi' -print)"
-assert_file_absent "audit 4a: no predictions.json (failure was pre-ESP)" \
-    "$ROOT/etc/debian-fde/predictions.json"
-assert_eq "audit 4a: lsinitrd ran against the built initrd (audit is wired)" \
-    "initrd.img" "$(basename "$(head -n 1 "$TMP/build-ls.argv" 2>/dev/null)")"
-
-# 4b: compliant inventory -> full build succeeds
-LSINITRD_CMD="$FAKE" LSINITRD_FAKE_INV="$inv_complete" \
-DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
-INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
-RETENTION=1 \
-    "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
-assert_rc "audit 4b: full build succeeds over a compliant fake inventory" 0 $?
-assert_file_exists "audit 4b: UKI installed on the ESP" \
-    "$ESP/EFI/Linux/debian-fde-$KVER.efi"
-assert_file_absent "audit 4b: failure marker cleared on success" \
-    "$ROOT/etc/debian-fde/build-failed"
-
-# 4c-4f: MD-04 full-build legs over the fixture variants — a denied artifact
-# must fail the build closed (64 + ADR-8 marker naming it, ESP untouched); the
-# dracut-shaped base (dash) must BUILD, because the dash allow rule is
-# load-bearing for every real production dracut initrd.
-variant_build() {
-    LSINITRD_CMD="$FAKE" LSINITRD_FAKE_VARIANT="$1" \
-    DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-    DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
-    INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
-    RETENTION=1 \
+build() { # <variant>
+    env INITRD_LISTER_CMD="$FAKE" LISTER_FAKE_VARIANT="$1" \
+        DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
+        DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
+        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+        INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
+        RETENTION=1 \
         "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
 }
-ESP_BEFORE_MD04=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 
-rm -f "$ROOT/etc/debian-fde/build-failed"
-variant_build clang
-assert_rc "audit 4c: full build fails closed (64) with clang in the inventory" 64 $?
-assert_file_exists "audit 4c: ADR-8 marker persisted" "$ROOT/etc/debian-fde/build-failed"
-assert_contains "audit 4c: marker names the denied clang" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "usr/bin/clang"
-assert_eq "audit 4c: ESP untouched by the denied-inventory build" \
-    "$ESP_BEFORE_MD04" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
+# 6a: non-compliant inventory (missing hook) -> rc 64 + marker, ESP untouched
+rm -f "$ROOT/etc/alpine-fde/build-failed"
+build missing-hook
+assert_rc "audit 6a: full build fails closed (64) on a missing unseal hook" 64 $?
+assert_file_exists "audit 6a: ADR-8 failure marker persisted" "$ROOT/etc/alpine-fde/build-failed"
+assert_contains "audit 6a: marker names the missing hook" \
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "alpine-fde-unseal.sh"
+assert_eq "audit 6a: no ESP mutation (no UKI installed)" "" \
+    "$(find "$ESP" -type f -name '*.efi' -print)"
 
-rm -f "$ROOT/etc/debian-fde/build-failed"
-variant_build triplet-gcc
-assert_rc "audit 4d: full build fails closed (64) with a triplet-prefixed toolchain" 64 $?
-assert_contains "audit 4d: marker names the triplet gcc" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "x86_64-linux-gnu-gcc-12"
+# 6b: compliant inventory -> full build succeeds
+build alpine-base
+assert_rc "audit 6b: full build succeeds over a compliant fake inventory" 0 $?
+assert_file_exists "audit 6b: UKI installed on the ESP" \
+    "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
+assert_file_absent "audit 6b: failure marker cleared on success" \
+    "$ROOT/etc/alpine-fde/build-failed"
 
-rm -f "$ROOT/etc/debian-fde/build-failed"
-variant_build busybox
-assert_rc "audit 4e: full build fails closed (64) with busybox in the inventory" 64 $?
-assert_contains "audit 4e: marker names the denied busybox" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed")" "usr/bin/busybox"
-assert_eq "audit 4e: ESP untouched by the denied-inventory build" \
-    "$ESP_BEFORE_MD04" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
+# 6c: a denied package tool must fail the build closed (ESP untouched)
+ESP_BEFORE=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
+rm -f "$ROOT/etc/alpine-fde/build-failed"
+build deny-apk
+assert_rc "audit 6c: full build fails closed (64) with apk in the inventory" 64 $?
+assert_contains "audit 6c: marker names the denied package tool" \
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "usr/sbin/apk"
+assert_eq "audit 6c: ESP untouched by the denied-inventory build" \
+    "$ESP_BEFORE" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
 
-variant_build base
-assert_rc "audit 4f: full build SUCCEEDS over the dracut-shaped base (dash allowed)" 0 $?
-assert_file_absent "audit 4f: successful build cleared the stale marker" \
-    "$ROOT/etc/debian-fde/build-failed"
+# 6d: the dracut-era dash allow rule is GONE — dash in the inventory now fails
+rm -f "$ROOT/etc/alpine-fde/build-failed"
+build deny-shell
+assert_rc "audit 6d: full build fails closed with dash in the inventory" 64 $?
+assert_contains "audit 6d: marker names the denied dash" \
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "usr/bin/dash"
 
 finish

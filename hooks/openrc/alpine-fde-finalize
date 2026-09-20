@@ -1,0 +1,51 @@
+#!/sbin/openrc-run
+# alpine-fde-finalize — first-boot ADVISORY oneshot (§9.1 step 7; ADR-20).
+#
+# ADR-20 Stage 3 makes `alpine-fde finalize` a GUIDED command: the operator
+# runs it after enabling Secure Boot. This boot-time artifact NEVER runs the
+# command, NEVER enrolls, NEVER wipes, NEVER blocks boot — rc 0 ALWAYS. When
+# the install state is not yet `finalized` it only prints the read-only
+# Secure Boot state (fw_sb_state) and the finalize guidance.
+#
+# Install: copied to /etc/init.d/ and enabled via
+# `rc-update add alpine-fde-finalize default` (Stage 1 step 7).
+
+description="Advisory: Alpine FDE trust finalization pending (run: alpine-fde finalize)"
+
+depend() {
+    need localmount
+}
+
+start() {
+    _aff_dir=${DEBIAN_FDE_CMD_DIR:-/opt/debian-fde/lib/cmd}
+    _aff_lib=${_aff_dir%/*}
+    if [ -r "$_aff_lib/install-state.sh" ]; then
+        DEBIAN_FDE_CMD_DIR=$_aff_dir
+        # shellcheck disable=SC1090
+        . "$_aff_lib/install-state.sh"
+        if [ -r "$_aff_lib/firmware.sh" ]; then
+            # shellcheck disable=SC1090
+            . "$_aff_lib/firmware.sh"
+        fi
+    fi
+    if command -v istate_is_finalized >/dev/null 2>&1 &&
+        istate_is_finalized >/dev/null 2>&1; then
+        return 0
+    fi
+    _aff_state=unknown
+    if command -v istate_state >/dev/null 2>&1; then
+        _aff_state=$(istate_state 2>/dev/null)
+        [ -n "$_aff_state" ] || _aff_state=unknown
+    fi
+    _aff_sb='secureboot=? setup_mode=? pk=?'
+    if command -v fw_sb_state >/dev/null 2>&1; then
+        _aff_sb=$(fw_sb_state 2>/dev/null || true)
+        [ -n "$_aff_sb" ] || _aff_sb='secureboot=? setup_mode=? pk=?'
+    fi
+    printf '%s\n' \
+        "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+        "Secure Boot: $_aff_sb" \
+        "The permanent recovery passphrase has not been set yet; the disk unlocks" \
+        "via the provisional seal. Run: alpine-fde finalize"
+    return 0
+}

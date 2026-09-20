@@ -111,8 +111,9 @@ cmd_status_main() {
         case $_st_is in
             installed)
                 printf '    WARNING: installation is NOT finalized (install state: installed)\n'
-                printf '    First-boot finalization pending: debian-fde-finalize.service runs\n'
-                printf '    it on the next boot, or resume now: debian-fde finalize\n'
+                printf '    First-boot finalization pending: the advisory alpine-fde-finalize\n'
+                printf '    OpenRC service (/etc/init.d/) prints this on boot; resume now:\n'
+                printf '    alpine-fde finalize\n'
                 ;;
             finalized)
                 printf '    install state: finalized\n'

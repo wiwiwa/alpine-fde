@@ -1,0 +1,177 @@
+#!/bin/sh
+# alpine-fde-build.hook — /etc/kernel-hooks.d/ template for kernel
+# install/upgrade events (docs/Architecture.md §8.3; ADR-19/ADR-13, gap
+# G-C16). `alpine-fde install` copies this file into the target root,
+# executable. Replaces the retired Debian maintainer-script kernel-hook template via the
+# Alpine ukify-kernel-hook convention: the kernel hook runner invokes
+#
+#   alpine-fde-build.hook <event> <kver>     event in {add, update, remove}
+#
+# add/update map to `alpine-fde ukictl build <kver>`: initramfs (mkinitfs,
+# ADR-13) -> ukify build --measure --phases=enter-initrd with the release key
+# -> sbsign + sbverify -> atomic UKI install to the ESP -> manifest upsert ->
+# ensure-once enroll -> prune beyond current + 2 old. remove events are the
+# remove hook's business and exit 0 here.
+#
+# After a successful build the hook re-signs the BOOT MANAGER on the ESP
+# (logic reused from the retired Debian systemd-boot-upgrade hook,
+# verify-first: sbsign APPENDS signatures, so an already-verifying binary is
+# skipped — a manual re-run during a rotation window must not stack a dual
+# signature).
+#
+# ADR-18 custody: release.pem may be the ENCRYPTED on-target form. This hook
+# unlocks it ONCE via keys_unlock (ALPINE_FDE_KEY_PASSPHRASE env seam —
+# DEBIAN_FDE_KEY_PASSPHRASE accepted as the compat spelling — or the no-echo
+# TTY prompt) and signs with the UNLOCKED tmpfs path; the decrypted copy is
+# zeroized+removed when the hook exits. A plaintext release.pem (offline
+# medium) keeps the previous behavior with no passphrase interaction. The
+# canonical ALPINE_FDE_* spelling wins when both are set (§8.1).
+#
+# ADR-8: a failing build is a LOUD failure — the nonzero exit propagates to
+# the kernel hook runner, the failure marker is persisted under
+# /etc/alpine-fde for `alpine-fde status`, and the PREVIOUS default UKI is
+# never touched (ukictl build writes the ESP atomically and prunes only after
+# success). Operator recovery: re-run `alpine-fde ukictl build <kver>` (enter
+# the release-key passphrase when prompted); unattended, provide
+# ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then `apk fix`.
+#
+# Env: ALPINE_FDE_ROOT (target root for the marker, default /),
+# ALPINE_FDE_ESP (ESP mount, default /efi), ALPINE_FDE_KEYDIR (default
+# /etc/alpine-fde/keys), ALPINE_FDE_KEY_PASSPHRASE (credential-agent seam,
+# ADR-18), ALPINE_FDE_LIB_DIR (runtime; derived from this script's location,
+# falling back to /usr/share/alpine-fde/lib) — every one also under its
+# DEBIAN_FDE_* compat spelling.
+
+set -u
+
+event=${1:-}
+kver=${2:-}
+if [ -z "$event" ] || [ -z "$kver" ]; then
+    echo "alpine-fde hook: build: usage: alpine-fde-build.hook <add|update|remove> <kver> (kernel-hooks.d convention) — refusing to act (ADR-8)" >&2
+    exit 64
+fi
+case $event in
+    add | update) ;;
+    *)
+        # remove events never build — the remove hook owns them
+        exit 0
+        ;;
+esac
+
+# --- dual env seam: ALPINE_FDE_* canonical, DEBIAN_FDE_* compat ------------------
+ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-${DEBIAN_FDE_BIN:-alpine-fde}}
+ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-${DEBIAN_FDE_ROOT:-}}
+ALPINE_FDE_ESP=${ALPINE_FDE_ESP:-${DEBIAN_FDE_ESP:-/efi}}
+ALPINE_FDE_KEYDIR=${ALPINE_FDE_KEYDIR:-${DEBIAN_FDE_KEYDIR:-/etc/alpine-fde/keys}}
+ALPINE_FDE_LIB_DIR=${ALPINE_FDE_LIB_DIR:-${DEBIAN_FDE_LIB_DIR:-}}
+if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+    ALPINE_FDE_KEY_PASSPHRASE=$DEBIAN_FDE_KEY_PASSPHRASE
+fi
+# keys_unlock consumes the DEBIAN_FDE_KEY_PASSPHRASE spelling: hand the
+# canonical value down (never the reverse when the canonical is set)
+if [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+    DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
+    export DEBIAN_FDE_KEY_PASSPHRASE
+fi
+
+FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
+marker="$FDE_ETC/build-failed"
+
+"$ALPINE_FDE_BIN" ukictl build "$kver"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    mkdir -p "$FDE_ETC" 2>/dev/null || :
+    # APPEND, don't overwrite: the build already wrote a marker naming the
+    # exact failing step/pin — keep it and add the recovery line beneath it
+    {
+        printf 'kernel hook: ukictl build failed for kernel %s\n' "$kver"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: re-run "alpine-fde ukictl build %s" (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n' "$kver"
+    } >>"$marker" 2>/dev/null || :
+    exit "$rc"
+fi
+
+# --- boot-manager re-sign (verify-first; ADR-18 unlock) ---------------------------
+guard_fail() {
+    mkdir -p "$FDE_ETC" 2>/dev/null || :
+    {
+        printf 'boot-manager re-sign failed: %s\n' "$1"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: re-run this hook (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n'
+    } >"$marker" 2>/dev/null || :
+    exit 64
+}
+
+ALPINE_FDE_LIB_DIR=${ALPINE_FDE_LIB_DIR:-}
+if [ -z "$ALPINE_FDE_LIB_DIR" ]; then
+    _hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    if [ -f "$_hook_dir/../../lib/keys.sh" ]; then
+        ALPINE_FDE_LIB_DIR="$_hook_dir/../../lib"
+    else
+        ALPINE_FDE_LIB_DIR=/usr/share/alpine-fde/lib
+    fi
+fi
+if [ ! -f "$ALPINE_FDE_LIB_DIR/common.sh" ] || [ ! -f "$ALPINE_FDE_LIB_DIR/keys.sh" ]; then
+    guard_fail "alpine-fde runtime not found at $ALPINE_FDE_LIB_DIR (common.sh/keys.sh) — cannot unlock the release key (ADR-18)"
+fi
+# shellcheck source=../lib/common.sh
+. "$ALPINE_FDE_LIB_DIR/common.sh"
+# shellcheck source=../lib/keys.sh
+. "$ALPINE_FDE_LIB_DIR/keys.sh"
+
+[ -n "$ALPINE_FDE_KEYDIR" ] || guard_fail "no key directory configured (ALPINE_FDE_KEYDIR unset)"
+for f in release.pem release.crt; do
+    [ -f "$ALPINE_FDE_KEYDIR/$f" ] || guard_fail "missing key material: $ALPINE_FDE_KEYDIR/$f"
+done
+
+# ADR-18: unlock the release key ONCE (no-op for a plaintext release.pem)
+_hook_keyfile="$ALPINE_FDE_KEYDIR/release.pem"
+_hook_unlocked=''
+_hook_unlock_rc=0
+if keys_is_encrypted "$_hook_keyfile"; then
+    _hook_unlocked=$(keys_unlock "$ALPINE_FDE_KEYDIR") || _hook_unlock_rc=$?
+    if [ "$_hook_unlock_rc" -ne 0 ]; then
+        if [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+            guard_fail "release.pem unlock failed: wrong passphrase (ALPINE_FDE_KEY_PASSPHRASE rejected) — release key stays locked (ADR-18)"
+        fi
+        guard_fail "release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+    fi
+    chmod 600 "$_hook_unlocked" 2>/dev/null || :
+    _hook_keyfile=$_hook_unlocked
+    # zeroize+remove the decrypted copy on EVERY exit path (guard_fail's
+    # included); keys_scrub is best effort and never masks the hook's rc
+    trap 'keys_scrub "${_hook_unlocked:-}" 2>/dev/null || true' EXIT
+fi
+
+for rel in EFI/systemd/systemd-bootx64.efi EFI/BOOT/BOOTX64.EFI; do
+    src="$ALPINE_FDE_ESP/$rel"
+    [ -f "$src" ] || guard_fail "boot-manager binary missing on ESP: $src"
+    # verify-first: sbsign APPENDS signatures — re-signing an already-signed
+    # binary stacks a dual signature, which a later revocation of the old key
+    # renders outright rejected (the §9.6/s16 failure mode). A manual re-run
+    # (the documented ADR-8 recovery) on a binary that already verifies
+    # against the CURRENT key is an idempotent no-op.
+    if sbverify --cert "$ALPINE_FDE_KEYDIR/release.crt" "$src" >/dev/null 2>&1; then
+        printf 'alpine-fde hook: %s already verifies against the current key — skip re-sign\n' "$src" >&2
+        continue
+    fi
+    tmp="$src.signed.$$"
+    if ! sbsign --key "$_hook_keyfile" --cert "$ALPINE_FDE_KEYDIR/release.crt" --output "$tmp" "$src"; then
+        rm -f "$tmp" 2>/dev/null || :
+        guard_fail "sbsign failed for $src"
+    fi
+    # gate: the signed output must verify against the release cert BEFORE it
+    # replaces anything — no unverified binary ever lands on the ESP
+    if ! sbverify --cert "$ALPINE_FDE_KEYDIR/release.crt" "$tmp"; then
+        rm -f "$tmp" 2>/dev/null || :
+        guard_fail "sbverify failed for $src — not installed"
+    fi
+    if ! mv -f "$tmp" "$src"; then
+        rm -f "$tmp" 2>/dev/null || :
+        guard_fail "install failed for $src"
+    fi
+done
+
+# success — clear any stale marker from a previous failed attempt
+rm -f "$marker" 2>/dev/null || :
+exit 0

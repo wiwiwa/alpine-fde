@@ -19,7 +19,7 @@ T=$(mktemp -d /tmp/debian-fde-bootnext.XXXXXX)
 EFIVARS=$T/efivars
 export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
 VARFILE=$EFIVARS/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-ENTRY='debian-fde-6.1.0-0-amd64.conf'
+ENTRY='alpine-fde-6.6.0-0-lts.conf'
 
 run_bootnext() { # args...
     BN_OUT=$("$REPO/bin/debian-fde" bootnext "$@" 2>&1)
@@ -34,7 +34,7 @@ assert_eq "bootnext write rc 0" "0" "$BN_RC"
 assert_file_exists "var file created" "$VARFILE"
 assert_eq "file size = 4 (attrs) + 2*len(entry)" "$((4 + 2 * ${#ENTRY}))" "$(wc -c <"$VARFILE" | tr -d ' ')"
 assert_eq "attrs u32le 0x7 prefix" "07000000" "$(od -An -v -tx1 -N4 "$VARFILE" | tr -d ' \n')"
-assert_eq "payload starts with UTF-16LE('de')" "64006500" \
+assert_eq "payload starts with UTF-16LE('al')" "61006c00" \
     "$(tail -c +5 "$VARFILE" | od -An -v -tx1 | tr -d ' \n' | cut -c 1-8)"
 # precise: full body hex (attrs + UTF-16LE of $ENTRY, no trailing NUL)
 EXPECT_HEX='07000000'

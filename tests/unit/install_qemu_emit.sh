@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # tests/unit/install_qemu_emit.sh — `debian-fde install` qemu-runner contract
-# (docs/Architecture.md §8.1, §9.1): DEBIAN_FDE_INSTALL_RUNNER=qemu with
-# DEBIAN_FDE_INSTALL_SCRIPT=<tmpfile> emits the guest-side plan as a script
-# without executing anything:
+# (docs/Architecture.md §8.1, §9.1; ADR-20): DEBIAN_FDE_INSTALL_RUNNER=qemu
+# with DEBIAN_FDE_INSTALL_SCRIPT=<tmpfile> emits the guest-side plan as a
+# script without executing anything:
 #   * `set -eu` (repo standard guard) + shebang header
 #   * guest config writes as single-quote-escaped printf lines — crypttab and
-#     apt policy VERBATIM (a broken escape loses trailing content, wave-1 bug)
-#   * host steps emitted as comments (block layer, binds, metadata, state)
+#     the /etc/apk/repositories drop VERBATIM (a broken escape loses trailing
+#     content, wave-1 bug)
+#   * host steps emitted as comments (block layer, apk populate, binds,
+#     metadata, state, ephemeral-key scrub)
 #   * the §9.1 in-chroot provisioning sequence appears as EXECUTABLE guest
-#     lines (apt set, platform-key ceremony, NVRAM enrollment, bootctl,
-#     ukictl build, keys_encrypt_release)
+#     lines (apk additions txn, user account, platform-key ceremony, NVRAM
+#     enrollment, bootctl, ukictl build, G-C24 provisional seal)
+#   * G-C25: the MOTD/issue banner is emitted as guest printf lines
+#   * G-C26: NO OsIndications record in either lane; the direct reboot is
+#     suppressed by the CI seam (the harness reboots itself)
 #   * the script is NOT executed (stub log stays empty) and is chmod 700
 #
 # Conventions (E2E-mock rule): real handler, stubbed collaborators, asserted
@@ -40,7 +45,6 @@ export DEBIAN_FDE_HOOKS_DIR=$T/hooks
 export DEBIAN_FDE_ROOT=$T/root
 export DEBIAN_FDE_TEST_LOG=$T/cmd.log   # PATH stubs append one line per command
 export DEBIAN_FDE_INSTALL_SCRIPT=$T/guest-install.sh
-export DEBIAN_FDE_DISK_PASSPHRASE='correct-horse-battery-stapler-42'
 export DEBIAN_FDE_INSTALL_NO_REBOOT=1   # CI seam: the harness reboots itself
 export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
 
@@ -59,10 +63,19 @@ exit 0
 EOF
     chmod +x "$T/stub/$1"
 }
-for s in sfdisk mkfs.btrfs mkfs.vfat mount umount debootstrap chroot \
-    apt-get useradd usermod passwd systemctl bootctl lsblk btrfs cryptsetup; do
+for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
+    bootctl lsblk btrfs cryptsetup reboot; do
     make_stub "$s"
 done
+# openssl — deterministic 256-bit hex body (the staged ephemeral key, G-C23)
+cat >"$T/stub/openssl" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *" rand "*) printf 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' ;;
+esac
+exit 0
+EOF
+chmod +x "$T/stub/openssl"
 cat >"$T/stub/id" <<'EOF'   # pretend to be root (preflight check, never logged)
 #!/bin/sh
 printf '0\n'
@@ -71,21 +84,23 @@ chmod +x "$T/stub/id"
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR" "$DEBIAN_FDE_EFIVARS_DIR"
-for h in postinst.d-zz-debian-fde postrm.d-zz-debian-fde \
-    systemd-boot-upgrade-zz-debian-fde post-update.d-zz-debian-fde; do
+mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc" "$DEBIAN_FDE_EFIVARS_DIR"
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
     chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
 done
 # §9.1 preflight: firmware in Setup Mode
 printf '\007\000\000\000\001' >"$DEBIAN_FDE_EFIVARS_DIR/SetupMode-$GUID_GLOBAL"
 
-# --- run: emit the guest script -------------------------------------------------
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+# --- run: emit the guest script (UNATTENDED: stdin closed) -----------------------
+OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
 RC=$?
 SCRIPT=$DEBIAN_FDE_INSTALL_SCRIPT
 
-assert_eq "qemu emit rc 0" "0" "$RC"
+assert_eq "qemu emit rc 0 (unattended)" "0" "$RC"
 assert_file_exists "guest script written" "$SCRIPT"
 assert_contains "stderr names the emitted script" "$OUT" "guest install script written: $SCRIPT"
 
@@ -99,65 +114,87 @@ assert_eq "fixture: luksFormat comment pins an explicit uuid" "1" "$([ -n "$LUKS
 assert_eq "crypttab line verbatim (§8.2, single topology: no password-cache)" \
     "printf '%s\n' 'root UUID=$LUKS_UUID none luks,tpm2-device=auto,discard' >/etc/crypttab" \
     "$(grep -F "none luks,tpm2-device=auto,discard' >/etc/crypttab" "$SCRIPT")"
-assert_eq "apt policy lines verbatim incl. trailing content (wave-1 escape class)" \
-    "printf '%s\n' 'APT::Install-Recommends \"false\";' 'APT::Install-Suggests \"false\";' 'Acquire::Languages \"none\";' >/etc/apt/apt.conf.d/90debian-fde" \
-    "$(grep -F 'APT::Install-Recommends' "$SCRIPT")"
+assert_eq "repositories drop verbatim (G-C1: replaces apt sources)" \
+    "printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/community' >/etc/apk/repositories" \
+    "$(grep -F 'dl-cdn.alpinelinux.org' "$SCRIPT")"
 assert_eq "dracut conf verbatim (embedded double quotes survive)" \
     "printf '%s\n' 'hostonly=yes' 'hostonly_cmdline=no' 'omit_dracutmodules+=\" crypt \"' >/etc/dracut.conf.d/10-debian-fde.conf" \
     "$(grep -F 'omit_dracutmodules' "$SCRIPT")"
 assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
-assert_eq "guest step emitted executable: apt-get update" "1" "$(grep -cx 'apt-get update' "$SCRIPT")"
+assert_eq "guest step emitted executable: apk additions txn (§9.1 step 1)" "1" \
+    "$(grep -Ec '^apk add --no-cache ' "$SCRIPT")"
+assert_eq "guest step emitted executable: user account (locked, unattended)" "1" \
+    "$(grep -cx 'adduser -D -s /bin/ash admin && addgroup admin wheel' "$SCRIPT")"
+assert_eq "guest step emitted executable: OpenRC networking" "1" \
+    "$(grep -cx 'rc-update add networking boot' "$SCRIPT")"
+assert_eq "guest: finalize advisory enabled for the default runlevel (§9.1 step 7)" "1" \
+    "$(grep -cx 'rc-update add alpine-fde-finalize default' "$SCRIPT")"
 
 # --- host steps are comments ------------------------------------------------------
-assert_eq "host step emitted as comment: debootstrap" "1" \
-    "$(grep -c '^# HOST: debootstrap --variant=minbase' "$SCRIPT")"
+assert_eq "host step emitted as comment: apk populate (§3.3, replaces debootstrap)" "1" \
+    "$(grep -c '^# HOST: apk add --root .* --initdb alpine-base' "$SCRIPT")"
 assert_eq "host step emitted as comment: sfdisk" "1" \
     "$(grep -c '^# HOST: .*sfdisk' "$SCRIPT")"
 assert_eq "host step emitted as comment: mkfs.btrfs" "1" \
     "$(grep -c '^# HOST: .*mkfs.btrfs' "$SCRIPT")"
-assert_eq "host step emitted as comment: luksFormat" "1" \
+assert_eq "host step emitted as comment: luksFormat (keyslot 0, ephemeral key)" "1" \
     "$(grep -c '^# HOST: .*luksFormat --type luks2' "$SCRIPT")"
 assert_eq "host step emitted as comment: tree copy" "1" \
     "$(grep -c '^# HOST: .*cp -r .*opt/debian-fde' "$SCRIPT")"
 assert_eq "host step emitted as comment: pending baseline on target (§9.1 step 2)" "1" \
     "$(grep -c '^# HOST: inst_baseline_pending_write' "$SCRIPT")"
-assert_eq "host step emitted as comment: state write (§9.1 step 8)" "1" \
+assert_eq "host step emitted as comment: state write (§9.1 step 9)" "1" \
     "$(grep -c '^# HOST: inst_state_write installed' "$SCRIPT")"
-assert_eq "host step emitted as comment: OsIndications (§9.1 teardown)" "1" \
-    "$(grep -c '^# HOST: fw_osindications_set' "$SCRIPT")"
+assert_eq "host step emitted as comment: ephemeral-key scrub (G-C26, I1)" "1" \
+    "$(grep -c '^# HOST: rm -f /dev/shm/debian-fde-ephkey' "$SCRIPT")"
 assert_eq "host teardown emitted as comment" "1" \
     "$(grep -c '^# HOST: .*cryptsetup close root-crypt' "$SCRIPT")"
 assert_eq "no host step left executable" "0" \
-    "$(grep -c '^debootstrap' "$SCRIPT")"
+    "$(grep -c '^apk add --root' "$SCRIPT")"
 assert_eq "no reboot record (DEBIAN_FDE_INSTALL_NO_REBOOT=1 CI seam)" "0" \
     "$(grep -c '^# HOST: reboot' "$SCRIPT")"
+assert_eq "G-C26: NO OsIndications record in either lane" "0" \
+    "$(grep -c 'fw_osindications_set' "$SCRIPT")"
+assert_not_contains "ADR-20: keys_encrypt_release retired from Stage 1" "$(cat "$SCRIPT")" \
+    "keys_encrypt_release"
 
 # --- §9.1 in-chroot provisioning sequence: EXECUTABLE guest lines ----------------
 assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir)" "1" \
-    "$(grep -cx '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/debian-fde/keys' "$SCRIPT")"
+    "$(grep -cx '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/debian-fde/keys' "$SCRIPT")"
+    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: bootctl install (ESP layout)" "1" \
     "$(grep -cx 'bootctl install --esp-path=/efi --boot-path=/efi' "$SCRIPT")"
 assert_eq "guest: ukictl build (§9.1 step 5)" "1" \
     "$(grep -cx '/opt/debian-fde/bin/debian-fde ukictl build' "$SCRIPT")"
-assert_eq "guest: keys_encrypt_release (§9.1 step 6, cmd-dir + keydir)" "1" \
-    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/keys.sh && keys_encrypt_release /etc/debian-fde/keys' "$SCRIPT")"
-# F1/F2 (cycle-2 gate): guest one-liners run in a FRESH chroot shell — the line
-# exports the cmd dir BEFORE sourcing libs (floor/rotate resolution + die/info)
-assert_eq "guest: keys line exports cmd-dir then sources libs" "1" \
-    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && \. /opt/debian-fde/lib/keys\.sh && keys_encrypt_release /etc/debian-fde/keys' "$SCRIPT")"
-assert_eq "guest: firmware line exports cmd-dir then sources libs" "1" \
-    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && \. /opt/debian-fde/lib/firmware\.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/debian-fde/keys' "$SCRIPT")"
-# order inside the emitted script: ceremony -> enrollment -> build -> encrypt
+# G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
+assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
+    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
+assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRIPT")" \
+    "only-section=.pcrsig"
+assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \
+    "provisional Mechanism B seal (PCR 11) -> keyslot 1"
+# order inside the emitted script: ceremony -> enrollment -> build -> seal
 S_KEYGEN=$(grep -n 'provision stage1 --mode in-chroot' "$SCRIPT" | cut -d: -f1)
 S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
 S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
-S_ENCRYPT=$(grep -n 'keys_encrypt_release' "$SCRIPT" | cut -d: -f1)
+S_SEAL=$(grep -n 'seal_provisional' "$SCRIPT" | cut -d: -f1)
 assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL ? 1 : 0 ))"
 assert_eq "emitted order: enrollment before build" "1" "$(( S_ENROLL < S_BUILD ? 1 : 0 ))"
-assert_eq "emitted order: build before encrypt" "1" "$(( S_BUILD < S_ENCRYPT ? 1 : 0 ))"
+assert_eq "emitted order: build before the provisional seal" "1" "$(( S_BUILD < S_SEAL ? 1 : 0 ))"
+
+# --- G-C25: the unfinalized banner is emitted as guest printf lines ---------------
+assert_contains "banner: /etc/motd printf drop" "$(cat "$SCRIPT")" ">/etc/motd"
+assert_contains "banner: /etc/issue printf drop" "$(cat "$SCRIPT")" ">/etc/issue"
+assert_contains "banner: NOT finalized text emitted" "$(cat "$SCRIPT")" "NOT finalized"
+assert_contains "banner: finalize directive emitted" "$(cat "$SCRIPT")" "alpine-fde finalize"
+assert_contains "banner: pending-recovery-passphrase notice emitted" "$(cat "$SCRIPT")" \
+    "set your permanent recovery passphrase"
+S_MOTD=$(grep -n '>/etc/motd' "$SCRIPT" | cut -d: -f1)
+S_STATE=$(grep -n 'inst_state_write installed' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted order: banner BEFORE the state write (G-C28)" "1" \
+    "$(( S_MOTD > 0 && S_STATE > S_MOTD ? 1 : 0 ))"
 
 # --- emitted script is sound but NEVER executed -----------------------------------
 assert_rc "emitted script parses (escape loop sound)" 0 sh -n "$SCRIPT"

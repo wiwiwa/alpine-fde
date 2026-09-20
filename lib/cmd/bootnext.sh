@@ -1,12 +1,12 @@
 #!/bin/sh
 # bootnext.sh — `debian-fde bootnext <entry>`: one-shot boot entry for rollback
 # (§8.1, §9.3; C-G11). Writes the EFI variable LoaderEntryOneShot under the
-# systemd loader GUID:
+# systemd loader GUID directly to efivarfs (no bootctl/systemd round-trip):
 #   file: <efivars>/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 #   body: u32 attributes (0x7 NV+BS+RT, little-endian) + UTF-16LE entry id
 # Delete-then-write (a stale var may exist with a different size). No argument
-# prints the current value. `bootctl` has no one-shot writer CLI; alternative:
-# `systemctl reboot --boot-loader-entry=<id>`.
+# prints the current value. The firmware hands the entry to the boot manager
+# for the NEXT boot only, then clears the variable.
 
 if [ -n "${DEBIAN_FDE_BOOTNEXT_LOADED:-}" ]; then
     return 0
@@ -28,7 +28,7 @@ Usage: debian-fde bootnext [<entry-id>]
 Set the one-shot boot entry (UEFI LoaderEntryOneShot; consumed by
 systemd-boot on the NEXT boot only, then cleared by the firmware). <entry-id>
 is the loader entry id as listed by `bootctl list`, e.g.
-debian-fde-6.1.0-0-amd64.conf. Without argument: print the current value.
+alpine-fde-6.6.0-0-lts.conf. Without argument: print the current value.
 EOF
 }
 

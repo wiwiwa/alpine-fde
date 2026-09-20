@@ -242,7 +242,11 @@ cmd_audit_main() {
     if [ "$_am_accept" -eq 1 ]; then
         if [ -z "${DEBIAN_FDE_YES:-}" ]; then
             printf 'debian-fde: re-baseline (overwrite baseline.json with live values)? type ACCEPT: ' >&2
-            read -r _am_conf </dev/tty || _am_conf=''
+            if [ -t 0 ]; then
+                read -r _am_conf </dev/tty 2>/dev/null || read -r _am_conf || _am_conf=''
+            else
+                read -r _am_conf || _am_conf=''
+            fi
             if [ "$_am_conf" != "ACCEPT" ]; then
                 die "audit: re-baseline not confirmed"
             fi

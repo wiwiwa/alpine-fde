@@ -1,0 +1,60 @@
+#!/bin/sh
+# alpine-fde-remove.hook — /etc/kernel-hooks.d/ template for kernel removal
+# events (docs/Architecture.md §8.3; ADR-19/ADR-13, gap G-C16). `alpine-fde
+# install` copies this file into the target root, executable. Replaces the
+# retired Debian maintainer-script kernel-removal template via the Alpine ukify-kernel-hook
+# convention: the kernel hook runner invokes
+#
+#   alpine-fde-remove.hook <event> <kver>    event in {add, update, remove}
+#
+# remove maps to `alpine-fde ukictl remove <kver>`: ESP UKI + digest-manifest
+# entry dropped together (§8.3 prune, current + 2 retained). add/update
+# events are the build hook's business and exit 0 here.
+#
+# ADR-8: a failing prune is a LOUD failure — the nonzero exit propagates to
+# the kernel hook runner and the failure marker is persisted under
+# /etc/alpine-fde for `alpine-fde status`. A stale UKI fails closed at boot
+# (boots, prompts). Operator recovery: re-run
+# `alpine-fde ukictl remove <kver>`, or `apk fix` if the package state is
+# inconsistent.
+#
+# Env: ALPINE_FDE_ROOT (target root for the marker, default /) — the
+# DEBIAN_FDE_ROOT compat spelling is accepted; the binary seam is
+# ALPINE_FDE_BIN / DEBIAN_FDE_BIN (default `alpine-fde`).
+
+set -u
+
+event=${1:-}
+kver=${2:-}
+if [ -z "$event" ] || [ -z "$kver" ]; then
+    echo "alpine-fde hook: remove: usage: alpine-fde-remove.hook <add|update|remove> <kver> (kernel-hooks.d convention) — refusing to act (ADR-8)" >&2
+    exit 64
+fi
+case $event in
+    remove) ;;
+    *)
+        # add/update events never prune — the build hook owns them
+        exit 0
+        ;;
+esac
+
+ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-${DEBIAN_FDE_BIN:-alpine-fde}}
+ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-${DEBIAN_FDE_ROOT:-}}
+FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
+marker="$FDE_ETC/build-failed"
+
+"$ALPINE_FDE_BIN" ukictl remove "$kver"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    mkdir -p "$FDE_ETC" 2>/dev/null || :
+    {
+        printf 'kernel remove hook: ukictl remove failed for kernel %s\n' "$kver"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: re-run "alpine-fde ukictl remove %s" (stale UKIs fail closed at boot); "apk fix" if the package state is inconsistent\n' "$kver"
+    } >"$marker" 2>/dev/null || :
+    exit "$rc"
+fi
+
+# success — clear any stale marker from a previous failed attempt
+rm -f "$marker" 2>/dev/null || :
+exit 0

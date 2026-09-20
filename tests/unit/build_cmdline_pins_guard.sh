@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# tests/unit/build_cmdline_pins_guard.sh — G-U6 (§8.2 H-G1): the fail-closed
-# cmdline pins rd.shell=0 rd.emergency=poweroff are required build inputs. A
-# user-edited /etc/debian-fde/cmdline.txt missing either pin must fail the build
-# closed (rc 64 + ADR-8 marker naming the pin, initramfs builder never invoked,
-# ESP untouched) — the cmdline is embedded into the UKI verbatim, so an
-# unguarded rebuild would ship an emergency-shell escape hatch.
+# tests/unit/build_cmdline_pins_guard.sh — G-U6 (§8.2 H-G1; G-C9 resolution
+# R10): the fail-closed cmdline pins rd.shell=0 rd.emergency=poweroff remain
+# REQUIRED build inputs. On the Alpine/mkinitfs target the pins are inert
+# defense-in-depth (mkinitfs processes no rd.* knobs): the "no shell after 3
+# strikes, poweroff -f instead" guarantee is OWNED by the §8.2 Early-Boot
+# Unseal Hook (tests/unit/hooks_mkinitfs_unseal.sh). The pins are still
+# enforced because any rd.* knob consumer on the boot path must never see an
+# emergency-shell escape hatch. A user-edited cmdline.txt missing a pin (or
+# carrying an overriding duplicate — the effective value would be
+# argument-order dependent) must fail the build closed (rc 64 + ADR-8 marker
+# naming the pin, initramfs builder never invoked, ESP untouched).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -62,8 +67,8 @@ KVER=6.12.8-1-amd64
 ROOT="$TMP/root"
 ESP="$TMP/esp"
 CALLS="$TMP/initramfs.calls"
-CMDLINE="$ROOT/etc/debian-fde/cmdline.txt"
-mkdir -p "$ROOT/boot" "$ROOT/etc/debian-fde" "$ESP/EFI/Linux"
+CMDLINE="$ROOT/etc/alpine-fde/cmdline.txt"
+mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux"
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER"
 cp "$REPO/fixtures/uki/cmdline.txt" "$CMDLINE"
 cp "$REPO/fixtures/uki/os-release" "$ROOT/etc/os-release"
@@ -101,21 +106,21 @@ build() {
 
 # --- 1. rd.shell=0 stripped ----------------------------------------------------------
 printf '%s\n' 'root=UUID=00000000-0000-0000-0000-000000000000 rw rd.emergency=poweroff' >"$CMDLINE"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "pins 1: missing rd.shell=0 fails closed (64)" 64 $?
 assert_contains "pins 1: marker names the missing pin" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "rd.shell=0"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "rd.shell=0"
 assert_eq "pins 1: initramfs builder never invoked" "0" "$(calls)"
 assert_eq "pins 1: no ESP mutation" "" "$(find "$ESP" -type f -name '*.efi' -print)"
 
 # --- 2. rd.emergency=poweroff stripped ------------------------------------------------
 printf '%s\n' 'root=UUID=00000000-0000-0000-0000-000000000000 rw rd.shell=0' >"$CMDLINE"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "pins 2: missing rd.emergency=poweroff fails closed (64)" 64 $?
 assert_contains "pins 2: marker names the missing pin" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "rd.emergency=poweroff"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "rd.emergency=poweroff"
 assert_eq "pins 2: initramfs builder never invoked" "0" "$(calls)"
 
 # --- 3. pin embedded inside a longer token must NOT count ------------------------------
@@ -127,21 +132,21 @@ assert_eq "pins 3: initramfs builder never invoked" "0" "$(calls)"
 
 # --- 4. both pins present -> build proceeds ---------------------------------------------
 cp "$REPO/fixtures/uki/cmdline.txt" "$CMDLINE"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 build
 assert_rc "pins 4: pinned cmdline lets the build succeed" 0 $?
 assert_eq "pins 4: initramfs builder invoked at least once" "1" "$(calls)"
-assert_file_exists "pins 4: UKI installed" "$ESP/EFI/Linux/debian-fde-$KVER.efi"
-assert_file_absent "pins 4: failure marker cleared" "$ROOT/etc/debian-fde/build-failed"
+assert_file_exists "pins 4: UKI installed" "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
+assert_file_absent "pins 4: failure marker cleared" "$ROOT/etc/alpine-fde/build-failed"
 
 # --- 5. overriding duplicate pin must NOT pass (HW-2) ----------------------------------
 printf '%s\n' 'root=UUID=00000000-0000-0000-0000-000000000000 rw rd.shell=1 rd.shell=0 rd.emergency=poweroff' >"$CMDLINE"
-rm -f "$CALLS" "$ROOT/etc/debian-fde/build-failed"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
 ESP_BEFORE5=$(find "$ESP" -type f -name '*.efi' -print | sort)
 build
 assert_rc "pins 5: conflicting rd.shell=1 override fails the build closed (64)" 64 $?
 assert_contains "pins 5: marker names the override" \
-    "$(cat "$ROOT/etc/debian-fde/build-failed" 2>/dev/null)" "rd.shell=1"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "rd.shell=1"
 assert_eq "pins 5: initramfs builder never invoked" "0" "$(calls)"
 assert_eq "pins 5: no ESP mutation" "$ESP_BEFORE5" "$(find "$ESP" -type f -name '*.efi' -print | sort)"
 

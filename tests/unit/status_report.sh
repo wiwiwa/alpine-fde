@@ -55,8 +55,8 @@ BL_PCR0=$(printf 'a%.0s' {1..64}) BL_PCR1=$(printf 'b%.0s' {1..64}) \
 # ESP: one UKI with a manifest entry (OK), one orphane UKI (EXTRA),
 # plus the two boot binaries §8.3 requires sbverify over
 mkdir -p "$ESP/EFI/Linux" "$ESP/EFI/systemd" "$ESP/EFI/BOOT"
-: >"$ESP/EFI/Linux/debian-fde-6.1.0-1-amd64.efi"
-: >"$ESP/EFI/Linux/debian-fde-9.9.9-local.efi"
+: >"$ESP/EFI/Linux/alpine-fde-6.1.0-1-amd64.efi"
+: >"$ESP/EFI/Linux/alpine-fde-9.9.9-local.efi"
 : >"$ESP/EFI/systemd/systemd-bootx64.efi"
 : >"$ESP/EFI/BOOT/BOOTX64.EFI"
 
@@ -288,8 +288,8 @@ assert_contains "L-5: loud skip line for the LUKS2 token section" "$ST_OUT" \
     "token section skipped"
 
 # --- 8. G-IL12 (§8.1/§9.1): install-state row — PROMINENT warning while the
-# ceremony is unfinished (state: installed + resume hint at
-# debian-fde-finalize.service), quiet line when finalized, SILENT when the
+# ceremony is unfinished (state: installed + resume hint at the advisory
+# alpine-fde-finalize OpenRC service), quiet line when finalized, SILENT when the
 # state file is absent (pre-state-machine installs). Report-only: rc stays 0.
 rm -f "$(istate_file)"
 run_status
@@ -304,8 +304,8 @@ assert_contains "installed: prominent warning" "$ST_OUT" \
     "WARNING: installation is NOT finalized"
 assert_contains "installed: names the state" "$ST_OUT" "install state: installed"
 assert_contains "installed: resume hint at the first-boot service" "$ST_OUT" \
-    "debian-fde-finalize.service"
-assert_contains "installed: resume hint at the CLI" "$ST_OUT" "debian-fde finalize"
+    "alpine-fde-finalize"
+assert_contains "installed: resume hint at the CLI" "$ST_OUT" "alpine-fde finalize"
 
 istate_write finalized
 run_status
