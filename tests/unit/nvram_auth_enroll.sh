@@ -2,7 +2,8 @@
 # tests/unit/nvram_auth_enroll.sh — lib/firmware.sh authenticated NVRAM API
 # (docs/Architecture.md §9.1 Stage-1 step 4, §8.4):
 #   * fw_var_write DIR NAME GUID AUTHFILE — writes an authenticated variable
-#     update as a 4-byte attrs header (u32le 7) + the full .auth packet,
+#     update as a 4-byte attrs header (u32le 0x01000007: NV+BS+RT +
+#     TIME_BASED_AUTHENTICATED_WRITE_ACCESS) + the full .auth packet,
 #     REFUSING (fail-closed 64) packets whose embedded variable name/GUID do
 #     not match the target
 #   * fw_auth_enroll EFIVARS_DIR KEYDIR — SetupMode-gated (exit 64 when not in
@@ -92,7 +93,7 @@ assert_eq "fw_var_write happy: rc 0 (no die)" "0" "$?"
 
 assert_file_exists "fw_var_write: variable file created in target namespace" \
     "$E1/db-$GUID_DBASE"
-assert_eq "fw_var_write: attrs header is u32le 7" "07000000" \
+assert_eq "fw_var_write: attrs header is u32le 0x01000007 (auth bit)" "07000001" \
     "$(head -c 4 "$E1/db-$GUID_DBASE" | od -An -vtx1 | tr -d ' \n')"
 assert_eq "fw_var_write: .auth packet follows the attrs header verbatim" \
     "$(cat "$T/db.auth" | od -An -vtx1 | tr -d ' \n')" \
@@ -136,7 +137,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RT/signer.ke
 openssl req -new -x509 -key "$RT/signer.key" -out "$RT/signer.pem" -days 30 -sha256 \
     -subj "/O=Debian FDE/CN=Roundtrip Signer" 2>/dev/null
 printf 'ESL-PAYLOAD' >"$RT/payload.bin"
-auth_packet_build "$RT/signer.key" "$RT/signer.pem" db "$GUID_DBASE" 7 \
+auth_packet_build "$RT/signer.key" "$RT/signer.pem" db "$GUID_DBASE" "$PROV_EFI_ATTRS" \
     "$RT/payload.bin" '2026-09-20T00:00:00Z' "$RT/db.auth"
 assert_eq "round-trip: builder rc 0" "0" "$?"
 RT_HEX=$(bin_to_hex <"$RT/db.auth")
@@ -154,7 +155,7 @@ assert_eq "round-trip: writer accepts the real packet (rc 0)" "0" \
 assert_file_exists "round-trip: variable written to efivars namespace" \
     "$RT/efivars/db-$GUID_DBASE"
 # tamper control: a packet aimed at KEK must not program db
-auth_packet_build "$RT/signer.key" "$RT/signer.pem" KEK "$GUID_GLOBAL" 7 \
+auth_packet_build "$RT/signer.key" "$RT/signer.pem" KEK "$GUID_GLOBAL" "$PROV_EFI_ATTRS" \
     "$RT/payload.bin" '2026-09-20T00:00:00Z' "$RT/kek.auth"
 assert_rc "round-trip: KEK packet refused for db (fail-closed 64)" 64 \
     die_rc fw_var_write "$RT/efivars" db "$GUID_DBASE" "$RT/kek.auth"

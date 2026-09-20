@@ -73,13 +73,13 @@ TS='2026-09-14T01:02:03Z'
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/signer.key" 2>/dev/null
 openssl req -new -x509 -key "$T/signer.key" -out "$T/signer.pem" -days 30 -sha256 -subj "/O=Debian FDE/CN=Test Signer" 2>/dev/null
 printf '\021\042\063\104' >"$T/payload.bin"    # 11 22 33 44
-auth_packet_build "$T/signer.key" "$T/signer.pem" db 'd719b2cb-3d3a-4596-a3bc-dad00e67656f' 7 \
+auth_packet_build "$T/signer.key" "$T/signer.pem" db 'd719b2cb-3d3a-4596-a3bc-dad00e67656f' "$PROV_EFI_ATTRS" \
     "$T/payload.bin" "$TS" "$T/db.auth"
 
 # descriptor golden (what gets signed): name+guid+attrs+time+payload
 GOLDEN_DESC='64006200'
 GOLDEN_DESC+='cbb219d73a3d9645a3bcdad00e67656f'
-GOLDEN_DESC+='07000000'
+GOLDEN_DESC+='07000001'
 GOLDEN_DESC+='ea07090e010203000000000000000000'
 GOLDEN_DESC+='11223344'
 # packet = EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + EFI_VARIABLE_DATA
@@ -232,7 +232,7 @@ tail -c +53 "$T/keys/dbx.auth" >"$T/dbx.p7"
 # descriptor = name + guid + attrs + EFI_TIME (read from the packet header, as
 # a firmware/KeyTool verifier does) + payload
 TS_HEX=$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 1-32)
-DESC_HEX=$(ascii_utf16le_hex 'dbx')$(guid_le_hex 'd719b2cb-3d3a-4596-a3bc-dad00e67656f')$(le32_hex 7)$TS_HEX$(bin_to_hex <"$T/keys/dbx.esl")
+DESC_HEX=$(ascii_utf16le_hex 'dbx')$(guid_le_hex 'd719b2cb-3d3a-4596-a3bc-dad00e67656f')$(le32_hex 16777223)$TS_HEX$(bin_to_hex <"$T/keys/dbx.esl")
 printf '%s' "$DESC_HEX" | hex_to_bin >"$T/dbx-desc.bin"
 openssl smime -verify -inform DER -in "$T/dbx.p7" -content "$T/dbx-desc.bin" \
     -CAfile "$T/keys/kek.cert.pem" -out /dev/null 2>"$T/dbx-verify.err"

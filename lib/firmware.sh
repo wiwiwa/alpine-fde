@@ -166,10 +166,16 @@ fw_var_write() {
     _fwv_got_name=$(printf '%s\n' "$_fwv_hex" | cut -c73-$((72 + 4 * ${#_fwv_name})))
     [ "$_fwv_got_name" = "$(fw_name_utf16_hex "$_fwv_name")" ] ||
         die "firmware: $_fwv_auth does not name variable $_fwv_name — refusing to program it (packet identity mismatch)"
-    printf '\007\000\000\000' >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
-        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid"
-    cat "$_fwv_auth" >>"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
-        die "firmware: cannot append packet to $_fwv_dir/$_fwv_name-$_fwv_guid"
+    # ONE write() of attrs+packet: the kernel's efivarfs performs SetVariable
+    # on the first write to the file — writing the 4-byte attrs header and
+    # then appending the packet would attempt to create the variable with an
+    # EMPTY body and fail with EIO on real firmware (2026-09-20 live metal).
+    # Attrs 0x01000007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS:
+    # without the auth bit firmware refuses an authenticated update outright;
+    # the value must match the attrs signed into the packet descriptor
+    # (provision PROV_EFI_ATTRS).
+    { printf '\007\000\000\001'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
+        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid (kernel/firmware refused the authenticated SetVariable)"
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
     return 0
 }

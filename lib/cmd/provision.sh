@@ -115,7 +115,7 @@ PROV_GUID_X509_SHA256_HEX='92a4d23bc0967940b420fcf98ef103ed'
 # the image-security-database namespace)
 PROV_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'   # EFI_GLOBAL_VARIABLE
 PROV_GUID_DBASE='d719b2cb-3d3a-4596-a3bc-dad00e67656f'    # EFI_IMAGE_SECURITY_DATABASE
-PROV_EFI_ATTRS=7                                          # NV + BS + RT
+PROV_EFI_ATTRS=16777223                                   # 0x01000007: NV + BS + RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS
 
 # esl_build CERT-DER-FILE [OWNER-GUID-DASHED] — EFI_SIGNATURE_LIST on stdout:
 # SignatureType(16) + ListSize u32le + HeaderSize u32le(0) + SignatureSize u32le
