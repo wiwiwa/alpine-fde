@@ -817,10 +817,11 @@ cmd_install_main() {
       _im_i=$((_im_i + 1))
     done
     ;;
-  esac
-  inst_plan_run host "mdev -s"
+esac
+# (Alpine mdev coldplug is handled by the guarded inst_wait_node_line records
+# above — a bare `mdev -s` here would die 127 on hosts without mdev.)
 
-  # --- 2. LUKS2 keyslot 0 — the permanent recovery passphrase (§9.1: NO
+# --- 2. LUKS2 keyslot 0 — the permanent recovery passphrase (§9.1: NO
   #        provisional TPM token is created during Stage 1) -------------------
   inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # passphrase: §13 floor enforced; interactive when no key-file"
   inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
