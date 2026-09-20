@@ -40,6 +40,9 @@ In the happy path you type **no password at boot**, ever.
 
 # Multi-disk Btrfs RAID1 across two drives:
 ./bin/alpine-fde install --disk /dev/nvme0n1 --disk /dev/nvme1n1
+
+# Accelerated multi-disk hybrid storage (fast SSD caching multiple HDDs in Btrfs RAID1):
+./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
 The installer prompts for your disk recovery passphrase and signing key passphrase, installs Alpine base system via `apk`, enrolls your custom Secure Boot keys into firmware, and automatically reboots into BIOS.

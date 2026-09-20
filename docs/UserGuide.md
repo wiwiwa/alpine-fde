@@ -21,7 +21,7 @@ Before beginning installation, your target machine must be configured in UEFI se
 
 ## 2. Installation Ceremonies
 
-Alpine FDE supports three primary storage layouts. Choose the one that matches your hardware:
+Alpine FDE supports four primary storage layouts. Choose the one that matches your hardware:
 
 ### Topology A: Default Single-Disk (NVMe or SATA SSD)
 Partitions the disk into an unencrypted ESP (`p1`) and an Argon2id LUKS2 container (`p2`) formatted with Btrfs (`@`, `@home`, `@snapshots`):
@@ -45,6 +45,17 @@ Mirrors both data and metadata across two or more physical drives (`-d raid1 -m 
 
 ```sh
 ./bin/alpine-fde install --disk /dev/nvme0n1 --disk /dev/nvme1n1
+```
+
+### Topology D: Accelerated Multi-Disk Hybrid Storage (`--bcache` + Multi-`--disk`)
+Combines SSD caching acceleration with multi-drive Btrfs RAID1 redundancy (e.g. one fast NVMe SSD caching two large mechanical hard drives):
+- ESP (`p1`) and shared bcache caching set (`p2`) reside on the fast NVMe drive (`--bcache`).
+- Backing devices (`p1`) reside on each HDD (`/dev/sda`, `/dev/sdb`), registering as `/dev/bcache0` and `/dev/bcache1`.
+- Independent LUKS2 dm-crypt containers sit directly on top of each `/dev/bcacheN` device in strictly enforced **`writethrough`** mode.
+- Btrfs root filesystem mirrors data and metadata across both decrypted volumes (`-d raid1 -m raid1`).
+
+```sh
+./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
 ---
@@ -151,27 +162,31 @@ The system reboots into the previous kernel **without requiring a password**, be
 
 ### Runbook 1: Broken Cache SSD & ESP Rebuild (Hybrid bcache Setup)
 
-**Scenario:** In an accelerated `--bcache` setup (`--disk /dev/sda --bcache /dev/nvme0n1`), the NVMe SSD physically fails, taking down both the ESP (`p1`) and the cache partition (`p2`).
+**Scenario:** In an accelerated single-disk or multi-disk hybrid setup (`--disk /dev/sda --bcache /dev/nvme0n1` or `--bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb`), the NVMe SSD physically fails, taking down both the ESP (`p1`) and the cache partition (`p2`).
 
-Because the system was installed in **`writethrough`** mode, **100% of your data remains intact on the backing disk (`/dev/sda1`)**.
+Because the system was installed in **`writethrough`** mode, **100% of your data remains intact on the backing disk(s) (`/dev/sda1`, `/dev/sdb1`)**.
 
 #### Step 1: Boot Recovery Live Media
 Boot from an Alpine Linux live USB.
 
 #### Step 2: Assemble Backing Device in Standalone Mode
-Without the caching drive present, load the bcache module and register the backing disk directly:
+Without the caching drive present, load the bcache module and register the backing disk(s) directly:
 ```sh
 modprobe bcache
 echo /dev/sda1 > /sys/fs/bcache/register
-# The virtual block device appears at /dev/bcache0
+# For multi-disk setups, register all backing drives:
+# echo /dev/sdb1 > /sys/fs/bcache/register
+# The virtual block devices appear at /dev/bcache0 (and /dev/bcache1)
 ```
 
 #### Step 3: Unlock and Mount Root Filesystem
 Unlock LUKS2 using your **recovery passphrase**:
 ```sh
 cryptsetup open /dev/bcache0 root-crypt
+# For multi-disk setups:
+# cryptsetup open /dev/bcache1 root2
 
-# Mount Btrfs root subvolume
+# Mount Btrfs root subvolume (single device or RAID1 pool):
 mount -o subvol=@ /dev/mapper/root-crypt /mnt
 mount -o subvol=@home /dev/mapper/root-crypt /mnt/home
 ```
@@ -195,11 +210,14 @@ mount "${NEW_SSD}p1" /mnt/efi
 # 3. Create the new bcache caching set
 make-bcache -C "${NEW_SSD}p2"
 
-# 4. Attach new cache to the running backing device in writethrough mode
+# 4. Attach new cache to the running backing device(s) in writethrough mode
 echo "${NEW_SSD}p2" > /sys/fs/bcache/register
 CSET_UUID=$(bcache-super-show "${NEW_SSD}p2" | grep cset.uuid | awk '{print $2}')
 echo "$CSET_UUID" > /sys/block/bcache0/bcache/attach
 echo writethrough > /sys/block/bcache0/bcache/cache_mode
+# For multi-disk setups, attach remaining backing devices:
+# echo "$CSET_UUID" > /sys/block/bcache1/bcache/attach
+# echo writethrough > /sys/block/bcache1/bcache/cache_mode
 ```
 
 #### Step 5: Rebuild the ESP inside Chroot
@@ -281,6 +299,44 @@ Update `/mnt/etc/crypttab` with the new container UUID and rebuild the UKI:
 TARGET_KVER=$(ls -1 /mnt/lib/modules | sort -V | tail -n1)
 alpine-fde --root /mnt ukictl build "$TARGET_KVER"
 ```
+
+#### Variation: Failed Backing Drive in Accelerated Multi-Disk Hybrid Setup (`--bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb`)
+
+If a backing HDD (e.g. `/dev/sdb`) fails in an accelerated hybrid RAID1 setup:
+
+1. **Boot live media and assemble surviving array degraded:**
+   ```sh
+   modprobe bcache
+   echo /dev/sda1 > /sys/fs/bcache/register
+   cryptsetup open /dev/bcache0 root1
+   mount -o degraded,subvol=@ /dev/mapper/root1 /mnt
+   ```
+2. **Install replacement drive** (e.g. `/dev/sdc`) and partition it with a backing partition:
+   ```sh
+   printf 'label: gpt\ntype=linux, name="backing"\n' | sfdisk /dev/sdc
+   ```
+3. **Format as bcache backing device and attach to the NVMe caching set:**
+   ```sh
+   make-bcache -B /dev/sdc1
+   echo /dev/sdc1 > /sys/fs/bcache/register
+   # Registered as /dev/bcache1
+   CSET_UUID=$(bcache-super-show /dev/nvme0n1p2 | grep cset.uuid | awk '{print $2}')
+   echo "$CSET_UUID" > /sys/block/bcache1/bcache/attach
+   echo writethrough > /sys/block/bcache1/bcache/cache_mode
+   ```
+4. **Format LUKS2 on `/dev/bcache1` with Argon2id parameters:**
+   ```sh
+   cryptsetup luksFormat --type luks2 --pbkdf argon2id \
+     --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 \
+     /dev/bcache1
+   cryptsetup open /dev/bcache1 root-repl
+   ```
+5. **Rebuild Btrfs RAID1 array and seal to TPM 2.0:**
+   ```sh
+   btrfs replace start <missing-devid> /dev/mapper/root-repl /mnt
+   LUKS_UUID=$(cryptsetup luksUUID /dev/bcache1)
+   alpine-fde --root /mnt enroll-tpm --uuid "$LUKS_UUID"
+   ```
 
 ---
 
