@@ -1,14 +1,14 @@
-# Debian FDE — TPM 2.0-Backed Verified Boot & Disk Encryption
+# Alpine FDE — TPM 2.0-Backed Verified Boot & Disk Encryption
 
-**Platform:** Debian 13 "trixie" (x86_64, systemd) · **Status:** revision B — approved design; **implementation in progress** [Wave 2 Architecture — Design Approved, Implementation In Progress] (unit suite: 1095 assertions green at commit aa6cdd8; e2e: 17/17 pass on the pinned run of 2026-09-14, `tests/e2e/results-final.json` — scenario rework in flight)
+**Platform:** Alpine Linux (x86_64, OpenRC, musl) · **Status:** revision C — approved design [Alpine Architecture]; (supersedes Revision B Debian 13 baseline)
 
-Debian FDE makes a Linux machine that protects its data against physical theft:
+Alpine FDE makes a Linux machine that protects its data against physical theft:
 
-1. **The root filesystem is fully encrypted** (LUKS2) and **minimal** (§3.3).
+1. **The root filesystem is fully encrypted** (LUKS2) and **minimal** (~200 MB installed, §3.3).
 2. **The key unseals automatically in the initramfs — but only if the boot process verifies as untampered** (Secure Boot + measured kernel, enforced by a TPM 2.0 signed-PCR policy).
 3. **Booting requires no password** in the happy path.
 
-Revision B note: the original design targeted Alpine Linux with fully custom enrollment + initramfs tooling. It was revised to Debian to adopt the maintained `systemd-cryptenroll` / `systemd-cryptsetup` unlock path (same security semantics, battle-tested code) — see ADR-1. While the target installed OS is Debian 13, the initial bootstrap installer environment is decoupled: a lightweight live OS (such as Alpine Linux) can serve as a "dumb" bootstrap launcher (handling disk partitioning, LUKS2 encryption, formatting, and `debootstrap`), while all Debian-specific package installation (via `apt-get` installed by debootstrap), bootloader installation, and EFI binary signing occur inside the Debian `chroot` or post-first-reboot (ADR-15). Debian FDE provides the signing ceremony, minimal-image installer, firmware key provisioning, manifest/token lifecycle, and the audit + recovery tooling.
+Revision C note: the architecture targets Alpine Linux as the installed target operating system. While Revision B evaluated Debian for its systemd-cryptenroll/cryptsetup unlock path, Alpine FDE leverages Alpine's ultra-compact footprint (~200 MB rootfs vs ~1.4 GB on Debian) by utilizing standalone upstream packages available on Alpine (`ukify`, `systemd-boot`, `systemd-efistub`, `tpm2-tools`, `libtss2-policy`). Unified Kernel Images (UKIs) assembled via `ukify` embed the `.pcrsig` and `.pcrpkey` sections, which `systemd-stub` injects into the synthetic initramfs at `/.extra/`. Early-boot unseal is executed by a dedicated initramfs hook with strict fail-closed poweroff guards (`poweroff -f`), and post-install lifecycle events are managed via OpenRC trust finalization and APK upgrade triggers.
 
 ---
 
@@ -20,7 +20,7 @@ Revision B note: the original design targeted Alpine Linux with fully custom enr
 - G4 — Kernel updates and rollback boots remain passwordless (no re-seal of existing enrollments, no passphrase).
 - G5 — One clearly documented recovery path when verification fails.
 - G6 — Everything reproducible in CI with a software TPM.
-- G7 — The installed system is **minimal** (§3.3): only what boot, unlock, audit, and admin need.
+- G7 — The installed system is **minimal** (§3.3): only what boot, unlock, audit, and admin need (~200 MB budget).
 
 ## 2. Threat model
 
@@ -32,7 +32,7 @@ Revision B note: the original design targeted Alpine Linux with fully custom enr
 | **T1b — Cache SSD theft (Hybrid bcache)** | An attacker extracts the caching SSD. Because LUKS2 sits on top of `/dev/bcache0`, the cache SSD holds solely AES-XTS ciphertext (no plaintext user data or key material on SSD, ADR-17). Yields no decrypted data or keys |
 | **T1c — Single RAID member theft (Btrfs RAID1)** | An attacker extracts one drive from a multi-disk RAID1 array. Each member is independently wrapped in a LUKS2 container sealed to the machine's TPM; protected by the same verified-boot policy and Argon2id passphrase floor |
 | **T2 — Evil maid**: brief physical access; boots USB/modified boot files to install a backdoored kernel, then steals the machine | Firmware (Secure Boot, custom keys) refuses unsigned bootloaders/kernels; TPM policy (PCR 7 bound + release-key-authorized PCR 11) refuses to unseal otherwise. Two independent mechanisms |
-| **T2b — Brute force** | Sealed blob and volume key are high-entropy and unguessable; the one guessable secret is the keyslot-0 passphrase. Enforced by a passphrase entropy floor + Argon2id KDF (§3.3, §13); systemd's passphrase prompt retries are bounded before boot fails. Note: TPM dictionary-attack lockout does **not** increment on policy-session failures (only authValue failures) — it's an availability consideration, not a confidentiality control |
+| **T2b — Brute force** | Sealed blob and volume key are high-entropy and unguessable; the one guessable secret is the keyslot-0 passphrase. Enforced by a passphrase entropy floor + Argon2id KDF (§3.3, §13); unlock attempts are bounded, and failure triggers immediate fail-closed poweroff (no rescue shell). Note: TPM dictionary-attack lockout does **not** increment on policy-session failures (only authValue failures) — it's an availability consideration, not a confidentiality control |
 | **T2c — Bootstrap handoff window** | Between Stage 1 in-chroot provisioning and Stage 3 trust finalization, the volume is protected exclusively by the operator's permanent recovery passphrase in keyslot 0 (Argon2id + high entropy floor). No TPM token exists during the reboot window, completely eliminating PCR-replay vulnerabilities while Secure Boot is transitioning. `release.pem` is encrypted with AES-256 PBKDF2 in Stage 1 before reboot (ADR-18). On first boot under verified Secure Boot, the operator enters the recovery passphrase once, whereupon the system validates the firmware state and establishes the permanent {PCR 7, PCR 11} TPM token |
 
 ### 2.2 Out of scope (non-goals)
@@ -42,48 +42,47 @@ Revision B note: the original design targeted Alpine Linux with fully custom enr
 - **Hibernation** (a hibernate image is unencrypted volume-key state on disk). Swap is RAM-only (zram); suspend-to-RAM is fine.
 - Dual-booting with foreign operating systems (multi-disk Btrfs RAID1 and bcache hybrid acceleration are in-scope per §4.1; foreign OS dual-boot is unsupported).
 
-## 3. Platform baseline (Debian 13 "trixie")
+## 3. Platform baseline (Alpine Linux)
 
 ### 3.1 Package dependencies
 
-Verified present in the trixie `main` component (Packages/Contents indexes checked at revision time):
+Verified present in the Alpine Linux `main` and `community` components:
 
-| Purpose | Debian package | Note |
+| Purpose | Alpine package | Note |
 |---|---|---|
-| systemd init, journal, networkd/resolved, getty | `systemd` | base |
-| LUKS2 unlock (initramfs + running system) and **`systemd-cryptenroll`** | `systemd-cryptsetup` | cryptenroll ships here (verified via Contents) |
-| Boot manager + `bootctl` | `systemd-boot`, `systemd-boot-tools` | both in main |
-| UKI assembly + PCR measurement/signing | `systemd-ukify` | `ukify`, includes measure support |
-| Initramfs generator | `dracut` | hostonly mode (§8.2) |
-| Kernel | `linux-image-amd64` | cloud variant `linux-image-cloud-amd64` is a smaller option **only if** its config has TCG_TIS/TPM built in — verify before adopting |
-| TPM audit/ceremony ops | `tpm2-tools` | pulls TSS libs; host-side and in-guest |
-| EFI binary signing | `sbsigntool` | `sbctl` is **not** in Debian main — key handling via our openssl-based scripts |
-| Firmware key enrollment fallback | `efitools` | KeyTool, for machines whose setup UI can't enroll db entries; **verify presence in trixie at implementation** (efitools has churned in Debian) — else firmware-UI-only, documented |
-| Minimal rootfs bootstrap | `debootstrap` | `--variant=minbase`; `mmdebstrap` exists as an unprivileged alternative (§3.3) |
+| Init system, service manager, getty | `openrc`, `busybox` | base |
+| LUKS2 volume manipulation | `cryptsetup` | standard upstream tool |
+| Boot manager + `bootctl` | `systemd-boot` | available in Alpine main (`apk add systemd-boot`) |
+| EFI Boot Stub | `systemd-efistub` | measures UKI into PCR 11, injects `/.extra/` signatures |
+| UKI assembly + PCR measurement/signing | `ukify`, `py3-pefile` | available in Alpine (`apk add ukify`) |
+| Initramfs generator | `mkinitfs` / `dracut` | modular initramfs with early-boot unlock hook (§8.2) |
+| Kernel | `linux-lts` | default stable LTS kernel (or `linux-virt`) |
+| TPM audit, ceremony, and policy ops | `tpm2-tools`, `tpm2-tss`, `tpm2-tss-policy`, `tpm2-tss-tcti-device` | full TSS2 and policy stack |
+| EFI binary signing | `sbsigntool`, `openssl` | UKI and bootloader signing via openssl-based ceremony |
+| Minimal rootfs bootstrap | `apk-tools-static` / `apk` | `apk add --root` onto mounted LUKS2 root |
 | Filesystem utilities | `btrfs-progs` (default) / `e2fsprogs` (if ext4) | Btrfs tools for subvolume management; e2fsprogs if `--fs ext4` |
 | Hybrid storage acceleration | `bcache-tools` | Optional; required when `--bcache` is enabled |
-| Swap on zram | `zram-tools` | hibernation unsupported (§2.2) |
-| Admin | `sudo`, `openssh-server` (optional) | the one interactive service |
+| Swap on zram | `zram-init` | hibernation unsupported (§2.2) |
+| Admin | `doas` or `sudo`, `openssh-server` (optional) | interactive service |
 
-CI **host** (test sandbox, Arch Linux) additionally uses: `qemu-system-x86_64`, `edk2-ovmf`, `swtpm`, `tpm2-tools`, `sbsigntools`, `virt-firmware` (offline OVMF vars enrollment), `dosfstools`+`mtools` (ESP image tooling, no root needed), `jq`, `python3`.
+CI **host** (test sandbox) additionally uses: `qemu-system-x86_64`, `edk2-ovmf`, `swtpm`, `tpm2-tools`, `sbsigntool`, `virt-firmware` (offline OVMF vars enrollment), `dosfstools`+`mtools` (ESP image tooling, no root needed), `jq`, `python3`.
 
-Version-pin policy: fixture artifacts (rootfs tarball, OVMF binaries) are SHA256-pinned in the harness; doc-cited versions may drift — the harness, not this doc, is the pin of record.
+### 3.2 Why `ukify` + Authorized Policy over Clevis
 
-### 3.2 Why not clevis / why systemd-cryptenroll
+Clevis's `tpm2` pin supports only *static PCR digest* policies — it cannot evaluate digital signatures over PCR 11 (`PolicyAuthorize`). Binding statically to PCR 11 causes every legitimate kernel update to break passwordless boot, while omitting PCR 11 leaves the boot chain completely unverified against evil-maid kernel replacement.
 
-Debian ships clevis, but its `tpm2` pin supports only *static PCR digest* policies — it cannot express the **signed PCR policy** this design requires (§6), and it would re-introduce a custom JWE token format. `systemd-cryptenroll` + `systemd-cryptsetup` implement exactly the required semantics natively: signed PCR policies (`--tpm2-public-key` / `--tpm2-signature`), `systemd-tpm2` LUKS2 tokens, initramfs unlock with passphrase fallback. Adopting them deletes the riskiest custom code (an initramfs unlock script) in exchange for systemd's battle-tested path (ADR-1).
+Alpine FDE uses `ukify` to predict and sign PCR 11 measurements into `.pcrsig` files, which `systemd-efistub` measures into PCR 11 and places at `/.extra/tpm2-pcr-signature.json`. The early-boot initramfs hook evaluates the `PolicyAuthorize` session against the release public key, enabling **fully passwordless kernel updates and rollbacks** without sacrificing evil-maid protection (ADR-1, ADR-14).
 
 ### 3.3 Minimal root filesystem composition
 
 The installed system is deliberately minimal — only what boot, unlock, audit, and administration require:
 
-- **Bootstrap:** `debootstrap --variant=minbase trixie <mnt> http://deb.debian.org/debian` onto the mounted LUKS2 root. minbase installs only `Priority: required` (apt, dpkg, coreutils, systemd, libc, …).
-- **Apt policy** (written by `install` before first apt use): `APT::Install-Recommends "false"`, `APT::Install-Suggests "false"`, `Acquire::Languages "none"`; sources include `main` + `non-free-firmware` (microcode). Optional trims recorded in the image config: `path-exclude=/usr/share/doc/*`, man pages, non-C.UTF-8 locales.
-- **Explicit additions** (all `--no-install-recommends`, installed in one transaction so `linux-image-amd64`'s `linux-initramfs-tool` dependency resolves to **dracut**, not initramfs-tools): the §3.1 boot/unlock/audit set (`systemd-cryptsetup`, `systemd-boot`, `systemd-boot-tools`, `systemd-ukify`, `dracut`, `linux-image-amd64`, `tpm2-tools`), **plus the tools our own flows need on-target**: `cryptsetup` (CLI: `luksAddKey`/`luksKillSlot`/`luksDump` for enroll/rotate/status), `btrfs-progs` (default rootfs filesystem utilities and snapshot management; `e2fsprogs` when `--fs ext4` is selected), `bcache-tools` (when `--bcache` is enabled), `sbsigntool` + `openssl` (UKI/boot-manager signing + pcrsign helpers — without these every kernel update fails loudly, ADR-8), `zram-tools`, `jq` (dependency of the `debian-fde` CLI itself — manifest/enrollment JSON bookkeeping; ~1 MB installed), `sudo`, and optionally `openssh-server`. CPU microcode (`intel-microcode` / `amd64-microcode`) is included — security-relevant. `systemd-ukify`'s signing dependencies are `Depends`-verified at implementation (no-recommends must not break them).
-- **Explicit exclusions:** no bootloader packages (firmware → systemd-boot → UKI; no GRUB, no shim — our own db key signs the boot manager), no editor, no cron (systemd timers), no rsyslog (journald), no ifupdown (systemd-networkd + resolved), no man/docs/locales beyond C.UTF-8.
-- **What must NOT be cut:** `systemd-cryptsetup`, `cryptsetup`, `btrfs-progs` (or `e2fsprogs`), `jq`, `tpm2-tools`, `sbsigntool`, `openssl` (in-guest recovery, re-enroll, audit, re-sign), microcode, and the kernel modules the target hardware needs (dracut hostonly collects them — §8.2).
-- **User account:** `install` creates the admin user (name, password, sudo grant) interactively — §5's "login as usual" needs it.
-- **Size budget (asserted in CI, scenario S-00):** the pin of record lives in the harness config, not this doc; initial planning target ≤ 1.4 GB installed (kernel modules dominate), revised to the measured value at S-00. Package count tracked alongside.
+- **Bootstrap:** `apk add --root <mnt> --initdb alpine-base` onto the mounted LUKS2 root.
+- **Package policy:** explicit minimal additions installed with `--no-cache`.
+- **Explicit additions:** the §3.1 boot/unlock/audit set (`cryptsetup`, `systemd-boot`, `systemd-efistub`, `ukify`, `linux-lts`, `tpm2-tools`, `tpm2-tss-policy`, `tpm2-tss-tcti-device`, `sbsigntool`, `openssl`, `jq`, `btrfs-progs` or `e2fsprogs`, optional `bcache-tools`).
+- **Explicit exclusions:** no heavy display managers, no GRUB/shim (direct UEFI handover to `systemd-boot`), no documentation/man pages.
+- **Fail-closed guard:** The initramfs hook enforces `poweroff -f` after failed unseal / passphrase retries, preventing drops into an interactive BusyBox emergency shell.
+- **Size budget:** Initial planning target ≤ 250 MB installed (an 80%+ reduction compared to Debian).
 
 ## 4. Disk layout
 
@@ -194,70 +193,62 @@ Negative controls (all mechanisms): a signature over pcrs ≠ {7,11}, or over a 
 - **Token** (type `systemd-tpm2`; field names per the systemd schema — `tpm2_blob`, `tpm2_pcrs`, `tpm2_pcr_bank`, `tpm2_pubkey`, `tpm2_signature`, … — schema owned by systemd, not normative here): `pcrs: [7, 11]`, `pcrbank: sha256`, `pubkey: <b64 release public key>`, `signature: <b64 release-key signature over the PolicyAuthorize verification structure>`, `keyslots: [<slot>]`.
 - **Trust posture (I3):** the token is untrusted input. The pubkey in the token is *used* for signature verification but anchored by the keyName pinned inside the sealed object's policy — swapping it fails the policy. Tampering can only *break* unseal, never forge it. Unknown token format/version fields are ignored or rejected by systemd (fail-closed).
 
-## 8. Components
+### 8. Components
 
-### 8.1 `debian-fde` CLI — the only user-facing tool
+### 8.1 `alpine-fde` CLI — the user-facing tool
 
-Ceremony and lifecycle orchestration around systemd/Debian primitives, **designed to run from a Debian live ISO or minimal bootstrap launcher** (e.g. Alpine Linux, ADR-15): the script tree is self-contained, and every command declares its binary dependencies — missing packages are installed **on demand** via apt on Debian hosts (`--no-install-recommends`), or the command fails loudly with the exact manual-install list on non-Debian hosts (ADR-15). `DEBIAN_FDE_NO_INSTALL=1` disables the auto-install. `debian-fde doctor` reports environment readiness without changing anything. All commands accept overrides for scripting/tests: `--root <dir>` (target root/`/etc/debian-fde`), `--esp <dir|file>`, `--disk <dev|file>` (repeatable for RAID1), `--bcache <dev>` (for hybrid acceleration), `--fs <btrfs|ext4>`, `--tcti <conf>`, `--keydir <dir>`.
+Ceremony and lifecycle orchestration around verified boot and storage primitives (`bin/alpine-fde`, with `bin/debian-fde` provided as a backwards-compatible alias). Missing host packages are installed on demand via `apk` (or the command fails loudly with the manual install list, ADR-15). `DEBIAN_FDE_NO_INSTALL=1` / `ALPINE_FDE_NO_INSTALL=1` disables auto-install. `alpine-fde doctor` reports environment readiness without changing anything. All commands accept overrides for scripting/tests: `--root <dir>` (target root/`/etc/alpine-fde`), `--esp <dir|file>`, `--disk <dev|file>` (repeatable for RAID1), `--bcache <dev>` (for hybrid acceleration), `--fs <btrfs|ext4>`, `--tcti <conf>`, `--keydir <dir>`.
 
 | Command | Purpose |
 |---|---|
-| `doctor` | Environment readiness check: missing binaries/packages, apt reachability, TPM presence, SB state readout (including `SetupMode` detection), OVMF/QEMU prereqs (CI) — no changes, exit 0/1 |
-| `provision` | Two stages. **stage1**: generate release keypair (in-chroot or on offline signing medium, ADR-18); create PK/KEK/db certificates; repeatable `--revoke-cert <cert>` builds dbx `EFI_CERT_X509_SHA256` revocation entries (KEK-signed) so removed vendor certs can't verify — after stage1, PCR 7 is **fully ours** (§6); enroll into firmware via efivarfs in strict order `db → KEK → PK (last)` (requires `SetupMode=1`) or KeyTool/efitools; record baseline **marked pending**. **stage2** (= `--capture-baseline`): the same guarded baseline capture as `audit --init` — refuses any non-final SB state (§8.4 guard). No SRK step — systemd owns it. (In Wave 2, `install` runs these steps integrated in-chroot; `provision` remains available for standalone/offline key ceremonies) |
-| `install` | Guided: partition, block layer setup (single-disk, `--bcache`, or RAID1), format LUKS2 keyslot 0 with recovery passphrase (Argon2id + entropy floor), format root filesystem (Btrfs default or ext4), `debootstrap --variant=minbase` (§3.3), apt policy, minimal package set, user account, systemd-networkd config, `bootctl install` to ESP **followed by signing the boot manager** (sbsign; ESP writes happen only via signed flows). Stage 1 in-chroot sets `OsIndications` bit 0 to signal firmware setup on next reboot |
-| `finalize` | First-boot trust-finalization entry point (shipped as `debian-fde-finalize.service`, §9.1 Stage 3): install-state guard (runs only in state `installed`), `fw_sb_state` guard (halts exit 64 with **no enrollment and no wiping** when Secure Boot is off), crash-idempotent `audit --init` + per-member enroll (RAID1), writes state `finalized` |
-| `ukictl build` | Per kernel (A″ only — the whole pipeline, §6.1): dracut hostonly initrd → `ukify build --measure` (phase `enter-initrd`) with the release key (ukify natively embeds the UKI's own `.pcrsig`/`.pcrpkey`) → combined {7,11} policy digest computed for manifest/audit display → `sbsign` + `sbverify` → atomic UKI install to ESP → manifest upsert → **ensure-once enroll**: a `systemd-tpm2` token already standing ⇒ metadata read only, **zero TPM operations** (verified in s14), and the build stamps **every** manifest entry — including the new kernel's — with the standing `keyslot`/`token_id` via one `luksDump` metadata read (still zero TPM operations; unit-pinned: `tests/unit/ukictl_build_enroll_wire.sh` T6); volume unreachable in the build context (chroot/kernel-hook builds without the target volume attached), OR install state is not finalized / baseline is pending (such as during Stage 1 in-chroot provisioning) ⇒ warn and skip enrollment, rc 0 — kernel updates are TPM-free either way (s14) — with manifest entries written in that state carrying empty `keyslot`/`token_id` until a build that can reach the volume stamps them (unit-pinned: `tests/unit/ukictl_build_enroll_wire.sh` T7); token absent and state finalized ⇒ exactly ONE cryptenroll (static PCR 7 + release-pubkey-signed PCR 11), and the manifest records the enrollment's **`keyslot`/`token_id`** (§8.4) → prune beyond current + 2 old (ESP file + manifest entry together; the standing enrollment is untouched) |
-| `pcrsign` | The §6.1 signer: combined {7,11} policy digest → PolicyAuthorize verification structure → release-key signature JSON. Standalone, fully unit-tested against live TPM trial sessions — **no pipeline consumer under A″** (ukify signs natively); kept for the §6.1.1 contract tests, manual re-sign tooling, and future rung work |
-| `enroll-tpm` | The enrollment step of `ukictl build` (shared `enrl_run`/`enrl_ensure_once` core). Under A″ there is ONE enrollment per volume: one fresh keyslot + one cryptenroll token pinning only the release pubkey — each UKI's `.pcrsig` already rides on the ESP, so **no release key and no re-signing** are needed. Takes `--uuid <LUKS_UUID>` (or target block device). An existing enrollment is wiped and re-created in ONE cryptenroll invocation (`--reseat` forces it); TPM-clear recovery (§9.4) uses the same path |
+| `doctor` | Environment readiness check: missing binaries/packages, apk/network reachability, TPM presence, SB state readout (including `SetupMode` detection), OVMF/QEMU prereqs (CI) — no changes, exit 0/1 |
+| `provision` | Two stages. **stage1**: generate release keypair (in-chroot or on offline signing medium, ADR-18); create PK/KEK/db certificates; repeatable `--revoke-cert <cert>` builds dbx `EFI_CERT_X509_SHA256` revocation entries (KEK-signed) so removed vendor certs can't verify — after stage1, PCR 7 is **fully ours** (§6); enroll into firmware via efivarfs in strict order `db → KEK → PK (last)` (requires `SetupMode=1`) or KeyTool/efitools; record baseline **marked pending**. **stage2** (= `--capture-baseline`): guarded baseline capture — refuses any non-final SB state (§8.4 guard). (In Wave 2, `install` runs these steps integrated in-chroot; `provision` remains available for standalone/offline key ceremonies) |
+| `install` | Guided: partition, block layer setup (single-disk, `--bcache`, or RAID1), format LUKS2 keyslot 0 with recovery passphrase (Argon2id + entropy floor), format root filesystem (Btrfs default or ext4), `apk add --root` minimal base system (§3.3), minimal package set, user account, OpenRC network config, `bootctl install` to ESP **followed by signing the boot manager** (sbsign; ESP writes happen only via signed flows). Stage 1 in-chroot sets `OsIndications` bit 0 to signal firmware setup on next reboot |
+| `finalize` | First-boot trust-finalization entry point (shipped as `/etc/init.d/alpine-fde-finalize` OpenRC service, §9.1 Stage 3): install-state guard (runs only in state `installed`), `fw_sb_state` guard (halts exit 64 with **no enrollment and no wiping** when Secure Boot is off), crash-idempotent `audit --init` + per-member enroll (RAID1), writes state `finalized` |
+| `ukictl build` | Per kernel: initramfs generation → `ukify build --measure` (phase `enter-initrd`) with the release key (ukify natively embeds the UKI's own `.pcrsig`/`.pcrpkey`) → combined {7,11} policy digest computed for manifest/audit display → `sbsign` + `sbverify` → atomic UKI install to ESP → manifest upsert → **ensure-once enroll**: an active token already standing ⇒ metadata read only, **zero TPM operations**; token absent and state finalized ⇒ enrolls static PCR 7 + release-pubkey-signed PCR 11 → prune beyond current + 2 old (ESP file + manifest entry together) |
+| `pcrsign` | Standalone signer: combined {7,11} policy digest → PolicyAuthorize verification structure → release-key signature JSON (§6.1.1) |
+| `enroll-tpm` | The enrollment step of `ukictl build` (shared core). Binds keyslot 1 to static PCR 7 + release-pubkey-signed PCR 11 via TPM 2.0 authorized policy. Takes `--uuid <LUKS_UUID>` (or target block device). TPM-clear recovery (§9.4) uses the same path |
 | `rotate` | Change the keyslot-0 passphrase (`cryptsetup`/`luksChangeKey`; volume key and TPM seals untouched — no re-encryption, no re-seal) |
-| `audit` | Compare PCR 0..3 + SB state against baseline; warn on firmware drift (§9.5). `--init` records the first finalized baseline (post-first-boot into the final SB state); `--accept` re-baselines after explicit operator confirmation (required before PCR 7 drift recovery, §9.4) |
-| `status` | SB state, PCR readings vs baseline/token, enrolled slots (`cryptsetup luksDump`), manifest vs ESP diff, last audit; warns prominently if installation state is `installed` (pending first-boot finalization) |
-| `bootnext <entry>` | One-shot boot entry (EFI LoaderEntryOneShot) for rollback (§9.3) |
+| `audit` | Compare PCR 0..3 + SB state against baseline; warn on firmware drift (§9.5). `--init` records the first finalized baseline; `--accept` re-baselines after explicit operator confirmation (required before PCR 7 drift recovery, §9.4) |
+| `status` | SB state, PCR readings vs baseline/token, enrolled slots (`cryptsetup luksDump`), manifest vs ESP diff, last audit; warns prominently if installation state is `installed` |
+| `bootnext <entry>` | One-shot boot entry (`bootctl` / EFI LoaderEntryOneShot) for rollback (§9.3) |
 | `pre-upgrade` | Optional: filesystem snapshot before upgrades (btrfs-backed roots only; plain ext4 installs skip) |
 
-### 8.2 Unlock path (systemd-native, no custom code)
+### 8.2 Unlock path & Initramfs Hook
 
-- dracut **hostonly** initramfs with modules: `systemd`, `systemd-cryptsetup`, `tpm2-tss`, `kernel-modules`; the legacy `crypt`/`90crypt` module is **omitted** (competing non-systemd prompt path). Verified coupling (trixie dracut 106): `systemd-cryptsetup` auto-adds `tpm2-tss` only when `/etc/crypttab` contains `tpm2-device=` **at build time**, and `91tpm2-tss` requires `tpm2` binaries (installs `systemd-tpm2-generator`, tpm udev rules, TPM driver modules). Hostonly inputs are explicit, not ambient: kernel cmdline comes from `/etc/debian-fde/cmdline.txt` (canonical, embedded into the UKI via ukify `--cmdline`), extra drivers via a `dracut.conf.d` snippet `force_drivers` list — CI builds for the q35/TPM guest use these explicitly.
-- **Fail-closed cmdline pins (verified, H-G1):** systemd's passphrase loop is bounded (attempt pacing sentinels → `Too many attempts to activate; giving up.`) but exhaustion then drops to the initrd **emergency shell**. The UKI cmdline therefore pins `rd.shell=0 rd.emergency=poweroff` (dracut 106 honors both) — three strikes ends in poweroff, never an unauthenticated shell; the e2e asserts `Entering emergency mode.` NEVER appears.
-- **crypttab contract (verified 257.13 option table):**
-  - *Single-disk topology:* `root UUID=<luks-uuid> none luks,tpm2-device=auto,discard`
-  - *Hybrid bcache topology:* `root UUID=<bcache-luks-uuid> none luks,tpm2-device=auto,discard`. dracut requires `force_drivers+=" bcache "` in `/etc/dracut.conf.d/20-bcache.conf` (mandatory because hostonly collection inside chroot will not detect bcache hardware ambiently) and `install_items+=" /lib/udev/rules.d/69-bcache.rules /lib/udev/bcache-register "` to ensure `/dev/bcache0` is registered before systemd-cryptsetup triggers.
-  - *Multi-disk Btrfs RAID1 topology:* Multiple entries, each mapped to its underlying container with `password-cache=yes`:
-    ```text
-    root1 UUID=<uuid-disk1> none luks,tpm2-device=auto,password-cache=yes,discard
-    root2 UUID=<uuid-disk2> none luks,tpm2-device=auto,password-cache=yes,discard
-    ```
-    `password-cache=yes` (systemd 257.13 standard option, default yes) caches the entered recovery passphrase in the kernel keyring with a 2.5-minute timeout so fallback unlock prompts only once across member disks. dracut includes `btrfs` (`add_dracutmodules+=" btrfs "`) and udev scans all member devices before `sysroot.mount`.
-  - *Degraded boot policy:* A missing RAID1 member stalls `sysroot.mount` by design (fail closed against split-brain / missing volumes). Because runtime cmdline modifications break PCR 11 measurement and loader `options` are dropped by sd-boot 257.13, degraded boot cannot be achieved by editing loader entries at boot. Instead, two recovery mechanisms are supported:
-    1. *Live rescue media:* Boot live USB, unlock surviving member(s) via recovery passphrase, mount degraded (`mount -o degraded,subvol=@ /dev/mapper/<surviving-member> /mnt`), and execute `btrfs replace` (Runbook 2).
-    2. *Signed rescue UKI (optional):* An operator may provision a pre-signed `debian-fde-rescue.efi` UKI whose embedded cmdline carries `rootflags=subvol=@,degraded ro` and filters devices (`rd.luks.uuid=<survivor-uuid>`), measured into PCR 11 and signed with `.pcrsig`, permitting authorized degraded boot without live media. (Note: for passwordless unseal, the embedded cmdline must include `rd.luks.options=tpm2-device=auto`; otherwise initramfs prompts for the keyslot 0 recovery passphrase). Scope (resolved): S-20 (§12) asserts the production dracut initrd stall; the signed rescue UKI remains optional/deferred.
-  - The `tpm2-device=` option is **mandatory** across all entries (omitting it silently disables all TPM unlock); no `tpm2-pin=`, no `try-empty-password=`, prompts reachable (`headless=no`), `tpm2-signature=` reserved for non-UKI debug.
-- **Required unlock artifacts asserted present in the initrd** (their absence = tokens silently ignored → every boot prompts, G2 lost): `libcryptsetup-token-systemd-tpm2.so`, the libtss2 libraries, TPM kernel modules + udev rules (`tpmrm0`; multiarch paths — `/usr/lib/x86_64-linux-gnu/systemd/…`), filesystem drivers (`btrfs.ko` or `ext4.ko`), and `bcache.ko` when hybrid storage is used. Asserted by the `lsinitrd` audit and in S-01.
-- `/etc/crypttab` populated before initramfs generation; initramfs regenerates per kernel inside `ukictl build` itself (`dracut --force`, §8.3); UKI assembly consumes the initrd that same build produced (dracut-hook ordering is convention only, §8.3).
-- Behavior contract: token policy satisfied → unseal, zero input; policy/TPM failure → **passphrase fallback prompt** (bounded attempt pacing per systemd; the exact try-count is confirmed on target to match the T2b cap) → retries exhausted ⇒ poweroff (no shell).
-- Honesty note: loader entries are unsigned by design, so an attacker with ESP write access can append `rd.break`/`rd.shell` to the effective cmdline — unseal then **fails** (PCR 11 mismatch); with `rd.shell=0` no shell spawns, and even where one would, it yields **no secrets** (key never unsealed, no /etc/shadow in the initrd).
-- Initrd contents are audited in CI (`lsinitrd` inventory: required-artifact presence per above + deny-rules: no compilers, package tools, unnecessary shells — I6).
+- **Early-Boot Unseal Hook:**
+  - When `systemd-efistub` boots the UKI, it measures the UKI sections into PCR 11 and places `.pcrsig` and `.pcrpkey` into the synthetic initrd at `/.extra/tpm2-pcr-signature.json` and `/.extra/tpm2-pcr-public-key.pem`.
+  - In the initramfs, the early-boot unlock hook executes:
+    1. Extends `"enter-initrd"` into PCR 11 via `tpm2_pcrextend` to align with `ukify`'s phase measurement prediction.
+    2. Starts a TPM policy session evaluating `PolicyPCR` (PCR 7 + PCR 11) and `PolicyAuthorize` (matching `/.extra/tpm2-pcr-signature.json`).
+    3. Unseals the keyslot-1 secret and unlocks the container via `cryptsetup open`.
+    4. If the TPM policy fails, prompts for the keyslot 0 recovery passphrase.
+- **Fail-Closed Security Guarantee (Anti Evil-Maid):**
+  - If passphrase attempts fail (bounded to 3 strikes), the hook executes **`poweroff -f` immediately**.
+  - Dropping into an interactive BusyBox ash rescue shell is **strictly prevented**, eliminating local dictionary attacks, kernel memory inspection, and ESP tampering vectors.
+- **crypttab & RAID1:**
+  - Each container is mapped in `/etc/crypttab`. For multi-disk RAID1 arrays, all member containers are enrolled with matching policy parameters.
 
-### 8.3 Kernel hook — `/etc/kernel/postinst.d/zz-debian-fde`
+### 8.3 Kernel upgrade hooks — APK Triggers
 
-Debian's dpkg kernel-hook convention: `/etc/kernel/postinst.d/zz-debian-fde` runs after every kernel install/upgrade and calls `ukictl build` for the new kernel; `/etc/kernel/postrm.d/zz-debian-fde` prunes that kernel's UKI + manifest entry **ONLY** (`ukictl remove`) — under A″ the volume's single keyslot/token is shared by all retained UKIs and is **never killed on kernel removal**. **One enrollment per volume (A″ ensure-once)**: rebuilding the same version (microcode, dracut config, cmdline change) finds the standing `systemd-tpm2` token and skips — zero TPM operations (a new kernel built while the token stands is likewise stamped with the standing `keyslot`/`token_id` bookkeeping — still zero TPM operations, `tests/unit/ukictl_build_enroll_wire.sh` T6); a fresh volume gets exactly one enrollment — either way dead slots never accumulate toward LUKS2's 8-slot ceiling. Ordering: the `zz-` placement after dracut's own postinst hook is retained by convention, but Debian FDE's build does not depend on it — `ukictl build` does not consume dracut-hook output; it (re)generates the initrd itself, unconditionally, via `dracut --force` under the pinned §8.2 module set (`initramfs_build`, lib/initramfs.sh). Dracut is never given an ESP/UKI output, and its own ESP-sync (if any) is disabled because **all ESP writes go through Debian FDE's signed flow**. The same guard covers the boot manager: a `systemd-boot` package upgrade re-runs `bootctl install` + re-signs (masked `systemd-boot-update.service`; a dpkg path hook re-signs ESP boot-manager binaries on package upgrade), and `status`/`audit` run `sbverify` over ESP binaries. Microcode and other initrd-affecting updates trigger a `ukictl build` for the running kernel too (same hook family). Release signing key unavailable ⇒ **fail loudly** (non-zero exit + persisted marker visible in `status`); silently shipping a UKI that boots but cannot unseal, or an unsigned binary on the ESP, is treated as a bug.
+- **APK Trigger Integration:**
+  - Alpine packages use `apk`. An APK trigger script (e.g., `/etc/apk/triggers/alpine-fde.trigger` watching `/boot/vmlinuz-*`) intercepts kernel installations and upgrades.
+  - The trigger prompts the operator for the `release.pem` passphrase and calls `alpine-fde ukictl build` for the new kernel version.
+  - Pruning retains the current plus 2 older UKIs on the ESP; rollback remains 100% passwordless via each retained UKI's `.pcrsig`.
 
 ### 8.4 Interfaces between components
 
-- **`systemd-tpm2` LUKS2 token** (§7.2) — written by the enroll step (`systemd-cryptenroll`; under ADR-14 the only writer — Mechanism B's own writer is documented-absent), read by systemd-cryptsetup in the initramfs. Schema owned by systemd; Debian FDE only orchestrates.
-- **Digest manifest** `/etc/debian-fde/digests.json` — written by `ukictl build`; per retained UKI: `kernel_version`, `pcr11_digest` (enter-initrd phase), `policy_digest` (combined {7,11}), `signature`, plus its **`keyslot` and `token id`** — the standing A″ enrollment's bookkeeping, repeated per entry (one enrollment per volume, §7.2). Consumed by `enroll-tpm`/`audit`/harness; bridges build→enroll, including on first install.
-- **Baseline file** `/etc/debian-fde/baseline.json` — written at `provision` with `pcr7: "pending"`, **finalized by `audit --init`** after the first boot into the final SB state (PCR 7 changes only on the next boot after firmware key enrollment) — finalization is guarded (`baseline_finalize_from_live`, lib/baseline.sh): requires `secureboot=1 setup_mode=0`, else fail-closed 64 **before any mutation** (baseline stays pending), no override: PCR 0..3 values, expected PCR 7 digest for the custom-key state (what every "PCR 7 matches baseline" check means), release public key path + its TPM name/hash alg, SB state, firmware version, creation date. Read by `audit` and `enroll-tpm`.
-- **Installation state file** `/etc/debian-fde/install-state.json` — tracks the install ceremony state machine: `installed` → `[reboot to BIOS]` → `finalized`. Prevents premature enrollment and guarantees crash recovery across the first-boot reboot.
+- **LUKS2 Token Metadata:** Keyslot 0 holds the recovery passphrase (Argon2id). Keyslot 1 holds the TPM-sealed passphrase bound to {PCR 7, PCR 11}.
+- **Digest manifest** `/etc/alpine-fde/digests.json` — written by `ukictl build`; per retained UKI: `kernel_version`, `pcr11_digest` (enter-initrd phase), `policy_digest` (combined {7,11}), `signature`, plus `keyslot` and `token_id`.
+- **Baseline file** `/etc/alpine-fde/baseline.json` — written at `provision` with `pcr7: "pending"`, finalized by `audit --init` after the first boot into the verified custom Secure Boot state (`secureboot=1 setup_mode=0`).
+- **Installation state file** `/etc/alpine-fde/install-state.json` — tracks the install ceremony state machine: `installed` → `[reboot to BIOS]` → `finalized`. Prevents premature enrollment and guarantees crash recovery across the first-boot reboot.
 - **ESP layout convention:**
   ```
   ESP:/EFI/systemd/systemd-bootx64.efi
-  ESP:/EFI/Linux/debian-fde-<kernel-version>.efi     (one UKI per kernel)
+  ESP:/EFI/Linux/alpine-fde-<kernel-version>.efi     (one UKI per kernel)
   ```
-
-  The resolved ESP mount is persisted at install as `ESP_PATH` in `/etc/debian-fde/debian-fde.conf`; the CLI default is `/efi`.
-
-  (Also the firmware fallback loader `/EFI/BOOT/BOOTX64.EFI`. `loader/` config and entry files are unsigned and unmeasured themselves — acceptable, because security does not rest on them: the boot manager and UKIs are SB-signed, and systemd-stub measures the embedded command line into PCR 11. Empirical note (s07, trixie 257.13): the loader-level cmdline-injection vector is structurally dead — sd-boot drops a type1 UKI entry's `options` line, Boot#### OptionalData is dropped by the stub, and UKI addons are not picked up — so the live tamper vector is a signed-UKI variant with a tampered `.cmdline`, which still breaks unseal via the PCR 11 mismatch. A tampered `loader.conf` default can at most choose *which* signed UKI boots — all retained UKIs are unlock-capable, so there is no privilege gain. `sbverify` + CI assert the signing of `systemd-bootx64.efi` and the fallback loader.)
-- **Key material** `/etc/debian-fde/keys/` — release public key, db/KEK/PK certs; private release key (`release.pem`) is encrypted at rest (AES-256 PBKDF2) and backed up off-machine (I4, ADR-18).
+  Persisted as `ESP_PATH` in `/etc/alpine-fde/alpine-fde.conf` (default `/efi`).
+- **Key material** `/etc/alpine-fde/keys/` — release public key, db/KEK/PK certs; private release key (`release.pem`) is encrypted at rest (AES-256 PBKDF2) and backed up off-machine (I4, ADR-18).
 
 ## 9. Lifecycle flows
 
@@ -397,16 +388,16 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
 - **Firmware in Setup Mode prior to install** (`SetupMode=1`, vendor PK cleared; verified by `doctor` and `install` preflight, §9.1 preflight).
 - Offline custody / off-machine backup plan for the release signing key.
 - Keyslot-0 passphrase: minimum **heuristic entropy estimate** (zxcvbn-class, threshold-blocked) enforced interactively by `install` (both Wave 1 and Wave 2 paths) and by `rotate`; LUKS2 KDF pinned to **Argon2id** (`--pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000`, matching Runbook 2; the passphrase is the one offline-guessable secret, T2b). The same entropy floor applies to the `release.pem` encryption passphrase.
-- ESP sized from **measured UKI size × retention + headroom** (verified in CI, §12; minimum 512 MB, recommended 1 GB for multi-kernel retention).
-- Debian 13 (trixie) target; root on **Btrfs** with subvolumes (`@`, `@home`, `@snapshots`), enabling atomic `debian-fde pre-upgrade` snapshots (ext4 optional via `--fs ext4`).
-- **Host installer tools** (verified by `install` preflight before disk mutation): `debootstrap` (or `mmdebstrap`), `sfdisk` (`util-linux`), `cryptsetup`, `btrfs-progs` (or `e2fsprogs`), `mkfs.vfat` (`dosfstools`), optional `bcache-tools` (if `--bcache` enabled), `lsblk`.
-- **Target chroot tools** (installed into rootfs via `apt-get`): the §3.3 explicit-additions set (topology-conditional items per `--fs`/`--bcache`: `linux-image-amd64`, `dracut`, `systemd-cryptsetup`, `cryptsetup`, `systemd-boot`, `systemd-boot-tools`, `systemd-ukify`, `sbsigntool`, `openssl`, `tpm2-tools`, `jq`, `sudo`, `zram-tools`, `btrfs-progs` or `e2fsprogs`, optional `bcache-tools`, CPU microcode).
+- ESP sized from **measured UKI size × retention + headroom** (verified in CI, §12; minimum 128 MB, recommended 512 MB for multi-kernel retention).
+- Alpine Linux target; root on **Btrfs** with subvolumes (`@`, `@home`, `@snapshots`), enabling atomic `alpine-fde pre-upgrade` snapshots (ext4 optional via `--fs ext4`).
+- **Host installer tools** (verified by `install` preflight before disk mutation): `apk`, `sfdisk` (`util-linux`), `cryptsetup`, `btrfs-progs` (or `e2fsprogs`), `mkfs.vfat` (`dosfstools`), optional `bcache-tools` (if `--bcache` enabled), `lsblk`.
+- **Target chroot tools** (installed into rootfs via `apk`): the §3.1 additions set (`cryptsetup`, `systemd-boot`, `systemd-efistub`, `ukify`, `linux-lts`, `tpm2-tools`, `tpm2-tss-policy`, `tpm2-tss-tcti-device`, `sbsigntool`, `openssl`, `jq`, `btrfs-progs` or `e2fsprogs`, optional `bcache-tools`).
 
 ## 14. Decision record
 
 | # | Decision | Rationale |
 |---|---|---|
-| ADR-1 | **Platform: Debian 13 "trixie"** (rev. B; supersedes Alpine) | systemd-cryptenroll/cryptsetup provide the signed-PCR unlock path as maintained code; custom Alpine initramfs tooling was the original premise and is consciously traded away for a battle-tested unlock path and simpler validation. Debian FDE keeps the ceremony, installer, audit, and lifecycle tooling |
+| ADR-1 | **Platform: Alpine Linux** (rev. C; supersedes Debian 13) | Re-adopts Alpine Linux as the primary target operating system to achieve an ultra-compact footprint (~200 MB installed vs ~1.4 GB on Debian) and minimal attack surface. Leverages standalone upstream `ukify`, `systemd-boot`, `systemd-efistub`, and `tpm2-tools`/`libtss2-policy` packages available on Alpine, coupled with a custom early-boot initramfs hook and fail-closed poweroff guards. |
 | ADR-2 | Threat model: offline theft + evil maid; firmware attacks out of scope | Hardware-rooted firmware verification (Boot Guard/PSP) is OEM-fused, not user-installable |
 | ADR-3 | Recovery: TPM slot + user-chosen passphrase slot | User decision; recovery-key option declined |
 | ADR-4 | Boot chain: SB(custom keys) → systemd-boot → signed UKI; policy = PCR 7 + PCR 11 combined, release-key-signed | Only option satisfying G3 + G4 simultaneously |
@@ -414,13 +405,13 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
 | ADR-6 | PCR 0..3 excluded from seal policy; covered by `audit` | Firmware updates would permanently break sealing; detection beats brittle prevention |
 | ADR-7 | Hibernation unsupported; swap = zram | Hibernate image would leak volume-key state to disk |
 | ADR-8 | Missing signing key during kernel update = loud failure | Silent passphrase-prompt degradation would erode the security property |
-| ADR-9 | TPM seals a keyslot passphrase, not the volume key | LUKS2 keyslots wrap passphrases; systemd's model is exactly this — conventional and validated |
+| ADR-9 | TPM seals a keyslot passphrase, not the volume key | LUKS2 keyslots wrap passphrases; conventional and validated |
 | ADR-10 | Release-key signature covers the combined policy digest — single PolicyPCR call, selection {7,11}, ascending | Signing only the PCR 11 digest would leave PCR 7 unbindable — the evil-maid gate could silently vanish |
 | ADR-11 | One signing identity: the release key's certificate lives in db and signs both UKIs and policy digests | Fewer keys, one custody story; PK/KEK/db keys are enrollment-only |
-| ADR-12 | Minimal rootfs: debootstrap `--variant=minbase`, no-recommends policy, explicit ~15-package addition set, size budget asserted in CI | User requirement; §3.3 is the normative recipe; installs `apt-get` for subsequent in-chroot configuration |
-| ADR-13 | **dracut hostonly initramfs; Btrfs default rootfs with subvolumes (ext4 optional)** [Wave 2 Architecture — Design Approved, Implementation In Progress] | Btrfs subvolumes (`@`, `@home`, `@snapshots`) provide native userspace rollback matching `pre-upgrade` snapshot flows; dracut hostonly collects `btrfs` driver + tools. ext4 remains supported for minimal single-partition simplicity |
-| ADR-14 | Mechanism ladder resolved empirically: **A″ PROVEN in e2e (s00/s01/s14/s16)** — systemd-native static PCR 7 + signed PCR 11 delivered via per-UKI `.pcrsig`; single enrollment; kernel updates and rollback TPM-free | Verified live on trixie 257.13: no signer/consumer skew (257≡261 bit-exact); the unlock blocker was the harness initrd missing `systemd-pcrextend enter-initrd` (production dracut does this via systemd-pcrphase-initrd). In code the ladder is A″-only: rungs a/ap/b fail closed (exit 64, "documented-absent") at the `policy_mode_normalize` boundary (lib/common.sh) inherited by every pipeline entry point; `pcrsign` (§6.1.1) ships as a standalone fully-tested CLI with no pipeline consumer; rungs retained as design documentation |
-| ADR-15 | Runs from Debian live ISO or minimal live OS (e.g. Alpine as dumb launcher); missing host packages installed on demand via apt (Debian) or pre-installed via apk (Alpine), `DEBIAN_FDE_NO_INSTALL=1` escape hatch, loud failure with manual list otherwise | The host provisioning environment only needs partitioning, LUKS formatting, and debootstrap; all Debian-specific packages, kernel assembly, and EFI signing run in the target chroot where apt-get is available |
+| ADR-12 | Minimal rootfs: `apk add --root`, explicit additions set, size budget ≤ 250 MB asserted in CI | User requirement; §3.3 is the normative recipe |
+| ADR-13 | **mkinitfs / dracut initramfs with early-boot hook; Btrfs default rootfs with subvolumes (ext4 optional)** | Btrfs subvolumes (`@`, `@home`, `@snapshots`) provide native userspace rollback matching `pre-upgrade` snapshot flows. ext4 remains supported for minimal single-partition simplicity |
+| ADR-14 | Signed PCR 11 via per-UKI `.pcrsig` + static PCR 7; single enrollment; kernel updates and rollback TPM-free | Unified Kernel Images assembled via `ukify` embed `.pcrsig` into synthetic initrd `/.extra/`; initramfs unseal hook verifies against release public key |
+| ADR-15 | Runs from Alpine live ISO (or Debian live launcher); missing host packages installed on demand via apk, `ALPINE_FDE_NO_INSTALL=1` escape hatch, loud failure with manual list otherwise | The host provisioning environment only needs partitioning, LUKS formatting, and apk-tools; all Alpine-specific packages, kernel assembly, and EFI signing run in the target chroot |
 | ADR-16 | **Key algorithms: RSA (RSA-3072 release key, RSA-2048 PK/KEK/db) over ECC** | While TPM 2.0 and Linux userspace (`systemd-cryptenroll`, `ukify`, `openssl`) support NIST P-256/P-384 ECDSA, UEFI Secure Boot firmware support for ECC certificates in NVRAM (`db`) and ECDSA Authenticode PE/COFF verification is notoriously incomplete or broken across commodity x86_64 PC motherboards. Because ADR-11 binds the release-key identity to both UEFI Secure Boot and TPM policy authorization, RSA is mandatory for universal firmware compatibility. |
 | ADR-17 | **Accelerated hybrid storage: bcache under LUKS2 (LUKS over bcache, writethrough)** [Wave 2 Architecture — Design Approved, Implementation In Progress] | When `--bcache <cache_dev>` is specified to cache backing storage (`--disk`), LUKS2 dm-crypt sits on top of `/dev/bcache0`. The cache mode is pinned to `writethrough` for strict crash safety and data integrity (backing storage remains 100% consistent if cache SSD fails). All blocks written to the caching SSD are ciphertext (zero plaintext leakage, I2), and `/dev/bcache0` presents a single LUKS2 header so Mechanism A″ single-token TPM 2.0 unsealing and single-passphrase recovery apply cleanly without multi-device coordination complexity. |
 | ADR-18 | **Key custody: on-target encrypted `release.pem` (AES-256 PBKDF2) with interactive upgrade passphrase** | To support single-machine autonomy without requiring an offline host during installation while preventing unencrypted private key material on disk, `release.pem` is generated in-chroot on the encrypted root volume and encrypted with AES-256 (PBKDF2 HMAC-SHA256, ≥ 600,000 iterations, entropy floor enforced; PBKDF2 conforms to standard OpenSSL PKCS#8 interoperability while Argon2id is pinned for LUKS2) in Stage 1 before reboot, with mandatory off-machine backup via `scp`. Consequently, post-install signing operations (`apt upgrade`, `ukictl build`) prompt the operator interactively for the release key passphrase. Non-interactive updates fail loudly (ADR-8) unless unlocked via a credential agent. |
