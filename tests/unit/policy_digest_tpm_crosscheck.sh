@@ -76,5 +76,38 @@ tpm_digest=$(tpm_session_policy_digest)
 assert_eq "offline policy_digest == live TPM session digest (case 2, d11 drifted)" "$tpm_digest" "$mine"
 assert_ne "digest changed after the PCR 11 drift" "$case1_digest" "$mine"
 
+# --- case 3: §6.1.1 step 4b — sealed-object policy digest (PolicyAuthorize) -----
+# The LIVE oracle for policy_sealed_digest: drive a REAL policy session through
+# PolicyPCR + PolicyAuthorize (signature ticket from the release key fixture)
+# and require the SESSION digest after PolicyAuthorize to equal the offline
+# double hash over the same keyName — our math must match what the TPM computes,
+# byte for byte (swtpm, tpm2-tools 5.8).
+KEYDIR="$REPO/fixtures/keys"
+tpm loadexternal -C o -G rsa -u "$KEYDIR/release.pub" -c "$TPMDIR/rel.ctx" \
+    -n "$TPMDIR/name.bin" >/dev/null 2>&1
+assert_rc "case 3: loadexternal produced the verifying area" 0 $?
+NAME_HEX=$(od -An -v -tx1 "$TPMDIR/name.bin" | tr -d ' \n')
+# approved policy = the {7,11} trial digest the session currently holds
+policy_digest_bin "$d7" "$d11" >"$TPMDIR/trial3.bin"
+assert_eq "case 3: session digest after PolicyPCR == approved-policy bytes" \
+    "$(policy_digest "$d7" "$d11")" \
+    "$(od -An -v -tx1 "$TPMDIR/trial3.bin" | tr -d ' \n')"
+openssl dgst -sha256 -sign "$KEYDIR/release.pem" -out "$TPMDIR/sig3.bin" "$TPMDIR/trial3.bin" 2>/dev/null
+tpm verifysignature -c "$TPMDIR/rel.ctx" -m "$TPMDIR/trial3.bin" -s "$TPMDIR/sig3.bin" \
+    -f rsassa -g sha256 -t "$TPMDIR/ticket3.bin" >/dev/null 2>&1
+assert_rc "case 3: TPM2_VerifySignature issued the release-key ticket" 0 $?
+tpm startauthsession --policy-session -S "$TPMDIR/sess3.ctx" >/dev/null
+tpm policypcr -S "$TPMDIR/sess3.ctx" -l sha256:7,11 >/dev/null
+tpm policyauthorize -S "$TPMDIR/sess3.ctx" -i "$TPMDIR/trial3.bin" \
+    -n "$TPMDIR/name.bin" -t "$TPMDIR/ticket3.bin" >/dev/null 2>&1
+assert_rc "case 3: TPM2_PolicyAuthorize accepted the ticket + keyName" 0 $?
+session3=$(tpm getpolicydigest -S "$TPMDIR/sess3.ctx" --hex | awk '{print $NF}' | sed 's/^0x//')
+sealed3=$(policy_sealed_digest "$NAME_HEX")
+assert_eq "offline policy_sealed_digest == live session digest after PolicyAuthorize (case 3)" \
+    "$session3" "$sealed3"
+assert_ne "case 3: sealed digest differs from the pre-authorize trial digest" "$sealed3" \
+    "$(policy_digest "$d7" "$d11")"
+tpm flushcontext -s "$TPMDIR/sess3.ctx" >/dev/null 2>&1 || true
+
 # cleanup: the fixture's EXIT trap (swtpm_cleanup_all) stops the daemon
 finish

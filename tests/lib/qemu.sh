@@ -39,36 +39,61 @@ _DEBIAN_FDE_QEMU_SOURCED=1
 
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-420}"
 
-# --- accelerator selection (KVM autodetect) ---------------------------------------
-# DEBIAN_FDE_ACCEL: kvm | tcg | auto (default). `auto` picks KVM when /dev/kvm
-# exists AND is writable AND a cheap probe guest (`-accel kvm -machine none`)
-# succeeds, else TCG exactly as before. An EXPLICIT `kvm` that cannot be
-# honored is a loud failure (never a silent TCG downgrade); an explicit `tcg`
-# is honored verbatim. The decision is made once per process and logged with a
-# greppable `qemu-accel:` marker; every qemu_run in the process then uses the
-# chosen accelerator (the `-accel kvm` flag is added ONLY for KVM, so TCG
-# invocations stay byte-identical to the pre-autodetect ones). OVMF + swtpm
-# need no accel-specific flags and work identically under both.
-DEBIAN_FDE_ACCEL="${DEBIAN_FDE_ACCEL:-auto}"
+# --- accelerator selection (/dev/kvm is REQUIRED) ---------------------------------
+# DEBIAN_FDE_ACCEL: kvm (default) | tcg. KVM is a hard requirement for e2e
+# (§12): an unusable /dev/kvm is a loud fail-closed error — never a silent TCG
+# downgrade (TCG boots blow the per-scenario time budget and corrupt the serial
+# console; the explicit escape hatch below exists for exactly that reason).
+# DEBIAN_FDE_ACCEL=tcg is honored verbatim as the explicitly-requested dev
+# opt-out; any other value (including the old silent 'auto') is rejected. The
+# decision is made once per process and logged with a greppable `qemu-accel:`
+# marker; every qemu_run in the process then uses the chosen accelerator (the
+# `-accel kvm` flag is added ONLY for KVM, so TCG invocations stay
+# byte-identical). OVMF + swtpm need no accel-specific flags and work
+# identically under both.
+# DEBIAN_FDE_KVM_PROBE_TIMEOUT (seconds, default 10) bounds the KVM probe guest
+# below: the probe is SELF-TERMINATING (QMP `quit` over stdio), so the bound is
+# only a hang guard — a refusal costs ~0.1s on a broken-KVM host, never a
+# 30s idle-kill.
+DEBIAN_FDE_ACCEL="${DEBIAN_FDE_ACCEL:-kvm}"
+DEBIAN_FDE_KVM_PROBE_TIMEOUT="${DEBIAN_FDE_KVM_PROBE_TIMEOUT:-10}"
 
 _qemu_accel=""
 
+# _qemu_kvm_probe_run — self-terminating probe guest. Drives QMP over stdio:
+# `qmp_capabilities` then `quit` make qemu exit as soon as KVM init is proven,
+# instead of idling until an external killer arrives (the old `timeout 30 …`
+# form paid a 30s hang on every refusal). Success ONLY = KVM-accelerated qemu
+# (a lone `-accel kvm` never falls back to TCG) starts AND exits cleanly within
+# the DEBIAN_FDE_KVM_PROBE_TIMEOUT bound; timeout-kill, nonzero exit, or a
+# missing binary are all "not working". VERIFIED on this sandbox: 0.115s, rc 0,
+# query-kvm -> {"enabled": true}; with stdin at EOF qemu would idle, hence the
+# piped quit AND the timeout guard (belt and braces).
+_qemu_kvm_probe_run() {
+    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"quit"}' \
+        | timeout "${DEBIAN_FDE_KVM_PROBE_TIMEOUT}" \
+            qemu-system-x86_64 -accel kvm -machine none -display none \
+            -qmp stdio >/dev/null 2>&1
+}
+
 # _qemu_kvm_ok — /dev/kvm present, writable, and a -machine none probe guest
-# actually starts under KVM (the kernel module can be loaded but broken).
+# actually starts under KVM and exits cleanly (the kernel module can be loaded
+# but broken). The cheap /dev/kvm check stays the first gate; the qemu probe
+# (_qemu_kvm_probe_run) is the authoritative one.
 _qemu_kvm_ok() {
     [[ -e /dev/kvm && -w /dev/kvm ]] || return 1
-    timeout 30 qemu-system-x86_64 -accel kvm -machine none -display none \
-        >/dev/null 2>&1
+    _qemu_kvm_probe_run
 }
 
 # _qemu_accel_choose — decide the accelerator ONCE PER PROCESS and log the
 # choice (loud, greppable `qemu-accel:` marker); sets $_qemu_accel, rc 0.
-# Nonzero = selection failed (explicit kvm unavailable / invalid env value).
-# This is the entry point qemu_run uses — NOT via command substitution, whose
-# subshell would defeat the once-per-process cache.
+# Nonzero = KVM required but unusable (default and explicit kvm), explicit tcg
+# is always honored, invalid env value. This is the entry point qemu_run uses
+# — NOT via command substitution, whose subshell would defeat the
+# once-per-process cache.
 _qemu_accel_choose() {
     [[ -n "$_qemu_accel" ]] && return 0
-    local mode="${DEBIAN_FDE_ACCEL:-auto}" why
+    local mode="${DEBIAN_FDE_ACCEL:-kvm}" why
     case "$mode" in
         tcg)
             _qemu_accel="tcg"; why="requested (DEBIAN_FDE_ACCEL=tcg)" ;;
@@ -76,21 +101,23 @@ _qemu_accel_choose() {
             if _qemu_kvm_ok; then
                 _qemu_accel="kvm"; why="requested (DEBIAN_FDE_ACCEL=kvm)"
             else
-                echo "qemu-accel: DEBIAN_FDE_ACCEL=kvm but KVM is unusable here" >&2
+                echo "qemu-accel: KVM is REQUIRED for e2e but /dev/kvm is unusable here" >&2
                 echo "  (need /dev/kvm, writable, and a working probe:" >&2
-                echo "   qemu-system-x86_64 -accel kvm -machine none -display none)" >&2
+                echo "   qemu-system-x86_64 -accel kvm -machine none -display none" >&2
+                echo "   -qmp stdio, bounded by DEBIAN_FDE_KVM_PROBE_TIMEOUT" >&2
+                echo "   =${DEBIAN_FDE_KVM_PROBE_TIMEOUT}s: success only on a clean exit)" >&2
+                echo "  enable KVM (modprobe kvm_intel / kvm_amd) or run on KVM-capable" >&2
+                echo "  hardware; explicitly set DEBIAN_FDE_ACCEL=tcg to opt out anyway" >&2
                 return 1
             fi
             ;;
         auto)
-            if _qemu_kvm_ok; then
-                _qemu_accel="kvm"; why="auto (/dev/kvm writable + probe ok)"
-            else
-                _qemu_accel="tcg"; why="auto (no usable /dev/kvm)"
-            fi
+            echo "qemu-accel: DEBIAN_FDE_ACCEL=auto removed — KVM is required by default;" >&2
+            echo "  set DEBIAN_FDE_ACCEL=tcg explicitly to request software emulation" >&2
+            return 1
             ;;
         *)
-            echo "qemu-accel: invalid DEBIAN_FDE_ACCEL='$mode' (want kvm|tcg|auto)" >&2
+            echo "qemu-accel: invalid DEBIAN_FDE_ACCEL='$mode' (want kvm|tcg)" >&2
             return 1
             ;;
     esac

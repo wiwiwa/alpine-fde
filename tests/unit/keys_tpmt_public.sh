@@ -100,4 +100,39 @@ tpm loadexternal -C n -u "$TMP/release.tpm2b" -c "$TMP/ctx" -n "$TMP/name2" >/de
 tpm flushcontext "$TMP/ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
 assert_eq "direct tpm2_loadexternal name matches" "$name_hex" "$(xxd -p "$TMP/name2" | tr -d '\n')"
 
+# --- G-B1 §6.1.1 step 4b: keys_keyname_verifying — the VERIFYING-area keyName --------
+# The sealed policy pins the keyName of the area that will VERIFY at session
+# time: the tpm2-tools PEM conversion (attrs 0x00060040), NOT the task-pinned
+# 0x00020012 recording area above (keys.sh header NOTE — different Names).
+rm -f "$TMP/verifying.name"
+keys_keyname_verifying "$KEYDIR/release.pub" "$TMP/verifying.name"
+[ -s "$TMP/verifying.name" ]
+assert_rc "keys_keyname_verifying produced an output file" 0 $?
+verifying_hex=$(tr -d '[:space:]' <"$TMP/verifying.name")
+[ ${#verifying_hex} -eq 68 ] && case $verifying_hex in *[!0-9a-f]* | '') false ;; esac
+assert_rc "verifying keyName output contract: pure lowercase hex, 68 chars (000b || SHA256)" 0 $?
+
+# TPM-authoritative equality: the name the TPM itself reports, via two
+# independent commands, for the object tpm2-tools converts the PEM into
+tpm loadexternal -C n -G rsa -u "$KEYDIR/release.pub" -c "$TMP/verifying.ctx" \
+    -n "$TMP/verifying-lo.name" >/dev/null 2>&1
+tpm readpublic -c "$TMP/verifying.ctx" -n "$TMP/verifying-rp.name" >/dev/null 2>&1
+assert_eq "verifying keyName == tpm2_loadexternal -n (TPM-authoritative)" \
+    "$(xxd -p "$TMP/verifying-lo.name" | tr -d '\n')" "$verifying_hex"
+assert_eq "verifying keyName == tpm2_readpublic -n (TPM-authoritative)" \
+    "$(xxd -p "$TMP/verifying-rp.name" | tr -d '\n')" "$verifying_hex"
+tpm flushcontext "$TMP/verifying.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
+
+# the two areas MUST differ (recording-area name_hex captured above, line ~89)
+[ "$verifying_hex" != "$name_hex" ]
+assert_rc "verifying-area keyName DIFFERS from the recording-area keys_keyname name" 0 $?
+
+# rc contract: missing PEM file -> loud die 64, no output file written
+rc=0
+out_missing=$(keys_keyname_verifying "$TMP/no-such.pub" "$TMP/missing.name" 2>&1) || rc=$?
+assert_rc "keys_keyname_verifying: missing PEM -> die 64" 64 $rc
+assert_contains "keys_keyname_verifying: missing PEM dies LOUD" "$out_missing" "keys_keyname_verifying"
+[ ! -e "$TMP/missing.name" ]
+assert_rc "keys_keyname_verifying: missing PEM -> no output file written" 0 $?
+
 finish

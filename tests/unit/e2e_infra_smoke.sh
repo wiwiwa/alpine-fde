@@ -278,6 +278,121 @@ if [[ -f "$WORK/esp-scan.img" ]]; then
     fi
 fi
 
+# --- accelerator contract (§12): /dev/kvm is REQUIRED for e2e --------------------
+# Default DEBIAN_FDE_ACCEL=kvm: an unusable KVM is a LOUD failure (rc!=0, the
+# message names /dev/kvm) — never a silent TCG downgrade. DEBIAN_FDE_ACCEL=tcg
+# is the explicit dev escape hatch, honored verbatim; every other value
+# (including the old silent 'auto') is rejected. Decision is once-per-process,
+# so every case runs _qemu_accel_choose in a fresh subshell.
+ACC=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=kvm; _qemu_kvm_ok() { return 0; }; \
+    _qemu_accel_choose 2>/dev/null && printf '%s' "$_qemu_accel" ) )
+assert_eq "accel: explicit kvm + working KVM -> kvm" "kvm" "$ACC"
+ACC=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 0; }; \
+    _qemu_accel_choose 2>/dev/null && printf '%s' "$_qemu_accel" ) )
+assert_eq "accel: DEFAULT is kvm (working KVM -> kvm, never tcg)" "kvm" "$ACC"
+ACC_RC=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
+    _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
+assert_eq "accel: default + unusable /dev/kvm -> fail closed (rc!=0)" "1" "$ACC_RC"
+MSG=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
+    _qemu_accel_choose 2>&1 >/dev/null ) )
+assert_contains "accel: failure message names /dev/kvm" "$MSG" "/dev/kvm"
+assert_not_contains "accel: unusable KVM never downgrades to tcg" "$MSG" "using tcg"
+TCG=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=tcg; _qemu_accel_choose 2>/dev/null \
+    && printf '%s' "$_qemu_accel" ) )
+assert_eq "accel: explicit DEBIAN_FDE_ACCEL=tcg honored verbatim" "tcg" "$TCG"
+INV=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=auto; _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
+assert_eq "accel: 'auto' (silent-decision mode) rejected" "1" "$INV"
+
+# --- KVM probe hardening (G-K1): the probe guest must be SELF-TERMINATING --------
+# A `-machine none` guest with no QMP `quit` idles forever, so the historical
+# `timeout 30 qemu …` probe paid a ~30s hang on EVERY refusal. The probe now
+# drives QMP over stdio (qmp_capabilities + quit) under `timeout` with the
+# DEBIAN_FDE_KVM_PROBE_TIMEOUT bound (default 10): success ONLY = KVM-accelerated
+# qemu starts AND exits cleanly within the bound. Unit tests exercise the
+# _qemu_kvm_probe_run helper seam through a PATH-stubbed qemu (the /dev/kvm
+# existence+writability gate cannot be forced here); every case runs in a fresh
+# subshell, resetting PATH after each so later sections keep the real qemu.
+PROBE_STUB="$WORK/kvm-probe-stub"
+mkdir -p "$PROBE_STUB/bin"
+
+assert_eq "kvm-probe: _qemu_kvm_probe_run helper seam exists" "function" \
+    "$(declare -F _qemu_kvm_probe_run >/dev/null && echo function || echo missing)"
+
+# (a) stub qemu exits 0 immediately -> probe run succeeds
+cat >"$PROBE_STUB/bin/qemu-system-x86_64" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$PROBE_STUB/bin/qemu-system-x86_64"
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+assert_eq "kvm-probe: clean fast qemu exit 0 -> probe run succeeds" "0" "$RC"
+
+# (b) stub exits 1 (broken KVM init) -> probe run fails
+cat >"$PROBE_STUB/bin/qemu-system-x86_64" <<'EOF'
+#!/bin/sh
+echo "qemu-system-x86_64: -accel kvm: failed to initialize kvm" >&2
+exit 1
+EOF
+chmod +x "$PROBE_STUB/bin/qemu-system-x86_64"
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+assert_eq "kvm-probe: nonzero qemu exit -> probe run fails (rc 1 propagates)" "1" "$RC"
+
+# (c) stub hangs; the default bound kills it -> nonzero, FAST, SIGTERM marker
+cat >"$PROBE_STUB/bin/qemu-system-x86_64" <<EOF
+#!/bin/sh
+trap 'echo sigterm > "$PROBE_STUB/sigterm.marker"; exit 99' TERM
+sleep 30
+EOF
+chmod +x "$PROBE_STUB/bin/qemu-system-x86_64"
+rm -f "$PROBE_STUB/sigterm.marker"
+T0=$SECONDS
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+ELAPSED=$((SECONDS - T0))
+assert_eq "kvm-probe: hung guest killed by bound -> rc 124" "124" "$RC"
+if (( ELAPSED < 20 )); then
+    _assert_result ok "kvm-probe: hung guest refuses fast (elapsed=${ELAPSED}s < 20s)" ""
+else
+    _assert_result not-ok "kvm-probe: hung guest refuses fast" "elapsed=${ELAPSED}s >= 20s"
+fi
+assert_file_exists "kvm-probe: bound SIGTERMed the hung guest (stub marker)" \
+    "$PROBE_STUB/sigterm.marker"
+
+# (d) qemu missing from PATH (timeout still resolvable) -> probe run fails
+mkdir -p "$PROBE_STUB/only-timeout"
+ln -sf "$(command -v timeout)" "$PROBE_STUB/only-timeout/timeout"
+RC=$( ( PATH="$PROBE_STUB/only-timeout"; _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+assert_ne "kvm-probe: missing qemu -> probe run fails" "0" "$RC"
+
+# (e) DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 with the hanging stub -> refuses in < 6s
+rm -f "$PROBE_STUB/sigterm.marker"
+T0=$SECONDS
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; DEBIAN_FDE_KVM_PROBE_TIMEOUT=1; \
+    _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+ELAPSED=$((SECONDS - T0))
+assert_eq "kvm-probe: bound=1 expiry -> rc 124" "124" "$RC"
+if (( ELAPSED < 6 )); then
+    _assert_result ok "kvm-probe: DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 honored (elapsed=${ELAPSED}s < 6s)" ""
+else
+    _assert_result not-ok "kvm-probe: DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 honored" "elapsed=${ELAPSED}s >= 6s"
+fi
+
+# (f) argv pin: the probe cannot silently degrade into a non-KVM check
+cat >"$PROBE_STUB/bin/qemu-system-x86_64" <<EOF
+#!/bin/sh
+printf '%s\n' "\$@" > "$PROBE_STUB/argv.log"
+exit 0
+EOF
+chmod +x "$PROBE_STUB/bin/qemu-system-x86_64"
+( PATH="$PROBE_STUB/bin:$PATH"; _qemu_kvm_probe_run >/dev/null 2>&1 )
+ARGV=$(tr '\n' ' ' <"$PROBE_STUB/argv.log" 2>/dev/null)
+assert_contains "kvm-probe: argv pins -accel kvm" "$ARGV" "-accel kvm"
+assert_contains "kvm-probe: argv pins -machine none" "$ARGV" "-machine none"
+assert_contains "kvm-probe: argv pins -qmp stdio (self-terminating QMP quit)" "$ARGV" \
+    "-qmp stdio"
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; DEBIAN_FDE_KVM_PROBE_TIMEOUT=notaseconds; \
+    _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
+assert_ne "kvm-probe: invalid DEBIAN_FDE_KVM_PROBE_TIMEOUT fails closed" "0" "$RC"
+
 echo "# e2e_infra_smoke: pass=$TESTS_PASS fail=$TESTS_FAIL"
 (( TESTS_FAIL == 0 )) || exit 1
 exit 0

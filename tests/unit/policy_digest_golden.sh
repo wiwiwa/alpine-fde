@@ -65,6 +65,39 @@ assert_rc "policy_check_digest rejects short strings" 1 $rc
 rc=0; policy_check_digest "zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64" || rc=1
 assert_rc "policy_check_digest rejects non-hex" 1 $rc
 
+# --- §6.1.1 step 4b: sealed-object policy digest (PolicyAuthorize) ---------------
+# PINNED formula (docs/Architecture.md §6.1.1 step 4b; matches libtpms
+# PolicyAuthorize.c / Policy_spt.c): PolicyAuthorize CLEARS the session digest,
+# then recomputes it as a DOUBLE hash — the second round runs even for the empty
+# policyRef:
+#   sealed = SHA256( SHA256( zero32 || CC_PolicyAuthorize(0x0000016a) || keyName )
+#                    || policyRef(empty) )
+# keyName = the VERIFYING-area Name hex of the release key fixture (the area
+# tpm2_loadexternal/tpm2_readpublic produce for fixtures/keys/release.pub —
+# attrs 0x00060040). NOTE: this is deliberately NOT the recording-area
+# keyname_hex in release-facts.json (attrs 0x00020012 — different TPMT_PUBLIC,
+# different Name; see the keys.sh header deviation note): the sealed policy
+# pins the name of the area that will VERIFY at session time (§6.1.1 step 4b).
+FIXED_KEYNAME=000b2a076d4f4509c26f83730abb1e5598768a00a45a5fd2d3cda399eeaaf38aac68
+assert_ne "sealed-digest: verifying-area keyName differs from recording-area keyname_hex (attrs differ)" \
+    "$(jq -r .keyname_hex "$REPO/fixtures/keys/release-facts.json")" "$FIXED_KEYNAME"
+SEALED_GOLDEN=$(cat "$REPO/fixtures/policy-digest/sealed-digest.golden")
+assert_eq "sealed-digest: policy_sealed_digest reproduces sealed-digest.golden" \
+    "$SEALED_GOLDEN" "$(policy_sealed_digest "$FIXED_KEYNAME")"
+
+# value-dependence: flipping ONE keyName hex digit must change the digest
+KEYNAME_FLIP="${FIXED_KEYNAME%?}1"
+assert_ne "sealed-digest: value-dependent in keyName (one hex digit flipped)" \
+    "$SEALED_GOLDEN" "$(policy_sealed_digest "$KEYNAME_FLIP")"
+
+# input validation: fail closed (die 64) — odd length, non-hex, empty
+rc=0; (policy_sealed_digest "$(printf '%063d' 7)") >/dev/null 2>&1 || rc=$?
+assert_rc "sealed-digest: odd-length keyName hex -> die 64" 64 $rc
+rc=0; (policy_sealed_digest "zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64zz64") >/dev/null 2>&1 || rc=$?
+assert_rc "sealed-digest: non-hex keyName -> die 64" 64 $rc
+rc=0; (policy_sealed_digest "") >/dev/null 2>&1 || rc=$?
+assert_rc "sealed-digest: empty keyName -> die 64" 64 $rc
+
 # --- raw message bytes: exactly 32 bytes (the PolicyAuthorize message) ----------
 policy_digest_bin "$D7" "$D11" >"$TMP/msg.bin"
 n=$(wc -c <"$TMP/msg.bin" | tr -d '[:space:]')

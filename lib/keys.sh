@@ -34,10 +34,17 @@
 # Name but the TPM rejects in-TPM verification with RC_ATTRIBUTES — hence the
 # two areas have DIFFERENT Names. NORMATIVE RULE (§6.1.1 step 4b): the sealed
 # policy must pin the keyName of the area that will VERIFY at session time —
-# the tpm2-tools PEM conversion — NOT this recording area's name.
+# the tpm2-tools PEM conversion — NOT this recording area's name. The two
+# keyName APIs cross-reference:
+#   keys_keyname           — Name of THIS 0x00020012 RECORDING area (the
+#                            task-pinned public-area builder's name)
+#   keys_keyname_verifying — Name of the VERIFYING area (the tpm2-tools PEM
+#                            conversion): WHAT the sealed policy pins —
+#                            consumed by lib/policy.sh policy_sealed_digest
+#                            <keyNameHex>
 #
 # Depends on: lib/common.sh, lib/policy.sh (policy_hex_to_bin), openssl,
-# tpm2-tools via the tpm() TCTI wrapper (only for keys_keyname).
+# tpm2-tools via the tpm() TCTI wrapper (keys_keyname, keys_keyname_verifying).
 # ADR-18 custody (keys_is_encrypted / keys_encrypt_release / keys_unlock):
 # openssl only; the §13 passphrase floor is reused from lib/cmd/rotate.sh
 # (sourced lazily via $DEBIAN_FDE_CMD_DIR when keys_encrypt_release needs it).
@@ -491,6 +498,32 @@ keys_keyname() {
     fi
     tpm flushcontext "$_keys_tmp/pub.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
     rm -rf "$_keys_tmp"
+}
+
+# keys_keyname_verifying <pub.pem> <out.name> — the TPM Name of the VERIFYING
+# public area (§6.1.1 step 4b NORMATIVE RULE, see the header NOTE): tpm2-tools
+# converts <pub.pem> ITSELF (attrs 0x00060040: userwithauth|decrypt|sign — the
+# area that allows in-TPM tpm2_verifysignature at session time), and the
+# sealed object's PolicyAuthorize policy must pin THAT name. Loaded external
+# in the NULL hierarchy (-C n); out.name receives the TPM-reported name as
+# PURE LOWERCASE HEX text (no colons, no spaces, one trailing newline) — the
+# exact form lib/policy.sh policy_sealed_digest <keyNameHex> consumes.
+# Cross-reference: keys_keyname names the 0x00020012 RECORDING area — a
+# DIFFERENT name; never pin that one in the sealed policy.
+keys_keyname_verifying() {
+    [ $# -eq 2 ] || die "keys_keyname_verifying: usage: keys_keyname_verifying <pub.pem> <out.name>"
+    [ -n "$1" ] && [ -f "$1" ] || die "keys_keyname_verifying: public key PEM not found: ${1:-<none>}"
+    _keys_v_tmp=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-keyname-verifying.XXXXXX") \
+        || die "keys: mktemp failed"
+    if ! tpm loadexternal -C n -G rsa -u "$1" -c "$_keys_v_tmp/pub.ctx" \
+        -n "$_keys_v_tmp/pub.name" >/dev/null 2>&1; then
+        rm -rf "$_keys_v_tmp"
+        die "keys_keyname_verifying: tpm2_loadexternal failed for $1 (TCTI: ${DEBIAN_FDE_TCTI:-default})"
+    fi
+    tpm flushcontext "$_keys_v_tmp/pub.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
+    _keys_v_hex=$(od -An -v -tx1 "$_keys_v_tmp/pub.name" | tr -d ' \n')
+    rm -rf "$_keys_v_tmp"
+    printf '%s\n' "$_keys_v_hex" >"$2"
 }
 
 return 0

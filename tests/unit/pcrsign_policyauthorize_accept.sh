@@ -102,11 +102,12 @@ keys_keyname "$KEYDIR/release.pub" "$TMP/name-recorded.bin"
 assert_rc "keys_keyname still reproduces the fixture keyName (recording path)" 0 $?
 flushall
 
-# --- sealed-object policy digest (see header for the pinned formula) ----------------
+# --- sealed-object policy digest — policy_sealed_digest (lib/policy.sh) -----------
+# The pinned §6.1.1 step 4b formula lives in that function's header comment;
+# the offline golden is fixtures/policy-digest/sealed-digest.golden (asserted in
+# policy_digest_golden.sh). This live chain is the normative TPM oracle.
 NAME_HEX=$(xxd -p "$TMP/name.bin" | tr -d '\n')
-ZERO32='0000000000000000000000000000000000000000000000000000000000000000'
-D1=$(printf '%s0000016a%s' "$ZERO32" "$NAME_HEX" | policy_hex_to_bin | sha256sum | awk '{print $1}')
-SEALED=$(printf '%s' "$D1" | policy_hex_to_bin | sha256sum | awk '{print $1}')
+SEALED=$(policy_sealed_digest "$NAME_HEX")
 
 # --- seal a dummy secret under the sealed policy digest ------------------------------
 printf 'dummy-secret-for-policyauthorize-accept\n' >"$TMP/secret.txt"

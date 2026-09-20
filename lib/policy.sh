@@ -19,6 +19,10 @@
 # PKCS1-v1_5 over SHA256(message) — plain `openssl dgst -sha256 -sign`, matching
 # what `tpm2_verifysignature -f rsassa -g sha256` accepts.
 #
+# The sealed-object policy digest PolicyAuthorize leaves in the session
+# (§6.1.1 step 4b) is policy_sealed_digest below — a DOUBLE hash over
+# zero32 || CC_PolicyAuthorize || keyName, policyRef empty.
+#
 # Depends on: lib/common.sh (info/warn/die/require_cmds), openssl, awk (LC_ALL=C),
 # jq only for the signature JSON emitter (policy_sign_json).
 
@@ -29,6 +33,7 @@ DEBIAN_FDE_POLICY_LOADED=1
 
 # --- constants (marshaled TPM 2.0 structures, sha256 bank, PCRs 7+11) ----------
 POLICY_CC_PCR='0000017f'
+POLICY_CC_AUTHORIZE='0000016a'
 POLICY_TPML_7_11='00000001000b03800800'
 POLICY_ZERO32='0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -59,6 +64,34 @@ policy_pcr_digest() {
     policy_check_digest "$2" || die "policy: pcr11 digest is not a sha256 hex digest: $2"
     printf '%s%s' "$1" "$2" | policy_hex_to_bin \
         | openssl dgst -sha256 -hex | awk '{print $NF}'
+}
+
+# policy_sealed_digest <keyNameHex> — print the sealed-object policy digest
+# a TPM2_PolicyAuthorize session leaves behind (docs/Architecture.md §6.1.1
+# step 4b — formula PINNED; matches libtpms PolicyAuthorize.c/Policy_spt.c and
+# live swtpm sessions; offline golden: fixtures/policy-digest/sealed-digest.golden,
+# live oracle: tests/unit/policy_digest_tpm_crosscheck.sh case 3 +
+# tests/unit/pcrsign_policyauthorize_accept.sh):
+#
+#   sealed = SHA256( SHA256( zero32 || CC_PolicyAuthorize || keyName ) || policyRef )
+#     zero32            = 32 zero bytes    (PolicyAuthorize CLEARS the session digest)
+#     CC_PolicyAuthorize = 00 00 01 6a     (4-byte big-endian command code — part of
+#                                          the hash per TPM 2.0 Part 3 PolicyContextUpdate)
+#     keyName           = TPM Name (hex) of the area that will VERIFY at session time
+#     policyRef         = EMPTY — the second hash round STILL runs (DOUBLE hash)
+#
+# The earlier single-hash form H(policyDigest || keyName || policyRef) is WRONG.
+# keyName is NOT signed (§6.1.1 step 4); it enters only this digest update.
+# Fails closed (die 64) on non-hex or odd-length keyName hex.
+policy_sealed_digest() {
+    case ${1:-} in
+        '' | *[!0-9a-fA-F]*)
+            die "policy_sealed_digest: keyName is not a hex string: '${1:-}'" ;;
+    esac
+    [ $((${#1} % 2)) -eq 0 ] || die "policy_sealed_digest: keyName hex has odd length: $1"
+    _pol_d1=$(printf '%s%s%s' "$POLICY_ZERO32" "$POLICY_CC_AUTHORIZE" "$1" \
+        | policy_hex_to_bin | openssl dgst -sha256 -hex | awk '{print $NF}')
+    printf '%s' "$_pol_d1" | policy_hex_to_bin | openssl dgst -sha256 -hex | awk '{print $NF}'
 }
 
 # policy_digest <d7hex> <d11hex> — print the combined {7,11} PolicyPCR policy digest.

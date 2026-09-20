@@ -88,15 +88,17 @@ for c in ukify objdump cpio xz openssl depmod; do
     fi
 done
 # --- accelerator selection (loud, greppable, once per run) ------------------------
-# tests/lib/qemu.sh owns the decision (DEBIAN_FDE_ACCEL=kvm|tcg|auto); the
-# runner only asks for it up front so the choice is on the record BEFORE any
-# scenario boots, and lands it in the results JSON ("accel"/"tcg_only").
+# tests/lib/qemu.sh owns the decision (DEBIAN_FDE_ACCEL=kvm|tcg; kvm is the
+# default and REQUIRED — no /dev/kvm is a fail-closed 64 here, tcg is the
+# explicit dev opt-out); the runner only asks for it up front so the choice is
+# on the record BEFORE any scenario boots, and lands it in the results JSON
+# ("accel"/"tcg_only").
 # Worker scenarios re-derive the same decision in their own process (it is
 # deterministic per machine) and log the same greppable line.
 # shellcheck source=lib/qemu.sh
 source "$TESTS/lib/qemu.sh"
 ACCEL=$(qemu_accel) || {
-    echo "run-e2e: accelerator selection failed (see qemu-accel lines above)" >&2
+    echo "run-e2e: KVM (/dev/kvm) is required for e2e — see qemu-accel lines above" >&2
     exit 64
 }
 
