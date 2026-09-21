@@ -45,9 +45,9 @@ In the happy path you type **no password at boot**, ever.
 ./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
-The installer runs completely unattended (zero prompts), installs Alpine base system via `apk`, enrolls your custom Secure Boot keys into firmware, seals a provisional PCR-11 TPM token, and reboots directly to disk.
-* On first boot: **Zero passwords at boot.** The disk unseals automatically via the provisional TPM token and presents the standard login prompt with an MOTD reminder.
-* Trust finalization: Log in and run `alpine-fde finalize` on demand to set your recovery passphrase, encrypt your signing key, and permanently seal to {PCR 7, PCR 11}.
+Unattended means unattended **until reboot** (ADR-20, amended): `install` asks you exactly three no-echo questions — your user account password, your **recovery passphrase** (keyslot 0, Argon2id), and your **release signing key passphrase** (encrypts `release.pem` at rest). It then installs Alpine via `apk`, enrolls your custom Secure Boot keys into firmware, seals a provisional PCR-11 TPM token, and reboots directly to disk.
+* On first boot: **Zero passwords at boot.** The disk unseals automatically via the provisional TPM token, and the first-boot OpenRC service **completes trust finalization by itself** — baseline capture, permanent {PCR 7, PCR 11} sealing, ephemeral-keyslot purge, banner clear. No login needed to finalize; log in and use the machine.
+* `alpine-fde finalize` is only the crash-resume path: run it manually if the first-boot service could not finish (mid-finalization power loss, repeated guard failure).
 * From now on: **100% passwordless verified boot.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered.
 
 #### Option B: Shipped Wave 1 Installation (Single-disk ext4, offline signing medium)

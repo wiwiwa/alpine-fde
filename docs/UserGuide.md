@@ -60,54 +60,65 @@ Combines SSD caching acceleration with multi-drive Btrfs RAID1 redundancy (e.g. 
 
 ---
 
-## 3. The Fully Automated Ceremony & First-Boot Trust Finalization
+## 3. The Install Ceremony & First-Boot Auto-Finalization
 
-Alpine FDE eliminates all manual prompts during installation. The entire process runs unattended from the live USB through to the booted system:
+Unattended means unattended **until reboot** (ADR-20, amended). Since the first reboot boots into firmware, a completely unattended flow is impossible — so `install` asks you exactly **three questions**, all no-echo, and everything after them (including trust finalization) runs automatically with zero further input:
 
-1. **Installer Phase (Live Host) — Stage 1 (Unattended):**
-   - Run `./bin/alpine-fde install --disk ...` (with `--yes` or non-interactively).
-   - The installer partitions disks according to the chosen topology, formats the root container with an internal **ephemeral install key** in keyslot 0 (kept only in tmpfs, never written to disk), and installs the minimal Alpine base system via `apk add --root`.
-   - In-chroot provisioning executes unattended in strict sequence:
-     1. Installs the explicit additions package set (`linux-lts`, `cryptsetup`, `systemd-boot`, `systemd-efistub`, `ukify`, `sbsigntool`, `openssl`, `tpm2-tools`, `jq`, filesystem tools).
+1. Your **user account password** (the account becomes loginable).
+2. Your **LUKS2 recovery passphrase** — the one password you ever type for the disk. Enforce the entropy floor; it is enrolled into keyslot 0 (Argon2id).
+3. Your **release signing key passphrase** — used to encrypt `/etc/alpine-fde/keys/release.pem` at rest (AES-256 PBKDF2, ADR-18).
+
+There are no flags and no credential files to automate these prompts.
+
+1. **Installer Phase (Live Host) — Stage 1 (interactive credential ceremony + unattended bootstrap):**
+   - Run `./bin/alpine-fde install --disk ...` and answer the three no-echo prompts above.
+   - The installer partitions disks according to the chosen topology, formats the root container with an internal **ephemeral install key** (kept only in tmpfs in a temporary keyslot; purged at finalization), and installs the minimal Alpine base system via `apk add --root`.
+   - In-chroot provisioning executes in strict sequence:
+     1. Installs the explicit additions package set (`linux-lts`, `cryptsetup`, `systemd-boot`, `systemd-efistub`, `ukify`, `sbsigntool`, `openssl`, `tpm2-tools`, `jq`, filesystem tools, `doas`).
      2. Generates custom platform keys (`PK`, `KEK`, `db`) and `release.pem` (mode `0600`).
-     3. Enrolls authenticated UEFI NVRAM variables in strict order (`db → KEK → PK` last).
-     4. Builds signed `systemd-bootx64.efi` and signed UKI with embedded `.pcrsig` via `ukictl build`.
-     5. **Provisional TPM Sealing:** Seals keyslot 1 with a **Provisional TPM Token** bound via `PolicyAuthorize` over **PCR 11 only** (matching the signed UKI).
-     6. Drops an unfinalized warning banner into `/etc/motd` and `/etc/issue`.
-     7. Writes state `installed` to `/etc/alpine-fde/install-state.json`.
+     3. **Credential ceremony:** sets your user account password, enrolls your recovery passphrase into keyslot 0 (Argon2id, authorized by the ephemeral install key while staged), and encrypts `release.pem` with AES-256 PBKDF2 ($\ge$ 600,000 iterations), mode `0400`.
+     4. Enrolls authenticated UEFI NVRAM variables in strict order (`db → KEK → PK` last).
+     5. Builds signed `systemd-bootx64.efi` and signed UKI with embedded `.pcrsig` via `ukictl build`.
+     6. **Provisional TPM Sealing:** Seals keyslot 1 with a **Provisional TPM Token** bound via `PolicyAuthorize` over **PCR 11 only** (matching the signed UKI).
+     7. Drops an unfinalized warning banner into `/etc/motd` and `/etc/issue`.
+     8. Writes state `installed` to `/etc/alpine-fde/install-state.json`.
    - Cleans up and reboots directly into the target disk.
 
-2. **First Boot Phase (Provisional UKI Unseal) — Stage 2 (Automated):**
+2. **First Boot Phase (Provisional UKI Unseal + Automatic Finalization) — Stage 2 (Automated):**
    - The machine powers on under custom Secure Boot keys.
    - The initramfs hook matches the provisional token against the measured UKI in PCR 11 and **automatically unlocks the root filesystem without asking for any password**.
-   - The system boots straight to the normal multi-user login prompt (console / SSH reachability).
-   - The `/etc/motd` banner alerts the operator:
+   - The system boots straight to the normal multi-user login prompt (console / SSH reachability) — your Stage 1 account is loginable.
+   - The OpenRC first-boot service (`alpine-fde-finalize`) **completes trust finalization automatically — never the user**:
+     1. **Guard:** verifies final Secure Boot state (`secureboot=1`, `setup_mode=0`); if not satisfied, stays provisional, prints the advisory warning, exits 0 (never blocks boot), and retries on the next boot.
+     2. **Baseline:** captures the actual Secure Boot PCR 7 baseline via `audit --init`.
+     3. **Upgrades TPM Seal:** upgrades the keyslot 1 token from provisional {PCR 11} to **{PCR 7, PCR 11}** (Mechanism B, authorized by re-unsealing the standing provisional token — no credential of yours is needed or stored).
+     4. **Purges** the ephemeral install keyslot.
+     5. **Cleans Up:** clears the unfinalized MOTD banner and writes state `finalized` to `/etc/alpine-fde/install-state.json`.
+   - Any step failure means the system stays provisional, warns loudly, and retries next boot — nothing ever blocks boot.
+   - If the guard could not pass (for example, Secure Boot was left OFF), the login MOTD explains:
      ```text
      ================================================================================
      [!] Alpine FDE: System running in PROVISIONAL mode!
          - Disk is unlocked via provisional UKI measurement (PCR 11 only).
-         - No permanent recovery passphrase is set.
-         - Release signing key is unencrypted at rest.
+         - Trust finalization is pending: Secure Boot must be enabled
+           (secureboot=1, setup_mode=0) for auto-finalization to complete.
+         - The alpine-fde-finalize service retries on every boot.
 
-     >> To complete setup, run:
+     >> To complete setup manually, run:
         sudo alpine-fde finalize
      ================================================================================
      ```
 
-3. **Trust Finalization Phase — Stage 3 (`alpine-fde finalize`):**
-   - The administrator logs in and runs:
+3. **Manual Crash-Resume — Stage 3 (`alpine-fde finalize`):**
+   - Under normal operation you never run this: the Stage 2 service finalizes automatically. `alpine-fde finalize` exists for when the service could not complete — a mid-finalization power loss, or repeated guard failure:
      ```sh
      sudo alpine-fde finalize
      ```
-   - The interactive finalization wizard executes:
-     1. **Sets Permanent Recovery Passphrase:** Prompts the operator to choose a permanent recovery passphrase (enforcing §13 entropy floor). Enrolls it into keyslot 0 (Argon2id) and purges the ephemeral install key.
-     2. **Encrypts Release Signing Key:** Prompts operator for a passphrase to encrypt `/etc/alpine-fde/keys/release.pem` with AES-256 PBKDF2 ($\ge$ 600,000 iterations, ADR-18), tightening permissions to `0400`.
-     3. **Upgrades TPM Seal:** Captures actual Secure Boot PCR 7 baseline via `audit --init` and upgrades the keyslot 1 token to **{PCR 7, PCR 11}** (Mechanism B).
-     4. **Cleans Up:** Clears the unfinalized MOTD banner and writes state `finalized` to `/etc/alpine-fde/install-state.json`.
-     5. **Backup:** Prompts operator to back up `/etc/alpine-fde/keys/` off-machine via `scp`:
-        ```sh
-        scp -r /etc/alpine-fde/keys/ admin@backup-host:/secure/storage/alpine-fde-backup/
-        ```
+   - It performs the same completion steps as the service (guard → baseline → token upgrade → ephemeral keyslot purge → banner clear → state `finalized`), interactively, and is authorized by **your recovery passphrase** (keyslot 0) — the one you chose during install.
+   - **Backup:** after finalization, back up `/etc/alpine-fde/keys/` off-machine via `scp`:
+     ```sh
+     scp -r /etc/alpine-fde/keys/ admin@backup-host:/secure/storage/alpine-fde-backup/
+     ```
 
 4. **Normal Operation — Stage 4:**
    - Every subsequent boot is **100% passwordless**: unseals via the permanent TPM token bound to both Secure Boot state (PCR 7) and measured UKI (PCR 11).
@@ -117,9 +128,9 @@ Keyslot lifecycle summary (§9.1):
 
 | Install state | Keyslot 0 | Keyslot 1 | TPM token |
 |---|---|---|---|
-| `installed` (post-install, pre-first-boot) | Ephemeral install key (tmpfs) | Sealed provisional secret | Provisional Token: Bound to PCR 11 |
-| `provisional-booted` (first boot, pre-finalize) | Ephemeral install key (unprompted) | Sealed provisional secret | Provisional Token: Bound to PCR 11 (MOTD active) |
-| `finalized` (post-`finalize`) | Permanent recovery passphrase | Finalized sealed secret | Mechanism B Token: Bound to PCR 7 + PCR 11 |
+| `installed` (post-install, pre-reboot) | Your recovery passphrase (set in-chroot) | Sealed provisional secret | Provisional Token: Bound to PCR 11 (temporary ephemeral keyslot pending) |
+| `provisional-booted` (first boot, pre-finalization) | Your recovery passphrase (never prompted) | Sealed provisional secret | Provisional Token: Bound to PCR 11 (MOTD active; service auto-finalizes) |
+| `finalized` (post-finalization) | Your recovery passphrase | Finalized sealed secret | Mechanism B Token: Bound to PCR 7 + PCR 11 |
 
 ---
 
