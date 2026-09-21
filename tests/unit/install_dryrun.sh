@@ -104,6 +104,20 @@ assert_contains "plan: §3.3 apk populate (alpine-base, --initdb)" "$INS_OUT" \
 assert_not_contains "plan: debootstrap retired" "$INS_OUT" "debootstrap"
 assert_contains "plan: in-chroot apk additions txn (--no-cache)" "$INS_OUT" "apk add --no-cache"
 assert_not_contains "plan: apt retired" "$INS_OUT" "apt-get"
+# §3.1/§3.3/ADR-16 delivery + §8.3/ADR-19: the additions txn carries the
+# mkinitfs/ukify/zram/doas set verbatim
+APK_TXN=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
+for want in mkinitfs py3-pefile zram-init doas ukify-kernel-hook; do
+    assert_contains "plan: apk txn includes $want (§3.1)" "$APK_TXN" "$want"
+done
+# §3.1/ADR-7: swap is zram-only — the zram-init boot config is dropped and the
+# service enabled; NO disk swap line may appear in fstab anywhere
+assert_contains "plan: zram swap config drop (§3.1 zram-init, ADR-7)" "$INS_OUT" \
+    "etc/conf.d/zram-init"
+assert_contains "plan: zram-init service enabled for boot" "$INS_OUT" \
+    "rc-update add zram-init boot"
+assert_eq "plan: fstab carries NO swap line (ADR-7: no disk swap)" "0" \
+    "$(grep -Ec 'UUID=.*swap' <<<"$INS_OUT")"
 # §3.3: /etc/apk/repositories drop replaces apt sources + dpkg trims
 assert_contains "plan: /etc/apk/repositories drop" "$INS_OUT" "etc/apk/repositories"
 assert_contains "plan: repositories drop pins the Alpine CDN main repo" "$INS_OUT" \
@@ -129,8 +143,12 @@ assert_not_contains "plan: single topology crypttab has NO password-cache (verba
 assert_contains "plan: G-ST10 rootflags=subvol=@ on the btrfs cmdline" "$INS_OUT" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
 assert_contains "plan: fail-closed cmdline pins verbatim" "$INS_OUT" "rd.shell=0 rd.emergency=poweroff"
-assert_contains "plan: dracut hostonly" "$INS_OUT" "hostonly=yes"
-assert_contains "plan: dracut legacy crypt module omitted" "$INS_OUT" "omit_dracutmodules"
+# ADR-13/§3.3: dracut is REJECTED on Alpine (mkinitfs is the initramfs
+# generator, G-C8) — no dracut config residue may appear in the plan
+assert_not_contains "plan: NO dracut conf drop (ADR-13: mkinitfs, not dracut)" "$INS_OUT" \
+    "dracut.conf.d"
+assert_not_contains "plan: NO omit_dracutmodules pin (ADR-13)" "$INS_OUT" "omit_dracutmodules"
+assert_not_contains "plan: NO dracut hostonly pin (ADR-13)" "$INS_OUT" "hostonly=yes"
 # G-ST1: subvol fstab forms
 assert_contains "plan: fstab root subvol form" "$INS_OUT" "btrfs subvol=@,defaults 0 1"
 assert_contains "plan: fstab @home subvol form" "$INS_OUT" "btrfs subvol=@home,defaults 0 2"
@@ -281,10 +299,12 @@ assert_eq "bcache: LUKS2 ON TOP of /dev/bcache0 (key invariant)" "1" \
     "$(grep -Ec 'luksFormat --type luks2 [^ ]*.* /dev/bcache0' <<<"$INS_OUT")"
 assert_contains "bcache: ESP lands on the CACHE dev (§4.1 topology 2)" "$INS_OUT" \
     "mkfs.vfat -F 32 -n EFI ${CACHEDEV}1"
-assert_contains "bcache: dracut 20-bcache.conf dropped" "$INS_OUT" "etc/dracut.conf.d/20-bcache.conf"
-assert_contains "bcache: conf forces the bcache driver" "$INS_OUT" 'force_drivers+=" bcache "'
-assert_contains "bcache: conf installs the bcache udev registration pieces" "$INS_OUT" \
-    'install_items+=" /lib/udev/rules.d/69-bcache.rules /lib/udev/bcache-register "'
+# ADR-13: the bcache driver/kernel-args intent is carried by the mkinitfs
+# features.d inventory (bcache.ko + 69-bcache.rules, hooks/mkinitfs/features.d/
+# alpine-fde.files) and the cmdline builder — NOT by a dracut conf drop
+assert_not_contains "bcache: NO dracut 20-bcache.conf drop (ADR-13)" "$INS_OUT" \
+    "dracut.conf.d/20-bcache.conf"
+assert_not_contains "bcache: NO dracut force_drivers pin" "$INS_OUT" "force_drivers"
 assert_contains "bcache: conf records BCACHE=1" "$INS_OUT" "BCACHE=1"
 APK_TXN_BC=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "bcache: apk txn includes bcache-tools" "$APK_TXN_BC" "bcache-tools"
@@ -442,9 +462,80 @@ unset _IME_KEYFILE _ime_kf DEBIAN_FDE_TMPDIR
 trap cleanup EXIT # the resolver re-armed the EXIT trap; restore fixture cleanup
 unset DEBIAN_FDE_INSTALL_RUNNER DEBIAN_FDE_YES
 
+# --- 9b. §8.1 provision row / ADR-18: --keydir is CONSUMED (staged from the ---
+#         signing medium, NO in-chroot keygen) — README "provision stage1 on
+#         USB -> install --keydir" flow
+KEYDIR=$T/medium-keys
+mkdir -p "$KEYDIR"
+for f in release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.der \
+    db.esl kek.esl pk.esl db.auth kek.auth pk.auth; do
+    printf 'key-material' >"$KEYDIR/$f"
+done
+DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
+assert_eq "keydir: dry-run rc 0" "0" "$INS_RC"
+assert_contains "keydir: plan stages release.pem FROM the medium onto the encrypted root" \
+    "$INS_OUT" "cp $KEYDIR/release.pem"
+assert_contains "keydir: plan stages the db.auth packet (fw_auth_enroll input)" \
+    "$INS_OUT" "$KEYDIR/db.auth"
+assert_contains "keydir: staged keys dir locked to 0700" "$INS_OUT" "chmod 700 /mnt/etc/alpine-fde/keys"
+assert_contains "keydir: staged key files locked to 0600" "$INS_OUT" "chmod 600 /mnt/etc/alpine-fde/keys"
+assert_not_contains "keydir: NO in-chroot keygen when the medium supplies the keys" \
+    "$INS_OUT" "provision stage1 --mode in-chroot"
+assert_contains "keydir: NVRAM enrollment still consumes the staged packets" "$INS_OUT" \
+    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+K_STAGE=$(line_no "$INS_OUT" "cp $KEYDIR/release.pem")
+K_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
+assert_eq "keydir: staging BEFORE NVRAM enrollment (plan order)" "1" \
+    "$(( K_STAGE > 0 && K_ENROLL > K_STAGE ? 1 : 0 ))"
+assert_not_contains "keydir: key material NEVER staged to the ESP" "$INS_OUT" \
+    "cp $KEYDIR/.*efi"
+# missing/invalid key material fails closed BEFORE any plan record exists
+DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$T/no-such-dir"
+assert_eq "keydir: nonexistent medium dir -> usage rc 2" "2" "$INS_RC"
+rm -f "$KEYDIR/kek.auth"
+DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
+assert_eq "keydir: missing key artifact (kek.auth) -> usage rc 2" "2" "$INS_RC"
+assert_contains "keydir: error names the missing artifact" "$INS_OUT" "kek.auth"
+printf 'key-material' >"$KEYDIR/kek.auth"
+
+# --- 9c. §8.1 flags contract: `install --esp` sets the ESP mount point -------
+#         (relative to the target root; flows into fstab, mount plan,
+#         ESP_PATH, bootctl and the UKI extraction path)
+run_install --disk "$FAKEDISK" --esp /boot/efi
+assert_eq "esp: --esp /boot/efi dry-run rc 0" "0" "$INS_RC"
+assert_contains "esp: fstab entry uses the flag mount point" "$INS_OUT" \
+    "PARTUUID=<esp-partuuid> /boot/efi vfat umask=0077 0 2"
+assert_contains "esp: ESP_PATH persisted from the flag" "$INS_OUT" "ESP_PATH=/boot/efi"
+assert_contains "esp: mount plan creates the flag mount point" "$INS_OUT" \
+    "mkdir -p /mnt/home /mnt/.snapshots /mnt/boot/efi"
+assert_contains "esp: ESP mounted at the flag mount point" "$INS_OUT" \
+    "mount $FAKEDISK"$(printf '%s' "1")" /mnt/boot/efi"
+assert_contains "esp: bootctl install targets the flag mount point" "$INS_OUT" \
+    "bootctl install --esp-path=/boot/efi --boot-path=/boot/efi"
+assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
+    "/boot/efi/EFI/Linux/alpine-fde-*.efi"
+# dispatcher global --esp (env DEBIAN_FDE_ESP) is consumed too
+DEBIAN_FDE_ESP=/boot/efi run_install --disk "$FAKEDISK"
+assert_eq "esp: env DEBIAN_FDE_ESP dry-run rc 0" "0" "$INS_RC"
+assert_contains "esp: env DEBIAN_FDE_ESP flows into ESP_PATH" "$INS_OUT" "ESP_PATH=/boot/efi"
+# invalid values fail loudly rc 2 BEFORE any plan record
+run_install --disk "$FAKEDISK" --esp /
+assert_eq "esp: / rejected -> usage rc 2" "2" "$INS_RC"
+run_install --disk "$FAKEDISK" --esp boot/efi
+assert_eq "esp: value without leading / rejected -> usage rc 2" "2" "$INS_RC"
+run_install --disk "$FAKEDISK" --esp '/boot efi'
+assert_eq "esp: value with a space rejected -> usage rc 2" "2" "$INS_RC"
+run_install --disk "$FAKEDISK" --esp ''
+assert_eq "esp: empty value rejected -> usage rc 2" "2" "$INS_RC"
+# default unchanged: /efi
+run_install --disk "$FAKEDISK"
+assert_contains "esp: default stays /efi (fstab)" "$INS_OUT" \
+    "PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2"
+assert_contains "esp: default stays /efi (ESP_PATH)" "$INS_OUT" "ESP_PATH=/efi"
+
 # --- 10. package-list lint (§3.3, topology-conditional) ------------------------
 PKG_LIST=$(install_package_list)
-REQUIRED="cryptsetup systemd-boot systemd-efistub ukify linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq btrfs-progs"
+REQUIRED="cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq zram-init doas btrfs-progs"
 for want in $REQUIRED; do
     FOUND=0
     for w in $PKG_LIST; do

@@ -117,9 +117,10 @@ assert_eq "crypttab line verbatim (§8.2, single topology: no password-cache)" \
 assert_eq "repositories drop verbatim (G-C1: replaces apt sources)" \
     "printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/community' >/etc/apk/repositories" \
     "$(grep -F 'dl-cdn.alpinelinux.org' "$SCRIPT")"
-assert_eq "dracut conf verbatim (embedded double quotes survive)" \
-    "printf '%s\n' 'hostonly=yes' 'hostonly_cmdline=no' 'omit_dracutmodules+=\" crypt \"' >/etc/dracut.conf.d/10-alpine-fde.conf" \
-    "$(grep -F 'omit_dracutmodules' "$SCRIPT")"
+# ADR-13: dracut is REJECTED on Alpine (mkinitfs, G-C8) — the emitted guest
+# script carries NO dracut config residue
+assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
+    "$(grep -c 'dracut' "$SCRIPT")"
 assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
 assert_eq "guest step emitted executable: apk additions txn (§9.1 step 1)" "1" \

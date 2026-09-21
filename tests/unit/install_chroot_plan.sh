@@ -222,9 +222,24 @@ assert_contains "fstab: real ESP PARTUUID (placeholder resolved)" "$(cat "$MNT_E
 assert_not_contains "fstab: no unresolved placeholder" "$(cat "$MNT_ETC/fstab")" "<esp-partuuid>"
 assert_file_exists "target: network interfaces drop (OpenRC)" "$MNT_ETC/network/interfaces"
 assert_contains "interfaces: dhcp" "$(cat "$MNT_ETC/network/interfaces")" "dhcp"
-assert_file_exists "target: dracut conf" "$MNT_ETC/dracut.conf.d/10-alpine-fde.conf"
-assert_contains "dracut: hostonly" "$(cat "$MNT_ETC/dracut.conf.d/10-alpine-fde.conf")" "hostonly=yes"
-assert_not_contains "single topology: no 20-bcache.conf drop" "$(ls "$MNT_ETC/dracut.conf.d/")" "20-bcache.conf"
+# §3.1/ADR-7: swap is zram-only — zram-init config dropped + service enabled;
+# the target fstab carries NO swap line (no disk swap anywhere)
+assert_file_exists "target: zram-init boot config dropped (§3.1, ADR-7)" "$MNT_ETC/conf.d/zram-init"
+assert_contains "zram-init config: swap device pinned (type0=0)" \
+    "$(cat "$MNT_ETC/conf.d/zram-init")" "type0=0"
+assert_contains "target: zram-init service enabled for boot" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "rc-update add zram-init boot"
+assert_eq "fstab: zero swap lines (ADR-7: no disk swap)" "0" \
+    "$(grep -c 'swap' "$MNT_ETC/fstab")"
+# §3.1 additions set lands in the in-guest apk transaction
+CHROOT_TXN=$(grep -m1 'apk add --no-cache' "$DEBIAN_FDE_TEST_LOG")
+for want in mkinitfs py3-pefile zram-init doas ukify-kernel-hook; do
+    assert_contains "apk txn includes $want (§3.1, executed)" "$CHROOT_TXN" "$want"
+done
+# ADR-13: dracut is REJECTED on Alpine (mkinitfs, G-C8) — no dracut config
+# residue may land on the target in ANY topology
+assert_eq "target: NO dracut.conf.d directory (ADR-13)" "0" \
+    "$([ -e "$MNT_ETC/dracut.conf.d" ] && echo 1 || echo 0)"
 assert_eq "cmdline.txt verbatim: rootflags + §8.2 fail-closed pins" \
     "root=UUID=$LUKS_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
@@ -300,6 +315,17 @@ assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot" "$LOG"
 assert_contains "§9.1 step 6: guest line pins the provisional slot contract" "$LOG" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
 assert_not_contains "ADR-20: keys_encrypt_release moved to finalize" "$LOG" "keys_encrypt_release"
+# I1 (§11): the Stage-1 provisional-seal one-liner must scrub its secrets —
+# the random volume passphrase (overwrite-then-unlink, the shared keys_scrub
+# idiom) and the seal work dir (blob halves + primary.ctx under the
+# /tmp-defaulted stage) — not just /run/alpine-fde
+SEAL_LINE=$(grep -m1 'seal_provisional' <<<"$LOG")
+assert_contains "I1: seal one-liner scrubs SEAL_PASS_FILE (keys_scrub idiom)" \
+    "$SEAL_LINE" 'keys_scrub "$SEAL_PASS_FILE"'
+assert_contains "I1: seal one-liner scrubs the seal work dir (blob halves + primary.ctx)" \
+    "$SEAL_LINE" 'debian-fde-seal.'
+assert_contains "I1: seal one-liner still removes /run/alpine-fde" "$SEAL_LINE" \
+    'rm -rf /run/alpine-fde'
 first_line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 L_SFDISK=$(first_line_no "$LOG" "sfdisk")
 L_APKPOP=$(first_line_no "$LOG" "apk add --root")
@@ -337,10 +363,19 @@ for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.h
     assert_file_exists "target: kernel hook shipped: $h" "$MNT_ETC/$h"
     assert_eq "target kernel hook executable: $h" "1" "$([ -x "$MNT_ETC/$h" ] && echo 1 || echo 0)"
 done
-assert_file_exists "target: mkinitfs unseal hook shipped" "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh"
+# §8.2/ADR-13: the hook ships to the EXACT path the features.d inventory lists
+# (/usr/share/alpine-fde/mkinitfs/… — what mkinitfs packs when the alpine-fde
+# feature is enabled) and the feature is REGISTERED in /etc/mkinitfs/
+# mkinitfs.conf (full contract: tests/unit/featuresd_contract.sh)
+assert_file_exists "target: mkinitfs unseal hook shipped (features.d path)" \
+    "$DEBIAN_FDE_INSTALL_MNT/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
 assert_eq "target: mkinitfs unseal hook executable" "1" \
-    "$([ -x "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
+    "$([ -x "$DEBIAN_FDE_INSTALL_MNT/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
+assert_eq "target: retired /etc/mkinitfs hook path NOT used" "0" \
+    "$([ -e "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
 assert_file_exists "target: mkinitfs features.d entry shipped" "$MNT_ETC/mkinitfs/features.d/alpine-fde.files"
+assert_contains "target: alpine-fde feature registered in mkinitfs.conf (§8.2/ADR-13)" \
+    "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" "alpine-fde"
 assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"
 assert_eq "target: apk trigger executable" "1" \
     "$([ -x "$MNT_ETC/apk/triggers/alpine-fde.trigger" ] && echo 1 || echo 0)"
@@ -514,6 +549,46 @@ rm -f /tmp/pwned
 OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
 RC=$?
 assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$RC"
+
+# =============================================================================
+# §8.1 provision row / ADR-18: `install --keydir` is CONSUMED — the
+# operator-supplied key material is staged FROM THE MEDIUM onto the encrypted
+# root (restrictive perms) and the in-chroot keygen ceremony is SKIPPED for
+# those artifacts. Never any key material on the ESP (I2).
+# =============================================================================
+KEYDIR=$T/medium-keys
+mkdir -p "$KEYDIR"
+for f in release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.der \
+    db.esl kek.esl pk.esl db.auth kek.auth pk.auth; do
+    printf 'key-material' >"$KEYDIR/$f"
+done
+: >"$DEBIAN_FDE_TEST_LOG"
+rm -rf "$DEBIAN_FDE_INSTALL_MNT"
+OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --keydir "$KEYDIR" 2>&1 </dev/null)
+RC=$?
+assert_eq "keydir: chroot install rc 0 (medium-staged keys)" "0" "$RC"
+assert_contains "keydir: release.pem staged from the medium (host record)" "$OUT" \
+    "cp $KEYDIR/release.pem"
+assert_contains "keydir: db.auth staged from the medium (host record)" "$OUT" \
+    "$KEYDIR/db.auth"
+assert_eq "keydir: NO in-chroot keygen ceremony ran" "0" \
+    "$(grep -c 'provision stage1' "$DEBIAN_FDE_TEST_LOG")"
+assert_contains "keydir: NVRAM enrollment still consumes /etc/alpine-fde/keys" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+assert_file_exists "keydir: release.pem on the encrypted root" "$MNT_ETC/alpine-fde/keys/release.pem"
+assert_eq "keydir: staged keys dir mode 0700" "700" "$(stat -c '%a' "$MNT_ETC/alpine-fde/keys")"
+assert_eq "keydir: staged key files mode 0600" "600" "$(stat -c '%a' "$MNT_ETC/alpine-fde/keys/kek.auth")"
+L_KSTAGE=$(first_line_no "$OUT" "cp $KEYDIR/release.pem")
+L_KENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
+assert_eq "keydir: staging before NVRAM enrollment" "1" \
+    "$(( L_KSTAGE > 0 && L_KENROLL > L_KSTAGE ? 1 : 0 ))"
+assert_eq "keydir: NO key material anywhere on the ESP (I2)" "0" \
+    "$(find "$DEBIAN_FDE_INSTALL_MNT/efi" -name 'release*' -o -name '*.auth' -o -name '*.esl' 2>/dev/null | wc -l)"
+# default (no --keydir): in-chroot ceremony unchanged
+run_install </dev/null
+assert_eq "keydir: default run (no --keydir) rc 0" "0" "$RC"
+assert_contains "keydir: default run keeps the in-chroot ceremony" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys"
 
 # =============================================================================
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort

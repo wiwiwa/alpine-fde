@@ -2,9 +2,13 @@
 # alpine-fde Early-Boot Unseal Hook (docs/Architecture.md §8.2; ADR-13,
 # gap G-C8). `alpine-fde install` copies this file to
 # /etc/mkinitfs/features.d/alpine-fde.files and registers the `alpine-fde`
-# feature in /etc/mkinitfs/mkinitfs.conf; every file the unseal hook needs
+# feature in /etc/mkinitfs/mkinitfs.conf (mkinitfs packs a feature's entries
+# ONLY when the feature is enabled there — §8.2/ADR-13 staging contract,
+# tests/unit/featuresd_contract.sh); every file the unseal hook needs
 # inside the initramfs is listed here (absolute target-root paths, globs
-# allowed):
+# allowed). mkinitfs resolves these paths against the TARGET tree at build
+# time, so the first entry below is also the ONE pinned destination where
+# `install` stages the hook itself (§9.1 step 7):
 #   * the hook script itself
 #   * cryptsetup + libcrypto (openssl) for the unlock + signature gate
 #   * the exact tpm2-tools verbs the hook runs + libtss2 (ESYS stack incl.

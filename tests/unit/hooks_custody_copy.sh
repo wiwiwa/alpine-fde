@@ -11,7 +11,14 @@
 #     an ENCRYPTED release.pem is decrypted ONCE to tmpfs and the UNLOCKED
 #     path is signed with; plaintext keys keep the old behavior;
 #     missing/wrong passphrase = loud 64 + build-failed marker (ADR-8)
-#   * the decrypted copy is scrubbed after the hook exits
+#   * §9.2/ADR-18 single-unlock: ONE hook run unlocks EXACTLY ONCE — the
+#     hook unlocks BEFORE `ukictl build` and hands the ALREADY-UNLOCKED
+#     staged path to the child (staged keydir seam), so the build child and
+#     the boot-manager re-sign leg never unlock/prompt again
+#   * ADR-8 loud failure stays SINGLE: no env + no tty -> one rc 64, one
+#     marker report, zero prompts
+#   * the decrypted copy is scrubbed after the hook exits — on success AND
+#     on failure (single EXIT-trap scrub site)
 #   * the canonical seam wins when both spellings are set (§8.1)
 
 set -u
@@ -62,12 +69,20 @@ printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi
 printf 'unsigned-fallback' >"$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI"
 MARKER=$ALPINE_FDE_ROOT/etc/alpine-fde/build-failed
 
-# recording alpine-fde stub (the ukictl build child — always "succeeds" here;
-# the hook-level contract under test is the boot-manager re-sign custody)
+# recording alpine-fde stub (the ukictl build child — "succeeds" unless
+# ALPINE_FDE_TEST_FAIL is set; records the DEBIAN_FDE_KEYDIR seam it was
+# handed so the single-unlock handoff is assertable)
 FAKE=$T/stub/alpine-fde
 cat >"$FAKE" <<'EOF'
 #!/bin/sh
-printf 'alpine-fde %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
+printf 'alpine-fde %s DEBIAN_FDE_KEYDIR=%s\n' "$*" "${DEBIAN_FDE_KEYDIR:-}" >>"$ALPINE_FDE_TEST_LOG"
+# record WHAT the child saw at its keydir seam (mid-run: the hook scrubs the
+# staging on exit, so this is the only vantage point)
+if [ -n "${DEBIAN_FDE_KEYDIR:-}" ] && [ -f "$DEBIAN_FDE_KEYDIR/release.pem" ]; then
+    printf 'child-release.pem=%s\n' "$(cat "$DEBIAN_FDE_KEYDIR/release.pem")" \
+        >>"$ALPINE_FDE_TEST_LOG"
+fi
+[ -n "${ALPINE_FDE_TEST_FAIL:-}" ] && exit "${ALPINE_FDE_TEST_FAIL}"
 exit 0
 EOF
 # sbsign/sbverify stubs: sbsign records argv and writes signed(output);
@@ -98,11 +113,71 @@ chmod +x "$FAKE" "$T/stub/sbsign" "$T/stub/sbverify"
 export ALPINE_FDE_BIN=$FAKE
 export PATH="$T/stub:$PATH"
 
+# the hook-run passphrase (fixtures + stub tty prompt seam below)
+HOOK_PASS='ci-hook-passphrase-600000'
+
+# =============================================================================
+# keys_unlock stub lib (plugged in through the ALPINE_FDE_LIB_DIR seam, cf.
+# leg 6): a contract-shaped stand-in for lib/keys.sh that COUNTS unlock
+# invocations and passphrase prompts, so the §9.2/ADR-18 single-unlock
+# contract is observable. The stub tty seam (ALPINE_FDE_TEST_TTY) stands in
+# for `[ -t 0 ]` because run_hook feeds the hook </dev/null.
+# =============================================================================
+STUBLIB=$T/stub-lib
+mkdir -p "$STUBLIB"
+: >"$STUBLIB/common.sh"
+cat >"$STUBLIB/keys.sh" <<'EOF'
+# stub keys.sh — unit-test double for lib/keys.sh (ADR-18 custody surface only)
+keys_is_encrypted() {
+    [ -n "$1" ] && [ -f "$1" ] || return 1
+    case $(head -n 1 "$1") in
+        *ENCRYPTED*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+keys_unlock() {
+    printf 'keys_unlock %s\n' "$1" >>"$ALPINE_FDE_UNLOCK_LOG"
+    [ $# -eq 1 ] && [ -f "$1/release.pem" ] || return 64
+    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+        if [ -z "${ALPINE_FDE_TEST_TTY:-}" ]; then
+            printf 'keys_unlock: release.pem is encrypted: passphrase required\n' >&2
+            return 64
+        fi
+        # stub tty prompt: no-echo read stand-in, counted in the log
+        printf 'prompt\n' >>"$ALPINE_FDE_UNLOCK_LOG"
+        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_TEST_HOOK_PASS
+    fi
+    if [ "$DEBIAN_FDE_KEY_PASSPHRASE" != "$ALPINE_FDE_TEST_HOOK_PASS" ]; then
+        # mirror lib/keys.sh: a wrong passphrase stages + scrubs, then fails
+        _su_bad=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-unlock.XXXXXX")
+        printf 'x' >"$_su_bad"
+        rm -f "$_su_bad"
+        return 65
+    fi
+    _su_out=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-unlock.XXXXXX") || return 64
+    printf 'unlocked-release-key' >"$_su_out"
+    chmod 600 "$_su_out"
+    printf '%s\n' "$_su_out"
+}
+keys_scrub() {
+    for _ss_f in "$@"; do
+        [ -n "$_ss_f" ] || continue
+        rm -f "$_ss_f"
+    done
+}
+EOF
+export ALPINE_FDE_LIB_DIR=$STUBLIB
+export ALPINE_FDE_TEST_HOOK_PASS=$HOOK_PASS
+export ALPINE_FDE_UNLOCK_LOG=$T/unlock.log
+
 run_hook() { sh "$BUILD" add "$KVER" </dev/null >"$T/out.log" 2>&1; echo $?; }
-reset_stubs() { : >"$ALPINE_FDE_TEST_LOG"; }
+reset_stubs() { : >"$ALPINE_FDE_TEST_LOG"; : >"$ALPINE_FDE_UNLOCK_LOG"; }
+# unlock-count helpers over the stub log
+unlock_count() { grep -c '^keys_unlock ' "$ALPINE_FDE_UNLOCK_LOG"; }
+prompt_count() { grep -c '^prompt$' "$ALPINE_FDE_UNLOCK_LOG"; }
+staged_left() { find "$T/shm" -maxdepth 1 \( -name '*-fde-unlock.*' -o -name '*-fde-hook-keys.*' \) -print 2>/dev/null; }
 
 # fixture: a REAL encrypted release.pem (ADR-18 form) + public material
-HOOK_PASS='ci-hook-passphrase-600000'
 openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 600000 \
     -in "$REPO/fixtures/keys/release.pem" -passout pass:"$HOOK_PASS" \
     -out "$ALPINE_FDE_KEYDIR/release.pem" 2>/dev/null
@@ -118,6 +193,13 @@ assert_contains "hook: marker demands the passphrase (env or interactive)" \
     "$(cat "$MARKER")" "passphrase required"
 assert_eq "hook: nothing signed without a credential" "0" \
     "$(grep -c '^sbsign' "$ALPINE_FDE_TEST_LOG"; true)"
+assert_eq "hook: impossible unlock is attempted ONCE (single-unlock, §9.2/ADR-18)" \
+    "1" "$(unlock_count; true)"
+assert_eq "hook: impossible unlock never prompts (no tty -> loud, ADR-8)" \
+    "0" "$(prompt_count; true)"
+assert_eq "hook: loud failure reported ONCE (no double marker write)" \
+    "1" "$(grep -c 'passphrase required' "$MARKER"; true)"
+assert_eq "hook: failure path left no staging behind" "" "$(staged_left)"
 
 # leg 2: WRONG compat env passphrase -> 64 + marker naming wrong-passphrase
 reset_stubs
@@ -125,6 +207,9 @@ export DEBIAN_FDE_KEY_PASSPHRASE=definitely-not-it
 assert_eq "hook: wrong compat env passphrase -> rc 64" "64" "$(run_hook)"
 assert_contains "hook: wrong-passphrase marker is distinct" \
     "$(cat "$MARKER")" "wrong passphrase"
+assert_eq "hook: wrong-passphrase run is a single unlock attempt" \
+    "1" "$(unlock_count; true)"
+assert_eq "hook: wrong-passphrase failure path left no staging behind" "" "$(staged_left)"
 unset DEBIAN_FDE_KEY_PASSPHRASE
 
 # leg 3: correct CANONICAL env passphrase -> re-signs via the UNLOCKED tmpfs key
@@ -141,6 +226,16 @@ assert_eq "hook: boot manager replaced by the signed binary" "signed" \
 assert_eq "hook: decrypted copy scrubbed after the hook" "" \
     "$(find "$T/shm" -maxdepth 1 -name '*-fde-unlock.*' -print 2>/dev/null)"
 assert_eq "hook: success cleared the marker" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
+assert_eq "hook: env path unlocks EXACTLY ONCE per hook run" \
+    "1" "$(unlock_count; true)"
+assert_eq "hook: env path performs ZERO passphrase prompts" \
+    "0" "$(prompt_count; true)"
+assert_contains "hook: build child received the staged keydir (single-unlock handoff)" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "DEBIAN_FDE_KEYDIR=$T/shm/debian-fde-hook-keys."
+assert_eq "hook: build child never saw the encrypted keydir" "0" \
+    "$(grep -c "DEBIAN_FDE_KEYDIR=$ALPINE_FDE_KEYDIR\b" "$ALPINE_FDE_TEST_LOG"; true)"
+assert_contains "hook: staged keydir serves the ALREADY-UNLOCKED key (not the encrypted PEM)" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "child-release.pem=unlocked-release-key"
 unset ALPINE_FDE_KEY_PASSPHRASE
 
 # leg 4: CANONICAL wins when both spellings are set (canonical correct,
@@ -171,6 +266,52 @@ export ALPINE_FDE_LIB_DIR=$T/no-such-lib
 assert_eq "hook: unusable lib seam -> fail-closed 64" "64" "$(run_hook)"
 assert_contains "hook: unusable lib seam is loud in the marker" \
     "$(cat "$MARKER")" "runtime"
-unset ALPINE_FDE_LIB_DIR
+export ALPINE_FDE_LIB_DIR=$STUBLIB
+
+# =============================================================================
+# §9.2/ADR-18 single-unlock across BOTH stages (build child + re-sign leg)
+# =============================================================================
+# re-encrypt the fixture (legs 5+ replaced it with plaintext) and reset the
+# ESP so both signing stages actually run
+refit_encrypted() {
+    openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 600000 \
+        -in "$REPO/fixtures/keys/release.pem" -passout pass:"$HOOK_PASS" \
+        -out "$ALPINE_FDE_KEYDIR/release.pem" 2>/dev/null
+    printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi"
+    printf 'unsigned-fallback' >"$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI"
+}
+
+# leg 7: encrypted key + NO env + STUB TTY prompt -> the prompt is hit EXACTLY
+# ONCE per hook run and BOTH stages (ukictl build + boot-manager re-sign)
+# succeed on the single unlocked copy
+refit_encrypted
+reset_stubs
+unset ALPINE_FDE_KEY_PASSPHRASE DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+export ALPINE_FDE_TEST_TTY=1
+assert_eq "hook: tty prompt path -> rc 0" "0" "$(run_hook)"
+assert_eq "hook: tty path unlocks EXACTLY ONCE per hook run" \
+    "1" "$(unlock_count; true)"
+assert_eq "hook: tty path prompts EXACTLY ONCE (no second unlock in the re-sign leg)" \
+    "1" "$(prompt_count; true)"
+assert_eq "hook: both stages signed (build child + 2 ESP binaries)" "2" \
+    "$(grep -c '^sbsign' "$ALPINE_FDE_TEST_LOG"; true)"
+assert_contains "hook: build child signed with the single staged unlock" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "DEBIAN_FDE_KEYDIR=$T/shm/debian-fde-hook-keys."
+assert_eq "hook: tty path scrubbed the staged copy after the run" "" "$(staged_left)"
+unset ALPINE_FDE_TEST_TTY
+
+# leg 8: unlock SUCCEEDS but the build child fails -> rc propagates (ADR-8)
+# and the EXIT trap still scrubs the decrypted copy exactly once
+refit_encrypted
+reset_stubs
+export ALPINE_FDE_TEST_TTY=1
+export ALPINE_FDE_TEST_FAIL=7
+assert_eq "hook: failing build child -> rc propagates" "7" "$(run_hook)"
+assert_contains "hook: build failure marker appended" \
+    "$(cat "$MARKER")" "kernel hook: ukictl build failed"
+assert_eq "hook: child-failure path unlocked ONCE" "1" "$(unlock_count; true)"
+assert_eq "hook: child-failure path scrubbed the staged copy on the exit path" "" \
+    "$(staged_left)"
+unset ALPINE_FDE_TEST_TTY ALPINE_FDE_TEST_FAIL
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

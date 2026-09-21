@@ -20,9 +20,15 @@
 #      /etc/crypttab (UUID mapping)
 #   4. fail-closed: TPM absent/refused/tampered/empty-unseal -> bounded
 #      keyslot-0 prompt (3 strikes) -> poweroff -f; NEVER a shell
-#   5. RAID1: one prompt, passphrase cached across members
+#   5. RAID1: one prompt, passphrase cached across members; a PARTIAL token
+#      unlock (one member's token open failed) still routes that member into
+#      the same bounded prompt loop — never a silently incomplete pool
 #   6. writes the provisional-booted install-state marker on the mounted
 #      NEWROOT when the state file says `installed` (atomic tmp+mv)
+#   7. token scan covers the full LUKS2 token-id range 0..31
+#   8. §6.1/§12 signing negative controls: token/.pcrsig PCR-selection
+#      mismatch in BOTH directions -> no pol extraction -> zero unseals ->
+#      bounded prompt path
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -72,12 +78,15 @@ hex2bin() {
 # the approved policy digest the .pcrsig signs (any 64-hex value works: the
 # TPM chain is stubbed; openssl verification is REAL)
 POL=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-printf '%s' "$POL" | hex2bin >"$TMP/pol.bin"
+hex2bin "$POL" >"$TMP/pol.bin"
 SIGB64=$(openssl dgst -sha256 -sign "$KEYDIR/release.pem" "$TMP/pol.bin" | openssl base64 -A)
 # a REAL signature over the WRONG message (the token-tampering class)
 BADSIGB64=$(printf 'tampered' | openssl dgst -sha256 -sign "$KEYDIR/release.pem" | openssl base64 -A)
 # sha256 of the ukify --measure phase string (what pcrextend must feed)
 PHASH=$(printf 'enter-initrd' | sha256sum | awk '{print $1}')
+# the sentinel secret the tpm2_unseal stub writes (the "TPM-unsealed" keyslot-1
+# passphrase the token path feeds to `cryptsetup open`)
+TOKEN_PASS=1111111111111111111111111111111111111111111111111111111111111111
 
 cp "$KEYDIR/release.pub" "$TMP/extra/tpm2-pcr-public-key.pem"
 cat >"$TMP/extra/tpm2-pcr-signature.json" <<EOF
@@ -136,7 +145,7 @@ prev=
 for a in "\$@"; do
     case "\$prev" in
         -o) [ "\${FDE_UNSEAL_EMPTY:-0}" = 1 ] && : >"\$a" ||
-            printf '1111111111111111111111111111111111111111111111111111111111111111' >"\$a" ;;
+            printf '$TOKEN_PASS' >"\$a" ;;
         -t | -n | -S | -c) : >"\$a" ;;
     esac
     prev=\$a
@@ -150,13 +159,36 @@ cat >"$BIN/cryptsetup" <<EOF
 #!/bin/sh
 printf 'cryptsetup %s\n' "\$*" >>'$LOG'
 if [ "\$1" = "token" ]; then
+    # FDE_TEST_TOKEN_MIN_ID seam: token export fails (no token) for every
+    # token-id below the floor — used to place the token at a HIGH id
+    _fdt_tid=0
+    _fdt_prev=
+    for _fdt_a in "\$@"; do
+        [ "\$_fdt_prev" = "--token-id" ] && _fdt_tid=\$_fdt_a
+        _fdt_prev=\$_fdt_a
+    done
+    if [ "\$_fdt_tid" -lt "\${FDE_TEST_TOKEN_MIN_ID:-0}" ]; then
+        exit 1
+    fi
     cat "\${FDE_TEST_TOKEN_FILE:-$TMP/token.json}"
     exit 0
 fi
 if [ "\$1" = "open" ]; then
     IFS= read -r _p || :
     printf 'cryptsetup-pass %s\n' "\$_p" >>'$LOG'
+    # the mapper target is the last positional argv word
+    _fdt_tgt=
+    for _fdt_a in "\$@"; do
+        _fdt_tgt=\$_fdt_a
+    done
     [ "\${FDE_OPEN_FAIL:-0}" = 1 ] && exit 1
+    # FDE_OPEN_FAIL_TARGET: EVERY open of that member fails (token + passphrase)
+    [ -n "\${FDE_OPEN_FAIL_TARGET:-}" ] && [ "\$_fdt_tgt" = "\${FDE_OPEN_FAIL_TARGET}" ] && exit 1
+    # FDE_OPEN_FAIL_TOKEN_TARGET: only the TOKEN unlock (the TPM-unsealed
+    # sentinel passphrase) fails for that member — the keyslot-0 recovery
+    # passphrase still succeeds (partial RAID1 unlock scenario)
+    [ -n "\${FDE_OPEN_FAIL_TOKEN_TARGET:-}" ] && [ "\$_fdt_tgt" = "\${FDE_OPEN_FAIL_TOKEN_TARGET}" ] &&
+        [ "\$_p" = "$TOKEN_PASS" ] && exit 1
     exit 0
 fi
 exit 1
@@ -190,8 +222,21 @@ reset_leg() {
 }
 
 # =============================================================================
-# 0. artifact shape
+# 0. artifact shape — the hook's initramfs staging path is pinned to a SINGLE
+#    canonical constant, derived from the path hooks/mkinitfs/features.d/
+#    alpine-fde.files actually lists (that file is the mkinitfs contract the
+#    installer stages against; §8.2/ADR-13)
 # =============================================================================
+assert_file_exists() { # <desc> <path>
+    if [ -e "$2" ]; then
+        _pass "$1"
+    else
+        _fail "$1 (no such file: $2)"
+    fi
+}
+# the canonical staging path: the one alpine-fde-unseal.sh line in the
+# features.d list (absolute target-root path, no inline comment)
+HOOK_INITRAMFS_PATH=$(grep -E '^[[:space:]]*/.*alpine-fde-unseal\.sh[[:space:]]*$' "$FILES" | head -n 1 | tr -d '[:space:]')
 assert_file_exists "unseal hook exists" "$HOOK"
 assert_eq "hook is executable" "1" "$([ -x "$HOOK" ] && echo 1 || echo 0)"
 sh -n "$HOOK" >/dev/null 2>&1
@@ -199,8 +244,14 @@ assert_eq "hook parses under POSIX sh (busybox ash)" "0" "$?"
 assert_eq "hook source never spawns a shell or rescue path" "" \
     "$(grep -nE '(^|[^a-zA-Z_-])(exec|rescue)([^a-zA-Z_-]|$)|sh +-c|ash +-c' "$HOOK" || true)"
 assert_file_exists "features.d/alpine-fde.files exists" "$FILES"
+assert_ne "features.d lists the hook staging path (canonical constant non-empty)" \
+    "$HOOK_INITRAMFS_PATH" ""
+assert_eq "features.d lists exactly one unseal-hook artifact path" "1" \
+    "$(grep -cE '^[[:space:]]*/.*alpine-fde-unseal\.sh[[:space:]]*$' "$FILES")"
+assert_not_contains "canonical staging path is the features.d-listed path (not the /etc/mkinitfs config dir)" \
+    "$HOOK_INITRAMFS_PATH" "etc/mkinitfs"
 for need in \
-    usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh \
+    "$HOOK_INITRAMFS_PATH" \
     usr/bin/cryptsetup usr/bin/openssl \
     usr/bin/tpm2_pcrextend usr/bin/tpm2_startauthsession usr/bin/tpm2_policypcr \
     usr/bin/tpm2_policyauthorize usr/bin/tpm2_loadexternal usr/bin/tpm2_verifysignature \
@@ -247,6 +298,23 @@ assert_eq "token success: no leftover temp state documents" "" \
     "$(find "$TMP/newroot/etc/alpine-fde" -name '.*' -print)"
 assert_eq "token success: success path never runs a shell (recorded argv)" "" \
     "$(grep -nE 'sh +-c|(^| )exec |rescue|ash +-c' "$LOG" || true)"
+
+# =============================================================================
+# 1b. token parked at a HIGH token-id (17) — the scan must cover the full
+#     LUKS2 valid range 0..31 (§8.2 step 2); a token at id >=16 must still
+#     unseal, not silently fall through to the passphrase prompt
+# =============================================================================
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_MIN_ID=17)
+assert_rc "high token-id: hook rc 0" 0 "$rc"
+assert_eq "high token-id: scan reaches id 17 and exports the token" "1" \
+    "$(argv_count 'token export --token-id 17')"
+assert_eq "high token-id: unseal still happens" "1" "$(argv_count '^tpm2_unseal')"
+assert_eq "high token-id: exactly one open (no prompt fallback)" "1" "$(argv_count '^cryptsetup open')"
+assert_eq "high token-id: no poweroff" "0" "$(argv_count '^poweroff')"
+assert_contains "high token-id: marker moved to provisional-booted" \
+    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
 
 # =============================================================================
 # 2. FINALIZED token {PCR 7, 11} — policy PCR selection follows the token;
@@ -307,6 +375,36 @@ assert_eq "tampered token: bounded to 3 prompt attempts then poweroff once" \
     "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
 
 # =============================================================================
+# 5b/5c. §6.1/§12 signing NEGATIVE CONTROL — PCR-selection mismatch between
+#     the token's pinned selection and the /.extra .pcrsig entries, BOTH
+#     directions. The approved policy digest must come from the .pcrsig entry
+#     for EXACTLY the token's selection: a mismatch leaves `pol` unextracted,
+#     the openssl gate refuses, and the TPM chain (incl. tpm2_unseal) is
+#     never entered — bounded prompt path (fail-closed).
+# =============================================================================
+# 5b: token pins {7,11} but .pcrsig carries only [11]
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TEST_TOKEN_FILE="$TMP/token-7-11.json" FDE_OPEN_FAIL=1)
+assert_ne "selection mismatch {7,11}vs[11]: hook rc nonzero" "0" "$rc"
+assert_eq "selection mismatch {7,11}vs[11]: pol extraction failed -> no verifysignature" "0" \
+    "$(argv_count '^tpm2_verifysignature')"
+assert_eq "selection mismatch {7,11}vs[11]: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
+assert_eq "selection mismatch {7,11}vs[11]: bounded to 3 prompt attempts then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# 5c (inverse): token pins {11} but .pcrsig carries only [7,11]
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TEST_TOKEN_FILE="$TMP/token.json" FDE_EXTRA_DIR="$TMP/extra-7-11" FDE_OPEN_FAIL=1)
+assert_ne "selection mismatch {11}vs[7,11]: hook rc nonzero" "0" "$rc"
+assert_eq "selection mismatch {11}vs[7,11]: pol extraction failed -> no verifysignature" "0" \
+    "$(argv_count '^tpm2_verifysignature')"
+assert_eq "selection mismatch {11}vs[7,11]: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
+assert_eq "selection mismatch {11}vs[7,11]: bounded to 3 prompt attempts then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# =============================================================================
 # 6. /.extra artifacts missing -> fail-closed prompt path (no TPM ops)
 # =============================================================================
 reset_leg
@@ -348,6 +446,42 @@ assert_eq "raid1 prompt: exactly one passphrase entry, reused (2 identical passe
     "2" "$(argv_count '^cryptsetup-pass recovery-pass')"
 assert_eq "raid1 prompt: both members opened" "2" "$(argv_count '^cryptsetup open')"
 assert_eq "raid1 prompt: no poweroff" "0" "$(argv_count '^poweroff')"
+
+# =============================================================================
+# 8b. RAID1 PARTIAL token unlock — the token open fails for member 2 only
+#     (§10 "kernel re-signed, its enrollment missing/stale"): the failing
+#     member MUST fall back into the same bounded 3-strike prompt loop (one
+#     prompt shared across the remaining members) — never a silently
+#     incomplete pool, never an interactive shell
+# =============================================================================
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-rec" FDE_CRYPTTAB="$TMP/crypttab-raid1" FDE_OPEN_FAIL_TOKEN_TARGET=root2)
+assert_rc "raid1 partial token: hook rc 0" 0 "$rc"
+assert_contains "raid1 partial token: member 1 opened via the TPM token" \
+    "$(grep '^cryptsetup open' "$LOG")" "/dev/disk/by-uuid/$UUID1"
+assert_eq "raid1 partial token: member 2 recovered by ONE prompt" "1" \
+    "$(argv_count '^cryptsetup-pass recovery-pass')"
+assert_eq "raid1 partial token: member 2 attempted exactly twice (failed token + prompt)" "2" \
+    "$(grep -c '^cryptsetup open --type luks --key-file - .* root2$' "$LOG" || true)"
+assert_eq "raid1 partial token: 3 opens total (2 token attempts + 1 prompt)" "3" \
+    "$(argv_count '^cryptsetup open')"
+assert_eq "raid1 partial token: no poweroff" "0" "$(argv_count '^poweroff')"
+assert_contains "raid1 partial token: marker written (pool complete)" \
+    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+
+# --- 8c. same partial failure, but the passphrase never works: the bounded
+#     strikes still end in exactly one forced poweroff (fail-closed, §8.2)
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_CRYPTTAB="$TMP/crypttab-raid1" FDE_OPEN_FAIL_TARGET=root2)
+assert_ne "raid1 partial hard-fail: hook rc nonzero" "0" "$rc"
+assert_eq "raid1 partial hard-fail: poweroff -f exactly once" "1" "$(argv_count '^poweroff')"
+assert_contains "raid1 partial hard-fail: poweroff is forced" "$(grep '^poweroff' "$LOG")" "-f"
+assert_eq "raid1 partial hard-fail: opens bounded (1 member token + 1 fail + 3 strikes)" "5" \
+    "$(argv_count '^cryptsetup open')"
+assert_eq "raid1 partial hard-fail: no state write after failing" "installed" \
+    "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
 
 # =============================================================================
 # 9. no crypttab root entry -> fatal fail-closed (poweroff, no prompt loop)

@@ -22,10 +22,15 @@
 # ADR-18 custody: release.pem may be the ENCRYPTED on-target form. This hook
 # unlocks it ONCE via keys_unlock (ALPINE_FDE_KEY_PASSPHRASE env seam —
 # DEBIAN_FDE_KEY_PASSPHRASE accepted as the compat spelling — or the no-echo
-# TTY prompt) and signs with the UNLOCKED tmpfs path; the decrypted copy is
-# zeroized+removed when the hook exits. A plaintext release.pem (offline
-# medium) keeps the previous behavior with no passphrase interaction. The
-# canonical ALPINE_FDE_* spelling wins when both are set (§8.1).
+# TTY prompt) and signs with the UNLOCKED tmpfs path. §9.2 single-unlock: the
+# unlock happens BEFORE the `ukictl build` child, and the staged decrypted
+# path is handed to that child through the staged keydir seam (DEBIAN_FDE_KEYDIR,
+# the spelling the runtime libs consume) so the build child and the
+# boot-manager re-sign leg share exactly ONE unlock/passphrase prompt per hook
+# invocation. The decrypted copy is zeroized+removed by the hook's single EXIT
+# trap on EVERY exit path. A plaintext release.pem (offline medium) keeps the
+# previous behavior with no passphrase interaction. The canonical ALPINE_FDE_*
+# spelling wins when both are set (§8.1).
 #
 # ADR-8: a failing build is a LOUD failure — the nonzero exit propagates to
 # the kernel hook runner, the failure marker is persisted under
@@ -77,20 +82,6 @@ fi
 FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
 marker="$FDE_ETC/build-failed"
 
-"$ALPINE_FDE_BIN" ukictl build "$kver"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-    mkdir -p "$FDE_ETC" 2>/dev/null || :
-    # APPEND, don't overwrite: the build already wrote a marker naming the
-    # exact failing step/pin — keep it and add the recovery line beneath it
-    {
-        printf 'kernel hook: ukictl build failed for kernel %s\n' "$kver"
-        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'recovery: re-run "alpine-fde ukictl build %s" (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n' "$kver"
-    } >>"$marker" 2>/dev/null || :
-    exit "$rc"
-fi
-
 # --- boot-manager re-sign (verify-first; ADR-18 unlock) ---------------------------
 guard_fail() {
     mkdir -p "$FDE_ETC" 2>/dev/null || :
@@ -124,9 +115,13 @@ for f in release.pem release.crt; do
     [ -f "$ALPINE_FDE_KEYDIR/$f" ] || guard_fail "missing key material: $ALPINE_FDE_KEYDIR/$f"
 done
 
-# ADR-18: unlock the release key ONCE (no-op for a plaintext release.pem)
+# ADR-18/§9.2: unlock the release key EXACTLY ONCE per hook invocation, BEFORE
+# the `ukictl build` child (no-op for a plaintext release.pem). Both signing
+# stages — the child's UKI build and the boot-manager re-sign leg below — then
+# share this single unlocked copy.
 _hook_keyfile="$ALPINE_FDE_KEYDIR/release.pem"
 _hook_unlocked=''
+_hook_stage_keydir=''
 _hook_unlock_rc=0
 if keys_is_encrypted "$_hook_keyfile"; then
     _hook_unlocked=$(keys_unlock "$ALPINE_FDE_KEYDIR") || _hook_unlock_rc=$?
@@ -138,9 +133,45 @@ if keys_is_encrypted "$_hook_keyfile"; then
     fi
     chmod 600 "$_hook_unlocked" 2>/dev/null || :
     _hook_keyfile=$_hook_unlocked
-    # zeroize+remove the decrypted copy on EVERY exit path (guard_fail's
-    # included); keys_scrub is best effort and never masks the hook's rc
-    trap 'keys_scrub "${_hook_unlocked:-}" 2>/dev/null || true' EXIT
+    # staged keydir seam (§9.2 single-unlock): a tmpfs view of the keydir whose
+    # release.pem IS the decrypted copy, handed to the `ukictl build` child via
+    # DEBIAN_FDE_KEYDIR (the spelling lib/keys.sh keys_dir consumes) so the
+    # child classifies it plaintext and performs ZERO unlock interaction
+    # instead of prompting a second time
+    _hook_stage_keydir=$(mktemp -d "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-hook-keys.XXXXXX") \
+        || guard_fail "staging keydir mktemp failed (${DEBIAN_FDE_TMPDIR:-/dev/shm} usable?)"
+    ln -s "$_hook_keyfile" "$_hook_stage_keydir/release.pem"
+    ln -s "$ALPINE_FDE_KEYDIR/release.crt" "$_hook_stage_keydir/release.crt"
+    # the child's keys_check judges completeness on the staged view: mirror
+    # release.pub only when the real keydir carries it
+    if [ -f "$ALPINE_FDE_KEYDIR/release.pub" ]; then
+        ln -s "$ALPINE_FDE_KEYDIR/release.pub" "$_hook_stage_keydir/release.pub"
+    fi
+    # zeroize+remove the decrypted copy — and drop the staged keydir view — on
+    # EVERY exit path (guard_fail's included); ONE EXIT-trap scrub site, and
+    # keys_scrub is best effort so it never masks the hook's rc
+    trap '
+        keys_scrub "${_hook_unlocked:-}" 2>/dev/null || true
+        rm -rf "${_hook_stage_keydir:-}" 2>/dev/null || true
+    ' EXIT
+fi
+
+if [ -n "$_hook_stage_keydir" ]; then
+    DEBIAN_FDE_KEYDIR="$_hook_stage_keydir" "$ALPINE_FDE_BIN" ukictl build "$kver"
+else
+    "$ALPINE_FDE_BIN" ukictl build "$kver"
+fi
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    mkdir -p "$FDE_ETC" 2>/dev/null || :
+    # APPEND, don't overwrite: the build already wrote a marker naming the
+    # exact failing step/pin — keep it and add the recovery line beneath it
+    {
+        printf 'kernel hook: ukictl build failed for kernel %s\n' "$kver"
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'recovery: re-run "alpine-fde ukictl build %s" (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n' "$kver"
+    } >>"$marker" 2>/dev/null || :
+    exit "$rc"
 fi
 
 for rel in EFI/systemd/systemd-bootx64.efi EFI/BOOT/BOOTX64.EFI; do

@@ -56,8 +56,8 @@ _fdh_poweroff() {
     exit 1
 }
 
-# _fdh_hex2bin — hex (stdin) -> raw bytes. Pure busybox awk (no xxd in the
-# initramfs).
+# _fdh_hex2bin HEX — hex string -> raw bytes on stdout. Pure busybox awk (no
+# xxd in the initramfs).
 # shellcheck disable=SC2120  # stdin consumer by design
 _fdh_hex2bin() {
     printf '%s' "$1" | LC_ALL=C awk '{
@@ -153,7 +153,10 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         fi
         _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
         _fdh_tid=0
-        while [ "$_fdh_tid" -le 15 ]; do
+        # LUKS2 allows up to 32 tokens (ids 0..31): scan the FULL valid range —
+        # a token parked at id >=16 must still be found, never silently
+        # dropped into the passphrase fallback (§8.2 step 2)
+        while [ "$_fdh_tid" -le 31 ]; do
             _fdh_out=$(cryptsetup token export --token-id "$_fdh_tid" "$_fdh_dev" 2>/dev/null) || {
                 _fdh_tid=$((_fdh_tid + 1))
                 continue
@@ -197,7 +200,7 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         _fdh_rc=1
         if [ -n "$_fdh_pol" ]; then
             if printf '%s' "$_fdh_toksig" | openssl base64 -d -A >"$_fdh_w/sig.bin" 2>/dev/null; then
-                printf '%s' "$_fdh_pol" | _fdh_hex2bin >"$_fdh_w/pol.bin"
+                _fdh_hex2bin "$_fdh_pol" >"$_fdh_w/pol.bin"
                 if openssl dgst -sha256 -verify "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" \
                     -signature "$_fdh_w/sig.bin" "$_fdh_w/pol.bin" >/dev/null 2>&1; then
                     _fdh_rc=0
@@ -258,6 +261,7 @@ fi
 # --- open every member with the unsealed secret (§8.2 step 3; RAID1: the
 # unsealed passphrase is reused across all members without re-prompting) -------
 _fdh_opened=0
+_fdh_opened_list=''
 if [ -n "$_fdh_pass_file" ]; then
     _fdh_pos=0
     for _fdh_wd in $_fdh_members; do
@@ -269,6 +273,7 @@ if [ -n "$_fdh_pass_file" ]; then
         _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
         if cryptsetup open --type luks --key-file - "$_fdh_dev" "$_fdh_target" <"$_fdh_pass_file" >/dev/null 2>&1; then
             _fdh_opened=$((_fdh_opened + 1))
+            _fdh_opened_list="$_fdh_opened_list $_fdh_target "
             _msg "unlocked $_fdh_target ($_fdh_dev) via the TPM token"
         else
             _msg "token unlock failed for $_fdh_target — recovery passphrase path (§8.2)"
@@ -280,38 +285,42 @@ if [ -n "$_fdh_pass_file" ]; then
 fi
 
 # --- §8.2 step 4: BOUNDED recovery-passphrase path (keyslot 0, 3 strikes
-# TOTAL across all members), then poweroff -f. NO shell is ever offered. --------
+# TOTAL across all members), then poweroff -f. NO shell is ever offered.
+# EVERY member not yet unlocked enters this loop — a partial RAID1 token
+# unlock (one member's token open failed, §10 "kernel re-signed, its
+# enrollment missing/stale") must never leave the pool silently incomplete.
 _fdh_cached=''
-if [ "$_fdh_opened" -eq 0 ]; then
-    _fdh_tries=0
-    _fdh_pos=0
-    for _fdh_wd in $_fdh_members; do
-        _fdh_pos=$((_fdh_pos + 1))
-        if [ $((_fdh_pos % 2)) -eq 1 ]; then
-            _fdh_target=$_fdh_wd
-            continue
+_fdh_tries=0
+_fdh_pos=0
+for _fdh_wd in $_fdh_members; do
+    _fdh_pos=$((_fdh_pos + 1))
+    if [ $((_fdh_pos % 2)) -eq 1 ]; then
+        _fdh_target=$_fdh_wd
+        continue
+    fi
+    case $_fdh_opened_list in
+        *" $_fdh_target "*) continue ;; # already unlocked via the TPM token
+    esac
+    _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
+    _fdh_done=0
+    while [ "$_fdh_done" -eq 0 ]; do
+        if [ -n "$_fdh_cached" ]; then
+            if printf '%s' "$_fdh_cached" | cryptsetup open --type luks --key-file - \
+                "$_fdh_dev" "$_fdh_target" >/dev/null 2>&1; then
+                _fdh_opened=$((_fdh_opened + 1))
+                _fdh_done=1
+                _msg "unlocked $_fdh_target ($_fdh_dev) via the recovery passphrase"
+                continue
+            fi
+            _fdh_cached=''
         fi
-        _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
-        _fdh_done=0
-        while [ "$_fdh_done" -eq 0 ]; do
-            if [ -n "$_fdh_cached" ]; then
-                if printf '%s' "$_fdh_cached" | cryptsetup open --type luks --key-file - \
-                    "$_fdh_dev" "$_fdh_target" >/dev/null 2>&1; then
-                    _fdh_opened=$((_fdh_opened + 1))
-                    _fdh_done=1
-                    _msg "unlocked $_fdh_target ($_fdh_dev) via the recovery passphrase"
-                    continue
-                fi
-                _fdh_cached=''
-            fi
-            if [ "$_fdh_tries" -ge "$FDE_MAX_ATTEMPTS" ]; then
-                _fdh_poweroff "$FDE_MAX_ATTEMPTS failed recovery passphrase attempts — giving up (§8.2 fail-closed)"
-            fi
-            _fdh_cached=$(_fdh_prompt_pass "$_fdh_target")
-            _fdh_tries=$((_fdh_tries + 1))
-        done
+        if [ "$_fdh_tries" -ge "$FDE_MAX_ATTEMPTS" ]; then
+            _fdh_poweroff "$FDE_MAX_ATTEMPTS failed recovery passphrase attempts — giving up (§8.2 fail-closed)"
+        fi
+        _fdh_cached=$(_fdh_prompt_pass "$_fdh_target")
+        _fdh_tries=$((_fdh_tries + 1))
     done
-fi
+done
 
 # --- §9.1 Stage 2 / ADR-20: flip installed -> provisional-booted on the
 # mounted NEWROOT (atomic tmp+mv; only when the state file says installed) ------

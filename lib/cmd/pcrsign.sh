@@ -5,7 +5,10 @@
 # Standalone signer: combined {7,11} PolicyPCR policy digest -> release-key
 # PolicyAuthorize signature JSON (systemd-measure sign output shape, existing
 # fields only). All signing math lives in lib/policy.sh (golden-vector pinned +
-# live-TPM cross-checked); key material handling in lib/keys.sh.
+# live-TPM cross-checked); key material handling in lib/keys.sh — the keydir
+# release.pem is routed through keys_unlock (ADR-18 encrypted-at-rest form is
+# decrypted to a scrubbed tmpfs copy; §11 I4), the same seam enrl_sign_pcrsig
+# and the ukictl hook use.
 #
 # Sequence (§6.1.1 steps 1–5):
 #   1. expected PCR 11 digest: `ukify build --measure`, phase pinned
@@ -26,11 +29,30 @@
 #      invented fields (policy_sign_json).
 #
 # Errors exit 64 fail-closed (missing tools, missing/pending baseline, missing
-# keys, bad measurements); CLI-shape errors exit 2 with usage (§8.1 contract).
+# keys, bad measurements, release-key unlock failure); CLI-shape errors exit 2
+# with usage (§8.1 contract).
 
 _pcrsign_lib() {
     # shellcheck disable=SC1090  # resolved next to this command file
     . "$DEBIAN_FDE_CMD_DIR/../$1"
+}
+
+# _pcrsign_marker_write REASON — persist the ADR-8 failure marker for a
+# release-key UNLOCK failure (ADR-18: the keydir release.pem is the
+# encrypted-at-rest form and could not be decrypted), best effort, same shape
+# as ukictl-build's _ukictl_marker_write (consumed next to
+# <etc>/build-failed). Only the unlock path writes it: this command is a
+# standalone signer with no ESP/build state of its own.
+_pcrsign_marker_write() {
+    _pm_etc="${DEBIAN_FDE_ROOT:-}/etc/alpine-fde"
+    mkdir -p "$_pm_etc" 2>/dev/null || true
+    {
+        printf 'pcrsign failed (release key unlock, ADR-18)\n'
+        printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'reason: %s\n' "$1"
+    } >"$_pm_etc/pcrsign-failed" 2>/dev/null \
+        || warn "pcrsign: cannot persist failure marker at $_pm_etc/pcrsign-failed"
+    return 0
 }
 
 cmd_pcrsign_usage() {
@@ -245,15 +267,46 @@ cmd_pcrsign_main() {
         die "pcrsign: mktemp failed"
     }
     _ps_keydir=$(keys_dir)
+    # ADR-18 + §11 I4: route the private key through the SAME unlock seam as
+    # enrl_sign_pcrsig (lib/cmd/enroll-tpm.sh) and the ukictl hook — the keydir
+    # release.pem may be the encrypted-at-rest form, and signing with the raw
+    # ciphertext would simply fail (or worse, bypass custody). ALPINE_FDE_KEY_
+    # PASSPHRASE is the canonical credential-agent env spelling (§8.1); keys_
+    # unlock consumes DEBIAN_FDE_KEY_PASSPHRASE (the finalize.sh mapping).
+    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
+    fi
+    _ps_had_pass=0
+    [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && _ps_had_pass=1
+    # command substitution: a die inside keys_unlock (missing/wrong passphrase)
+    # exits THAT subshell 64 — its stderr is already loud; persist the ADR-8
+    # marker, leave NO signature artifact and scrub _ps_work/_ps_tmp (S-L1).
+    # The env-provided vs. absent passphrase distinguishes wrong-passphrase
+    # from missing-passphrase in the marker.
+    _ps_priv=$(keys_unlock "$_ps_keydir") || {
+        rm -rf "$_ps_work"
+        rm -f "$_ps_tmp"
+        if [ "$_ps_had_pass" = 1 ]; then
+            _pcrsign_marker_write "release.pem unlock FAILED: wrong passphrase — no signature written (ADR-8/ADR-18/I4)"
+            die "pcrsign: wrong passphrase for $_ps_keydir/release.pem (unlock failed) — no signature written (ADR-8/ADR-18)"
+        fi
+        _pcrsign_marker_write "release.pem is encrypted and no passphrase is available (ADR-18) — no signature written (ADR-8)"
+        die "pcrsign: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE / DEBIAN_FDE_KEY_PASSPHRASE or run interactively — no signature written (ADR-8/ADR-18)"
+    }
     # subshell: a die inside policy_sign_json (corrupt key material) must not
-    # strand _ps_work/_ps_tmp (S-L1)
-    if ! (policy_sign_json "$_ps_d7" "$_ps_d11" "$_ps_keydir/release.pem" \
+    # strand the decrypted key copy (I4) nor _ps_work/_ps_tmp (S-L1)
+    if ! (policy_sign_json "$_ps_d7" "$_ps_d11" "$_ps_priv" \
         "$_ps_keydir/release.pub" "$_ps_tmp"); then
+        [ "$_ps_priv" != "$_ps_keydir/release.pem" ] && keys_scrub "$_ps_priv"
         rm -rf "$_ps_work"
         rm -f "$_ps_tmp"
         die "pcrsign: policy signature emission failed (keydir: $_ps_keydir)"
     fi
+    # I4 hygiene: scrub the DECRYPTED copy only — for a plaintext (offline
+    # medium) keydir keys_unlock returned the input path itself
+    [ "$_ps_priv" != "$_ps_keydir/release.pem" ] && keys_scrub "$_ps_priv"
     rm -rf "$_ps_work"
+    unset DEBIAN_FDE_KEY_PASSPHRASE ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
 
     if [ -n "$_ps_out" ]; then
         # atomic: same-directory temp + rename (S-M1: a slash-less relative

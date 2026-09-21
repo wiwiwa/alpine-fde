@@ -280,6 +280,84 @@ assert_contains "bootctl at pin reported ok (G-A12)" "$DOCTOR_OUT" "systemd-boot
 rm "$FAKEBIN/bootctl"
 ln -sf /usr/bin/true "$FAKEBIN/bootctl"
 
+# --- 4e. SHA-256 PCR bank (§13 "TPM 2.0 (SHA-256 PCRs)", G-A13) ----------------
+# §13's baseline machine has SHA-256 PCRs; readiness must not rest on
+# `getcap properties-fixed` alone or a SHA-1-only TPM reads READY. The probe
+# goes through the repo's existing tpm seam (the same `tpm` wrapper
+# tpm_available uses, lib/baseline.sh), so a PATH-stubbed tpm2 answering
+# `getcap pcrs` stubs it deterministically (output mirrors real tpm2-tools 5.x:
+# "selected-pcrs:" then one "- <bank>: [ ... ]" line per selected bank).
+fake_tpm2_pcr_banks() { # BANKS... — PATH-stub tpm2 answering `getcap pcrs`
+    rm -f "$FAKEBIN/tpm2"        # sever the /usr/bin/true-era symlink first
+    cat >"$FAKEBIN/tpm2" <<EOF
+#!/bin/sh
+[ "\${1:-}" = getcap ] || exit 0
+case \${2:-} in
+    properties-fixed) exit 0 ;;
+    pcrs)
+        printf 'selected-pcrs:\n'
+        for b in $*; do
+            printf '  - %s: [ 0, 1, 2, 3 ]\n' "\$b"
+        done
+        ;;
+    *) exit 0 ;;
+esac
+EOF
+    chmod +x "$FAKEBIN/tpm2"
+}
+
+# (a) sha256 bank selected → [ok], rc unchanged (0), verdict stays READY
+fake_tpm2_pcr_banks sha256 sha1
+run_doctor
+assert_contains "sha256 bank reported ok (G-A13)" "$DOCTOR_OUT" "SHA-256 PCR bank present"
+assert_eq "sha256 bank present: rc unchanged" "0" "$DOCTOR_RC"
+assert_contains "sha256 bank present: verdict still READY" "$DOCTOR_OUT" "verdict: READY"
+
+# (c) rc 0 but unparsable/empty pcrs output → warn, never gate: "cannot
+# determine" is not a confirmed absence, so it downgrades exactly like the
+# SB probe (warn) instead of the unreachable-TPM convention ([fail])
+fake_tpm2_pcr_banks
+run_doctor
+assert_contains "unparsable pcrs output warns (G-A13)" "$DOCTOR_OUT" "could not parse PCR bank selection"
+assert_eq "unparsable pcrs output: rc stays 0" "0" "$DOCTOR_RC"
+assert_contains "unparsable pcrs output: verdict still READY" "$DOCTOR_OUT" "verdict: READY"
+
+# (b) only sha1 → doctor flags it and gates (the §13 machine is absent),
+# following the dominant convention of this section: [fail] + NOT READY + rc 1,
+# exactly like an unreachable TPM.
+fake_tpm2_pcr_banks sha1
+run_doctor
+assert_contains "sha1-only TPM flagged (G-A13)" "$DOCTOR_OUT" "no SHA-256 PCR bank"
+assert_contains "sha1-only TPM flags the banks it does have (G-A13)" "$DOCTOR_OUT" "sha1"
+assert_contains "sha1-only: verdict NOT READY (G-A13)" "$DOCTOR_OUT" "NOT READY"
+assert_not_contains "sha1-only TPM never reads READY (G-A13)" "$DOCTOR_OUT" "verdict: READY"
+assert_eq "sha1-only TPM: rc 1 (gates like an unreachable TPM)" "1" "$DOCTOR_RC"
+
+rm -f "$FAKEBIN/tpm2"        # restore the real tpm2 for any later sections
+
+# --- 4f. §13 manual-prereq advisories (G-A14): informational, non-gating ------
+# §13 lists two manual prerequisites doctor cannot probe (read-only, §8.1 "no
+# changes"): the firmware admin password and offline custody / off-machine
+# backup of the release signing key. Doctor must print both as advisory rows —
+# they must never change the exit code or any check's verdict.
+run_doctor
+assert_contains "firmware-admin-password advisory present (G-A14)" "$DOCTOR_OUT" \
+    "manual prereq (§13): firmware admin password set"
+assert_contains "offline key custody advisory present (G-A14)" "$DOCTOR_OUT" \
+    "manual prereq (§13): offline custody / off-machine backup plan"
+assert_eq "advisories never gate: rc stays 0" "0" "$DOCTOR_RC"
+assert_contains "advisories leave the verdict READY (G-A14)" "$DOCTOR_OUT" "verdict: READY"
+assert_not_contains "advisories are info rows, never warnings (G-A14)" "$DOCTOR_OUT" "[warn]    manual prereq"
+assert_not_contains "advisories never fail (G-A14)" "$DOCTOR_OUT" "[fail]    manual prereq"
+# non-gating must hold in a NOT READY run too — same exact rc as before the
+# advisories existed (§13: doctor is read-only; advisories change nothing)
+rm "$FAKEBIN/mkinitfs"
+run_doctor
+assert_eq "advisories present in a failing run: rc unchanged (1)" "1" "$DOCTOR_RC"
+assert_contains "advisory rows still print in a failing run (G-A14)" "$DOCTOR_OUT" \
+    "manual prereq (§13): firmware admin password set"
+ln -sf /usr/bin/true "$FAKEBIN/mkinitfs"
+
 # --- 5. doctor refuses extra args (usage rc 2) -----------------------------------
 run_doctor bogus-arg
 assert_eq "doctor rejects stray args with usage rc" "2" "$DOCTOR_RC"

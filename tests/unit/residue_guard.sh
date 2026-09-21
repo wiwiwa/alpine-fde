@@ -14,6 +14,7 @@
 #
 # PATTERNS: /opt/debian-fde  /etc/debian-fde  debian-fde-finalize.service
 #           debootstrap  apt-get install  dpkg  systemd-cryptenroll
+#           dracut.conf.d  omit_dracutmodules   (ADR-13: mkinitfs, not dracut)
 #
 # WHITELIST MECHANISM (exact): in docs/Architecture.md ONLY, a line carrying
 # the literal marker `ADR-` is exempt (today: the §14 decision-table rows and
@@ -55,6 +56,8 @@ PATTERNS=(
     'apt-get install'
     'dpkg'
     'systemd-cryptenroll'
+    'dracut.conf.d'
+    'omit_dracutmodules'
 )
 DOCS_FILES="$REPO/docs/Architecture.md $REPO/docs/UserGuide.md $REPO/README.md"
 SHIPPED_DIRS="$REPO/bin $REPO/lib $REPO/hooks"
@@ -108,6 +111,10 @@ ledger 'debootstrap' 1
 ledger 'apt-get install' 9
 ledger 'dpkg' 2
 ledger 'systemd-cryptenroll' 5
+# ADR-13 ratchet: the dracut-contract writes are removed from the install
+# plan — any dracut conf residue re-appearing in lib/ fails the guard
+ledger 'dracut.conf.d' 0
+ledger 'omit_dracutmodules' 0
 
 # =============================================================================
 # G-C7 seam agreement: the cmd-dir resolution candidates and the shipped

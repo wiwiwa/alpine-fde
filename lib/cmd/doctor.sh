@@ -124,6 +124,44 @@ doctor_bootctl_version() {
     return 0
 }
 
+# doctor_pcr_bank_report — §13 "x86_64 UEFI machine with TPM 2.0 (SHA-256
+# PCRs)": verify the TPM actually selects a SHA-256 PCR bank. Readiness must
+# not rest on `tpm getcap properties-fixed` alone (tpm_available) or a
+# SHA-1-only TPM would read READY. Goes through the same `tpm` seam as
+# tpm_available (lib/common.sh / lib/baseline.sh), so tests stub it via the
+# tpm2 binary on PATH; only reached when a TPM already answered.
+#   sha256 bank selected → [ok]
+#   probe fails / output unparsable → [warn], rc 0 — "cannot determine" is
+#                          never a gate (mirrors the SB probe's warn-on-
+#                          unreadable and bootctl's warn-on-unparsable rules)
+#   banks parsed, none sha256 → [fail], rc 1 — the §13 baseline machine is
+#                          absent; the caller counts it exactly like an
+#                          unreachable TPM (the dominant gating convention in
+#                          this section)
+doctor_pcr_bank_report() {
+    _dpb_out=$(tpm getcap pcrs 2>/dev/null) || {
+        printf '[warn]    could not read PCR bank selection (tpm2 getcap pcrs failed) — SHA-256 bank unverified (§13)\n'
+        return 0
+    }
+    # one "- <bank>: [ ... ]" line per selected bank (tpm2-tools 5.x); the
+    # dash-less "<bank>:" header form (4.x-era output) is accepted too
+    _dpb_banks=$(printf '%s\n' "$_dpb_out" | sed -n \
+        -e 's/^[[:space:]]*-[[:space:]]*\([a-z0-9]*\):.*/\1/p' \
+        -e 's/^[[:space:]]*\([a-z0-9]*\):.*/\1/p' | tr '\n' ' ')
+    if [ -z "$_dpb_banks" ]; then
+        printf '[warn]    could not parse PCR bank selection (unrecognized tpm2 getcap pcrs output) — SHA-256 bank unverified (§13)\n'
+        return 0
+    fi
+    case $_dpb_banks in
+        *sha256*)
+            printf '[ok]      SHA-256 PCR bank present (§13: SHA-256 PCRs)\n'
+            return 0
+            ;;
+    esac
+    printf '[fail]    no SHA-256 PCR bank — TPM selects only: %s(§13 requires SHA-256 PCRs)\n' "$_dpb_banks"
+    return 1
+}
+
 # doctor_apt_report — apt configuration probe (read-only; no network fetch)
 doctor_apt_report() {
     if ! command -v apt-get >/dev/null 2>&1; then
@@ -197,6 +235,17 @@ doctor_ovmf_report() {
     return 1
 }
 
+# doctor_manual_prereqs — §13 manual prerequisites that no probe can check
+# (read-only doctor, §8.1 "no changes"): the firmware admin password and the
+# offline custody / off-machine backup plan for the release signing key.
+# Purely informational [info] rows — they never gate the verdict or the exit
+# code (G-A14).
+doctor_manual_prereqs() {
+    printf '[info]    manual prereq (§13): firmware admin password set — keeps the evil maid out of firmware setup (cannot be probed)\n'
+    printf '[info]    manual prereq (§13): offline custody / off-machine backup plan for the release signing key (cannot be probed)\n'
+    return 0
+}
+
 cmd_doctor_main() {
     if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
         doctor_usage
@@ -228,6 +277,10 @@ cmd_doctor_main() {
     fi
     if tpm_available; then
         printf '[ok]      TPM 2.0 reachable (tpm2 getcap properties-fixed)\n'
+        # §13: readiness also requires the SHA-256 PCR bank (G-A13) — a
+        # SHA-1-only TPM must not read READY. A [fail] here counts like the
+        # unreachable-TPM [fail] above; the warn-on-probe-error path returns 0.
+        doctor_pcr_bank_report || _dd_missing=$((_dd_missing + 1))
     else
         printf '[fail]    no TPM 2.0 answered (TCTI: %s)\n' "${DEBIAN_FDE_TCTI:-<default discovery>}"
         _dd_missing=$((_dd_missing + 1))
@@ -266,6 +319,9 @@ cmd_doctor_main() {
     done
     # OVMF prereqs for the CI/QEMU path — informational, never gates (§8.1)
     doctor_ovmf_report || true
+
+    printf '\nmanual prerequisites (§13, advisory — cannot be probed, never gates):\n'
+    doctor_manual_prereqs
 
     printf '\nverdict: '
     if [ "$_dd_missing" -gt 0 ]; then

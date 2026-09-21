@@ -87,9 +87,14 @@ inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.o
 # the file to exist.
 INST_ROOT_FS=${INST_ROOT_FS:-btrfs}
 INST_BCACHE=${INST_BCACHE:-0}
+# ESP mount point (§8.1 --esp flag; env DEBIAN_FDE_ESP; default /efi). A path
+# UNDER the target root — the flag value flows into the fstab entry, the mount
+# plan, the persisted ESP_PATH (§8.4) and the UKI extraction path.
+INST_ESP_MNT=${INST_ESP_MNT:-}
 
 inst_root_fs() { printf '%s\n' "${INST_ROOT_FS:-btrfs}"; }
 inst_bcache() { printf '%s\n' "${INST_BCACHE:-0}"; }
+inst_esp_mnt() { printf '%s\n' "${INST_ESP_MNT:-/efi}"; }
 # --- ESP sizing (§13): measured UKI size x retention + headroom ---------------
 INST_ESP_RETENTION=3 # current + 2 retained UKIs (§9.3)
 INST_ESP_HEADROOM_BYTES=$((64 * 1024 * 1024))
@@ -139,6 +144,12 @@ inst_esp_size() {
   inst_esp_size_compute "$_ies_m" "$INST_ESP_RETENTION" "$INST_ESP_HEADROOM_BYTES"
 }
 inst_user() { printf '%s\n' "${DEBIAN_FDE_INSTALL_USER:-admin}"; }
+# ADR-18/§8.1 provision row: the offline-ceremony artifact set `install
+# --keydir` consumes from the signing medium — exactly what `provision
+# stage1` leaves there (certs + ESLs + .auth packets + the release key).
+# ALL are required: a half-stocked medium fails closed BEFORE any plan
+# record exists (missing artifacts would only surface mid-ceremony).
+INST_KEYDIR_ARTIFACTS='release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.der db.esl kek.esl pk.esl db.auth kek.auth pk.auth'
 
 # inst_repo_lines — the /etc/apk/repositories drop (§3.3): the configured
 # mirror (main component) plus its community twin (same URL stem).
@@ -424,10 +435,14 @@ inst_resolve_target_metadata() {
 
 # --- static package set (§3.3) — lint target for the harness -----------------
 # The §3.3 explicit additions (Alpine): one in-chroot `apk add --no-cache`
-# transaction. Topology-conditional: btrfs-progs by default, e2fsprogs for
+# transaction. §3.1 rows: mkinitfs (the initramfs generator, ADR-13),
+# py3-pefile (ukify's PCR-signature parsing, ADR-16 delivery), zram-init
+# (swap on zram ONLY — ADR-7 no disk swap), doas (admin, §3.1), and
+# ukify-kernel-hook (fires /etc/kernel-hooks.d on kernel transactions,
+# §8.3/ADR-19). Topology-conditional: btrfs-progs by default, e2fsprogs for
 # --fs ext4, bcache-tools when --bcache is given.
 install_package_list() {
-  _ipl='cryptsetup systemd-boot systemd-efistub ukify linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq'
+  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq zram-init doas'
   case $(inst_root_fs) in
   ext4) _ipl="$_ipl e2fsprogs" ;;
   *) _ipl="$_ipl btrfs-progs" ;;
@@ -561,7 +576,14 @@ inst_provisional_enroll_line() {
     _pel_ms="$_pel_ms $_pel_m"
   done
   _pel_ms=${_pel_ms# }
-  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls /efi/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && rm -rf /run/alpine-fde # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1"
+  _pel_esp=$(inst_esp_mnt)
+  # I1: the tail scrubs EVERYTHING the ceremony staged — the random volume
+  # passphrase (keys_scrub: overwrite-then-unlink, the shared idiom) and the
+  # seal work dir (seal.priv/seal.pub halves + primary.ctx under the
+  # ${DEBIAN_FDE_TMPDIR:-/tmp}-defaulted stage, seal.sh's mktemp pattern) —
+  # not just /run/alpine-fde. The tpm2 argv contract is UNCHANGED (the
+  # mkinitfs hook mirrors lib/seal.sh argv-for-argv).
+  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls $_pel_esp/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && keys_scrub \"\$SEAL_PASS_FILE\" && rm -rf /run/alpine-fde \${DEBIAN_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/debian-fde-seal.* # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1; I1 seal-secret scrub"
 }
 
 # inst_baseline_pending_write MNT — §9.1 Stage-1 step 2: write the initial
@@ -614,6 +636,7 @@ cmd_install_main() {
   _im_bcache=''
   _im_fs=''
   _im_no_reboot=0
+  _im_esp_given=0
   # §8.1: --disk is repeatable and ACCUMULATES. DEBIAN_FDE_DISKS (the
   # dispatcher-provided list from repeated global --disk flags) is CONSUMED
   # here, never re-parsed; the legacy single DEBIAN_FDE_DISK seeds the list.
@@ -636,6 +659,12 @@ cmd_install_main() {
     --bcache)
       [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --bcache requires an argument"
       _im_bcache=$2
+      shift
+      ;;
+    --esp)
+      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --esp requires an argument"
+      INST_ESP_MNT=$2
+      _im_esp_given=1
       shift
       ;;
     --no-reboot) _im_no_reboot=1 ;;
@@ -693,6 +722,20 @@ cmd_install_main() {
   # must be metacharacter-free BEFORE any record is built (and before
   # preflight, so a rejected value executes nothing)
   [ -n "$_im_disks" ] || die -r "$DEBIAN_FDE_USAGE" "install: no target disk — pass --disk (repeatable for RAID1)"
+  # §8.1 flags contract: --esp (flag wins; env DEBIAN_FDE_ESP; default /efi)
+  # names the ESP mount point UNDER the target root. Validated loudly (rc 2):
+  # never '/', never empty, never a bare relative name, never shell-unsafe.
+  if [ "$_im_esp_given" = "0" ]; then
+    INST_ESP_MNT=${DEBIAN_FDE_ESP:-/efi}
+  fi
+  # validate the RAW value (inst_esp_mnt defaults an empty INST_ESP_MNT —
+  # an explicit --esp '' must die, never silently fall back to /efi)
+  case ${INST_ESP_MNT-} in
+  '' | / | [^/]*)
+    die -r "$DEBIAN_FDE_USAGE" "install: --esp must be a mount point under the target root (e.g. /efi or /boot/efi) — got: '${INST_ESP_MNT-}'"
+    ;;
+  esac
+  inst_shell_safe 'ESP mount point' "${INST_ESP_MNT-}"
   if [ "$INST_BCACHE" = "1" ]; then
     inst_shell_safe '--bcache' "$_im_bcache"
     if [ -z "$_im_disks" ]; then
@@ -716,9 +759,21 @@ cmd_install_main() {
   inst_shell_safe 'DEBIAN_FDE_MIRROR' "$(inst_mirror)"
   inst_shell_safe 'DEBIAN_FDE_ESP_SIZE' "$(inst_esp_size)"
   inst_shell_safe 'DEBIAN_FDE_HOOKS_DIR' "$(inst_hooks_dir)"
-  # WR-01: --keydir rides into eval'd records — same boundary rule. Kept for
-  # compatibility; the §9.1 flow generates keys in-chroot, so it is OPTIONAL.
+  # WR-01: --keydir rides into eval'd records — same boundary rule. CONSUMED
+  # (not ignored): when given, the operator-supplied key material is staged
+  # from the medium and the in-chroot keygen is skipped (§8.1 provision row,
+  # ADR-18 — README "provision stage1 on USB -> install --keydir").
   [ -n "$(sp_keydir)" ] && inst_shell_safe 'DEBIAN_FDE_KEYDIR' "$(sp_keydir)"
+  _im_kd=$(sp_keydir)
+  if [ -n "$_im_kd" ]; then
+    [ -d "$_im_kd" ] ||
+      die -r "$DEBIAN_FDE_USAGE" "install: --keydir directory not found: $_im_kd (ADR-18: the signing medium from 'provision stage1')"
+    for _im_kf in $INST_KEYDIR_ARTIFACTS; do
+      [ -f "$_im_kd/$_im_kf" ] ||
+        die -r "$DEBIAN_FDE_USAGE" "install: --keydir missing key artifact: $_im_kd/$_im_kf (run 'provision stage1' on the medium first, ADR-18)"
+    done
+    info "install: --keydir given — key material will be staged from the medium ($_im_kd); NO in-chroot keygen (§8.1/ADR-18)"
+  fi
 
   if [ "$(inst_runner)" != "dry-run" ]; then
     inst_preflight $_im_disks
@@ -731,6 +786,7 @@ cmd_install_main() {
   _im_hooks=$(inst_hooks_dir)
   _im_tree=$(inst_tree)
   _im_user=$(inst_user)
+  _im_esp_mnt=$(inst_esp_mnt)
   _im_topology=single
   if [ "$INST_BCACHE" = "1" ]; then
     if [ "$_im_n" -ge 2 ]; then
@@ -916,15 +972,15 @@ cmd_install_main() {
     inst_plan_run host "btrfs subvolume create $_im_mnt/@home"
     inst_plan_run host "btrfs subvolume create $_im_mnt/@snapshots"
     inst_plan_run host "umount $_im_mnt"
-    inst_plan_run host "mount -o subvol=@ $_im_mapper $_im_mnt && mkdir -p $_im_mnt/home $_im_mnt/.snapshots $_im_mnt/efi"
+    inst_plan_run host "mount -o subvol=@ $_im_mapper $_im_mnt && mkdir -p $_im_mnt/home $_im_mnt/.snapshots $_im_mnt$_im_esp_mnt"
     inst_plan_run host "mount -o subvol=@home $_im_mapper $_im_mnt/home"
     inst_plan_run host "mount -o subvol=@snapshots $_im_mapper $_im_mnt/.snapshots"
     inst_plan_run host "mkfs.vfat -F 32 -n EFI $_im_esp"
-    inst_plan_run host "mount $_im_esp $_im_mnt/efi"
+    inst_plan_run host "mount $_im_esp $_im_mnt$_im_esp_mnt"
   else
     inst_plan_run host "mkfs.ext4 -F -U $_im_rootfs_uuid $_im_mapper"
     inst_plan_run host "mkfs.vfat -F 32 -n EFI $_im_esp"
-    inst_plan_run host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt/efi && mount $_im_esp $_im_mnt/efi"
+    inst_plan_run host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt$_im_esp_mnt && mount $_im_esp $_im_mnt$_im_esp_mnt"
   fi
 
   # --- 4. minimal rootfs (§3.3): apk populate (self-authored bootstrap) -------
@@ -953,12 +1009,27 @@ cmd_install_main() {
       "UUID=$_im_rootfs_uuid / btrfs subvol=@,defaults 0 1" \
       "UUID=$_im_rootfs_uuid /home btrfs subvol=@home,defaults 0 2" \
       "UUID=$_im_rootfs_uuid /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
-      'PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2'
+      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2"
   else
     inst_plan_write /etc/fstab \
       "UUID=$_im_rootfs_uuid / ext4 defaults 0 1" \
-      'PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2'
+      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2"
   fi
+  # §3.1/ADR-7: swap on zram ONLY — drop the zram-init boot config (Alpine
+  # zram-init convention: /etc/conf.d/zram-init; type0=0 is swap) and enable
+  # the service for boot. NO disk swap line exists in fstab above (hibernation
+  # unsupported, §2.2/ADR-7 — a hibernate image is unencrypted volume-key
+  # state on disk).
+  inst_plan_write /etc/conf.d/zram-init \
+    '# zram-init: swap on zram ONLY — no disk swap anywhere (ADR-7; hibernation unsupported)' \
+    'load_on_start=yes' \
+    'unload_on_stop=no' \
+    'num_devices=1' \
+    'type0=0' \
+    'flag0=maxsize' \
+    'size0=2048' \
+    'prio0=100'
+  inst_plan_run guest 'rc-update add zram-init boot # ADR-7: RAM-only swap'
   # §9.1 step 1: OpenRC networking (Alpine default: ifupdown-ng + udhcpc)
   inst_plan_write /etc/network/interfaces \
     'auto lo' \
@@ -966,19 +1037,14 @@ cmd_install_main() {
     '' \
     'auto eth0' \
     'iface eth0 inet dhcp'
-  # §3.3 trims: dracut-era initrd pins are dropped verbatim (the target
-  # initramfs generator seam consumes ROOT_FS/BCACHE from the conf below)
-  inst_plan_write /etc/dracut.conf.d/10-alpine-fde.conf \
-    'hostonly=yes' \
-    'hostonly_cmdline=no' \
-    'omit_dracutmodules+=" crypt "'
-  if [ "$(inst_bcache)" = "1" ]; then
-    # §8.2: hostonly chroot collection cannot detect bcache ambiently —
-    # force the driver + its udev registration pieces into the initrd
-    inst_plan_write /etc/dracut.conf.d/20-bcache.conf \
-      'force_drivers+=" bcache "' \
-      'install_items+=" /lib/udev/rules.d/69-bcache.rules /lib/udev/bcache-register "'
-  fi
+  # ADR-13/§3.3: NO dracut config is written — the target initramfs generator
+  # is mkinitfs (ADR-13; hook + features.d inventory staged at §9.1 step 7).
+  # The bcache driver/udev intent of the retired dracut drop is carried by the
+  # mkinitfs features.d inventory (hooks/mkinitfs/features.d/alpine-fde.files:
+  # bcache.ko + 69-bcache.rules) and ROOT_FS/BCACHE ride the conf below.
+  # The rd.shell=0/rd.emergency=poweroff cmdline pins below stay: they are the
+  # H-G1 fail-closed contract enforced by the cmdline-pins guard (§8.2) on
+  # every ukictl build — not a dracut module knob.
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     inst_plan_write /etc/alpine-fde/cmdline.txt \
       "root=UUID=$_im_uuid rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
@@ -994,7 +1060,7 @@ cmd_install_main() {
     '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0.' \
     "ROOT_FS=$(inst_root_fs)" \
     "BCACHE=$(inst_bcache)" \
-    'ESP_PATH=/efi'
+    "ESP_PATH=$_im_esp_mnt"
   # H-02: the freshly populated chroot has no /proc /sys /dev — bind them
   # before the first guest step so the in-chroot ceremony behaves. §9.1 also
   # binds the efivars so the in-chroot NVRAM enrollment reaches the live
@@ -1015,19 +1081,37 @@ cmd_install_main() {
   # operator's business at first login; no interactive passwd step exists),
   # and OpenRC networking.
   inst_plan_run guest "apk add --no-cache $(install_package_list)"
+  # step 1b (§8.2/ADR-13): register the `alpine-fde` mkinitfs feature in the
+  # target's /etc/mkinitfs/mkinitfs.conf. mkinitfs packs a feature's
+  # features.d/<name>.files entries ONLY when the feature is enabled in that
+  # conf — without this the staged unseal hook (§9.1 step 7) is silently
+  # omitted from every real build. Host-side record (runs against the staged
+  # tree right after the in-guest apk transaction installs mkinitfs and its
+  # package-default conf); grep-guard makes the patch idempotent under
+  # re-run; a missing conf (package not yet installed) is created with the
+  # feature-only line rather than silently skipped.
+  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde\"\n' >\"\$f\"; } # §8.2/ADR-13: enable the alpine-fde mkinitfs feature (idempotent)"
   inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
   inst_plan_run guest 'rc-update add networking boot'
   # step 2: pending baseline written ON-TARGET via the baseline writer
   inst_plan_run host "inst_baseline_pending_write $_im_mnt"
-  # step 3: platform-key ceremony — PK/KEK/db + release.pem generated on the
-  # encrypted root (ADR-18) by the custody flow (CLI invoked in-chroot)
-  inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
+  # step 3: platform-key ceremony — with --keydir the operator-supplied
+  # material is staged FROM THE MEDIUM onto the encrypted root (restrictive
+  # perms; NEVER anything under the ESP, I2) and the in-chroot keygen is
+  # SKIPPED; without it the ceremony generates everything on the encrypted
+  # root (ADR-18) via the custody flow (CLI invoked in-chroot)
+  _im_keys=$_im_mnt/etc/alpine-fde/keys
+  if [ -n "$_im_kd" ]; then
+    inst_plan_run host "mkdir -p $_im_keys && cp $_im_kd/release.pem $_im_kd/release.pub $_im_kd/release.crt $_im_kd/db.cert.der $_im_kd/kek.cert.der $_im_kd/pk.cert.der $_im_kd/db.esl $_im_kd/kek.esl $_im_kd/pk.esl $_im_kd/db.auth $_im_kd/kek.auth $_im_kd/pk.auth $_im_keys/ && chmod 700 $_im_keys && chmod 600 $_im_keys/* # ADR-18/§8.1: operator-supplied key material staged from the signing medium (no in-chroot keygen)"
+  else
+    inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
+  fi
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight)
   inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
   # ESP layout for the in-chroot build (systemd-boot binaries from the apk
   # transaction; ukictl build signs them, §9.1 step 5)
-  inst_plan_run guest 'bootctl install --esp-path=/efi --boot-path=/efi'
+  inst_plan_run guest "bootctl install --esp-path=$_im_esp_mnt --boot-path=$_im_esp_mnt"
   # step 5: signed boot manager + initial UKI (baseline pending ⇒ the build's
   # ensure-once enrollment is state-gated OFF — the PROVISIONAL seal below
   # is the only enrollment of Stage 1)
@@ -1040,7 +1124,16 @@ cmd_install_main() {
   # their run-parts destinations; the advisory oneshot ships to /etc/init.d/
   # and is enabled for the default runlevel. ADR-20 Stage 3: `finalize` is a
   # GUIDED command — the boot artifact NEVER runs it, it only advises.)
-  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize"
+  # §8.2/ADR-13 staging contract (ONE pinned path): the unseal hook ships to
+  # EXACTLY the absolute path listed in
+  # hooks/mkinitfs/features.d/alpine-fde.files —
+  # /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh — because mkinitfs
+  # copies a feature's inventory from the TARGET tree at build time (that
+  # path, resolved under the target root, is the features.d entry). Staging
+  # under /etc/mkinitfs would leave the listed path unresolved and the hook
+  # silently omitted. The repo-wide convention (hooks_mkinitfs_unseal +
+  # initrd_audit inventories) already pins the /usr/share/alpine-fde spelling.
+  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize"
   inst_plan_run guest 'rc-update add alpine-fde-finalize default'
   # §8.4: resolve the ESP PARTUUID into fstab + target metadata on the
   # on-target pending baseline (luks_uuid = primary; member_uuids additive)

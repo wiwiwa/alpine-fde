@@ -322,4 +322,58 @@ rm -f "$(istate_file)"
 run_status
 assert_not_contains "absent again: section gone" "$ST_OUT" "== Install state"
 
+# --- 9. ADR-20 provisional window (§8.4 vocabulary, §10 mid-finalization row):
+# state=provisional-booted is FIRST-CLASS (installed → provisional-booted →
+# finalized) — Stage 2 done (first boot unlocked via the provisional PCR-11-only
+# token), finalize pending. status must flag the active provisional window
+# PROMINENTLY (token provisional PCR-11-only, recovery passphrase not yet set)
+# with the `alpine-fde finalize` resume hint — never fall through to the
+# unreadable-state branch. Exercised through the DEBIAN_FDE_INSTALL_STATE seam
+# against the REAL cmd_status_main (same seam install-state.sh documents).
+ISTATE_FIX=$T/install-state-fixture.json
+export DEBIAN_FDE_INSTALL_STATE=$ISTATE_FIX
+
+printf '{\n  "schema_version": 1,\n  "state": "provisional-booted",\n  "updated_at": "2026-09-21T00:00:00Z"\n}\n' \
+    >"$ISTATE_FIX"
+run_status
+assert_eq "provisional-booted: rc stays 0 (report-only)" "0" "$ST_RC"
+assert_contains "provisional-booted: prominent ADR-20 provisional-window warning" \
+    "$ST_OUT" "WARNING"
+assert_contains "provisional-booted: names the state" "$ST_OUT" "provisional-booted"
+assert_contains "provisional-booted: token is provisional PCR-11-only" "$ST_OUT" "PCR 11"
+assert_contains "provisional-booted: recovery passphrase not yet set" "$ST_OUT" \
+    "recovery passphrase"
+assert_contains "provisional-booted: resume hint (§10 mid-finalization row)" "$ST_OUT" \
+    "alpine-fde finalize"
+assert_not_contains "provisional-booted: never the unreadable fallthrough" \
+    "$ST_OUT" "unreadable install state"
+
+# genuinely corrupt state file (not the documented schema at all) → the
+# fallthrough unreadable warning must KEEP working for real garbage
+printf 'garbage\x01\x02 not a state document' >"$ISTATE_FIX"
+run_status
+assert_eq "corrupt state file: rc stays 0" "0" "$ST_RC"
+assert_contains "corrupt state file: unreadable fallthrough intact" "$ST_OUT" \
+    "unreadable install state"
+
+# regression through the SAME seam: the other two first-class states unchanged
+printf '{\n  "schema_version": 1,\n  "state": "installed",\n  "updated_at": "x"\n}\n' \
+    >"$ISTATE_FIX"
+run_status
+assert_eq "installed (fixture seam): rc stays 0" "0" "$ST_RC"
+assert_contains "installed (fixture seam): prominent warning unchanged" "$ST_OUT" \
+    "WARNING: installation is NOT finalized"
+assert_contains "installed (fixture seam): resume hint unchanged" "$ST_OUT" \
+    "alpine-fde finalize"
+
+printf '{\n  "schema_version": 1,\n  "state": "finalized",\n  "updated_at": "x"\n}\n' \
+    >"$ISTATE_FIX"
+run_status
+assert_eq "finalized (fixture seam): rc stays 0" "0" "$ST_RC"
+assert_contains "finalized (fixture seam): quiet line unchanged" "$ST_OUT" \
+    "install state: finalized"
+assert_not_contains "finalized (fixture seam): no warning" "$ST_OUT" "WARNING"
+
+unset DEBIAN_FDE_INSTALL_STATE
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
