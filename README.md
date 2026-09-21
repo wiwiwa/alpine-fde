@@ -5,7 +5,7 @@
 Alpine FDE encrypts your entire root filesystem (LUKS2) and seals the unlock key
 inside your machine's TPM 2.0. The key is released **only if the boot process
 verifies as untampered** — Secure Boot with your own keys, booting a signed
-Unified Kernel Image (UKI via `ukify` and `systemd-boot`) whose measurement the TPM checks.
+Unified Kernel Image whose measurement the TPM checks.
 In the happy path you type **no password at boot**, ever.
 
 - Steal the disk → useless (key is sealed to *this* machine's TPM).
@@ -13,27 +13,50 @@ In the happy path you type **no password at boot**, ever.
   the TPM refuses to release the key → you see the recovery passphrase prompt;
   bounded attempts trigger an immediate fail-closed poweroff (no rescue shell).
 - Kernel update or rollback → still passwordless.
-- Extremely lightweight → minimal footprint (~200 MB installed vs ~1.4 GB on Debian).
+- Extremely lightweight → minimal footprint (~200 MB installed).
+
+No boot component added by Alpine FDE ever needs to be trusted with your
+passphrase.
+
+> [!NOTE]
+> **This document** is the pitch and quick start — deciding whether Alpine FDE
+> is for you, and getting a machine running the first time. The complete
+> end-user reference is [docs/UserGuide.md](docs/UserGuide.md); the design is
+> [docs/Architecture.md](docs/Architecture.md).
 
 ---
 
 ## For end users
 
+### Functional Requirements & Guarantees
+
+Alpine FDE delivers eight core functional guarantees (detailed in the [User Guide](docs/UserGuide.md#functional-requirements--security-guarantees)):
+1. **Full-Disk Encryption at Rest:** Complete encryption under LUKS2 (Argon2id); zero plaintext data on disk.
+2. **Passwordless Verified Boot:** Volume unseals via TPM 2.0 iff custom Secure Boot (`PCR 7`) and signed UKI measurements (`PCR 11`) verify.
+3. **Anti Evil-Maid & Fail-Closed Defense:** Tampered kernels, modified cmdlines, or disabled Secure Boot halt unseal, show diagnostic warnings, and enforce a 3-strike fail-closed immediate poweroff (`poweroff -f`).
+4. **TPM-Free Kernel Upgrades & Rollbacks:** Unified Kernel Images carry per-kernel `.pcrsig` signatures; upgrades and rollbacks remain 100% passwordless without TPM re-sealing.
+5. **Flexible Topologies:** Native support for single-disk, accelerated hybrid storage (`--bcache` in writethrough mode), and multi-disk redundancy (Btrfs RAID1). Optional ephemeral encrypted swap (`--swap`) wipes its key on poweroff.
+6. **Automated Firmware Auditing:** On every boot (oneshot `alpine-fde-audit` service) and every interactive login (`/etc/profile.d/alpine-fde.sh`), platform measurements are verified against the baseline, alerting you to firmware drift while `alpine-fde audit` supports manual checks and `--accept` re-baselining.
+7. **Unattended-Until-Reboot Installation:** Guided ceremony executes all formatting, bootstrap, and NVRAM enrollment first; credentials are prompted only as the final pre-reboot step.
+8. **Zero-Exfiltration Key Custody:** Signing keys remain encrypted on-target; disaster recovery is achieved without off-machine key exports.
+
 ### What you need
 
 - An x86_64 machine with UEFI firmware and TPM 2.0.
-- The ability to enter UEFI Setup, clear vendor keys to enter **Setup Mode** (`SetupMode=1`), and set a **firmware admin password**.
+- The ability to enter UEFI Setup, clear vendor keys to enter **Setup Mode**, and set a **firmware admin password**.
+  Recommended, not enforced — the installer cannot verify it. Without that password, an attacker with physical access can enter firmware setup, enroll their own boot keys, and install a bootkit. The disk still cannot be decrypted (the TPM seal fails closed on any Secure Boot key change), but the bootkit can fake the passphrase prompt to phish your recovery passphrase. The firmware admin password closes that first step.
 - One **recovery passphrase** (chosen during install; the only password you ever type for the disk — stored somewhere safe, not on the machine).
-- A remote host to `scp` backup your keys (or an offline USB stick).
 
 ### Quick start
 
-#### Option A: Wave 2 Installation (Btrfs default, single-reboot ceremony — Design Preview)
-*(Note: Wave 2 features are currently in design preview; see Option B for shipped `main` commands).*
+Boot the standard Alpine live USB, and install:
+
 ```sh
-# 1. From live host (Alpine Linux standard live ISO):
 # Standard single-disk installation (Btrfs root with @, @home, @snapshots):
 ./bin/alpine-fde install --disk /dev/nvme0n1
+
+# With optional ephemeral encrypted swap (key wiped on poweroff):
+./bin/alpine-fde install --disk /dev/nvme0n1 --swap 4G
 
 # Accelerated hybrid storage (fast SSD caching slow HDD; strictly writethrough):
 ./bin/alpine-fde install --disk /dev/sda --bcache /dev/nvme0n1
@@ -45,37 +68,27 @@ In the happy path you type **no password at boot**, ever.
 ./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
-Unattended means unattended **until reboot** (ADR-20, amended): `install` asks you exactly three no-echo questions — your user account password, your **recovery passphrase** (keyslot 0, Argon2id), and your **release signing key passphrase** (encrypts `release.pem` at rest). It then installs Alpine via `apk`, enrolls your custom Secure Boot keys into firmware, seals a provisional PCR-11 TPM token, and reboots directly to disk.
-* On first boot: **Zero passwords at boot.** The disk unseals automatically via the provisional TPM token, and the first-boot OpenRC service **completes trust finalization by itself** — baseline capture, permanent {PCR 7, PCR 11} sealing, ephemeral-keyslot purge, banner clear. No login needed to finalize; log in and use the machine.
-* `alpine-fde finalize` is only the crash-resume path: run it manually if the first-boot service could not finish (mid-finalization power loss, repeated guard failure).
-* From now on: **100% passwordless verified boot.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered.
+`install` is unattended **until reboot**: it executes all disk partitioning, package bootstrap, and firmware key enrollment first, prompting for your three credentials — your user account password, your **recovery passphrase**, and your **release signing key passphrase** — as the final step before rebooting directly to disk.
 
-#### Option B: Shipped Wave 1 Installation (Single-disk ext4, offline signing medium)
-```sh
-# boot the Alpine live ISO, then run alpine-fde from your USB stick:
-./bin/alpine-fde doctor            # checks the environment (read-only — it installs nothing)
-./bin/alpine-fde provision stage1   # creates + enrolls Secure Boot keys, generates release key on USB
-./bin/alpine-fde install --disk /dev/nvme0n1 --keydir /media/usb/keys # partitions, encrypts, installs
-# reboot — you'll be asked ONCE for the recovery passphrase
-./bin/alpine-fde audit --init      # record the verified-boot baseline
-./bin/alpine-fde ukictl build      # build + sign the kernel image (UKI via ukify)
-./bin/alpine-fde enroll-tpm        # seal the disk key into the TPM
-# reboot — from now on: zero passwords at boot
-```
+* On first boot: **zero passwords.** Before unlocking the disk, the early-boot sequence verifies Secure Boot is active — if Secure Boot is disabled, the initrd strictly refuses to boot, prints an error notice, never unseals the root volume, and reboots directly to UEFI setup; if Secure Boot is enabled, the disk unseals automatically via the TPM, and the standalone `alpine-fde-finalize` service runs automatically before the login prompt — capturing the baseline, making the TPM seal permanent ({PCR 7, PCR 11}), purging the temporary install key, and auto-removing itself upon completion.
+* From now on: **100% passwordless verified boot with automatic auditing.** The disk unseals automatically via the TPM as long as firmware and boot files are untampered. A lightweight oneshot service audits firmware measurements on every boot, and interactive logins alert you immediately if firmware drift is detected.
+
+For the full step-by-step walkthrough of install and first boot, see the [User Guide, §3](docs/UserGuide.md#3-installation--first-boot-experience).
 
 ### Daily life
 
 | You do… | What happens |
 |---|---|
 | Boot the machine | Unlocks automatically. No password. |
-| `apk upgrade` (new kernel) | The APK trigger prompts for your release key passphrase, then rebuilds and re-signs the boot image (`ukify`) and PCR policy. Next boot: still automatic. |
+| Normal boot / login | Oneshot `alpine-fde-audit` checks firmware baseline during boot; login profile alerts if drift is detected. |
+| `apk upgrade` (new kernel) | The upgrade prompts for your release key passphrase, then rebuilds and re-signs the boot image and updates the TPM policy. Next boot: still automatic. |
 | Before major upgrades / experiments | `alpine-fde pre-upgrade` takes an atomic Btrfs snapshot of `@` to `/.snapshots` for instant rollback. |
-| Machine won't unlock after a firmware/BIOS update or a Secure Boot change | You're asked for the **recovery passphrase** — that's by design (the machine noticed boot verification changed). Fix the cause, then `alpine-fde audit --accept` and re-enroll; see `docs/Architecture.md` §9.4. |
+| Machine won't unlock after a firmware/BIOS update or a Secure Boot key change | You're asked for the **recovery passphrase** — that's by design (the machine noticed boot verification changed). Fix the cause, then `alpine-fde audit --accept` and re-enroll; see the [User Guide, Runbook 3](docs/UserGuide.md#runbook-3-pcr-7-drift-after-firmwarebios-update). |
 | Want to boot the previous kernel | Pick it in the boot menu (`alpine-fde bootnext <entry>`) — still passwordless for the retained kernels. |
 | Suspect the passphrase leaked | `alpine-fde rotate` — new passphrase, no re-encryption. |
 
 > [!TIP]
-> For complete operational procedures, hardware replacement runbooks (including recovering from a failed cache SSD and rebuilding the ESP), and snapshot rollbacks, see [docs/UserGuide.md](docs/UserGuide.md).
+> For complete operational procedures, hardware replacement runbooks (including recovering from a failed cache SSD and rebuilding the ESP), and snapshot rollbacks, see [docs/UserGuide.md](docs/UserGuide.md) — the full end-user reference and functional-requirement specification. For the design, security invariants, and architecture decisions, see [docs/Architecture.md](docs/Architecture.md).
 
 ### Honest limits
 
@@ -88,62 +101,15 @@ firmware admin password.
 
 ### Keep safe
 
-1. Your **signing key backup** (and its passphrase) — whoever holds your decrypted signing key can sign boot images this TPM will trust.
-2. The **recovery passphrase** — with it, you can always get back in; without it
-   (and with the TPM refusing), the data is gone. That's the point.
+1. The **recovery passphrase** — with it, you can always get back in; without it (and with the TPM refusing), the data is gone. Store it safely off-machine.
+2. The **release signing key passphrase** — protects `release.pem` at rest on the encrypted disk. The private key never leaves the encrypted container (Zero-Exfiltration).
+3. The **firmware admin password** — prevents unauthorized physical tampering with UEFI Secure Boot settings.
 
 ---
 
 ## For developers
 
-### Repository layout
-
-```
-bin/alpine-fde            CLI dispatcher (symlink/alias: bin/debian-fde)
-lib/                      core libraries (TCTI/TPM seam, efivarfs seam, baseline,
-                          manifest, ESP management, policy/signing, firmware keys,
-                          initramfs/crypttab/cmdline build guards)
-hooks/                    /etc/apk/triggers + initramfs hooks (post-upgrade build,
-                          initramfs early-boot unlock hook, systemd-boot upgrade re-sign,
-                          OpenRC first-boot trust finalization service)
-fixtures/                 pinned test artifacts (keys, UKI inputs, golden vectors)
-tests/                    unit suite + e2e harness (swtpm, QEMU/OVMF, sentinels)
-docs/Architecture.md      the design — SOURCE OF TRUTH, implementation-ready
-docs/UserGuide.md         operator guide: workflows, RAID1, bcache, and recovery runbooks
-```
-
-### How it works
-
-The design — what gets sealed where, why the boot chain verifies, and every
-trade-off — is documented in [docs/Architecture.md](docs/Architecture.md).
-In short: your machine verifies the boot chain with your own Secure Boot keys,
-measures what it verified into the TPM, and the TPM only releases the disk key
-when both check out. No boot component added by Alpine FDE ever needs to be
-trusted with your passphrase.
-
-### Development environment
-
-- Alpine Linux (x86_64, musl libc, OpenRC) with standard toolchain; CI-style checks run
-  with POSIX sh (busybox-ash compatible), `apk`, `jq`, `openssl`, `cryptsetup`, `tpm2-tools` ≥ 5.8,
-  `ukify`, `systemd-boot`, `swtpm`, QEMU + OVMF for e2e.
-- `tests/env-check.sh` — verifies your environment, prints what's missing.
-- `tests/run-unit.sh` — unit suite (TAP output). Fast, no VM; TPM tests run
-  against **swtpm**, never your real TPM.
-
-### Conventions (enforced by review)
-
-- **Fail closed**: any abnormal condition ends in the recovery passphrase path
-  or poweroff — never in silent degradation or dropping to an interactive emergency shell.
-- **Loud failures** beat silent fallbacks everywhere (ADR-8): a kernel build
-  without the signing key must fail, not "just prompt for a passphrase".
-- The installed system stays **minimal** (§3.3): Alpine base via `apk add --root`,
-  targeting ~200 MB installed size budget.
-- Everything in `docs/Architecture.md` §14 is decided; if code and doc disagree,
-  raise it — never work around silently.
-
-### Build & test
-
-```sh
-tests/env-check.sh          # environment ready?
-tests/run-unit.sh           # unit suite (swtpm-backed)
-```
+Repository layout, development environment, coding conventions, and how to run
+the test suites are documented in [docs/Developer.md](docs/Developer.md).
+The design — source of truth, implementation-ready — is
+[docs/Architecture.md](docs/Architecture.md).
