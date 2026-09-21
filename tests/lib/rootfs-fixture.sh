@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
-# tests/lib/rootfs-fixture.sh — pinned Debian (trixie) artifact cache for the
-# Debian FDE e2e harness (Wave 1 agent C).
-#
-# Every guest-side binary in the harness UKI comes from the SHA256-pinned debs
-# below + the pinned Debian cloud rootfs tarball (used by Wave 2 scenarios to
-# populate the LUKS image in-guest). Nothing is "apt-get installed" at test
-# time: the cache IS the rootfs fixture.
+# tests/lib/rootfs-fixture.sh — pinned Debian (trixie) DEB cache for the e2e
+# harness. TWO consumers remain after the Alpine platform seam (G-E1):
+#   * the harness UKI's initrd guest tree (tests/lib/uki-build.sh — the unlock
+#     machinery: systemd-cryptsetup 257.13, busybox, btrfs-progs, udev, ...),
+#   * the ADR-19 interop oracle scaffold (tests/lib/interop-oracle.sh), whose
+#     fixture rootfs is assembled from exactly these pinned 257 debs.
+# The guest ROOTFS payload is no longer Debian: it is the pinned Alpine
+# minirootfs artifact (tests/lib/alpine-artifact.sh). Nothing is "apt-get
+# installed" at test time: the cache IS the fixture.
 #
 # Usage (source, then):
 #   rootfs_cache_dir                      -> print the cache dir (tests/.cache)
 #   rootfs_ensure <cache-name>            -> download+verify if absent/stale
 #   rootfs_ensure_all                     -> fetch every pinned artifact
+#   rootfs_pin_names                      -> list every pinned cache-name
 #   rootfs_deb_extract <cache-name> <dest>-> ar x + tar a deb into <dest>
-#   rootfs_tarball_extract <cache-name> <dest>
 #
 # Pin provenance (empirical, this sandbox):
 #   * systemd-cryptsetup / libsystemd-shared debs: same bytes as the debs
 #     hash-pinned in tests/sentinels-257.13.txt (the sentinel pin of record).
-#   * debian-13-generic-amd64.tar.xz: SHA512 verified against upstream
-#     SHA512SUMS of https://cloud.debian.org/images/cloud/trixie/latest/
 #   * all others: sha256 computed at pin time from deb.debian.org's
 #     dists/trixie index filenames (see docs in tests/e2e/README.md).
-#
-# NOTE (task-spec deviation, documented): the task suggested
-# "debian-13-generic-amd64-root.tar.xz" — that filename does not exist in the
-# trixie/latest listing; the actual artifact is "debian-13-generic-amd64.tar.xz".
 
 if [[ -n "${_DEBIAN_FDE_ROOTFS_FIXTURE_SOURCED:-}" ]]; then
     return 0
@@ -35,22 +31,10 @@ ROOTFS_CACHE_DIR="${DEBIAN_FDE_CACHE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.
 mkdir -p "$ROOTFS_CACHE_DIR"
 
 _DEB_BASE="http://deb.debian.org/debian"
-# Pin-of-record discipline (§3.1): dated upstream dir, never the moving `latest`
-# symlink — latest/ drifted under us once already (20260914 build ≠ pinned bytes).
-_CLOUD_BASE="https://cloud.debian.org/images/cloud/trixie"
 
-# G-HW4 (btrfs-default BASE matrix) pins: btrfs-progs + its only closure gap
-# (liblzo2 — objdump NEEDED of usr/bin/btrfs + usr/sbin/mkfs.btrfs 6.14-1:
-# libuuid/libblkid/libudev/libz/libzstd/libc are already pinned) + bcache-tools
-# (userspace of the §8.2 bcache topology; pinned for dated-suite discipline —
-# the harness boots single-LUKS volumes and packs only btrfs-progs into the
-# initrd). G-HW5 (initrd udev, the dracut pattern): the LUKS attach must be
-# udev-registered or the installed system's §9.1 fstab UUID= submounts never
-# resolve (systemd device units require the udev db; 55-dm.rules drops events
-# for dm devices created with udev sync disabled). udev carries systemd-udevd
-# + udevadm + the base rules (same pinned systemd version); dmsetup carries
-# 55-dm.rules + 60-persistent-storage-dm.rules. Versions are the trixie (main)
-# suite at pin time, verified against dists/trixie/main/binary-amd64/Packages.
+# Version discipline (§3.1): dated-suite pins, never a moving suite. Versions
+# are the trixie (main) suite at pin time, verified against
+# dists/trixie/main/binary-amd64/Packages.
 # NB: the table below must stay comment-free — every line is read as a pin row.
 # cache-name <TAB> sha256 <TAB> url
 _ROOTFS_PINS="
@@ -94,12 +78,22 @@ liblzo2-2.deb	f3032201fe2928a87e13f05ce256ff3ac2a7860c7e594dc51ae6d7348a4466ce	$
 bcache-tools_1.0.8_amd64.deb	18dc4abae5cedbf2303efda579e09960d0e89adada2b536e8d897234c886c837	$_DEB_BASE/pool/main/b/bcache-tools/bcache-tools_1.0.8-5_amd64.deb
 udev_257.13_amd64.deb	a9d751b4d73a489120ef68a21caedf0b58fba80598fb22a17f85060f308bfe7e	$_DEB_BASE/pool/main/s/systemd/udev_257.13-1~deb13u1_amd64.deb
 dmsetup.deb	4771f7ab0a907a8e5d02a6358ff016ae7cb49124906bada02fa882e141b615a0	$_DEB_BASE/pool/main/l/lvm2/dmsetup_1.02.205-2_amd64.deb
-debian-13-generic-amd64.tar.xz	700067e09ac7059f556eb8cf041575828b4f9a3c35d1544463fb600c08c70bf1	$_CLOUD_BASE/20260831-2587/debian-13-generic-amd64-20260831-2587.tar.xz
 "
 
 # rootfs_cache_dir — print the cache directory
 rootfs_cache_dir() {
     printf '%s\n' "$ROOTFS_CACHE_DIR"
+}
+
+# rootfs_pin_names — list every pinned cache-name (consumed by the ADR-19
+# interop-oracle scaffold, which assembles its fixture rootfs from exactly
+# this pinned deb table).
+rootfs_pin_names() {
+    local line name
+    while IFS=$'\t' read -r name _sha _url; do
+        [[ -z "$name" ]] && continue
+        printf '%s\n' "$name"
+    done <<<"$_ROOTFS_PINS"
 }
 
 # _rootfs_pin_lookup <cache-name> — set _PIN_SHA and _PIN_URL
@@ -175,18 +169,5 @@ rootfs_deb_extract() {
         return 1
     }
     rm -rf "$tmp"
-    return 0
-}
-
-# rootfs_tarball_extract <cache-name> <dest-dir> — extract the pinned rootfs
-# tarball (Debian cloud "root" tarball = an unpacked root tree, no /boot).
-rootfs_tarball_extract() {
-    local name="$1" dest="$2"
-    rootfs_ensure "$name" || return $?
-    mkdir -p "$dest"
-    tar -xf "$ROOTFS_CACHE_DIR/$name" -C "$dest" || {
-        echo "rootfs-fixture: tarball extraction failed: $name" >&2
-        return 1
-    }
     return 0
 }

@@ -34,6 +34,8 @@ source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/uki-build.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
+# shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/qemu.sh"
@@ -154,6 +156,9 @@ assert_contains "[6.2.0] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_en
 assert_contains "[6.2.0] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
 assert_contains "[6.2.0] UNSEALED" "$LOG" "debian-fde: UNSEALED"
 assert_contains "[6.2.0] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+# G-T13/G-E9 (boot reaches the UKI stub): $RUN/uki-pcrsig.json is 6.2.0's
+# signed prediction (uki_build wrote it), $CONSOLE is this boot's console.
+assert_pcr11_prediction "S-02 [6.2.0]"
 
 _meta_snapshot "$RUN/disk.img" "$RUN/meta-post-6.2.0.json"
 
@@ -196,6 +201,11 @@ assert_contains "[6.1.0] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
 assert_contains "[6.1.0] UNSEALED (rollback passwordless)" "$LOG" "debian-fde: UNSEALED"
 assert_not_contains "[6.1.0] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 assert_contains "[6.1.0] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+# G-T13/G-E9 for the ROLLBACK boot: pair the helper with 6.1.0's OWN signed
+# prediction (the older UKI's pols differ — asserted above) — the pre-unlock
+# PCR 11 reading under 6.1.0 must match 6.1.0's per-kernel signed policy.
+cp "$RUN/uki-6.1.0.efi.pcrsig.json" "$RUN/uki-pcrsig.json"
+assert_pcr11_prediction "S-02 [6.1.0]"
 
 _meta_snapshot "$RUN/disk.img" "$RUN/meta-post-6.1.0.json"
 assert_rc "rollback boot changed NO LUKS2 metadata (no enrollment)" 0 \

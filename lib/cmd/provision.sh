@@ -25,17 +25,17 @@ DEBIAN_FDE_PROVISION_LOADED=1
 
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../keys.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
 fi
 
 if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../firmware.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
 
 # --- EFI binary primitives (pure sh; byte output via awk "%c", gawk/mawk OK) ---

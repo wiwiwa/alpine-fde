@@ -71,29 +71,29 @@ DEBIAN_FDE_FINALIZE_LOADED=1
 
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../install-state.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
 fi
 if [ -z "${DEBIAN_FDE_AUDIT_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/audit.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/audit.sh"
 fi
 if [ -z "${DEBIAN_FDE_ENROLL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/enroll-tpm.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/enroll-tpm.sh"
 fi
 if [ -z "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../seal.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
 fi
 if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
     # the §13 entropy floor (§9.1 Stage 3 step 1) lives in lib/cmd/rotate.sh
     # (shared with `rotate` and keys_encrypt_release)
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/rotate.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/rotate.sh"
 fi
 
 finalize_usage() {

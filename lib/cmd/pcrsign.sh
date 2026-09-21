@@ -46,7 +46,7 @@ Usage: $PROG pcrsign (--uki <file> | --linux <file> [--initrd <file>] [--cmdline
   --initrd <file>     initrd component
   --cmdline <file>    kernel command line component
   --os-release <file> os-release component
-  --baseline <file>   baseline.json override (default: <root>/etc/debian-fde/)
+  --baseline <file>   baseline.json override (default: <root>/etc/alpine-fde/)
   --out <file>        write the signature JSON here (default: stdout)
 
 The baseline PCR 7 must be finalized ('debian-fde audit --init'); release key
@@ -139,7 +139,7 @@ cmd_pcrsign_main() {
     # --- §6.1.1 step 2: finalized baseline PCR 7 (§8.4) ---------------------------
     if [ -z "$_ps_baseline" ]; then
         _ps_root=${DEBIAN_FDE_ROOT:-}
-        _ps_baseline="$_ps_root/etc/debian-fde/baseline.json"
+        _ps_baseline="$_ps_root/etc/alpine-fde/baseline.json"
     fi
     if [ ! -f "$_ps_baseline" ]; then
         die "pcrsign: baseline file not found: $_ps_baseline (expected the finalized baseline.json — run 'debian-fde audit --init' after the first boot into the final SB state)"

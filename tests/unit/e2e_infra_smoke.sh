@@ -149,6 +149,48 @@ assert_contains "initrd: release pub present" "$CPIO" "rel.pub"
 assert_not_contains "initrd: no pcrsig.json (payload-drive design)" "$CPIO" "pcrsig.json"
 assert_file_exists "uki: pcrsig payload drive" "$WORK/run/pcrsig.img"
 
+# --- I6/G-E10: initrd inventory audit ---------------------------------------------
+# uki_initrd_inventory is the cpio listing emitter; the DEFAULT build's initrd
+# must satisfy the I6 allowlist policy: no compilers/linkers, no package tools
+# (apk/apt/dpkg), and no interactive shell — the debug-shell seam is proven
+# absent in the default build and armed only under DEBIAN_FDE_DEBUG_SHELL.
+INV=$(uki_initrd_inventory "$WORK/run/initrd.cpio" 2>/dev/null)
+if [[ -n "$INV" ]]; then
+    _assert_result ok "inventory: uki_initrd_inventory emits the cpio listing" ""
+else
+    _assert_result not-ok "inventory: uki_initrd_inventory emits the cpio listing" "empty listing"
+fi
+N_ENTRIES=$(grep -c . <<<"$INV")
+echo "# initrd inventory: $N_ENTRIES entries (uki_initrd_inventory)"
+INV_BASENAMES=$(awk -F/ '{print $NF}' <<<"$INV" | sort -u)
+INV_HIT=$(grep -Fx -e gcc -e cc1 -e g++ -e cpp -e as -e ld -e ld.gold -e make -e gas \
+    <<<"$INV_BASENAMES" | tr '\n' ' ' || true)
+assert_eq "inventory: no compilers/linkers (gcc/cc1/g++/cpp/as/ld/make)" "" "$INV_HIT"
+INV_HIT=$(grep -Fx -e apk -e apk-static -e apt -e apt-get -e dpkg -e dpkg-deb -e dpkg-query \
+    <<<"$INV_BASENAMES" | tr '\n' ' ' || true)
+assert_eq "inventory: no package tools (apk/apt/dpkg)" "" "$INV_HIT"
+INV_HIT=$(grep -Fx -e bash -e dash -e zsh -e ksh -e csh -e tcsh -e sulogin -e nulogin \
+    -e login -e getty -e agetty \
+    <<<"$INV_BASENAMES" | tr '\n' ' ' || true)
+assert_eq "inventory: no interactive shells/login/getty beyond the busybox init shell" "" "$INV_HIT"
+# debug-shell seam: the default build bakes the guard EMPTY (substituted, no
+# placeholder residue); with DEBIAN_FDE_DEBUG_SHELL=1 the same seam arms it.
+if grep -q '@@DEBUG_SHELL@@' "$WORK/run/guest-tree/init"; then
+    _assert_result not-ok "default build: @@DEBUG_SHELL@@ placeholder substituted" "placeholder residue in init"
+else
+    _assert_result ok "default build: @@DEBUG_SHELL@@ placeholder substituted" ""
+fi
+DISABLED=$(grep -cF 'if [ -n "" ]; then' "$WORK/run/guest-tree/init")
+assert_eq "default build: debug-shell seam DISABLED (empty -n guard)" "1" "$DISABLED"
+mkdir -p "$WORK/debug-tree"
+if bash -c 'set -u; source "$1/lib/uki-build.sh"; DEBIAN_FDE_DEBUG_SHELL=1 uki_initrd_write_init "$2"' \
+    _ "$TESTS" "$WORK/debug-tree" 2>/dev/null; then
+    ENABLED=$(grep -cF 'if [ -n "1" ]; then' "$WORK/debug-tree/init")
+    assert_eq "DEBIAN_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "1" "$ENABLED"
+else
+    assert_eq "DEBIAN_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "init written" "uki_initrd_write_init failed"
+fi
+
 # --- rootfs fixture: pins verify (downloads cached from the earlier run) ---------
 # CR-01: the fetch stage is the 8h-hang window — bound it (curl itself is
 # bounded in rootfs-fixture.sh; this is the stage-level defense in depth)
@@ -392,6 +434,79 @@ assert_contains "kvm-probe: argv pins -qmp stdio (self-terminating QMP quit)" "$
 RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; DEBIAN_FDE_KVM_PROBE_TIMEOUT=notaseconds; \
     _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
 assert_ne "kvm-probe: invalid DEBIAN_FDE_KVM_PROBE_TIMEOUT fails closed" "0" "$RC"
+
+# --- G-E2: sentinel fixtures — parse, cross-fixture collisions, consumers --------
+# Every versioned fixture must parse (name<TAB>string rows only, no duplicate
+# names within a file); a NAME defined in more than one fixture must carry the
+# IDENTICAL value everywhere (a value-drifting name is a collision and must be
+# renamed); and every sentinel_of name referenced by existing scenarios must
+# resolve against the DEFAULT table (260.2, the Alpine contract).
+SENT_DEFAULT=$(bash -c 'source "$1/lib/sentinels.sh"; printf "%s" "$SENTINELS"' _ "$TESTS")
+assert_contains "sentinels: default table is the Alpine fixture (sentinels-260.2.txt)" \
+    "$SENT_DEFAULT" "sentinels-260.2.txt"
+LEGACY_TABLE=$(bash -c 'source "$1/lib/sentinels.sh"; printf "%s" "$SENTINELS"' \
+    _ "$TESTS" 2>/dev/null) # env-pin seam re-checked below with SENTINELS_FILE
+LEGACY_TABLE=$(SENTINELS_VER=257.13 bash -c 'source "$1/lib/sentinels.sh"; printf "%s" "$SENTINELS"' _ "$TESTS")
+assert_contains "sentinels: SENTINELS_VER=257.13 loads the Debian-era record" \
+    "$LEGACY_TABLE" "sentinels-257.13.txt"
+for f in "$TESTS"/sentinels-*.txt; do
+    BAD=$(awk -F '\t' '
+        /^[[:space:]]*$/ {next}
+        /^#/ {next}
+        $1 !~ /^[A-Za-z_][A-Za-z0-9_]*$/ || $2 == "" {print "row: " $0}
+        ' "$f")
+    assert_eq "sentinels: $(basename "$f") parses (name<TAB>string data rows only)" "" "$BAD"
+    DUPS=$(awk -F '\t' '
+        /^[[:space:]]*$/ {next}
+        /^#/ {next}
+        {c[$1]++}
+        END {for (n in c) if (c[n] > 1) print n}' "$f")
+    assert_eq "sentinels: $(basename "$f") has no duplicate names" "" "$DUPS"
+done
+SENT_COLLISIONS=$(awk -F '\t' '
+    /^[[:space:]]*$/ {next}
+    /^#/ {next}
+    ($1 in seen) && seen[$1] != $2 {print $1 " (conflicting values across fixtures)"}
+    {seen[$1] = $2}' "$TESTS"/sentinels-*.txt)
+assert_eq "sentinels: no name collides across fixtures (value conflicts)" "" "$SENT_COLLISIONS"
+SENT_NAMES=$(grep -hEo 'sentinel_of +[A-Za-z_0-9]+' \
+    "$TESTS"/e2e/*.sh 2>/dev/null | awk '{print $2}' | sort -u)
+if [[ -n "$SENT_NAMES" ]]; then
+    _assert_result ok "sentinels: consumer grep found referenced names ($(grep -c . <<<"$SENT_NAMES"))" ""
+else
+    _assert_result not-ok "sentinels: consumer grep found referenced names" \
+        "no sentinel_of consumers found — non-vacuous check required"
+fi
+SENT_MISSING=""
+for n in $SENT_NAMES; do
+    bash -c 'source "$1/lib/sentinels.sh"; sentinel_of "$2" >/dev/null' _ "$TESTS" "$n" 2>/dev/null \
+        || SENT_MISSING="$SENT_MISSING $n"
+done
+assert_eq "sentinels: every referenced name resolves in the default (260.2) table" "" "$SENT_MISSING"
+
+# --- G-E11: ADR-19 interop oracle scaffold — fail-closed + scope guards ----------
+# The oracle is CI-only and gated: without DEBIAN_FDE_INTEROP_ORACLE=1, or
+# without bwrap on PATH, everything about it refuses (rc 64). The scope guard
+# must pass on the CURRENT tree: shipped bin/+lib/+hooks carry no bwrap /
+# Debian-runtime references. The oracle BODY is intentionally absent (scaffold).
+source "$TESTS/lib/interop-oracle.sh"
+assert_eq "interop-oracle: rootfs assembly seam exists (scaffold)" "function" \
+    "$(declare -F interop_oracle_rootfs >/dev/null && echo function || echo missing)"
+RC=$( ( unset DEBIAN_FDE_INTEROP_ORACLE; interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+assert_eq "interop-oracle: gate env unset -> fail closed (rc 64)" "64" "$RC"
+RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=0 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+assert_eq "interop-oracle: gate env not exactly 1 -> fail closed (rc 64)" "64" "$RC"
+mkdir -p "$WORK/no-bwrap"
+RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=1 PATH="$WORK/no-bwrap" interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+assert_eq "interop-oracle: gate set but bwrap absent -> fail closed (rc 64)" "64" "$RC"
+RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=1 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+assert_eq "interop-oracle: gate set + bwrap present -> ready (rc 0)" "0" "$RC"
+if interop_scope_check "$TESTS/.." >/dev/null 2>&1; then
+    _assert_result ok "interop-oracle: scope guard passes on the current tree (bin/lib/hooks clean)" ""
+else
+    _assert_result not-ok "interop-oracle: scope guard passes on the current tree" \
+        "bwrap/Debian-runtime references in shipped bin/lib/hooks (see stderr above)"
+fi
 
 echo "# e2e_infra_smoke: pass=$TESTS_PASS fail=$TESTS_FAIL"
 (( TESTS_FAIL == 0 )) || exit 1

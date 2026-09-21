@@ -29,7 +29,7 @@ DEBIAN_FDE_INITRAMFS_LOADED=1
 
 # --- persisted topology conf (§4.1/§8.2; G-ST4/G-ST5) -----------------------------
 # The installer persists the provisioned topology in
-# /etc/debian-fde/debian-fde.conf as ROOT_FS=btrfs|ext4 and BCACHE=0|1. Both
+# /etc/alpine-fde/alpine-fde.conf as ROOT_FS=btrfs|ext4 and BCACHE=0|1. Both
 # the crypttab guard and the initrd inventory audit resolve the topology
 # through this reader — a tiny LOCAL targeted parse (esp.sh style: load_config
 # parity without clobbering the caller's environment; esp.sh and
@@ -43,7 +43,7 @@ _initramfs_conf_get() {
     if command -v config_path >/dev/null 2>&1; then
         _icg_conf=$(config_path)
     else
-        _icg_conf=/etc/debian-fde/debian-fde.conf
+        _icg_conf=/etc/alpine-fde/alpine-fde.conf
     fi
     if [ -z "$_icg_conf" ] || [ ! -f "$_icg_conf" ]; then
         return 0
@@ -81,11 +81,11 @@ initramfs_topology() {
             ;;
         '')
             INI_ROOT_FS=btrfs
-            _ito_note='no ROOT_FS in debian-fde.conf — defaulting to btrfs (§4.1)'
+            _ito_note='no ROOT_FS in alpine-fde.conf — defaulting to btrfs (§4.1)'
             ;;
         *)
             INI_ROOT_FS=btrfs
-            _ito_note="invalid ROOT_FS '$_ito_fs' in debian-fde.conf — defaulting to btrfs (§4.1)"
+            _ito_note="invalid ROOT_FS '$_ito_fs' in alpine-fde.conf — defaulting to btrfs (§4.1)"
             ;;
     esac
     case $(_initramfs_conf_get BCACHE) in

@@ -42,6 +42,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -204,6 +206,13 @@ else
         "neither signature-lookup failure nor tpm2_refused in console"
 fi
 assert_contains "harness fail-closed sentinel" "$LOG" "debian-fde: PROMPT-FAILED"
+
+# G-T13/G-E9 (boot reaches the UKI stub): the stub measured the TAMPERED
+# effective cmdline into PCR 11 — the drifted pre-unlock reading must equal
+# the tampered UKI's OWN signed prediction ($RUN/uki-pcrsig.json, rebuilt
+# above with the extra cmdline word), proving the prediction formula covers
+# the cmdline measurement the tamper relied on.
+assert_pcr11_prediction "S-07"
 assert_not_contains "interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "never unlocked (token)" "$LOG" "$(sentinel_of unlocked)"
 assert_not_contains "never unlocked (harness sentinel)" "$LOG" "debian-fde: UNSEALED"

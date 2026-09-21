@@ -55,9 +55,9 @@ chmod +x "$STUBBIN/ukify"
 
 # --- fixture tree: finalized baseline (golden d7) + a REAL minimal UKI ------------
 ROOT="$TMP/root"
-mkdir -p "$ROOT/etc/debian-fde"
+mkdir -p "$ROOT/etc/alpine-fde"
 jq -n --arg d7 "$D7" '{schema_version: "1", expected_pcr7: $d7, status: "finalized"}' \
-    >"$ROOT/etc/debian-fde/baseline.json"
+    >"$ROOT/etc/alpine-fde/baseline.json"
 
 UKI="$TMP/uki.efi"
 ukify build \
@@ -165,9 +165,9 @@ assert_eq "fallback: identical artifact to the ukify path (same canned d11)" \
 
 # --- fail-closed: pending baseline (§8.4 — refuse until finalized) -------------------
 ROOT_PEND="$TMP/root-pending"
-mkdir -p "$ROOT_PEND/etc/debian-fde"
+mkdir -p "$ROOT_PEND/etc/alpine-fde"
 jq -n '{schema_version: "1", expected_pcr7: "pending", status: "pending"}' \
-    >"$ROOT_PEND/etc/debian-fde/baseline.json"
+    >"$ROOT_PEND/etc/alpine-fde/baseline.json"
 rc=0
 out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
     DEBIAN_FDE_ROOT="$ROOT_PEND" DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
@@ -180,7 +180,7 @@ assert_rc "pending baseline: no artifact written" 0 $?
 
 # --- fail-closed: baseline file missing entirely --------------------------------------
 ROOT_NOBL="$TMP/root-nobaseline"
-mkdir -p "$ROOT_NOBL/etc/debian-fde"
+mkdir -p "$ROOT_NOBL/etc/alpine-fde"
 rc=0
 out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
     DEBIAN_FDE_ROOT="$ROOT_NOBL" DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \

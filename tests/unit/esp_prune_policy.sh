@@ -37,7 +37,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- CR fix (review B-CR1): esp_dir resolution order — env DEBIAN_FDE_ESP > env
 # ESP_PATH > persisted conf ESP_PATH (install records the real mount in
-# /etc/debian-fde/debian-fde.conf) > /efi default (install + boot-hook parity).
+# /etc/alpine-fde/alpine-fde.conf) > /efi default (install + boot-hook parity).
 # All legs run in subshells so the ambient test env stays untouched.
 mkdir -p "$TMP/cr1"
 printf '%s\n' 'ESP_PATH=/efi-from-conf' >"$TMP/cr1/debian-fde.conf"

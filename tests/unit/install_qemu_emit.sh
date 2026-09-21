@@ -118,7 +118,7 @@ assert_eq "repositories drop verbatim (G-C1: replaces apt sources)" \
     "printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/community' >/etc/apk/repositories" \
     "$(grep -F 'dl-cdn.alpinelinux.org' "$SCRIPT")"
 assert_eq "dracut conf verbatim (embedded double quotes survive)" \
-    "printf '%s\n' 'hostonly=yes' 'hostonly_cmdline=no' 'omit_dracutmodules+=\" crypt \"' >/etc/dracut.conf.d/10-debian-fde.conf" \
+    "printf '%s\n' 'hostonly=yes' 'hostonly_cmdline=no' 'omit_dracutmodules+=\" crypt \"' >/etc/dracut.conf.d/10-alpine-fde.conf" \
     "$(grep -F 'omit_dracutmodules' "$SCRIPT")"
 assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
@@ -140,8 +140,8 @@ assert_eq "host step emitted as comment: mkfs.btrfs" "1" \
     "$(grep -c '^# HOST: .*mkfs.btrfs' "$SCRIPT")"
 assert_eq "host step emitted as comment: luksFormat (keyslot 0, ephemeral key)" "1" \
     "$(grep -c '^# HOST: .*luksFormat --type luks2' "$SCRIPT")"
-assert_eq "host step emitted as comment: tree copy" "1" \
-    "$(grep -c '^# HOST: .*cp -r .*opt/debian-fde' "$SCRIPT")"
+assert_eq "host step emitted as comment: tree copy (G-C7: /opt/alpine-fde)" "1" \
+    "$(grep -c '^# HOST: .*cp -r .*opt/alpine-fde' "$SCRIPT")"
 assert_eq "host step emitted as comment: pending baseline on target (§9.1 step 2)" "1" \
     "$(grep -c '^# HOST: inst_baseline_pending_write' "$SCRIPT")"
 assert_eq "host step emitted as comment: state write (§9.1 step 9)" "1" \
@@ -158,19 +158,23 @@ assert_eq "G-C26: NO OsIndications record in either lane" "0" \
     "$(grep -c 'fw_osindications_set' "$SCRIPT")"
 assert_not_contains "ADR-20: keys_encrypt_release retired from Stage 1" "$(cat "$SCRIPT")" \
     "keys_encrypt_release"
+# G-C7: the tooling tree lands at /opt/alpine-fde (§8.1/§12) — the OLD
+# /opt/debian-fde spelling must not survive anywhere in the emitted plan.
+assert_not_contains "G-C7: NO /opt/debian-fde anywhere in the emitted qemu script" \
+    "$(cat "$SCRIPT")" "/opt/debian-fde"
 
 # --- §9.1 in-chroot provisioning sequence: EXECUTABLE guest lines ----------------
 assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir)" "1" \
-    "$(grep -cx '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys' "$SCRIPT")"
+    "$(grep -cx '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
+    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: bootctl install (ESP layout)" "1" \
     "$(grep -cx 'bootctl install --esp-path=/efi --boot-path=/efi' "$SCRIPT")"
 assert_eq "guest: ukictl build (§9.1 step 5)" "1" \
-    "$(grep -cx '/opt/debian-fde/bin/debian-fde ukictl build' "$SCRIPT")"
+    "$(grep -cx '/opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
-    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
+    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
 assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRIPT")" \
     "only-section=.pcrsig"
 assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \

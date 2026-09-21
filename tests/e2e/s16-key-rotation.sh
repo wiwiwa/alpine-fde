@@ -37,6 +37,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13, §12)
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
@@ -71,7 +73,7 @@ _audit_cli() {
         DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
         DEBIAN_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
         DEBIAN_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
-        "$REPO/bin/debian-fde" audit "$@"
+        "$REPO/bin/alpine-fde" audit "$@"
 }
 # shellcheck disable=SC2317  # invoked via assert_rc's "$@" (see tests/lib/assert.sh)
 _host_wipe_enrollment() {
@@ -166,8 +168,8 @@ assert_contains "efivars fixture: SB on, SetupMode=0" \
     "$(DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" fw_sb_state)" \
     "secureboot=1 setup_mode=0"
 
-mkdir -p "$RUN/rootfs/etc/debian-fde"
-sed "s/PENDING-BY-SCENARIO/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" >"$RUN/rootfs/etc/debian-fde/baseline.json" <<'JSON'
+mkdir -p "$RUN/rootfs/etc/alpine-fde"
+sed "s/PENDING-BY-SCENARIO/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" >"$RUN/rootfs/etc/alpine-fde/baseline.json" <<'JSON'
 {
   "schema_version": "1",
   "created_at": "PENDING-BY-SCENARIO",
@@ -212,8 +214,9 @@ disk_make_luks "$RUN/disk.img" 128 || exit 1
 # --- boot 1: K1 enroll + unlock + baseline --------------------------------------
 boot_and_wait "k1-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0-k1.efi.pcrsig.img"
 LOG=$(log_of "k1-enroll")
+assert_pcr11_prediction "S-16 k1-enroll"
 assert_contains "[K1] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
-assert_contains "[K1] UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[K1] UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_rc "audit --init finalizes pre-rotation baseline" 0 _audit_cli --init
 D7_PRE=$(console_pcr7 "k1-enroll")
 assert_ne "boot 1 console records a non-zero PCR 7" "$D7_PRE" ""
@@ -221,9 +224,9 @@ assert_ne "boot 1 console records a non-zero PCR 7" "$D7_PRE" ""
 # live state is not durable across qemu boots/restarts, so the baseline records
 # the OPERATOR-meaningful pre-rotation values, not the restarted-TPM zeros
 sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$D7_PRE\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(console_pcr0 k1-enroll)\",|" \
-    "$RUN/rootfs/etc/debian-fde/baseline.json"
+    "$RUN/rootfs/etc/alpine-fde/baseline.json"
 assert_eq "baseline fixture carries the pre-rotation d7" "$D7_PRE" \
-    "$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/debian-fde/baseline.json")"
+    "$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/alpine-fde/baseline.json")"
 
 # --- §9.6 step 2: dual-sign (append K2 signature) --------------------------------
 echo "# dual-signing the UKI (sbsign append; old K1 signature retained) ..."
@@ -240,9 +243,10 @@ _esp_set_default "$RUN/esp.img" "$RUN/uki-6.2.0-dual.efi" || exit 1
 # --- §9.6 step 3: reboot BEFORE the db change (old key path, PCR 7 untouched) ----
 boot_and_wait "dual-prerevoke" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0-k1.efi.pcrsig.img"
 LOG=$(log_of "dual-prerevoke")
+assert_pcr11_prediction "S-16 dual-prerevoke"
 assert_contains "[dual] init ran (firmware verified via the OLD signature)" "$LOG" \
-    "debian-fde-harness: init started"
-assert_contains "[dual] UNSEALED (PCR 7 unchanged pre-db-change)" "$LOG" "debian-fde: UNSEALED"
+    "$(sentinel_of harness_init_started)"
+assert_contains "[dual] UNSEALED (PCR 7 unchanged pre-db-change)" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_eq "PCR 7 unchanged after the dual-sign reboot (console evidence)" "$D7_PRE" "$(console_pcr7 "dual-prerevoke")"
 
 # --- §9.6 step 4: db += K2 AND dbx += K1 in ONE vars edit -------------------------
@@ -280,11 +284,12 @@ else
         "no ovmf_sb_denied sentinel in the 150 s refusal budget; last console: $(tail -2 "$CONSOLE" 2>/dev/null | tr '\n' ' ')"
 fi
 assert_not_contains "[rot] guest never started (refused at firmware load)" "$LOG" \
-    "debian-fde-harness: init started"
+    "$(sentinel_of harness_init_started)"
 assert_not_contains "[rot] never unlocked" "$LOG" "$(sentinel_of unlocked)"
 assert_not_contains "[rot] interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "[rot] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_not_contains "[rot] never UNSEALED (revoked-signature refusal)" "$LOG" "debian-fde: UNSEALED"
+assert_not_contains "[rot] never UNSEALED (revoked-signature refusal)" "$LOG" \
+    "$(sentinel_of harness_unsealed)"
 
 # --- recovery (§9.6 steps 5-6): re-baseline + re-enroll under K2 ------------------
 # Detection with the REAL CLI: the baseline carries the pre-rotation d7; ANY
@@ -295,7 +300,7 @@ if _audit_cli >"$AUDOUT" 2>&1; then _audit_rc=0; else _audit_rc=$?; fi
 assert_eq "audit detects the rotation drift (exit 1)" "1" "$_audit_rc"
 assert_contains "audit report: pcr7 DRIFT line" "$(grep '^pcr7' "$AUDOUT")" "DRIFT"
 assert_rc "audit --accept --yes re-baselines over the new d7" 0 _audit_cli --accept --yes
-BL7=$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/debian-fde/baseline.json")
+BL7=$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/alpine-fde/baseline.json")
 assert_ne "baseline re-baselined AWAY from the pre-rotation d7" "$D7_PRE" "$BL7"
 if _audit_cli >"$AUDOUT" 2>&1; then _audit_rc=0; else _audit_rc=$?; fi
 assert_eq "audit clean after re-baseline (exit 0)" "0" "$_audit_rc"
@@ -316,11 +321,14 @@ _esp_set_default "$RUN/esp.img" "$RUN/uki-6.4.0-k2.efi" || exit 1
 # --- §9.6 step 6-7: boot + verify passwordless under the new key ------------------
 boot_and_wait "k2-re-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-rotated.fd" "$RUN/uki-6.4.0-k2.efi.pcrsig.img"
 LOG=$(log_of "k2-re-enroll")
-assert_contains "[K2] init ran (firmware verifies via K2 in db)" "$LOG" "debian-fde-harness: init started"
+cp "$RUN/uki-6.4.0-k2.efi.pcrsig.json" "$RUN/uki-pcrsig.json"   # prediction of the BOOTED (K2) UKI
+assert_pcr11_prediction "S-16 k2-re-enroll"
+assert_contains "[K2] init ran (firmware verifies via K2 in db)" "$LOG" \
+    "$(sentinel_of harness_init_started)"
 assert_contains "[K2] re-enrolled under the NEW key" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[K2] K2-signed .pcrsig consumed" "$LOG" "$(sentinel_of pcr_sig_added)"
 assert_contains "[K2] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
-assert_contains "[K2] UNSEALED (rotation complete)" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[K2] UNSEALED (rotation complete)" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_ne "PCR 7 is on the rotated value (console evidence, post-rotation)" "$D7_PRE" "$(console_pcr7 "k2-re-enroll")"
 TOKENPUB=$(disk_token_json "$RUN/disk.img" | jq -r '.[] | select(.type == "systemd-tpm2") | .tpm2_pubkey' | base64 -d)
 assert_eq "token now pins the K2 public key" \

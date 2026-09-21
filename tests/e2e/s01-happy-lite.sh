@@ -34,6 +34,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -74,6 +76,7 @@ swtpm_start "$STATE/tpm" || { echo "s01-lite: swtpm restart failed"; exit 1; }
 cp "$STATE/harness.efi" "$RUN/harness.efi"
 cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"
 cp "$STATE/disk.img" "$RUN/disk.img"
+[[ -f "$STATE/uki-pcrsig.json" ]] && cp "$STATE/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
 # negative fixture: stock vars copy (no PK, SecureBoot off)
 keys_vars_unenrolled "$STATE/keys" "$RUN/vars-unenrolled.fd"
 assert_not_contains "unenrolled vars: no SecureBootEnable" \
@@ -92,6 +95,11 @@ qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-unenrolled.fd" "$STATE
 # No interactive feeding — wait for the guest to exit.
 qemu_wait "$RUN" "$QEMU_TIMEOUT"
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
+
+# G-T13/G-E9: this boot reaches the UKI stub — the signed enter-initrd
+# prediction must equal the PRE-UNLOCK (post-phase-word) PCR 11 reading even
+# on the tampered boot (the tamper drifts PCR 7, never the pre-unlock PCR 11).
+assert_pcr11_prediction "S-01"
 
 # --- assertions ---------------------------------------------------------------
 assert_contains "token discovered" "$LOG" "$(sentinel_of token_discovered)"

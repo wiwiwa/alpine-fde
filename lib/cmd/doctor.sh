@@ -15,7 +15,7 @@ DEBIAN_FDE_DOCTOR_LOADED=1
 # (baseline.sh lazy-loads common.sh + firmware.sh relative to DEBIAN_FDE_CMD_DIR).
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 # hard-required provisioning tools: binary:package — the Alpine set (§3.1/§13;

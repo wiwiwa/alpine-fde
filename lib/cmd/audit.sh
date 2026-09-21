@@ -21,7 +21,7 @@ DEBIAN_FDE_AUDIT_LOADED=1
 
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 audit_usage() {
@@ -29,7 +29,7 @@ audit_usage() {
 Usage: debian-fde audit [--init | --accept | --yes]
 
 Compare PCR 0..3 + 7, Secure Boot state and the TCG event log against
-/etc/debian-fde/baseline.json. Exit 0 match / 1 drift / 64 error.
+/etc/alpine-fde/baseline.json. Exit 0 match / 1 drift / 64 error.
 
   --init    finalize a pending baseline from live values (first boot)
   --accept  re-baseline after operator confirmation (PCR 7 drift recovery)

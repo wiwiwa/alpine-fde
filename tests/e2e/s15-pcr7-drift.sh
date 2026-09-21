@@ -36,6 +36,8 @@ source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091
 source "$TESTS/lib/uki-build.sh"
 # shellcheck disable=SC1091
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13, §12)
+# shellcheck disable=SC1091
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091
 source "$TESTS/lib/qemu.sh"
@@ -67,7 +69,7 @@ _audit_cli() {
         DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
         DEBIAN_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
         DEBIAN_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
-        "$REPO/bin/debian-fde" audit "$@"
+        "$REPO/bin/alpine-fde" audit "$@"
 }
 _host_wipe_enrollment() {
     local img="$1" id slot
@@ -97,10 +99,10 @@ log_of() { cat "$RUN/console-$1.log" 2>/dev/null || true; }
 swtpm_start "$RUN/tpm" || { echo "s15: swtpm failed"; exit 1; }
 keys_create "$RUN/keys"
 keys_vars_enrolled "$RUN/keys" "$RUN/vars-enrolled.fd" || exit 1
-mkdir -p "$RUN/rootfs/etc/debian-fde"
+mkdir -p "$RUN/rootfs/etc/alpine-fde"
 # v1 schema baseline (expanded form: baseline_validate greps 4-space-indented
 # nested keys); values are stamped from boot-1 console evidence below.
-cat >"$RUN/rootfs/etc/debian-fde/baseline.json" <<'JSON'
+cat >"$RUN/rootfs/etc/alpine-fde/baseline.json" <<'JSON'
 {
   "schema_version": "1",
   "created_at": "PENDING-BY-SCENARIO",
@@ -145,8 +147,9 @@ disk_make_luks "$RUN/disk.img" 128 || exit 1
 # --- boot 1: healthy enroll + unlock -------------------------------------------
 boot_and_wait "v1-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "v1-enroll")
+assert_pcr11_prediction "S-15 v1-enroll"
 assert_contains "[v1] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
-assert_contains "[v1] UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[v1] UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 
 # G-R1 guard (§8.1): baseline_finalize_from_live (audit --init/--accept) refuses
 # fail-closed unless the efivars seam reports SecureBoot=1 SetupMode=0. The
@@ -176,9 +179,9 @@ assert_ne "boot 1 console records the enrolled PCR 7" "$D7_ENROLLED" ""
 
 # --- finalize the baseline fixture to the enrolled state ------------------------
 sed -i "s/PENDING-BY-SCENARIO/$(date -u +%Y-%m-%dT%H:%M:%SZ)/; s|\"pcr0\": \"pending\"|\"pcr0\": \"$PCR0_BOOT1\"|; s|\"expected_pcr7\": \"pending\"|\"expected_pcr7\": \"$D7_ENROLLED\"|" \
-    "$RUN/rootfs/etc/debian-fde/baseline.json"
+    "$RUN/rootfs/etc/alpine-fde/baseline.json"
 assert_eq "baseline fixture carries the enrolled d7" "$D7_ENROLLED" \
-    "$(jq -r '.expected_pcr7' "$RUN/rootfs/etc/debian-fde/baseline.json")"
+    "$(jq -r '.expected_pcr7' "$RUN/rootfs/etc/alpine-fde/baseline.json")"
 
 # --- §9.4 detection with the REAL CLI (live PCR 7 synthesized to a drifted value)
 _ensure_tpm || { echo "s15: swtpm not serving (drift)"; exit 1; }
@@ -192,12 +195,12 @@ assert_eq "audit detects the drift (exit 1)" "1" "$_audit_rc"
 assert_contains "audit report: pcr7 DRIFT line" "$(grep '^pcr7' "$AUDOUT")" "DRIFT"
 grep -E '^pcr' "$AUDOUT" | sed 's/^/# audit: /'
 assert_rc "audit --accept --yes re-baselines (real CLI, §9.4)" 0 _audit_cli --accept --yes
-BL7=$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/debian-fde/baseline.json")
+BL7=$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/alpine-fde/baseline.json")
 assert_ne "baseline re-baselined AWAY from the enrolled d7" "$D7_ENROLLED" "$BL7"
 if _audit_cli >"$AUDOUT" 2>&1; then _audit_rc=0; else _audit_rc=$?; fi
 assert_eq "audit clean after re-baseline (exit 0)" "0" "$_audit_rc"
 assert_contains "last-audit.json records the clean post-accept audit" \
-    "$(cat "$RUN/rootfs/etc/debian-fde/last-audit.json")" '"result": "ok"'
+    "$(cat "$RUN/rootfs/etc/alpine-fde/last-audit.json")" '"result": "ok"'
 # NB: exact-value equality with $D7_DRIFT is asserted only opportunistically —
 # the fixture swtpm can restart between the two CLI invocations (the probe is
 # conservative), re-zeroing PCRs; the re-baseline SEMANTICS above are the proof.
@@ -212,19 +215,20 @@ assert_rc "virt-fw-vars: dbx += throwaway cert" 0 \
 
 boot_and_wait "drifted" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-drifted.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "drifted")
+assert_pcr11_prediction "S-15 drifted"
 assert_contains "[drift] init ran (SB still verifies — only the SEAL refuses)" "$LOG" \
-    "debian-fde-harness: init started"
+    "$(sentinel_of harness_init_started)"
 assert_ne "[drift] firmware measured a DIFFERENT PCR 7" "$D7_ENROLLED" "$(console_pcr "drifted" 7)"
 assert_contains "[drift] enrollment SKIPPED (token still present)" "$LOG" \
     "systemd-tpm2 token present — skipping enrollment"
 assert_contains "[drift] TPM2 unseal refused (static PCR 7 term)" "$LOG" "$(sentinel_of tpm2_refused)"
 assert_contains "[drift] retry cap reached" "$LOG" "$(sentinel_of retry_cap)"
-assert_contains "[drift] PROMPT-FAILED" "$LOG" "debian-fde: PROMPT-FAILED"
+assert_contains "[drift] PROMPT-FAILED" "$LOG" "$(sentinel_of harness_prompt_failed)"
 assert_not_contains "[drift] never unlocked" "$LOG" "$(sentinel_of unlocked)"
-assert_not_contains "[drift] never UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_not_contains "[drift] never UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "[drift] interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "[drift] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "[drift] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[drift] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 
 # --- recovery: drop the stale seal; the guest re-enrolls on next boot ------------
 echo "# wiping the stale enrollment (token + slot) — re-enroll happens in-guest"
@@ -235,12 +239,13 @@ assert_eq "stale token removed" "0" "$NTOK"
 # --- boot 3: re-enroll against the new PCR 7 -> UNSEALED -------------------------
 boot_and_wait "re-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-drifted.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "re-enroll")
+assert_pcr11_prediction "S-15 re-enroll"
 assert_contains "[re] re-enrolled against drifted PCR 7" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[re] .pcrsig still consumed (no re-sign needed under A'')" "$LOG" \
     "$(sentinel_of pcr_sig_added)"
 assert_contains "[re] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
-assert_contains "[re] UNSEALED (recovery complete)" "$LOG" "debian-fde: UNSEALED"
-assert_contains "[re] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[re] UNSEALED (recovery complete)" "$LOG" "$(sentinel_of harness_unsealed)"
+assert_contains "[re] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 assert_eq "[re] sealed against the drifted (boot-layer) PCR 7" "$(console_pcr "drifted" 7)" \
     "$(console_pcr "re-enroll" 7)"
 

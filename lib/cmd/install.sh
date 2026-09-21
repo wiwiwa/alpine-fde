@@ -50,7 +50,7 @@ DEBIAN_FDE_INSTALL_LOADED=1
 
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
-  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 # The install ceremony state machine (§8.4 install-state.json) is owned by the
@@ -72,7 +72,7 @@ fi
 # ADR-20 Teardown & Direct Reboot)
 if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
-  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../firmware.sh"
+  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
 
 SPC_INSTALL_RUNNERS='dry-run chroot qemu'
@@ -82,7 +82,7 @@ inst_mnt() { printf '%s\n' "${DEBIAN_FDE_INSTALL_MNT:-/mnt}"; }
 inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"; }
 # --- resolved topology (§4.1): fs + bcache flags ------------------------------
 # ROOT_FS: btrfs (default) | ext4. BCACHE: 0 | 1. Recorded into the target's
-# /etc/debian-fde/debian-fde.conf; an ABSENT conf file (or absent keys) means
+# /etc/alpine-fde/alpine-fde.conf; an ABSENT conf file (or absent keys) means
 # the built-in defaults ROOT_FS=btrfs, BCACHE=0 — consumers must not require
 # the file to exist.
 INST_ROOT_FS=${INST_ROOT_FS:-btrfs}
@@ -171,7 +171,7 @@ inst_hooks_dir() { printf '%s\n' "${DEBIAN_FDE_HOOKS_DIR:-$(inst_tree)/hooks}"; 
 sp_keydir() { printf '%s\n' "${DEBIAN_FDE_KEYDIR:-}"; }
 
 # inst_tooling_copy_cmd TREE MNT — the §8.1 self-contained tooling copy: ship
-# ONLY the product script tree (bin/ lib/ hooks/ docs/) into <mnt>/opt/debian-fde.
+# ONLY the product script tree (bin/ lib/ hooks/ docs/) into <mnt>/opt/alpine-fde.
 # Explicit per-directory copies (§3.3): never descends into VCS/harness residue
 # (.git, tests/, fixtures/, caches, run dirs — a dirty checkout holds 100MB+
 # blobs and root-owned device nodes that a whole-tree `cp -r` copies or dies
@@ -182,11 +182,11 @@ inst_tooling_copy_cmd() {
   _itc_mkdir="mkdir -p $_itc_mnt/opt $_itc_mnt/usr/local/bin"
   _itc_cps=''
   for _itc_d in bin lib hooks docs; do
-    _itc_mkdir="$_itc_mkdir $_itc_mnt/opt/debian-fde/$_itc_d"
-    _itc_cps="$_itc_cps && cp -r $_itc_tree/$_itc_d/. $_itc_mnt/opt/debian-fde/$_itc_d/"
+    _itc_mkdir="$_itc_mkdir $_itc_mnt/opt/alpine-fde/$_itc_d"
+    _itc_cps="$_itc_cps && cp -r $_itc_tree/$_itc_d/. $_itc_mnt/opt/alpine-fde/$_itc_d/"
   done
-  printf '%s%s && ln -sf /opt/debian-fde/bin/debian-fde %s/usr/local/bin/debian-fde\n' \
-    "$_itc_mkdir" "$_itc_cps" "$_itc_mnt"
+  printf '%s%s && ln -sf /opt/alpine-fde/bin/alpine-fde %s/usr/local/bin/alpine-fde && ln -sf alpine-fde %s/usr/local/bin/debian-fde\n' \
+    "$_itc_mkdir" "$_itc_cps" "$_itc_mnt" "$_itc_mnt"
   return 0
 }
 
@@ -405,7 +405,7 @@ inst_resolve_target_metadata() {
   sed "s|<esp-partuuid>|$_irt_pu|" "$_irt_mnt/etc/fstab" >"$_irt_mnt/etc/fstab.tmp" ||
     die "install: fstab PARTUUID patch failed"
   mv "$_irt_mnt/etc/fstab.tmp" "$_irt_mnt/etc/fstab"
-  _irt_bl="$_irt_mnt/etc/debian-fde/baseline.json"
+  _irt_bl="$_irt_mnt/etc/alpine-fde/baseline.json"
   [ -f "$_irt_bl" ] || die "install: no on-target baseline at $_irt_bl — cannot set target metadata"
   baseline_set_field "$_irt_bl" '    ' target esp_partuuid "$_irt_pu"
   baseline_set_field "$_irt_bl" '    ' target luks_uuid "$_irt_uuid"
@@ -561,7 +561,7 @@ inst_provisional_enroll_line() {
     _pel_ms="$_pel_ms $_pel_m"
   done
   _pel_ms=${_pel_ms# }
-  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls /efi/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && rm -rf /run/alpine-fde # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1"
+  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls /efi/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && rm -rf /run/alpine-fde # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1"
 }
 
 # inst_baseline_pending_write MNT — §9.1 Stage-1 step 2: write the initial
@@ -569,7 +569,7 @@ inst_provisional_enroll_line() {
 # target via the baseline writer — NO host-baseline copy exists anywhere.
 inst_baseline_pending_write() {
   _ibp_mnt=$1
-  _ibp_dir=$_ibp_mnt/etc/debian-fde
+  _ibp_dir=$_ibp_mnt/etc/alpine-fde
   mkdir -p "$_ibp_dir"
   unset BL_CREATED_AT BL_PCR0 BL_PCR1 BL_PCR2 BL_PCR3 BL_PCR7 \
     BL_SB_SECURE_BOOT BL_SB_SETUP_MODE BL_SB_PK_FP BL_SB_KEK_FP \
@@ -584,7 +584,7 @@ inst_baseline_pending_write() {
 
 # inst_state_write STATE — §9.1 Stage-1 step 9: record the ceremony state
 # machine (installed → provisional-booted → finalized) in
-# <mnt>/etc/debian-fde/install-state.json. Consumes the install-state module's
+# <mnt>/etc/alpine-fde/install-state.json. Consumes the install-state module's
 # istate_write STATE (target root via DEBIAN_FDE_ROOT, atomic write); if the
 # module is not landed, the additive documented schema is written in place.
 # NOTE (§9.1): install writes only `installed` — the `provisional-booted`
@@ -597,10 +597,10 @@ inst_state_write() {
     istate_write "$_isw_state"
     unset DEBIAN_FDE_ROOT
     [ -n "$_isw_saved" ] && DEBIAN_FDE_ROOT=$_isw_saved
-    info "install: install-state written: $_isw_state ($(inst_mnt)/etc/debian-fde/install-state.json)"
+    info "install: install-state written: $_isw_state ($(inst_mnt)/etc/alpine-fde/install-state.json)"
     return 0
   fi
-  _isw_file=$(inst_mnt)/etc/debian-fde/install-state.json
+  _isw_file=$(inst_mnt)/etc/alpine-fde/install-state.json
   mkdir -p "${_isw_file%/*}"
   printf '{\n  "schema_version": 1,\n  "state": "%s",\n  "updated_at": "%s"\n}\n' \
     "$_isw_state" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$_isw_file" ||
@@ -927,11 +927,11 @@ cmd_install_main() {
     inst_plan_run host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt/efi && mount $_im_esp $_im_mnt/efi"
   fi
 
-  # --- 4. minimal rootfs (§3.3): apk populate replaces debootstrap -----------
+  # --- 4. minimal rootfs (§3.3): apk populate (self-authored bootstrap) -------
   inst_plan_run host "apk add --root $_im_mnt --initdb alpine-base"
 
   # --- 5. config drops (host-side writes; guest printf lines under qemu) -----
-  # §3.3: /etc/apk/repositories replaces the apt sources + dpkg trims
+  # §3.3: /etc/apk/repositories replaces the legacy distro package-source drops
   inst_plan_write /etc/apk/repositories $(inst_repo_lines)
   # §8.2 crypttab contract: single entry (single/bcache) has NO
   # password-cache; multi-member topologies (raid1, bcache-multi) get one
@@ -968,7 +968,7 @@ cmd_install_main() {
     'iface eth0 inet dhcp'
   # §3.3 trims: dracut-era initrd pins are dropped verbatim (the target
   # initramfs generator seam consumes ROOT_FS/BCACHE from the conf below)
-  inst_plan_write /etc/dracut.conf.d/10-debian-fde.conf \
+  inst_plan_write /etc/dracut.conf.d/10-alpine-fde.conf \
     'hostonly=yes' \
     'hostonly_cmdline=no' \
     'omit_dracutmodules+=" crypt "'
@@ -980,16 +980,16 @@ cmd_install_main() {
       'install_items+=" /lib/udev/rules.d/69-bcache.rules /lib/udev/bcache-register "'
   fi
   if [ "$(inst_root_fs)" = "btrfs" ]; then
-    inst_plan_write /etc/debian-fde/cmdline.txt \
+    inst_plan_write /etc/alpine-fde/cmdline.txt \
       "root=UUID=$_im_uuid rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
   else
-    inst_plan_write /etc/debian-fde/cmdline.txt \
+    inst_plan_write /etc/alpine-fde/cmdline.txt \
       "root=UUID=$_im_uuid ro rd.shell=0 rd.emergency=poweroff"
   fi
   # CR-01 + §4.1: persist the resolved topology + ESP mount for the build
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
   # BCACHE=0 — consumers must not require the file to exist.
-  inst_plan_write /etc/debian-fde/debian-fde.conf \
+  inst_plan_write /etc/alpine-fde/alpine-fde.conf \
     '# debian-fde runtime config (KEY=VALUE).' \
     '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0.' \
     "ROOT_FS=$(inst_root_fs)" \
@@ -1002,7 +1002,7 @@ cmd_install_main() {
   inst_plan_run host "mkdir -p $_im_mnt/proc $_im_mnt/sys $_im_mnt/dev && mount -t proc proc $_im_mnt/proc && mount --bind /sys $_im_mnt/sys && mount --bind /dev $_im_mnt/dev"
   inst_plan_run host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
 
-  # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/debian-fde ---
+  # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/alpine-fde ---
   info "tooling copy: product script tree only (bin lib hooks docs) — VCS/harness residue excluded (§3.3)"
   inst_plan_run host "$(inst_tooling_copy_cmd "$_im_tree" "$_im_mnt")"
   # G-U7: the boot-manager self-update service is masked — ESP binaries are
@@ -1021,17 +1021,17 @@ cmd_install_main() {
   inst_plan_run host "inst_baseline_pending_write $_im_mnt"
   # step 3: platform-key ceremony — PK/KEK/db + release.pem generated on the
   # encrypted root (ADR-18) by the custody flow (CLI invoked in-chroot)
-  inst_plan_run guest '/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
+  inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight)
-  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/debian-fde/lib/cmd; . /opt/debian-fde/lib/common.sh && . /opt/debian-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
+  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
   # ESP layout for the in-chroot build (systemd-boot binaries from the apk
   # transaction; ukictl build signs them, §9.1 step 5)
   inst_plan_run guest 'bootctl install --esp-path=/efi --boot-path=/efi'
   # step 5: signed boot manager + initial UKI (baseline pending ⇒ the build's
   # ensure-once enrollment is state-gated OFF — the PROVISIONAL seal below
   # is the only enrollment of Stage 1)
-  inst_plan_run guest '/opt/debian-fde/bin/debian-fde ukictl build'
+  inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde ukictl build'
   # step 6: PROVISIONAL TPM enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member container
   inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_mapper_names $_im_members_names)"

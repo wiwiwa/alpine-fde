@@ -105,8 +105,11 @@ ACCEL=$(qemu_accel) || {
 # --- harness self-test gate (§12) -------------------------------------------------
 # "Harness self-tests run before e2e so infra breakage reports as
 # harness-failure, not scenario-failure." The smoke exercises the key/disk/UKI
-# fixtures, the serial client and the registry contract; if IT is broken, no
-# scenario result from this run can be trusted.
+# fixtures, the serial client and the registry contract; the swtpm fixture
+# self-test (G-E8) covers the TPM fixture itself (start/getcap/pcrread/
+# pcrextend/stop/reset). If EITHER is broken, no scenario result from this run
+# can be trusted — both fail as the distinct exit-65 HARNESS-FAILURE class,
+# never as a scenario failure.
 echo "== harness self-test: e2e_infra_smoke"
 if ! SMOKE_OUT=$(bash "$TESTS/unit/e2e_infra_smoke.sh" 2>&1); then
     printf '%s\n' "$SMOKE_OUT"
@@ -114,6 +117,13 @@ if ! SMOKE_OUT=$(bash "$TESTS/unit/e2e_infra_smoke.sh" 2>&1); then
     exit 65
 fi
 printf '%s\n' "$SMOKE_OUT" | tail -1
+echo "== harness self-test: swtpm_fixture_smoke"
+if ! SWTPM_SMOKE_OUT=$(bash "$TESTS/unit/swtpm_fixture_smoke.sh" 2>&1); then
+    printf '%s\n' "$SWTPM_SMOKE_OUT"
+    echo "run-e2e: HARNESS-FAILURE — swtpm fixture self-test failed (not a scenario failure)" >&2
+    exit 65
+fi
+printf '%s\n' "$SWTPM_SMOKE_OUT" | tail -1
 
 # --- scenario registry ----------------------------------------------------------
 # id <TAB> script-name <TAB> status-hint   (the RUNTIME status is derived from

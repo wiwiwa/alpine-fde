@@ -63,7 +63,7 @@ cleanup() {
     rm -rf "$T"
 }
 trap cleanup EXIT
-mkdir -p "$FAKEBIN" "$EFIVARS" "$BYUUID" "$T/keys" "$(sp_etc_dir 2>/dev/null || echo "$T/root/etc/debian-fde")"
+mkdir -p "$FAKEBIN" "$EFIVARS" "$BYUUID" "$T/keys" "$(sp_etc_dir 2>/dev/null || echo "$T/root/etc/alpine-fde")"
 
 mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte
     printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"

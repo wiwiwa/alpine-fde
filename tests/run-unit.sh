@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tests/run-unit.sh — run every tests/unit/*.sh sequentially and print a
-# TAP-ish summary. Exits nonzero if any assertion or test file failed.
+# tests/run-unit.sh — run tests/unit/*.sh in parallel (default jobs: nproc)
+# and print a TAP-ish summary. Exits nonzero if any assertion or test file failed.
 # A file that exits 0 while emitting ZERO assertions is itself a failure
 # (vacuous pass), and a run that observes no assertions at all (1..0) fails.
 #
-# Usage: tests/run-unit.sh [pattern]
+# Usage: tests/run-unit.sh [-j <jobs>] [pattern]
+#   -j, --jobs: number of parallel jobs (default: nproc, or DEBIAN_FDE_TEST_JOBS)
 #   pattern: optional glob matched against unit test filenames (default '*')
 
 set -u
@@ -12,7 +13,30 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 # shellcheck source=lib/assert.sh
 source "$HERE/lib/assert.sh"
 
-PATTERN="${1:-*}"
+JOBS="${DEBIAN_FDE_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+PATTERN="*"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -j|--jobs)
+            JOBS="$2"
+            shift 2
+            ;;
+        -j*)
+            JOBS="${1#-j}"
+            shift
+            ;;
+        *)
+            PATTERN="$1"
+            shift
+            ;;
+    esac
+done
+
+if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || (( JOBS < 1 )); then
+    JOBS=1
+fi
+
 UNIT_DIR="$HERE/unit"
 # compgen -G, NOT pathname expansion: a word without wildcard chars is never
 # subject to nullglob (it stays a literal path and rc-127s below), while
@@ -27,12 +51,39 @@ if (( ${#TEST_FILES[@]} == 0 )); then
     exit 66   # EX_NOINPUT
 fi
 
+TMP_OUT=$(mktemp -d /tmp/debian-fde-run-unit.XXXXXX)
+cleanup() {
+    local pids
+    pids=$(jobs -p 2>/dev/null)
+    [[ -n "$pids" ]] && kill $pids 2>/dev/null
+    rm -rf "$TMP_OUT"
+}
+trap cleanup EXIT INT TERM
+
+# Run test files in parallel up to JOBS concurrency
+running=0
+for i in "${!TEST_FILES[@]}"; do
+    t="${TEST_FILES[$i]}"
+    (
+        trap - INT SIGQUIT
+        bash "$t" >"$TMP_OUT/$i.out" 2>&1
+        echo $? >"$TMP_OUT/$i.rc"
+    ) &
+    (( running++ ))
+    if (( running >= JOBS )); then
+        wait -n
+        (( running-- ))
+    fi
+done
+wait
+
 FILE_FAILS=0
-for t in "${TEST_FILES[@]}"; do
+for i in "${!TEST_FILES[@]}"; do
+    t="${TEST_FILES[$i]}"
     name=$(basename "$t")
     echo "# --- $name"
-    out=$(bash "$t" 2>&1)
-    rc=$?
+    out=$(cat "$TMP_OUT/$i.out" 2>/dev/null || true)
+    rc=$(cat "$TMP_OUT/$i.rc" 2>/dev/null || echo 1)
     printf '%s\n' "$out"
     # Aggregate this file's assertion counters from its output. Two house
     # styles coexist: TAP ("ok N - name" / "not ok N - name") from tests/lib/

@@ -46,7 +46,7 @@ die() {
 # --- config ---------------------------------------------------------------------
 # config_path — effective config file path (§8.4). $DEBIAN_FDE_CONF (typically
 # via the ALPINE_FDE_CONF alias, §8.1) overrides the default; clean rename to
-# the Alpine path — no legacy /etc/debian-fde fallback.
+# the Alpine path — no legacy Debian-era fallback.
 config_path() {
   printf '%s\n' "${DEBIAN_FDE_CONF:-/etc/alpine-fde/alpine-fde.conf}"
 }

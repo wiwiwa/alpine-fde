@@ -55,10 +55,10 @@ fi
 DEBIAN_FDE_KEYS_LOADED=1
 
 # Self-load common.sh (die/info/require helpers) so guest-side one-liners like
-# `. /opt/debian-fde/lib/keys.sh && keys_encrypt_release <keydir>` (§9.1 step
+# `. /opt/alpine-fde/lib/keys.sh && keys_encrypt_release <keydir>` (§9.1 step
 # 6, fresh chroot shell — functions do not cross the chroot boundary) work
 # standalone. Pattern: lib/install-state.sh.
-_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
 if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
     # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
@@ -253,7 +253,7 @@ keys_encrypt_release() {
         #   1. the cmd-dir seam (CLI context: DEBIAN_FDE_CMD_DIR always set)
         #   2. the cmd/ sibling of THIS file (any self-contained tree)
         #   3. the documented tooling-copy destination (§8.1/§9.1: the guest
-        #      one-liner runs from /opt/debian-fde with no cmd-dir env)
+        #      one-liner runs from /opt/alpine-fde with no cmd-dir env)
         #   4. the installed-tree default
         _ker_cands=""
         if [ -n "${DEBIAN_FDE_CMD_DIR:-}" ]; then
@@ -262,7 +262,7 @@ keys_encrypt_release() {
         if [ -n "${_is_lib_dir:-}" ]; then
             _ker_cands="$_ker_cands $_is_lib_dir/cmd"
         fi
-        _ker_cands="$_ker_cands /opt/debian-fde/lib/cmd /usr/share/debian-fde/lib/cmd"
+        _ker_cands="$_ker_cands /opt/alpine-fde/lib/cmd /usr/share/alpine-fde/lib/cmd"
         for _ker_cmd_dir in $_ker_cands; do
             if [ -f "$_ker_cmd_dir/rotate.sh" ]; then
                 # shellcheck disable=SC1090  # resolved via the cmd dir seam
@@ -273,7 +273,7 @@ keys_encrypt_release() {
         unset _ker_self _ker_cmd_dir _ker_cands 2>/dev/null || :
     fi
     command -v passphrase_floor_ok >/dev/null 2>&1 \
-        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/rotate.sh not found via DEBIAN_FDE_CMD_DIR, the lib sibling, /opt/debian-fde, or the installed tree)"
+        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/rotate.sh not found via DEBIAN_FDE_CMD_DIR, the lib sibling, /opt/alpine-fde, or the installed tree)"
     if ! passphrase_floor_ok "$DEBIAN_FDE_KEY_PASSPHRASE"; then
         die -r "$DEBIAN_FDE_USAGE" "keys_encrypt_release: release-key passphrase below entropy floor (§13: ≥12 chars/3 classes or ≥16; not a common pattern) — refusing before any ciphertext is written (ADR-18)"
     fi
@@ -357,7 +357,7 @@ keys_unlock() {
 # PLAINTEXT private key material.
 #   * KEYDIR outside TARGET_ROOT (offline medium)                 -> pass
 #   * KEYDIR inside TARGET_ROOT holding the ENCRYPTED release.pem -> pass
-#     (the ADR-18 in-chroot end state: $ROOT/etc/debian-fde/keys)
+#     (the ADR-18 in-chroot end state: $ROOT/etc/alpine-fde/keys)
 #   * KEYDIR inside TARGET_ROOT with plaintext private keys       -> die 64
 #   * KEYDIR inside TARGET_ROOT with no encrypted release.pem     -> die 64
 #     (the pre-generation refusal: offline `provision stage1` must not create
@@ -373,7 +373,7 @@ keys_unlock() {
 # not-yet-created keydir, which is the normal `provision stage1` case) and the
 # keydir is matched against the root in BOTH raw and normalized form (S-H1: a
 # symlinked-root spelling must not bypass the guard). "Inside the root" also
-# covers the target's /etc/debian-fde/keys key-holding directory explicitly,
+# covers the target's /etc/alpine-fde/keys key-holding directory explicitly,
 # so an empty under-root keydir is refused even before the root itself exists.
 keys_offline_guard() {
     _kg_d=$1
@@ -408,7 +408,7 @@ keys_offline_guard() {
                 "$_kg_r" | "$_kg_r"/*) _kg_inside=1 ;;
             esac
         done
-        _kg_etc=$(_kg_norm "${_kg_root}/etc/debian-fde/keys")
+        _kg_etc=$(_kg_norm "${_kg_root}/etc/alpine-fde/keys")
         for _kg_cand in "$_kg_dir_raw" "$_kg_dir"; do
             case $_kg_cand in
                 "$_kg_etc" | "$_kg_etc"/*) _kg_inside=1 ;;

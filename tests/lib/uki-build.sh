@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/lib/uki-build.sh — minimal harness UKI builder for the Debian FDE e2e
+# tests/lib/uki-build.sh — minimal harness UKI builder for the FDE e2e
 # harness (Wave 1 agent C).
 #
 # Builds a Unified Kernel Image whose initramfs is a small busybox-based
@@ -12,6 +12,14 @@
 #   * runs the real systemd-cryptsetup (trixie 257.13, from the pinned deb)
 #     with the signed-PCR policy (tpm2-signature= + .pcrsig),
 #   * prints `debian-fde: UNSEALED` / `debian-fde: PROMPT-FAILED`, powers off.
+#
+# GUEST ROOTFS (G-E1, ADR-12/§12): the S-00 payload populated into the LUKS
+# image is the SHA256-pinned ALPINE minirootfs artifact
+# (tests/lib/alpine-artifact.sh) + the alpine-fde tooling tree + host-closure
+# stub binaries (see rootfs_payload_image) — not the Debian cloud image. The
+# INITRD's own unlock machinery below still comes from the pinned Debian debs
+# (the harness-contract unlock path; its console sentinels live in
+# tests/sentinels-257.13.txt until the mkinitfs-hook unlock lands here).
 #
 # Provenance decisions (see tests/e2e/README.md for the full write-up):
 #   * Kernel: pinned Debian trixie linux-image deb (vmlinuz + module tree).
@@ -61,6 +69,8 @@ _DEBIAN_FDE_UKI_BUILD_SOURCED=1
 _HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/rootfs-fixture.sh
 source "$_HERE/rootfs-fixture.sh"
+# shellcheck source=lib/alpine-artifact.sh
+source "$_HERE/alpine-artifact.sh"
 # shellcheck source=lib/disk-fixture.sh
 source "$_HERE/disk-fixture.sh"
 
@@ -355,10 +365,10 @@ DISK=/dev/vdb
 # The one-time PASSPHRASE unlock of the freshly laid LUKS2 volume (the only
 # documented first-boot prompt; here fed from the embedded /kf0, ZERO console
 # input — no enrollment exists yet), then populate the minimal rootfs (§3.3)
-# from the SHA256-pinned Debian rootfs artifact and power off. NO enrollment and
+# from the SHA256-pinned Alpine rootfs payload and power off. NO enrollment and
 # NO token unlock in this stage: `audit --init` finalizes the baseline first
 # (S-00, host side) and the S-00b boot enrolls from the guest afterwards.
-# The pinned artifact travels on a raw payload drive (vdc for this stage — the
+# The pinned payload travels on a raw payload drive (vdc for this stage — the
 # token unlock never runs here, so the .pcrsig drive slot is free; embedding
 # the artifact in the initramfs is infeasible: a 171MiB UKI already proved
 # beyond the firmware's TCG budget, see uki_initrd_pack).
@@ -415,39 +425,33 @@ installer_stage() {
     busybox mount -t btrfs -o subvol=@ /dev/mapper/root /newroot || {
         echo "debian-fde-install: root mount FAILED (btrfs subvol=@)"; return 1; }
     echo "debian-fde-install: root mounted (btrfs subvol=@)"
-    echo "debian-fde-install: populating rootfs from the pinned Debian artifact (§3.3)"
+    echo "debian-fde-install: populating rootfs from the pinned Alpine artifact (§3.3)"
     gzip -dc /rootfs.tar | tar -xf - -C /newroot || {
         echo "debian-fde-install: rootfs untar FAILED"; return 1; }
-    # §3.3: apt policy + dpkg trims + networkd/resolved + serial getty
-    mkdir -p /newroot/etc/systemd/network /newroot/etc/systemd/system/multi-user.target.wants \
-             /newroot/etc/apt/apt.conf.d /newroot/etc/dpkg/dpkg.cfg.d
-    printf 'APT::Install-Recommends "false";\nAPT::Install-Suggests "false";\nAcquire::Languages "none";\n' \
-        >/newroot/etc/apt/apt.conf.d/99debian-fde-minimal
-    printf 'path-exclude=/usr/share/doc/*\npath-exclude=/usr/share/man/*\n' \
-        >/newroot/etc/dpkg/dpkg.cfg.d/99debian-fde-minimal
-    printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n' \
-        >/newroot/etc/systemd/network/20-debian-fde.network
-    ln -sfn /usr/lib/systemd/system/systemd-networkd.service \
-        /newroot/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
-    ln -sfn /usr/lib/systemd/system/systemd-resolved.service \
-        /newroot/etc/systemd/system/multi-user.target.wants/systemd-resolved.service
-    ln -sfn /usr/lib/systemd/system/serial-getty@.service \
-        /newroot/etc/systemd/system/multi-user.target.wants/serial-getty@ttyS0.service
-    echo "debian-fde-install: getty/networkd configured (§3.3)"
+    # §3.3/§9.1 config drops — mirror what production install writes
+    # (lib/cmd/install.sh): /etc/apk/repositories = inst_repo_lines (the
+    # mirror's main + community), /etc/network/interfaces = the OpenRC
+    # ifupdown-ng drop, `rc-update add networking boot` = the boot-runlevel
+    # symlink, and the serial getty = Alpine's own inittab line (commented
+    # upstream; enabled here for the harness console). No apk transaction runs
+    # in-guest: the payload ships the tooling + stubs pre-placed instead.
+    mkdir -p /newroot/etc/apk /newroot/etc/network /newroot/etc/runlevels/boot \
+             /newroot/usr/local/bin
+    printf '%s\n' '@@APK_MIRROR@@' '@@APK_MIRROR_COMMUNITY@@' >/newroot/etc/apk/repositories
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n' \
+        >/newroot/etc/network/interfaces
+    ln -sfn /etc/init.d/networking /newroot/etc/runlevels/boot/networking
+    if grep -q '^ttyS0::' /newroot/etc/inittab 2>/dev/null; then
+        :
+    else
+        printf '%s\n' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >>/newroot/etc/inittab
+    fi
+    echo "debian-fde-install: getty/openrc configured (§3.3)"
     # §9.1 mountpoints inside @ — the fstab entries below mount @home and
-    # @snapshots here at boot. Plus the btrfs userspace: production §9.1
-    # apt-installs btrfs-progs in-chroot for btrfs roots; the harness ships
-    # the pinned binaries instead (fsck.btrfs satisfies the fstab passno-2
-    # entries at boot, `btrfs` powers the pre-upgrade snapshots §9.3).
+    # @snapshots here at boot. (No btrfs userspace copy: the initrd's pinned
+    # btrfs-progs binaries are glibc builds and cannot execute on the musl
+    # root; the §3.3 additions set arrives via apk in the production flow.)
     mkdir -p /newroot/home /newroot/.snapshots
-    mkdir -p /newroot/usr/bin /newroot/usr/sbin /newroot/usr/lib/x86_64-linux-gnu
-    cp /usr/bin/btrfs /newroot/usr/bin/btrfs
-    cp /usr/sbin/mkfs.btrfs /newroot/usr/sbin/mkfs.btrfs
-    cp -P /usr/sbin/fsck.btrfs /newroot/usr/sbin/fsck.btrfs 2>/dev/null \
-        || busybox ln -sf ../bin/btrfs /newroot/usr/sbin/fsck.btrfs
-    for _l in /usr/lib/x86_64-linux-gnu/liblzo2.so.2*; do
-        cp -a "$_l" /newroot/usr/lib/x86_64-linux-gnu/
-    done
     # fstab: the §9.1 Btrfs subvolume forms (verbatim production shapes,
     # lib/cmd/install.sh: UUID=<rootfs-uuid> /|/home|/.snapshots btrfs
     # subvol=@…). Root is hand-mounted rw by the boot initrd before
@@ -462,18 +466,22 @@ installer_stage() {
         "UUID=$ROOTFS_UUID /home btrfs subvol=@home,defaults 0 2" \
         "UUID=$ROOTFS_UUID /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
         > /newroot/etc/fstab
-    # cloud-init probes DHCP before multi-user.target (minutes under TCG,
-    # degraded boots) — the official kill switch:
-    mkdir -p /newroot/etc/cloud
-    : > /newroot/etc/cloud/cloud-init.disabled
-    echo "debian-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) + cloud-init.disabled written"
+    echo "debian-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) written"
     # console proof of the on-disk fstab forms (asserted verbatim by S-00)
     while read -r _fl; do
         case "$_fl" in \#*) continue ;; esac
         echo "debian-fde-btrfs: fstab| $_fl"
     done < /newroot/etc/fstab
-    # machine-readable installed size + package count (§3.3 budget, asserted by S-00)
-    echo "debian-fde-rootfs: kib=$(du -sk /newroot | cut -f1) packages=$(grep -c '^Package: ' /newroot/var/lib/dpkg/status)"
+    # machine-readable installed size + package count (§3.3/ADR-12 budget,
+    # asserted by S-00). Package marker = the apk world/db: /lib/apk/db/
+    # installed, one leading `P:` line per installed package.
+    _pkgdb=/newroot/lib/apk/db/installed
+    if [ -f "$_pkgdb" ]; then
+        packages=$(grep -c '^P:' "$_pkgdb")
+    else
+        packages=0
+    fi
+    echo "debian-fde-rootfs: kib=$(du -sk /newroot | cut -f1) packages=$packages"
     # §9.1 subvolume presence — the on-disk evidence S-00 asserts (the mounted
     # root IS the @ subvolume; the list shows every subvolume on the volume)
     echo "debian-fde-btrfs: subvolume list (on-disk evidence):"
@@ -683,6 +691,11 @@ INIT
     sed -i "s/@@MODULES@@/$UKI_MODULES/" "$tree/init"
     sed -i "s/@@ROOTFS_SHA@@/${DEBIAN_FDE_ROOTFS_SHA:-none}/" "$tree/init"
     sed -i "s/@@ROOTFS_BYTES@@/${DEBIAN_FDE_ROOTFS_BYTES:-0}/" "$tree/init"
+    # apk repositories drop (inst_repo_lines shape): DEBIAN_FDE_MIRROR is the
+    # production mirror env (lib/cmd/install.sh), community = the sibling URL
+    local apk_mirror="${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"
+    sed -i "s|@@APK_MIRROR@@|$apk_mirror|" "$tree/init"
+    sed -i "s|@@APK_MIRROR_COMMUNITY@@|${apk_mirror%/main}/community|" "$tree/init"
     if [[ -n "${DEBIAN_FDE_DEBUG_SHELL:-}" ]]; then
         sed -i 's/@@DEBUG_SHELL@@/1/' "$tree/init"
     else
@@ -711,6 +724,14 @@ uki_pcrsig_disk() {
     local out="$1" json="$2"
     truncate -s 64K "$out"
     dd if="$json" of="$out" conv=notrunc status=none
+}
+
+# uki_initrd_inventory <initrd.cpio> — the initrd listing (I6 audit seam,
+# G-E10): emit the cpio file list so the infra smoke can assert the inventory
+# policy (no compilers, no package tools, no interactive shells beyond the
+# busybox init shell) and print it as a machine-greppable line.
+uki_initrd_inventory() {
+    cpio -it --quiet <"$1"
 }
 
 # uki_initrd_pack <tree> <out.cpio> — pack the staging tree as newc cpio.
@@ -874,40 +895,34 @@ esp_make() {
 }
 
 # rootfs_payload_image <out.img> — build the §12 S-00 rootfs payload drive: a
-# raw image whose LEADING bytes ARE the SHA256-pinned Debian rootfs artifact
+# raw image whose LEADING bytes ARE the SHA256-pinned Alpine rootfs payload
 # (MiB-aligned with zero padding — virtio-blk capacity is 512-byte granular and
-# an unaligned image would be rounded DOWN, truncating the artifact; /init dd's
-# the device whole, trims back to the artifact size and hash-verifies against
+# an unaligned image would be rounded DOWN, truncating the payload; /init dd's
+# the device whole, trims back to the payload size and hash-verifies against
 # the @@ROOTFS_SHA@@ pin baked at build time). Prints "<sha256> <bytes>"; the
 # S-00 scenario passes both back via DEBIAN_FDE_ROOTFS_SHA / DEBIAN_FDE_ROOTFS_
 # BYTES before calling uki_build with the `debian-fde-stage=install` word.
 #
-# DERIVED ARTIFACT (documented, deterministic — byte-identical across runs,
-# verified 2026-09-17): the PINNED upstream artifact is the Debian CLOUD IMAGE
-# tarball (20260831-2587) whose single member is a 3 GiB sparse `disk.raw`
-# (GPT: p15 ESP, p14 BIOS-boot, p1 = the ext4 root partition). No upstream
-# root-TREE tarball exists in that dated snapshot (checked; the in-guest
-# installer needs a TREE — and extracting a 3 GiB disk image in the guest
-# cannot fit any TCG budget or the LUKS volume anyway). The payload therefore
-# carves the root TREE out of the pinned image, unprivileged, HOST-side, ONCE
-# (cached): `tar -x --sparse` → `sfdisk -d` partition probe → `dd` the root
-# partition (largest, type Linux/x86-64) → `debugfs -R 'rdump /'` (e2fsprogs,
-# no root needed) → mtime normalization (rdump leaves directory mtimes at
-# dump time) → ustar re-tar with `--owner=0 --group=0` (rdump cannot
-# preserve ownership; in-guest extraction runs as root and restores uid/gid
-# from the archive) → `gzip -n` (no mtime/name ⇒ byte-stable). Derived ONLY
-# after rootfs_ensure hash-verified the pinned source. Cache:
-# <cache-dir>/debian-13-generic-amd64-rootustar.tar.gz.
+# DERIVED PAYLOAD (G-E1, ADR-12/§12): the PINNED upstream artifact is the
+# Alpine minirootfs (tests/lib/alpine-artifact.sh — downloaded once,
+# SHA256-verified, fail-closed). The §3.3 additions set cannot be pre-installed
+# without apk transactions, so the harness payload = mini rootfs + the
+# alpine-fde tooling tree (production inst_tooling_copy_cmd shape:
+# bin/lib/hooks/docs -> /opt/debian-fde + /usr/local/bin symlinks) + the
+# host-closure stub binaries (the s00b "/opt" pattern: tpm2 multitool, jq,
+# flock — each with its own ld-linux + ldd closure, wrapped from
+# /usr/local/bin; a musl guest cannot execute the host's glibc builds
+# directly). Assembled HOST-side, ONCE (cached): alpine_artifact_extract
+# (hash-verified) -> tooling copy -> stub closures -> mtime normalization ->
+# root-owned ustar re-tar -> `gzip -n` (no mtime/name => byte-stable). The
+# derived payload carries a sidecar sha256 verified on every reuse (MD-07: a
+# corrupted cached payload must never propagate into a UKI silently).
+# Cache: <alpine-artifact cache>/alpine-fde-payload-rootustar.tar.gz.
 rootfs_payload_image() {
-    local out="$1" name="debian-13-generic-amd64.tar.xz"
-    local src="$ROOTFS_CACHE_DIR/$name"
-    local derived="$ROOTFS_CACHE_DIR/debian-13-generic-amd64-rootustar.tar.gz"
-    # MD-07: the derived artifact carries a sidecar sha256 — verified on every
-    # reuse (there is no upstream pin for this artifact, so the sidecar IS the
-    # pin; a corrupted cached payload must never propagate into a UKI silently)
+    local out="$1"
+    local derived="$ALPINE_ARTIFACT_CACHE_DIR/alpine-fde-payload-rootustar.tar.gz"
     local derived_sha="$derived.sha256"
     local sha bytes aligned
-    rootfs_ensure "$name" || return 1
     if [[ -f "$derived" && -f "$derived_sha" ]] \
         && [[ "$(sha256sum "$derived" | awk '{print $1}')" == "$(awk '{print $1}' "$derived_sha")" ]]; then
         :
@@ -916,71 +931,49 @@ rootfs_payload_image() {
             echo "uki-build: derived payload cache failed its sidecar-sha check — re-deriving" >&2
         fi
         rm -f "$derived" "$derived_sha"
-        echo "uki-build: deriving the root tree payload from the pinned cloud image (one-time, cached) ..." >&2
+        echo "uki-build: deriving the Alpine payload (pinned minirootfs + tooling + stubs; one-time, cached) ..." >&2
         local tmp
         tmp=$(mktemp -d) || return 1
-        # 1. materialize the sparse disk image from the pinned tarball
-        if ! tar -x --sparse -f "$src" -C "$tmp"; then
+        # 1. the pinned, hash-verified mini rootfs
+        if ! alpine_artifact_extract "$tmp/tree"; then
             rm -rf "$tmp"
-            echo "uki-build: pinned cloud-image tarball extraction failed" >&2
             return 1
         fi
-        local diskimg="$tmp/disk.raw"
-        # 2. partition probe: the root partition = largest (Debian cloud GPT:
-        #    p15 ESP, p14 BIOS-boot, p1 root ext4). sfdisk -d emits
-        #    `name : start= N, size= M, type= ..., uuid= ...` — values carry
-        #    trailing commas; strip them (portable awk: no gawk 3-arg match).
-        local part_line start size
-        part_line=$(sfdisk -d "$diskimg" 2>/dev/null | awk '
-            /start=/ {
-                gsub(/=[ \t]+/, "=", $0)   # sfdisk pads AFTER the = sign
-                n = split($0, f, /[ \t]+/)
-                s = ""; z = ""
-                for (i = 1; i <= n; i++) {
-                    if (f[i] ~ /^start=/) { s = f[i]; sub(/^start=/, "", s); sub(/,$/, "", s) }
-                    if (f[i] ~ /^size=/)  { z = f[i]; sub(/^size=/, "", z); sub(/,$/, "", z) }
-                }
-                if ((z + 0) > (max + 0)) { max = z + 0; rs = s; rz = z }
-            }
-            END { print rs, rz }')
-        start=${part_line% *}
-        size=${part_line#* }
-        if [[ -z "$start" || -z "$size" ]]; then
+        # 2. the alpine-fde tooling tree — the production inst_tooling_copy_cmd
+        #    shape (explicit per-dir copies: bin lib hooks docs; never descends
+        #    into VCS/harness residue)
+        local tree="$tmp/tree" d repo_root
+        repo_root=$(cd "$_HERE/../.." && pwd)
+        mkdir -p "$tree/opt/debian-fde" "$tree/usr/local/bin"
+        for d in bin lib hooks docs; do
+            mkdir -p "$tree/opt/debian-fde/$d"
+            if ! cp -r "$repo_root/$d/." "$tree/opt/debian-fde/$d/"; then
+                rm -rf "$tmp"
+                echo "uki-build: tooling copy failed: $d" >&2
+                return 1
+            fi
+        done
+        ln -sfn /opt/debian-fde/bin/debian-fde "$tree/usr/local/bin/debian-fde"
+        ln -sfn /opt/debian-fde/bin/alpine-fde "$tree/usr/local/bin/alpine-fde"
+        # 3. stub binaries — the s00b /opt host-closure pattern
+        if ! _uki_payload_stub "$tree" tpm2 /opt/tpm/bin /usr/local/bin/tpm2 \
+            || ! _uki_payload_stub "$tree" jq /opt/jqbin /usr/local/bin/jq \
+            || ! _uki_payload_stub "$tree" flock /opt/flockbin /usr/local/bin/flock; then
             rm -rf "$tmp"
-            echo "uki-build: partition probe failed on the pinned cloud image (sfdisk)" >&2
             return 1
         fi
-        # 3. carve the root partition
-        dd if="$diskimg" of="$tmp/root-part.img" bs=512 skip="$start" count="$size" \
-            conv=sparse status=none || {
-            rm -rf "$tmp"
-            echo "uki-build: root partition carve failed (start=$start size=$size)" >&2
-            return 1
-        }
-        # 4. dump the tree (debugfs is unprivileged; target dir must pre-exist
-        #    and the rdump paths are resolved from THIS process's CWD — use
-        #    absolute paths)
-        mkdir -p "$tmp/tree"
-        if ! debugfs -R "rdump / $tmp/tree" "$tmp/root-part.img" >/dev/null 2>&1 \
-            || [[ ! -f "$tmp/tree/usr/lib/systemd/systemd" ]]; then
-            rm -rf "$tmp"
-            echo "uki-build: debugfs rdump of the root partition failed (or no systemd in tree)" >&2
-            return 1
-        fi
-        # 5. deterministic root-owned ustar + gzip -n payload artifact.
-        #    rdump restores FILE mtimes from the fs but leaves DIRECTORY
-        #    mtimes at dump time — normalize every mtime to epoch or the
-        #    derived artifact (and the @@ROOTFS_SHA@@ baked into the S-00
-        #    UKI) changes on every regeneration. (Verified: two dumps then
-        #    differ; normalized, byte-identical.)
-        find "$tmp/tree" -exec touch -h -d @0 {} +
+        # 4. deterministic root-owned ustar + gzip -n payload artifact.
+        #    Normalize every mtime to epoch or the derived artifact (and the
+        #    @@ROOTFS_SHA@@ baked into the S-00 UKI) changes on every
+        #    regeneration.
+        find "$tree" -exec touch -h -d @0 {} +
         # MD-07: unique temp (concurrent invocations never share a .part path)
         local tmpout
-        tmpout=$(mktemp "$ROOTFS_CACHE_DIR/.rootustar.part.XXXXXX") || { rm -rf "$tmp"; return 1; }
-        if ! (cd "$tmp/tree" && tar --format=ustar --owner=0 --group=0 --numeric-owner \
+        tmpout=$(mktemp "$ALPINE_ARTIFACT_CACHE_DIR/.alpinepayload.part.XXXXXX") || { rm -rf "$tmp"; return 1; }
+        if ! (cd "$tree" && tar --format=ustar --owner=0 --group=0 --numeric-owner \
             -cf - . | gzip -n >"$tmpout"); then
             rm -rf "$tmp" "$tmpout"
-            echo "uki-build: root tree re-containerization failed" >&2
+            echo "uki-build: alpine payload re-containerization failed" >&2
             return 1
         fi
         rm -rf "$tmp"
@@ -997,6 +990,30 @@ rootfs_payload_image() {
     }
     truncate -s "$aligned" "$out"
     printf '%s %s\n' "$sha" "$bytes"
+}
+
+# _uki_payload_stub <tree> <tool> <optdir> <wrapper-path> — copy one HOST
+# binary into the payload with its own loader + full ldd closure (the s00b
+# "/opt" pattern): a musl guest cannot run the host's glibc-linked build
+# directly, so the stub is invoked via the wrapper which pins the isolated
+# loader and library path.
+_uki_payload_stub() {
+    local tree="$1" tool="$2" optdir="$3" wrapper="$4"
+    local src interp l
+    src=$(command -v "$tool") || {
+        echo "uki-build: stub tool not found on host: $tool" >&2
+        return 1
+    }
+    mkdir -p "$tree/$optdir/lib" "$tree$(dirname "$wrapper")"
+    cp -L "$src" "$tree/$optdir/$(basename "$src")" || return 1
+    interp=$(ldd "$src" | awk '/ld-linux/{print $1}')
+    cp -L "$interp" "$tree/$optdir/ld-linux" || return 1
+    for l in $(ldd "$src" | awk '$3 ~ /^\// {print $3}'); do
+        cp -L "$l" "$tree/$optdir/lib/" || return 1
+    done
+    printf '#!/bin/sh\nexec %s/ld-linux --library-path %s/lib %s/%s "$@"\n' \
+        "$optdir" "$optdir" "$optdir" "$(basename "$src")" >"$tree$wrapper"
+    chmod 755 "$tree$wrapper"
 }
 
 # uki_pcrsig_enter_initrd_pol <pcrsig.json> — the .pcrsig entry the unlock

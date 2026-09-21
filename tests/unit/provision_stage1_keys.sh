@@ -30,7 +30,7 @@ cleanup() {
     rm -rf "$T"
 }
 trap cleanup EXIT
-export DEBIAN_FDE_ROOT="$T/root"    # baseline lands at $T/root/etc/debian-fde
+export DEBIAN_FDE_ROOT="$T/root"    # baseline lands at $T/root/etc/alpine-fde
 
 # --- golden: EFI_CERT_X509_GUID mixed-endian + ESL layout ---------------------
 # synthetic 8-byte "cert" 11 12 .. 18, zero owner GUID

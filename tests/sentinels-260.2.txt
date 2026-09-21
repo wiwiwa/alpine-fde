@@ -1,0 +1,144 @@
+# tests/sentinels-260.2.txt — versioned sentinel table for the ALPINE-platform
+# harness (docs/Architecture.md §12 "Sentinel pinning"; gap G-E2). This is the
+# DEFAULT table for the Alpine contract (tests/lib/sentinels.sh: SENTINELS_VER
+# defaults to 260.2); tests/sentinels-257.13.txt remains loadable (SENTINELS_
+# VER=257.13 or an explicit SENTINELS_FILE) as the Debian-era provenance
+# record.
+#
+# Schema: identical to 257.13 — one sentinel per line, `name<TAB>string`.
+# Data lines carry NO trailing comments (the awk helper greps field 2
+# verbatim). All console greps in the e2e scenarios consume the selected
+# table — never hardcode sentinel strings in scenario code.
+#
+# Name-space discipline (pinned by tests/unit/e2e_infra_smoke.sh): a name
+# defined in MORE THAN ONE fixture must carry the IDENTICAL string in all of
+# them — a name that changes value across eras is a silent-rot collision and
+# must be RENAMED instead. The Alpine-contract strings below therefore carry
+# fresh `unseal_*` / `sdboot_*` / `cli_*` names; the names shared with
+# 257.13 are value-identical carries (their emitters are unchanged harness
+# machinery — see the last section).
+#
+# ===========================================================================
+# Section 1 — mkinitfs unseal hook (the pin of record: byte-extracted from
+# hooks/mkinitfs/alpine-fde-unseal.sh, the shipped §8.2 hook; ADR-13/ADR-20).
+# Provenance notes:
+#   * unseal_pcrextend_ok: the hook printf is
+#     "extended '$FDE_PCR_PHASE' into PCR 11 (ukify --measure phase
+#     alignment)"; FDE_PCR_PHASE=enter-initrd is pinned at the top of the
+#     hook, so the stored string is the exact runtime rendering.
+#   * unseal_3strike: the hook printf interpolates $FDE_MAX_ATTEMPTS (=3,
+#     pinned in the hook); the stored string is the interpolation-safe suffix
+#     "… failed recovery passphrase attempts — giving up".
+#   * unseal_prompt_re: printf literal "enter the recovery passphrase for %s
+#     (keyslot 0): " emitted via the "alpine-fde-unseal: " prefix; stored as
+#     the anchored regex shape (same discipline as 257.13's prompt_re).
+#   * unseal_poweroff: the terminal fail-closed action (§8.2) — _fdh_poweroff
+#     prints the reason, then "fail-closed: forcing poweroff (no shell is
+#     offered, §8.2)", then `poweroff -f`. An interactive shell is NEVER
+#     offered by the hook (H-G1).
+#
+unseal_pcrextend_ok	extended 'enter-initrd' into PCR 11
+unseal_tpm_absent	TPM absent or refused the PCR 11 extend
+unseal_token_info	token: pcrs=[
+unseal_token_missing	no systemd-tpm2 token found on any crypttab member
+unseal_sig_refused	token/signature verification refused
+unseal_seal_refused	the TPM refused the sealed blob under the current PCR state
+unseal_unlocked	via the TPM token
+unseal_open_failed	token unlock failed for
+unseal_pass_unlocked	via the recovery passphrase
+unseal_prompt_re	enter the recovery passphrase for .* \(keyslot 0\):
+unseal_3strike	failed recovery passphrase attempts — giving up
+unseal_poweroff	fail-closed: forcing poweroff (no shell is offered
+unseal_no_crypttab	no root/root<N> entry in
+unseal_state_flip	install-state: installed -> provisional-booted
+#
+# ===========================================================================
+# Section 2 — systemd-boot 260.2 console anchors (ADR-1: Alpine ≥ 3.24 ships
+# systemd-boot 260.2 in main). Byte-extracted (strings) from the pinned apk:
+#   systemd-boot-260.2-r0.apk
+#     sha256 eeef3a0919785d1993dc699f2ca455ad1a84dded86050d7ddfdabdaf954406ce
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/systemd-boot-260.2-r0.apk
+#   member: usr/lib/systemd/boot/efi/systemd-bootx64.efi
+# Provenance notes: the loader-info banner and version string are static
+# literals; secure_boot / firmware_vendor / load_error are the leading
+# literals of printf formats ("%ls"/"%u.%02u" suffixes elided — the stored
+# value is the greppable prefix).
+#
+sdboot_loaderinfo	#### LoaderInfo: systemd-boot 260.2-0 ####
+sdboot_version	systemd-boot version: 260.2-0
+sdboot_secure_boot	secure boot:
+sdboot_firmware_vendor	firmware vendor:
+sdboot_load_error	Error loading EFI binary
+#
+# ===========================================================================
+# Section 3 — enroll-from-guest CLI markers (§12 S-00b: enrollment runs from
+# the guest via the production CLI). Byte-extracted from the shipped lib:
+#   lib/cmd/ukictl-build.sh:534  info "enroll: no TPM token on … — enrolling
+#     once (Mechanism B)"           -> cli_enroll_once (suffix literal)
+#   lib/cmd/ukictl-build.sh:526  info "enroll: systemd-tpm2 token already
+#     present … enrollment stands, no TPM operations (s14)" -> cli_enroll_stands
+#   lib/cmd/ukictl-build.sh:505  info "ukictl build: kernel … installed and
+#     recorded (pcr11=…"            -> cli_build_recorded (suffix literal)
+#   lib/seal.sh:367  info "seal: sealed the random volume passphrase (… into
+#     keyslot …)"                   -> cli_seal_slot
+#   lib/cmd/enroll-tpm.sh:193  die "enroll-tpm: PCR 7 drift: live …"
+#     -> cli_pcr7_drift
+#   lib/cmd/enroll-tpm.sh:331  info "existing TPM enrollment found — retiring
+#     it in the same run the fresh seal stands" -> cli_enroll_retire
+# (info lines render as "<prog>: info: <text>"; the stored values are the
+# prog-independent suffix literals.)
+#
+cli_enroll_once	enrolling once (Mechanism B)
+cli_enroll_stands	enrollment stands, no TPM operations
+cli_build_recorded	 installed and recorded (pcr11=
+cli_seal_slot	sealed the random volume passphrase (
+cli_pcr7_drift	enroll-tpm: PCR 7 drift: live
+cli_enroll_retire	existing TPM enrollment found — retiring it
+#
+# ===========================================================================
+# Section 4 — harness markers (the scenario-stable layer). These are printed
+# by the harness UKI itself (tests/lib/uki-build.sh), not by the guest OS, so
+# they are stable across the platform seam; names exist ONLY here (257.13
+# predates them), values stable for scenario consumption.
+#
+harness_init_started	debian-fde-harness: init started
+harness_tpm_present	/dev/tpmrm0 present
+harness_pcr_re	^debian-fde-pcr sha256:[0-9]{1,2}=[0-9a-f]{64}
+harness_rootfs_re	^debian-fde-rootfs: kib=[0-9]+ packages=[0-9]+
+harness_unsealed	debian-fde: UNSEALED
+harness_prompt_failed	debian-fde: PROMPT-FAILED
+harness_switch_root	debian-fde: SWITCH-ROOT
+harness_install_failed	debian-fde: INSTALL-FAILED
+harness_poweroff	debian-fde: POWEROFF
+#
+# ===========================================================================
+# Section 5 — carried 257.13 sentinels (VALUES IDENTICAL, name-for-name).
+# The harness UKI's unlock machinery is unchanged in this wave (the pinned
+# Debian 257.13 systemd-cryptsetup/cryptenroll debs still run in the initrd,
+# and the OVMF/sbverify/kernel anchors are the same binaries), so these
+# sentinels remain byte-true of the Alpine-era harness consoles. Carried here
+# because the default table flipped to this fixture and every existing
+# sentinel_of consumer must resolve; the value-identity smoke pin (no name
+# collides across fixtures) holds by construction.
+#
+token_discovered	Requesting JSON for token 0.
+pcr_sig_added	Adding PCR signature policy.
+unlocked	activated with a LUKS token.
+prompt_re	^Please enter .* for disk
+retry_cap	Too many attempts to activate; giving up.
+cryptenroll_enrolled	New TPM2 token enrolled as key slot 1.
+pcr_sig_missing	Couldn't find signature for this PCR bank
+cryptsetup_nokey	No key available with this passphrase.
+tpm_absent_nodevice	No TPM2 (tpmrm) device found.
+tpm_absent_notfound	TPM2 device not found.
+tpm_absent_fallback	No TPM2 hardware discovered and EFI firmware does not see it either, falling back to traditional unlocking.
+tpm2_refused	Failed to unseal secret using TPM2
+da_locked	dictionary attack lockout mode
+token_unusable	Token 9 unusable for segment 0 with desired keyslot priority 2.
+emergency_forbidden	Entering emergency mode.
+ovmf_bds_loading	BdsDxe: loading Boot0002
+ovmf_sb_denied	Access Denied -- rejected probably by Secure Boot
+ovmf_no_bootable	BdsDxe: No bootable option or device was found.
+ovmf_bds_starting	BdsDxe: starting Boot
+sbverify_no_sig	No signature table present
+linux_banner	Linux version 6.

@@ -30,6 +30,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -159,6 +161,7 @@ fi
 swtpm_start "$STATE/tpm" || { echo "s06: swtpm restart failed"; exit 1; }
 cp "$STATE/harness.efi" "$RUN/harness.efi"
 cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"   # the .pcrsig remains perfectly VALID
+[[ -f "$STATE/uki-pcrsig.json" ]] && cp "$STATE/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
 # SB off: the trap combines a firmware-level downgrade with the metadata tamper
 keys_vars_unenrolled "$STATE/keys" "$RUN/vars-unenrolled.fd"
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
@@ -183,6 +186,10 @@ else
         "neither tpm2_refused nor signature-lookup failure in console"
 fi
 assert_contains "harness fail-closed sentinel" "$LOG" "debian-fde: PROMPT-FAILED"
+
+# G-T13/G-E9 (boot reaches the UKI stub): the pubkey swap breaks the token
+# policy, never the PRE-UNLOCK PCR 11 measurement — prediction must hold.
+assert_pcr11_prediction "S-06"
 assert_not_contains "interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "never unlocked (token)" "$LOG" "$(sentinel_of unlocked)"
 assert_not_contains "never unlocked (harness sentinel)" "$LOG" "debian-fde: UNSEALED"

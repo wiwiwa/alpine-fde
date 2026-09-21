@@ -14,10 +14,19 @@
 #
 # VERDICT (empirical, filled in by the run): see the "H-G7 VERDICT" line in
 # the output and tests/e2e/README.md.
+#
+# Alpine contract (260.2 sentinel fixture): the kernel-update delivery path is
+# the apk trigger + /etc/kernel-hooks.d convention (§8.3, ADR-19/ADR-13) — the
+# update boot carries the alpine-fde tooling payload on its pcrsig drive tail
+# and the scenario asserts the contract markers: the kernel hook + apk trigger
+# ship in the payload and both invoke `alpine-fde ukictl build`. Every
+# UKI-reaching boot additionally asserts ukify's enter-initrd PCR 11
+# prediction against the guest's pre-unlock reading (G-T13, §12).
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 TESTS=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$TESTS/.." && pwd)
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/assert.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
@@ -26,6 +35,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/uki-build.sh"
+# shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13, §12)
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
@@ -121,11 +132,46 @@ esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/uki-6.2.0.efi" || exit 1
 _esp_add_uki "$RUN/esp.img" "$RUN/uki-6.2.0.efi" debian-fde-6.2.0.efi || exit 1
 disk_make_luks "$RUN/disk.img" 128 || exit 1
 
+# --- §8.3 Alpine kernel-update delivery contract (apk trigger + kernel-hooks.d) --
+# The update boot carries the alpine-fde tooling payload on its pcrsig drive
+# tail; the scenario asserts the payload ships the kernel hook + apk trigger
+# and both carry the `alpine-fde ukictl build` marker (§8.3, ADR-19/ADR-13).
+TOOLING="$RUN/tooling"
+rm -rf "$TOOLING" "$RUN/tooling.tar.gz"
+mkdir -p "$TOOLING/opt/alpine-fde"
+for d in bin lib hooks; do
+    cp -r "$REPO/$d" "$TOOLING/opt/alpine-fde/$d" || exit 1
+done
+tar -C "$TOOLING" -czf "$RUN/tooling.tar.gz" opt || { echo "s14: tooling tar failed"; exit 1; }
+TOOLING_LISTING="$RUN/tooling.listing"
+tar -tzf "$RUN/tooling.tar.gz" >"$TOOLING_LISTING"
+if grep -qx "opt/alpine-fde/hooks/kernel-hooks.d/alpine-fde-build.hook" "$TOOLING_LISTING" \
+    && grep -qx "opt/alpine-fde/hooks/apk/triggers/alpine-fde.trigger" "$TOOLING_LISTING" \
+    && grep -qx "opt/alpine-fde/hooks/mkinitfs/alpine-fde-unseal.sh" "$TOOLING_LISTING" \
+    && grep -qx "opt/alpine-fde/hooks/mkinitfs/features.d/alpine-fde.files" "$TOOLING_LISTING" \
+    && grep -qx "opt/alpine-fde/bin/alpine-fde" "$TOOLING_LISTING"; then
+    _assert_result ok "S-14 payload: kernel hook + apk trigger + mkinitfs hook/features.d ship in the tooling payload" ""
+else
+    _assert_result not-ok "S-14 payload: kernel hook + apk trigger + mkinitfs hook/features.d ship in the tooling payload" \
+        "required entries missing from $TOOLING_LISTING"
+fi
+assert_contains "S-14 contract: the kernel hook invokes alpine-fde ukictl build (§8.3 marker)" \
+    "$(cat "$TOOLING/opt/alpine-fde/hooks/kernel-hooks.d/alpine-fde-build.hook")" "ukictl build"
+assert_contains "S-14 contract: the apk trigger invokes alpine-fde ukictl build (§8.3 marker)" \
+    "$(cat "$TOOLING/opt/alpine-fde/hooks/apk/triggers/alpine-fde.trigger")" "ukictl build"
+assert_contains "S-14 contract: the apk trigger watches the kernel module tree" \
+    "$(cat "$TOOLING/opt/alpine-fde/hooks/apk/triggers/alpine-fde.trigger")" "/lib/modules"
+assert_contains "S-14 contract: features.d lists the bcache driver (§4.1 hybrid pieces)" \
+    "$(cat "$TOOLING/opt/alpine-fde/hooks/mkinitfs/features.d/alpine-fde.files")" "bcache.ko"
+# the update boot's payload drive pairs the 6.4.0 .pcrsig with the tooling tail
+cat "$RUN/pcrsig.img" "$RUN/tooling.tar.gz" >"$RUN/pcrsig-tooling.img"
+
 # --- boot 1: 6.2.0 enroll + unlock (s00 state) ---------------------------------
 boot_and_wait "v1-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "v1-enroll")
+assert_pcr11_prediction "S-14 v1-enroll"
 assert_contains "[6.2.0] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
-assert_contains "[6.2.0] UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[6.2.0] UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "[6.2.0] interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "[6.2.0] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 _meta_snapshot "$RUN/disk.img" "$RUN/meta-post-v1.json"
@@ -161,17 +207,18 @@ assert_not_contains "failed rebuild: no broken-variant UKI on the ESP" "$ESPLS" 
 # --- boot 2: the OLD default UKI still boots + auto-unlocks ---------------------
 boot_and_wait "old-default" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "old-default")
+assert_pcr11_prediction "S-14 old-default"
 assert_contains "[old] init ran (failed update did not strand the machine)" "$LOG" \
-    "debian-fde-harness: init started"
+    "$(sentinel_of harness_init_started)"
 assert_contains "[old] enrollment SKIPPED (zero TPM operations)" "$LOG" \
     "systemd-tpm2 token present — skipping enrollment"
 assert_not_contains "[old] no new enrollment after the failed rebuild" "$LOG" \
     "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[old] old default UKI still AUTO-UNLOCKS" "$LOG" "$(sentinel_of unlocked)"
-assert_contains "[old] UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[old] UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "[old] interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "[old] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "[old] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[old] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 
 # --- kernel update: build 6.4.0 + install, ZERO TPM operations ------------------
 echo "# building UKI 6.4.0 (kernel update; NO enrollment will be performed) ..."
@@ -187,20 +234,23 @@ ESPLS=$(mdir -i "$RUN/esp.img" ::/EFI/BOOT ::/EFI/Linux 2>/dev/null)
 assert_contains "ESP retains 6.2.0 (old kernel kept for rollback)" "$ESPLS" "debian-fde-6.2.0.efi"
 assert_contains "ESP has 6.4.0 as new default" "$ESPLS" "debian-fde-6.4.0.efi"
 
-# --- boot 2: new kernel, existing token, no re-enroll ---------------------------
-boot_and_wait "v2-noenroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.4.0.efi.pcrsig.img"
+# --- boot 2: new kernel, existing token, no re-enroll ----------------------------
+# the payload drive pairs the 6.4.0 .pcrsig with the §8.3 tooling tail
+boot_and_wait "v2-noenroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/pcrsig-tooling.img"
 LOG=$(log_of "v2-noenroll")
-assert_contains "[6.4.0] init ran" "$LOG" "debian-fde-harness: init started"
+cp "$RUN/uki-6.4.0.efi.pcrsig.json" "$RUN/uki-pcrsig.json"   # prediction of the BOOTED UKI
+assert_pcr11_prediction "S-14 v2-noenroll"
+assert_contains "[6.4.0] init ran" "$LOG" "$(sentinel_of harness_init_started)"
 assert_contains "[6.4.0] enrollment SKIPPED (zero TPM operations)" "$LOG" \
     "systemd-tpm2 token present — skipping enrollment"
 assert_not_contains "[6.4.0] no new enrollment" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[6.4.0] token discovered" "$LOG" "$(sentinel_of token_discovered)"
 assert_contains "[6.4.0] NEW kernel's .pcrsig consumed" "$LOG" "$(sentinel_of pcr_sig_added)"
 assert_contains "[6.4.0] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
-assert_contains "[6.4.0] UNSEALED (kernel update passwordless)" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[6.4.0] UNSEALED (kernel update passwordless)" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "[6.4.0] interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "[6.4.0] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "[6.4.0] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[6.4.0] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 _meta_snapshot "$RUN/disk.img" "$RUN/meta-post-v2.json"
 assert_rc "LUKS2 metadata byte-identical across the update boot (no enrollment)" 0 \
     cmp -s "$RUN/meta-post-v1.json" "$RUN/meta-post-v2.json"

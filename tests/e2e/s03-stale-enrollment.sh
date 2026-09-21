@@ -34,6 +34,8 @@ source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/uki-build.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
+# shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/qemu.sh"
@@ -159,6 +161,9 @@ assert_contains "[v1] init ran" "$LOG" "debian-fde-harness: init started"
 assert_contains "[v1] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[v1] UNSEALED" "$LOG" "debian-fde: UNSEALED"
 assert_contains "[v1] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+# G-T13/G-E9 (boot reaches the UKI stub): $RUN/uki-pcrsig.json is 6.2.0's
+# signed prediction, $CONSOLE is this boot's console.
+assert_pcr11_prediction "S-03 [v1]"
 
 # --- flavor 1: new UKI with NO .pcrsig -----------------------------------------
 echo "# building UKI 6.3.0 WITHOUT PCR signing (no .pcrsig section) ..."
@@ -183,6 +188,8 @@ assert_not_contains "[v3] never unlocked (token)" "$LOG" "$(sentinel_of unlocked
 assert_not_contains "[v3] never unlocked (harness)" "$LOG" "debian-fde: UNSEALED"
 assert_not_contains "[v3] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 assert_contains "[v3] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+# NB: NO assert_pcr11_prediction for this boot — the defect under test is the
+# ABSENT .pcrsig (no signed prediction exists to compare G-T13 against).
 
 # --- flavor 2: valid UKI + valid .pcrsig, token removed -------------------------
 # Production initramfs CANNOT self-heal (no enrollment tooling/key material in
@@ -215,6 +222,10 @@ assert_not_contains "[v1'] never unlocked (token)" "$LOG" "$(sentinel_of unlocke
 assert_not_contains "[v1'] never unlocked (harness)" "$LOG" "debian-fde: UNSEALED"
 assert_not_contains "[v1'] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 assert_contains "[v1'] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+# G-T13/G-E9 for the no-token boot (valid UKI + valid .pcrsig): pair the
+# helper with 6.2.0nt's OWN signed prediction.
+cp "$RUN/uki-6.2.0nt.efi.pcrsig.json" "$RUN/uki-pcrsig.json"
+assert_pcr11_prediction "S-03 [v1']"
 
 # --- wrap up -------------------------------------------------------------------
 rm -rf "$RUN/guest-tree" "$RUN/stage-6.3.0" "$RUN/stage-6.2.0nt"

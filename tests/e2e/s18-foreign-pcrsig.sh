@@ -1,36 +1,46 @@
 #!/usr/bin/env bash
-# tests/e2e/s18-foreign-pcrsig.sh — §6.1 signing negative control (G-T5):
-# "signature from a FOREIGN key — must fail closed at unlock."
+# tests/e2e/s18-foreign-pcrsig.sh — §6.1 signing negative controls (G-T5/G-E14):
+# a forged .pcrsig must FAIL CLOSED at unlock, for EVERY forgery class:
+#   control 1  foreign-key    — same (correct) pol entries, every sig re-signed
+#                               by a FOREIGN RSA key (the value is right, the
+#                               SIGNER is wrong);
+#   control 2  wrong-selection — release-signed pols RELABELED pcrs [11] ->
+#                               [7,11]: the signature is well-formed and
+#                               release-signed, but the entry no longer matches
+#                               the PCR selection the token pins (pcrs != the
+#                               policy selection — §6.1 "pcrs ≠ {7,11}");
+#   control 3  stale-d7       — a well-formed release-signed COMBINED {7,11}
+#                               policyDigest computed over a STALE PCR 7
+#                               (§6.1 "signature over a stale d7").
 #
-# Tamper: the payload-drive `.pcrsig` is REPLACED by a JSON carrying the SAME
-# predicted PCR-11 policy digests (same pol entries — the prediction for THIS
-# UKI is correct) but every `sig` re-signed by a FOREIGN RSA key. The outer
-# sbsign signature is OURS (the release UKI is booted unmodified), so the
+# Tamper geometry (all controls): the payload-drive `.pcrsig` is REPLACED; the
+# outer sbsign signature is OURS (the release UKI boots unmodified), so the
 # firmware happily boots it — Secure Boot cannot see the payload drive. The
-# TPM policy is where the foreign signer must die: the token's sealed policy
-# pivots on the RELEASE public key (PolicyAuthorize, §6.1 A″); a policy
-# signature from any other key must fail verification -> the token path is
-# refused -> documented fallback prompt -> bounded retries (3) -> clean
-# poweroff. NEVER `Entering emergency mode.` (H-G1).
+# TPM policy is where each forgery must die: the token's sealed policy pivots
+# on the RELEASE public key (PolicyAuthorize, §6.1 A″) over the LIVE PCR
+# digest — wrong signer, wrong selection, or stale digest all refuse -> the
+# token path is refused -> documented fallback prompt -> bounded retries (3)
+# -> clean poweroff. NEVER `Entering emergency mode.` (H-G1).
 #
-# Host-side proofs (no TPM involved): the verification recipe itself is
-# cross-checked — release.pub verifies the RELEASE sig over pol (positive),
-# release.pub REFUSES the foreign sig over the same pol (the negative
-# control, exact bytes), foreign.pub verifies the foreign sig (well-formed).
-# The pol entries are asserted IDENTICAL between the release and the foreign
-# JSON: only the signer moved — the refusal cannot be a stale prediction.
+# Host-side proofs per control (no TPM involved): the verification recipe
+# itself is cross-checked — release.pub verifies the RELEASE sig over pol
+# (positive), release.pub REFUSES the foreign sig (control 1 negative, exact
+# bytes), and each forged JSON's shape/selection/freshness is pinned
+# (controls 2/3). Control 1 additionally asserts the pol entries IDENTICAL
+# between the release and the foreign JSON: only the signer moved.
 #
-# In-guest: PCR 7 asserted equal to the enrolled boot (no drift confound) and
-# the post-phase PCR 11 asserted equal to the signed pol (the G-T13 property
-# — the pol MATCHED, so the refusal is exactly the foreign-signature
-# verification, not a value mismatch).
+# In-guest (every control): the post-phase PCR 11 asserted equal to the signed
+# pol where the pol is the true prediction (control 1 — the G-T13 property:
+# the pol MATCHED, so the refusal is exactly the forgery, not a value
+# mismatch); controls 2/3 assert the refusal sentinel of their class.
 #
 # Reuses s00b's enrolled artifacts via DEBIAN_FDE_E2E_STATE (run-e2e.sh sets
-# it); otherwise builds + boots them itself (2 boots).
+# it); otherwise builds + boots them itself (bootstrap boot + 3 control boots).
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 TESTS=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$TESTS/.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$TESTS/lib/assert.sh"
 # shellcheck source=../lib/keys-fixture.sh
@@ -39,6 +49,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13, §12)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -47,6 +59,12 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# the stale-d7 forge signs the §6.1.1 combined {7,11} policyDigest — the
+# product's own TPM-free policy math (host-side: openssl + awk only)
+# shellcheck source=../../lib/common.sh
+source "$REPO/lib/common.sh"
+# shellcheck source=../../lib/policy.sh
+source "$REPO/lib/policy.sh"
 
 RUN="$TESTS/e2e/.runs/s18-foreign-pcrsig-$(date +%s)"
 mkdir -p "$RUN"
@@ -92,13 +110,14 @@ if [[ -n "$STATE" && -f "$STATE/disk.img" && -d "$STATE/tpm" && -f "$STATE/harne
     echo "# reusing enrolled state from $STATE"
     RUN_ENROLLED="$STATE"
 else
-    echo "# no s00b state — building + booting it (boot 1 of 2: enroll under SB-on vars)"
+    echo "# no s00b state — building + booting it (bootstrap: enroll under SB-on vars)"
     RUN_ENROLLED="$RUN/enroll-boot"
     mkdir -p "$RUN_ENROLLED"
     swtpm_start "$RUN_ENROLLED/tpm" || { echo "s18: swtpm failed"; exit 1; }
     keys_create "$RUN_ENROLLED/keys"
     keys_vars_enrolled "$RUN_ENROLLED/keys" "$RUN_ENROLLED/vars-enrolled.fd" || exit 1
     uki_build "$RUN_ENROLLED" "$RUN_ENROLLED/keys" "$RUN_ENROLLED/harness.efi" || exit 1
+    cp "$RUN_ENROLLED/uki-pcrsig.json" "$RUN/uki-pcrsig.json"   # prediction of the BOOTED UKI
     UKI_MIB=$(( ($(stat -c%s "$RUN_ENROLLED/harness.efi") + 1048575) / 1048576 ))
     esp_make "$RUN_ENROLLED/esp.img" $(( UKI_MIB * 2 + 8 )) "$RUN_ENROLLED/harness.efi" || exit 1
     disk_make_luks "$RUN_ENROLLED/disk.img" 128 || exit 1
@@ -113,6 +132,7 @@ else
     done
     grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
         echo "s18: enroll boot did not reach UNSEALED — state unusable"; exit 1; }
+    CONSOLE="$RUN_ENROLLED/console.log" assert_pcr11_prediction "S-18 bootstrap"
     STATE="$RUN_ENROLLED"
 fi
 
@@ -139,7 +159,7 @@ assert_rc "outer sbsign signature is OURS (the firmware boots the UKI)" 0 \
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 esp_make "$RUN/esp.img" $(( UKI_MIB * 2 + 8 )) "$RUN/harness.efi" || exit 1
 
-# --- the foreign-signed .pcrsig ---------------------------------------------------
+# --- the THREE forged .pcrsig variants (§6.1/§12 negative controls) ----------------
 # FOREIGN keypair (the "compromised/foreign signer"): a valid, well-formed
 # RSA key that has NOTHING to do with the enrolled release identity.
 openssl genrsa -out "$RUN/foreign.key" 2048 2>/dev/null
@@ -147,30 +167,6 @@ openssl pkey -in "$RUN/foreign.key" -pubout -out "$RUN/foreign.pub" 2>/dev/null
 assert_file_exists "foreign keypair generated" "$RUN/foreign.pub"
 assert_rc "foreign key is NOT the release key (distinct key material)" 1 \
     cmp -s "$RUN/foreign.pub" "$STATE/keys/release.pub"
-
-# re-sign EVERY bank entry's pol with the foreign key (structure preserved,
-# only .sig moves); pol entries are the CORRECT prediction for this UKI —
-# that is the point: the value is right, the SIGNER is wrong.
-REL_JSON="$RUN/uki-pcrsig.json"
-FOR_JSON="$RUN/pcrsig-foreign.json"
-cp "$REL_JSON" "$FOR_JSON"
-N_ENTRIES=$(jq '.sha256 | length' "$REL_JSON")
-if (( N_ENTRIES >= 1 )); then
-    _assert_result ok "release .pcrsig carries $N_ENTRIES signed pol entries" ""
-else
-    _assert_result not-ok "release .pcrsig carries signed pol entries" "length=0"
-fi
-for ((e = 0; e < N_ENTRIES; e++)); do
-    jq -r ".sha256[$e].pol" "$REL_JSON" | xxd -r -p >"$RUN/pol.bin"
-    openssl dgst -sha256 -sign "$RUN/foreign.key" -out "$RUN/pol.sig" "$RUN/pol.bin"
-    SIG_B64=$(openssl base64 -A -in "$RUN/pol.sig")
-    # NB: update the ACCUMULATOR (FOR_JSON), not the release JSON — each
-    # entry must stay foreign-signed across iterations
-    jq --arg sig "$SIG_B64" ".sha256[$e].sig = \$sig" "$FOR_JSON" >"$FOR_JSON.tmp"
-    mv "$FOR_JSON.tmp" "$FOR_JSON"
-done
-assert_eq "foreign .pcrsig keeps the SAME pol entries (only the signer moved)" \
-    "$(jq -c '[.sha256[].pol]' "$REL_JSON")" "$(jq -c '[.sha256[].pol]' "$FOR_JSON")"
 
 # _sig_verifies <json> <entry> <pubkey> — the unlock-side verification recipe,
 # host-side: sig (base64) is an RSA-SHA256 signature over the RAW pol bytes.
@@ -181,117 +177,224 @@ _sig_verifies() {
     jq -r ".sha256[$e].sig" "$json" | openssl base64 -d -A >"$RUN/vpol.sig" 2>/dev/null
     openssl dgst -sha256 -verify "$pub" -signature "$RUN/vpol.sig" "$RUN/vpol.bin" >/dev/null 2>&1
 }
-# EVERY entry must move to the foreign signer (entry 0 == enter-initrd is the
-# one the unlock consumes — a partially re-signed JSON would leave a VALID
-# release entry behind and the negative control would be vacuous)
-for ((e = 0; e < N_ENTRIES; e++)); do
-    assert_rc "positive control [$e]: release.pub verifies the RELEASE sig over pol" 0 \
-        _sig_verifies "$REL_JSON" "$e" "$STATE/keys/release.pub"
-    assert_rc "NEGATIVE control [$e]: release.pub REFUSES the foreign sig over the same pol" 1 \
-        _sig_verifies "$FOR_JSON" "$e" "$STATE/keys/release.pub"
-    assert_rc "sanity [$e]: foreign.pub verifies the foreign sig (well-formed, foreign-signed)" 0 \
-        _sig_verifies "$FOR_JSON" "$e" "$RUN/foreign.pub"
-done
 
-# foreign payload drive — the ONLY tampered artifact on the wire
-uki_pcrsig_disk "$RUN/pcrsig-foreign.img" "$FOR_JSON" || exit 1
-assert_file_exists "foreign .pcrsig payload drive built" "$RUN/pcrsig-foreign.img"
+REL_JSON="$RUN/uki-pcrsig.json"
+N_ENTRIES=$(jq '.sha256 | length' "$REL_JSON")
+if (( N_ENTRIES >= 1 )); then
+    _assert_result ok "release .pcrsig carries $N_ENTRIES signed pol entries" ""
+else
+    _assert_result not-ok "release .pcrsig carries signed pol entries" "length=0"
+fi
 
-# --- boot: SB-on vars, enrolled disk, FOREIGN .pcrsig on the payload drive -------
-B="$RUN/boot-foreign"
-mkdir -p "$B"
-cp "$RUN/harness.efi" "$B/harness.efi"
-cp "$RUN/pcrsig-foreign.img" "$B/pcrsig.img"
-cp "$RUN/esp.img" "$B/esp.img"
-cp "$STATE/disk.img" "$B/disk.img"
-echo "# boot: release-signed UKI + FOREIGN .pcrsig (TCG, up to $QEMU_TIMEOUT s)"
-qemu_run "$B" "$B/esp.img" "$B/disk.img" "$STATE/vars-enrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
-for n in 1 2 3; do
-    if wait_attempt "$n" 300 "$B"; then
-        _assert_result ok "guest awaiting passphrase $n/3 (fallback armed after refusal)" ""
-    else
-        _assert_result not-ok "guest awaiting passphrase $n/3" "no attempt $n marker in console"
-        break
+# stale-d7 forge inputs: the §6.1.1 combined {7,11} policyDigest over a STALE
+# PCR 7 and a synthetic PCR 11 (the refusal class is the stale d7 term; the
+# post-boot freshness negative re-derives the FRESH pol from the live console
+# PCRs and asserts it differs)
+D7_STALE=$(printf 's18-stale-d7' | sha256sum | awk '{print $1}')
+D11_SYN=$(printf 's18-synthetic-d11' | sha256sum | awk '{print $1}')
+
+_forge_foreign() { # <out.json> — control 1: same pols, EVERY sig moved to the
+                   # foreign key (value right, SIGNER wrong)
+    local out="$1" e sig
+    cp "$REL_JSON" "$out"
+    for ((e = 0; e < N_ENTRIES; e++)); do
+        jq -r ".sha256[$e].pol" "$REL_JSON" | xxd -r -p >"$RUN/pol.bin"
+        openssl dgst -sha256 -sign "$RUN/foreign.key" -out "$RUN/pol.sig" "$RUN/pol.bin"
+        sig=$(openssl base64 -A -in "$RUN/pol.sig")
+        # NB: update the ACCUMULATOR (out), not the release JSON — each entry
+        # must stay foreign-signed across iterations
+        jq --arg sig "$sig" ".sha256[$e].sig = \$sig" "$out" >"$out.tmp"
+        mv "$out.tmp" "$out"
+    done
+}
+_forge_wrongsel() { # <out.json> — control 2: release-signed pols RELABELED
+                    # pcrs [11] -> [7,11] (pcrs != the token's selection)
+    local out="$1" e
+    cp "$REL_JSON" "$out"
+    for ((e = 0; e < N_ENTRIES; e++)); do
+        jq '.sha256['"$e"'].pcrs = [7, 11]' "$out" >"$out.tmp"
+        mv "$out.tmp" "$out"
+    done
+}
+_forge_staled7() { # <out.json> — control 3: well-formed release-signed {7,11}
+                   # policyDigest over a STALE d7 (§6.1.1 step 3, wrong d7)
+    local out="$1" pol sig
+    policy_digest_bin "$D7_STALE" "$D11_SYN" >"$RUN/pol.bin"
+    pol=$(policy_digest "$D7_STALE" "$D11_SYN")
+    openssl dgst -sha256 -sign "$STATE/keys/db.key" -out "$RUN/pol.sig" "$RUN/pol.bin"
+    sig=$(openssl base64 -A -in "$RUN/pol.sig")
+    jq -n --arg pol "$pol" --arg sig "$sig" \
+        '{sha256: [{pcrs: [7, 11], pol: $pol, sig: $sig}]}' >"$out"
+}
+
+# _forge_recipe <variant> <json> — the host-side positive/negative controls;
+# every control must fail the recipe BEFORE the boot is worth spending
+_forge_recipe() {
+    local variant="$1" json="$2" e
+    case "$variant" in
+        foreign)
+            assert_eq "[$variant] forged .pcrsig keeps the SAME pol entries (only the signer moved)" \
+                "$(jq -c '[.sha256[].pol]' "$REL_JSON")" "$(jq -c '[.sha256[].pol]' "$json")"
+            # EVERY entry must move to the foreign signer (entry 0 == enter-initrd is
+            # the one the unlock consumes — a partially re-signed JSON would leave a
+            # VALID release entry behind and the negative control would be vacuous)
+            for ((e = 0; e < N_ENTRIES; e++)); do
+                assert_rc "[$variant] positive control [$e]: release.pub verifies the RELEASE sig over pol" 0 \
+                    _sig_verifies "$REL_JSON" "$e" "$STATE/keys/release.pub"
+                assert_rc "[$variant] NEGATIVE control [$e]: release.pub REFUSES the foreign sig over the same pol" 1 \
+                    _sig_verifies "$json" "$e" "$STATE/keys/release.pub"
+                assert_rc "[$variant] sanity [$e]: foreign.pub verifies the foreign sig (well-formed, foreign-signed)" 0 \
+                    _sig_verifies "$json" "$e" "$RUN/foreign.pub"
+            done
+            ;;
+        wrongsel)
+            assert_rc "[$variant] positive control [0]: the release sig still verifies over its pol bytes" 0 \
+                _sig_verifies "$json" 0 "$STATE/keys/release.pub"
+            assert_eq "[$variant] NEGATIVE control: NO entry carries the token's pcrs [11] selection anymore" "0" \
+                "$(jq '[.sha256[] | select(.pcrs == [11])] | length' "$json")"
+            assert_eq "[$variant] every entry is relabeled to the foreign selection [7,11]" \
+                "$(jq -c '[.sha256[].pcrs]' "$json")" \
+                "$(jq -cn --argjson n "$N_ENTRIES" '[range(0; $n) | [7, 11]]')"
+            ;;
+        staled7)
+            assert_rc "[$variant] positive control [0]: release.pub verifies the release sig over the (stale) pol bytes" 0 \
+                _sig_verifies "$json" 0 "$STATE/keys/release.pub"
+            assert_eq "[$variant] the signed pol IS the well-formed {7,11} digest over the stale d7" \
+                "$(policy_digest "$D7_STALE" "$D11_SYN")" "$(jq -r '.sha256[0].pol' "$json")"
+            ;;
+    esac
+}
+
+# _refusal_sentinel <variant> — the in-guest refusal sentinel of each class
+_refusal_sentinel() {
+    case "$1" in
+        # OBSERVED (2026-09-17, this sandbox): with the pol MATCHED and the
+        # signature FOREIGN, 257.13's plugin logs "Adding PCR signature policy."
+        # and the TPM refuses the signature at Esys_VerifySignature
+        # (TPM_RC_SIGNATURE), followed by the pinned tpm2_refused sentinel — a
+        # DIFFERENT refusal class than the stale/mismatched-pol case (s07's
+        # pcr_sig_missing — "Couldn't find signature for this PCR bank").
+        foreign) printf '%s\n' "$(sentinel_of tpm2_refused)" ;;
+        wrongsel | staled7) printf '%s\n' "$(sentinel_of pcr_sig_missing)" ;;
+    esac
+}
+
+for VARIANT in foreign wrongsel staled7; do
+    FOR_JSON="$RUN/pcrsig-$VARIANT.json"
+    case "$VARIANT" in
+        foreign) _forge_foreign "$FOR_JSON" ;;
+        wrongsel) _forge_wrongsel "$FOR_JSON" ;;
+        staled7) _forge_staled7 "$FOR_JSON" ;;
+    esac
+    _forge_recipe "$VARIANT" "$FOR_JSON"
+
+    # forged payload drive — the ONLY tampered artifact on the wire
+    uki_pcrsig_disk "$RUN/pcrsig-$VARIANT.img" "$FOR_JSON" || exit 1
+    assert_file_exists "[$VARIANT] forged .pcrsig payload drive built" "$RUN/pcrsig-$VARIANT.img"
+
+    # --- boot: SB-on vars, enrolled disk, FORGED .pcrsig on the payload drive ----
+    B="$RUN/boot-$VARIANT"
+    mkdir -p "$B"
+    cp "$RUN/harness.efi" "$B/harness.efi"
+    cp "$RUN/pcrsig-$VARIANT.img" "$B/pcrsig.img"
+    cp "$RUN/esp.img" "$B/esp.img"
+    cp "$STATE/disk.img" "$B/disk.img"
+    echo "# [$VARIANT] boot: release-signed UKI + forged .pcrsig (TCG, up to $QEMU_TIMEOUT s)"
+    qemu_run "$B" "$B/esp.img" "$B/disk.img" "$STATE/vars-enrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
+    for n in 1 2 3; do
+        if wait_attempt "$n" 300 "$B"; then
+            _assert_result ok "[$VARIANT] guest awaiting passphrase $n/3 (fallback armed after refusal)" ""
+        else
+            _assert_result not-ok "[$VARIANT] guest awaiting passphrase $n/3" "no attempt $n marker in console"
+            break
+        fi
+        feed_line "$B/serial.sock" "debian-fde-$VARIANT-wrong-passphrase-$n"
+    done
+    qemu_wait "$B" "$QEMU_TIMEOUT"
+    CONSOLE="$B/console.log" assert_pcr11_prediction "S-18 $VARIANT"
+    LOG=$(cat "$B/console.log" 2>/dev/null || true)
+
+    # --- control-1 forensics: the refusal must be the SIGNER, not the values -----
+    pcr_of() { grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
+    if [[ "$VARIANT" == "foreign" ]]; then
+        PCR7=$(pcr_of "$B/console.log" 7)
+        PCR7_ENROLLED=$(pcr_of "$STATE/console.log" 7)
+        PCR11_POST=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$B/console.log" 2>/dev/null | head -1 | cut -d= -f2)
+        assert_eq "[$VARIANT] PCR 7 unchanged vs the enrolled boot (no drift confound — only the signer moved)" \
+            "$PCR7_ENROLLED" "$PCR7"
+        POL0=$(jq -r '.sha256[0].pol' "$FOR_JSON")
+        POL_DIGEST=$(uki_pcr11_policy_digest "$PCR11_POST")
+        if [[ -n "$PCR11_POST" ]]; then
+            assert_eq "[$VARIANT] post-phase PCR 11 state == the signed pol (the pol MATCHED at unlock)" \
+                "$POL0" "$POL_DIGEST"
+        else
+            _assert_result not-ok "[$VARIANT] post-phase PCR 11 state == the signed pol" \
+                "no postphase PCR 11 line in console"
+        fi
+        assert_contains "[$VARIANT] policy matched — the plugin attempted the signature (pcr_sig_added)" "$LOG" \
+            "$(sentinel_of pcr_sig_added)"
     fi
-    feed_line "$B/serial.sock" "debian-fde-foreign-wrong-passphrase-$n"
-done
-qemu_wait "$B" "$QEMU_TIMEOUT"
-LOG=$(cat "$B/console.log" 2>/dev/null || true)
+    if [[ "$VARIANT" == "staled7" ]]; then
+        # freshness negative over the LIVE console PCRs: the fresh {7,11} digest
+        # over the boot's real d7/d11 differs from the stale-signed pol
+        D7_LIVE=$(pcr_of "$B/console.log" 7)
+        D11_LIVE=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$B/console.log" 2>/dev/null | head -1 | cut -d= -f2)
+        if [[ -n "$D7_LIVE" && -n "$D11_LIVE" ]]; then
+            assert_ne "[$VARIANT] NEGATIVE control: the stale pol != the fresh pol over the LIVE PCRs" \
+                "$(jq -r '.sha256[0].pol' "$FOR_JSON")" "$(policy_digest "$D7_LIVE" "$D11_LIVE")"
+        else
+            _assert_result not-ok "[$VARIANT] freshness negative (live PCRs on console)" \
+                "no PCR evidence in console"
+        fi
+    fi
 
-# --- PCR forensics: the refusal must be the SIGNER, not the values ---------------
-pcr_of() { grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
-PCR7=$(pcr_of "$B/console.log" 7)
-PCR7_ENROLLED=$(pcr_of "$STATE/console.log" 7)
-PCR11_POST=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$B/console.log" 2>/dev/null | head -1 | cut -d= -f2)
-assert_eq "PCR 7 unchanged vs the enrolled boot (no drift confound — only the signer moved)" \
-    "$PCR7_ENROLLED" "$PCR7"
-POL0=$(jq -r '.sha256[0].pol' "$FOR_JSON")
-POL_DIGEST=$(uki_pcr11_policy_digest "$PCR11_POST")
-if [[ -n "$PCR11_POST" ]]; then
-    assert_eq "post-phase PCR 11 state == the signed pol (the pol MATCHED at unlock)" \
-        "$POL0" "$POL_DIGEST"
-else
-    _assert_result not-ok "post-phase PCR 11 state == the signed pol" \
-        "no postphase PCR 11 line in console"
-fi
-
-# --- assertions: firmware boots -> policy refuses the FOREIGN signer -------------
-assert_contains "init ran (firmware booted our release signature — SB saw no tamper)" "$LOG" \
-    "debian-fde-harness: init started"
-assert_contains "TPM char device appeared" "$LOG" "/dev/tpmrm0 present"
-assert_contains "token discovered (the token path is attempted)" "$LOG" \
-    "$(sentinel_of token_discovered)"
-# OBSERVED (2026-09-17, this sandbox): with the pol MATCHED and the signature
-# FOREIGN, 257.13's plugin logs "Adding PCR signature policy." (table key
-# pcr_sig_added) and the TPM refuses the signature at Esys_VerifySignature
-# (TPM_RC_SIGNATURE — "Failed to validate signature in TPM"), followed by the
-# pinned tpm2_refused sentinel. This is a DIFFERENT refusal class than the
-# stale-pol case (s07's pcr_sig_missing — "Couldn't find signature for this
-# PCR bank"): here the value matches and the SIGNER is rejected. A dedicated
-# table key for "Failed to validate signature in TPM" is a follow-up for the
-# sentinel-table owner (the table is not scenario-owned; never inlined here).
-assert_contains "policy matched — the plugin attempted the signature (pcr_sig_added)" "$LOG" \
-    "$(sentinel_of pcr_sig_added)"
-assert_contains "TPM2 unseal refused (foreign signer fails closed)" "$LOG" \
-    "$(sentinel_of tpm2_refused)"
-# the refusal must strictly precede the first passphrase attempt (the fallback
-# loop may only arm AFTER the token path failed)
-_ref_line=$(grep -nm1 -F "$(sentinel_of tpm2_refused)" "$B/console.log" 2>/dev/null | cut -d: -f1)
-_att1_line=$(grep -nm1 -F "passphrase attempt 1/3" "$B/console.log" 2>/dev/null | cut -d: -f1)
-if [[ -n "${_ref_line:-}" && -n "${_att1_line:-}" ]] && (( _ref_line < _att1_line )); then
-    _assert_result ok "token refusal FIRST (line $_ref_line < first attempt line $_att1_line)" ""
-else
-    _assert_result not-ok "token refusal FIRST" "ref=$_ref_line attempt1=$_att1_line"
-fi
-assert_contains "fallback armed only after the refusal" "$LOG" \
-    "debian-fde-harness: token refused (rc="
-for n in 1 2 3; do
-    assert_contains "wrong passphrase $n rejected by real cryptsetup" "$LOG" \
-        "debian-fde-harness: passphrase attempt $n rejected (cryptsetup rc="
+    # --- assertions: firmware boots -> policy refuses the FORGERY fail-closed ----
+    assert_contains "[$VARIANT] init ran (firmware booted our release signature — SB saw no tamper)" "$LOG" \
+        "$(sentinel_of harness_init_started)"
+    assert_contains "[$VARIANT] TPM char device appeared" "$LOG" "$(sentinel_of harness_tpm_present)"
+    assert_contains "[$VARIANT] token discovered (the token path is attempted)" "$LOG" \
+        "$(sentinel_of token_discovered)"
+    assert_contains "[$VARIANT] token path REFUSED ($VARIANT forgery fails closed)" "$LOG" \
+        "$(_refusal_sentinel "$VARIANT")"
+    # the refusal must strictly precede the first passphrase attempt (the fallback
+    # loop may only arm AFTER the token path failed)
+    _ref_line=$(grep -nm1 -F "$(_refusal_sentinel "$VARIANT")" "$B/console.log" 2>/dev/null | cut -d: -f1)
+    _att1_line=$(grep -nm1 -F "passphrase attempt 1/3" "$B/console.log" 2>/dev/null | cut -d: -f1)
+    if [[ -n "${_ref_line:-}" && -n "${_att1_line:-}" ]] && (( _ref_line < _att1_line )); then
+        _assert_result ok "[$VARIANT] token refusal FIRST (line $_ref_line < first attempt line $_att1_line)" ""
+    else
+        _assert_result not-ok "[$VARIANT] token refusal FIRST" "ref=$_ref_line attempt1=$_att1_line"
+    fi
+    assert_contains "[$VARIANT] fallback armed only after the refusal" "$LOG" \
+        "debian-fde-harness: token refused (rc="
+    for n in 1 2 3; do
+        assert_contains "[$VARIANT] wrong passphrase $n rejected by real cryptsetup" "$LOG" \
+            "debian-fde-harness: passphrase attempt $n rejected (cryptsetup rc="
+    done
+    if [[ "$(grep -cF 'rejected (cryptsetup rc=' <<<"$LOG" || true)" == "3" ]]; then
+        _assert_result ok "[$VARIANT] exactly 3 passphrase attempts (bounded retries, no 4th)" ""
+    else
+        _assert_result not-ok "[$VARIANT] exactly 3 passphrase attempts (bounded retries, no 4th)" \
+            "rejection lines: $(grep -cF 'rejected (cryptsetup rc=' <<<"$LOG" || true)"
+    fi
+    assert_contains "[$VARIANT] cryptsetup evidence (sentinel cryptsetup_nokey)" "$LOG" \
+        "$(sentinel_of cryptsetup_nokey)"
+    assert_contains "[$VARIANT] PROMPT-FAILED (retries exhausted, deterministic end)" "$LOG" \
+        "$(sentinel_of harness_prompt_failed)"
+    assert_not_contains "[$VARIANT] never unlocked (token)" "$LOG" "$(sentinel_of unlocked)"
+    assert_not_contains "[$VARIANT] never UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
+    assert_not_contains "[$VARIANT] no interactive ask-password prompt (the fallback is the harness loop)" "$LOG" \
+        "$(sentinel_of prompt_re)"
+    assert_not_contains "[$VARIANT] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
+    assert_contains "[$VARIANT] clean poweroff sentinel" "$LOG" "$(sentinel_of harness_poweroff)"
+    # IN-08: honest in both directions (missing pid file is not a clean exit)
+    if [[ -f "$B/qemu.pid" ]] && ! kill -0 "$(cat "$B/qemu.pid" 2>/dev/null)" 2>/dev/null; then
+        _assert_result ok "[$VARIANT] guest exited (poweroff, not timeout-kill — no hang)" ""
+    else
+        _assert_result not-ok "[$VARIANT] guest exited (poweroff, not timeout-kill — no hang)" \
+            "qemu still running or qemu.pid missing"
+    fi
 done
-if [[ "$(grep -cF 'rejected (cryptsetup rc=' <<<"$LOG" || true)" == "3" ]]; then
-    _assert_result ok "exactly 3 passphrase attempts (bounded retries, no 4th)" ""
-else
-    _assert_result not-ok "exactly 3 passphrase attempts (bounded retries, no 4th)" \
-        "rejection lines: $(grep -cF 'rejected (cryptsetup rc=' <<<"$LOG" || true)"
-fi
-assert_contains "cryptsetup evidence (sentinel cryptsetup_nokey)" "$LOG" \
-    "$(sentinel_of cryptsetup_nokey)"
-assert_contains "PROMPT-FAILED (retries exhausted, deterministic end)" "$LOG" \
-    "debian-fde: PROMPT-FAILED"
-assert_not_contains "never unlocked (token)" "$LOG" "$(sentinel_of unlocked)"
-assert_not_contains "never UNSEALED" "$LOG" "debian-fde: UNSEALED"
-assert_not_contains "no interactive ask-password prompt (the fallback is the harness loop)" "$LOG" \
-    "$(sentinel_of prompt_re)"
-assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "clean poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
-# IN-08: honest in both directions (missing pid file is not a clean exit)
-if [[ -f "$B/qemu.pid" ]] && ! kill -0 "$(cat "$B/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-    _assert_result ok "guest exited (poweroff, not timeout-kill — no hang)" ""
-else
-    _assert_result not-ok "guest exited (poweroff, not timeout-kill — no hang)" \
-        "qemu still running or qemu.pid missing"
-fi
 
 # keep the run dir small (the state dir is not ours to prune)
 rm -f "$RUN/pol.bin" "$RUN/pol.sig" "$RUN/vpol.bin" "$RUN/vpol.sig"

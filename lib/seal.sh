@@ -53,7 +53,7 @@ if [ -n "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
 fi
 DEBIAN_FDE_SEAL_LOADED=1
 
-_sl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+_sl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _sl_lib_dir=${_sl_cmd_dir%/*}
 if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
     if [ -r "$_sl_lib_dir/common.sh" ]; then

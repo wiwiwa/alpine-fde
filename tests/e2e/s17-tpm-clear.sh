@@ -22,6 +22,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13, §12)
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck disable=SC1091  # fixtures resolved at runtime via $TESTS
@@ -84,8 +86,9 @@ disk_make_luks "$RUN/disk.img" 128 || exit 1
 # --- boot 1: healthy enroll + unlock --------------------------------------------
 boot_and_wait "v1-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "v1-enroll")
+assert_pcr11_prediction "S-17 v1-enroll"
 assert_contains "[v1] enrolled in-guest" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
-assert_contains "[v1] UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[v1] UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 D7_PRE=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v1-enroll.log" | head -1 | cut -d= -f2)
 assert_ne "boot 1 console records a non-zero PCR 7" "$D7_PRE" ""
 
@@ -99,16 +102,17 @@ assert_eq "fresh TPM: PCR 7 is zero" "$ZERO7" "$(swtpm_pcrread "$RUN/tpm" 7)"
 # --- boot 2: seal is dead — fail closed -------------------------------------------
 boot_and_wait "cleared" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "cleared")
+assert_pcr11_prediction "S-17 cleared"
 assert_contains "[clr] init ran (still boots — firmware re-measures the fresh TPM)" "$LOG" \
-    "debian-fde-harness: init started"
+    "$(sentinel_of harness_init_started)"
 assert_contains "[clr] TPM2 unseal refused (sealed blob lost with the old SRK)" "$LOG" \
     "$(sentinel_of tpm2_refused)"
 assert_contains "[clr] retry cap reached" "$LOG" "$(sentinel_of retry_cap)"
-assert_contains "[clr] PROMPT-FAILED" "$LOG" "debian-fde: PROMPT-FAILED"
+assert_contains "[clr] PROMPT-FAILED" "$LOG" "$(sentinel_of harness_prompt_failed)"
 assert_not_contains "[clr] never unlocked" "$LOG" "$(sentinel_of unlocked)"
-assert_not_contains "[clr] never UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_not_contains "[clr] never UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "[clr] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "[clr] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[clr] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 
 # --- recovery: wipe the dead seal; guest re-enrolls on the fresh TPM --------------
 echo "# wiping the stale enrollment (token + slot) — re-enroll happens in-guest"
@@ -119,11 +123,12 @@ assert_eq "stale token removed" "0" "$NTOK"
 # --- boot 3: re-enroll on the fresh TPM -> UNSEALED --------------------------------
 boot_and_wait "re-enroll" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.2.0.efi.pcrsig.img"
 LOG=$(log_of "re-enroll")
+assert_pcr11_prediction "S-17 re-enroll"
 assert_contains "[re] re-enrolled on the fresh TPM" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 assert_contains "[re] .pcrsig consumed" "$LOG" "$(sentinel_of pcr_sig_added)"
 assert_contains "[re] unlocked via token" "$LOG" "$(sentinel_of unlocked)"
-assert_contains "[re] UNSEALED (recovery complete)" "$LOG" "debian-fde: UNSEALED"
-assert_contains "[re] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[re] UNSEALED (recovery complete)" "$LOG" "$(sentinel_of harness_unsealed)"
+assert_contains "[re] clean poweroff" "$LOG" "$(sentinel_of harness_poweroff)"
 D7_RE=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-re-enroll.log" | head -1 | cut -d= -f2)
 assert_eq "PCR 7 re-measured to the same enrolled state (console evidence)" "$D7_PRE" "$D7_RE"
 

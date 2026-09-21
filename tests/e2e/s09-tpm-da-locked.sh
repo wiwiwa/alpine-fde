@@ -70,6 +70,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -254,6 +256,14 @@ assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidd
 assert_not_contains "interactive prompt never appeared (harness loop is the fallback)" "$LOG" \
     "$(sentinel_of prompt_re)"
 assert_contains "clean poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
+
+# G-T13/G-E9 (boot reaches the UKI stub): DA lockout gates authValue ops only
+# — the auth-less phase-word extend still happened, so the PRE-UNLOCK PCR 11
+# reading must equal the fallback UKI's signed prediction.
+_CONSOLE_SAVE="$CONSOLE"
+CONSOLE="$B/console.log"
+assert_pcr11_prediction "S-09"
+CONSOLE="$_CONSOLE_SAVE"
 # IN-08: honest in both directions (missing pid file is not a clean exit)
 if [[ -f "$B/qemu.pid" ]] && ! kill -0 "$(cat "$B/qemu.pid" 2>/dev/null)" 2>/dev/null; then
     _assert_result ok "guest exited (poweroff, not timeout-kill — no hang)" ""

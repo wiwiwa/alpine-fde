@@ -222,23 +222,23 @@ assert_contains "fstab: real ESP PARTUUID (placeholder resolved)" "$(cat "$MNT_E
 assert_not_contains "fstab: no unresolved placeholder" "$(cat "$MNT_ETC/fstab")" "<esp-partuuid>"
 assert_file_exists "target: network interfaces drop (OpenRC)" "$MNT_ETC/network/interfaces"
 assert_contains "interfaces: dhcp" "$(cat "$MNT_ETC/network/interfaces")" "dhcp"
-assert_file_exists "target: dracut conf" "$MNT_ETC/dracut.conf.d/10-debian-fde.conf"
-assert_contains "dracut: hostonly" "$(cat "$MNT_ETC/dracut.conf.d/10-debian-fde.conf")" "hostonly=yes"
+assert_file_exists "target: dracut conf" "$MNT_ETC/dracut.conf.d/10-alpine-fde.conf"
+assert_contains "dracut: hostonly" "$(cat "$MNT_ETC/dracut.conf.d/10-alpine-fde.conf")" "hostonly=yes"
 assert_not_contains "single topology: no 20-bcache.conf drop" "$(ls "$MNT_ETC/dracut.conf.d/")" "20-bcache.conf"
 assert_eq "cmdline.txt verbatim: rootflags + §8.2 fail-closed pins" \
     "root=UUID=$LUKS_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff" \
-    "$(cat "$MNT_ETC/debian-fde/cmdline.txt")"
+    "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 # §4: topology recorded in the target conf (absent file = btrfs default, doc'd)
-assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/debian-fde/debian-fde.conf")" "ROOT_FS=btrfs"
-assert_contains "conf: BCACHE=0 recorded" "$(cat "$MNT_ETC/debian-fde/debian-fde.conf")" "BCACHE=0"
-assert_contains "conf: ESP_PATH=/efi persisted (CR-01)" "$(cat "$MNT_ETC/debian-fde/debian-fde.conf")" "ESP_PATH=/efi"
-assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/debian-fde/debian-fde.conf")" \
+assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ROOT_FS=btrfs"
+assert_contains "conf: BCACHE=0 recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "BCACHE=0"
+assert_contains "conf: ESP_PATH=/efi persisted (CR-01)" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ESP_PATH=/efi"
+assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" \
     "Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0"
 
 # =============================================================================
 # §9.1 step 2/8/9: pending baseline + banner + install-state ON TARGET
 # =============================================================================
-TGT_BL=$MNT_ETC/debian-fde/baseline.json
+TGT_BL=$MNT_ETC/alpine-fde/baseline.json
 assert_file_exists "§9.1 step 2: pending baseline written ON TARGET" "$TGT_BL"
 assert_rc "on-target pending baseline validates" 0 baseline_validate "$TGT_BL"
 assert_eq "on-target baseline: expected_pcr7 pending" "pending" "$(baseline_get "$TGT_BL" expected_pcr7)"
@@ -292,8 +292,8 @@ assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
     "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
 assert_contains "ESP layout for the in-chroot build" "$LOG" \
     "bootctl install --esp-path=/efi --boot-path=/efi"
-assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI)" "$LOG" \
-    "debian-fde ukictl build"
+assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
+    "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24: provisional seal guest line after the build
 assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot" "$LOG" \
     'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
@@ -409,10 +409,10 @@ assert_eq "raid1: crypttab member entries verbatim (password-cache=yes on BOTH)"
 root2 UUID=$MEM2_UUID none luks,tpm2-device=auto,password-cache=yes,discard" \
     "$(cat "$MNT_ETC/crypttab")"
 assert_eq "raid1: baseline target.luks_uuid = PRIMARY member" "$MEM1_UUID" \
-    "$(baseline_get_in "$MNT_ETC/debian-fde/baseline.json" target luks_uuid)"
+    "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target luks_uuid)"
 assert_eq "raid1: baseline target.member_uuids (additive schema)" "$MEM1_UUID $MEM2_UUID" \
-    "$(baseline_get_in "$MNT_ETC/debian-fde/baseline.json" target member_uuids)"
-assert_contains "raid1: cmdline rootflags pins verbatim" "$(cat "$MNT_ETC/debian-fde/cmdline.txt")" \
+    "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target member_uuids)"
+assert_contains "raid1: cmdline rootflags pins verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
 # G-C24: the provisional seal loop covers BOTH members in raid1
 SEAL_LINE2=$(grep -m1 'seal_provisional' <<<"$LOG2")
@@ -427,7 +427,7 @@ assert_eq "raid1: ephemeral key scrubbed at teardown" "0" \
     "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-ephkey.*' 2>/dev/null | wc -l)"
 
 # =============================================================================
-# G4/F-1 (§8.1/§3.3): the tooling copy into /opt/debian-fde ships ONLY the
+# G4/F-1 (§8.1/§3.3): the tooling copy into /opt/alpine-fde ships ONLY the
 # product script tree (bin/ lib/ hooks/ docs/) — NEVER VCS/harness residue.
 # Residue is seeded in a THROWAWAY tree — never the real tests/ dirs.
 # =============================================================================
@@ -451,7 +451,7 @@ run_install_tree() { # TREE — run_install against a different tooling tree
 run_install_tree "$DEBIAN_FDE_TREE"
 assert_eq "tooling copy from seeded tree: rc 0" "0" "$RC"
 
-OPT=$DEBIAN_FDE_INSTALL_MNT/opt/debian-fde
+OPT=$DEBIAN_FDE_INSTALL_MNT/opt/alpine-fde
 assert_file_exists "tooling copy: bin/debian-fde shipped" "$OPT/bin/debian-fde"
 assert_file_exists "tooling copy: lib/ shipped" "$OPT/lib/cmd/install.sh"
 assert_file_exists "tooling copy: hooks/ shipped (Alpine layout)" "$OPT/hooks/kernel-hooks.d/alpine-fde-build.hook"
@@ -466,6 +466,20 @@ COPY_LINE=$(grep -m1 'cp -r' <<<"$OUT")
 assert_contains "tooling copy step: enumerates bin" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE/bin"
 assert_contains "tooling copy step: enumerates docs" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE/docs"
 assert_not_contains "tooling copy step: never the whole tree root" "$COPY_LINE" "cp -r $DEBIAN_FDE_TREE "
+# G-C7 (§8.1/§12): the tooling tree lands at /opt/alpine-fde and the guest CLI
+# is /opt/alpine-fde/bin/alpine-fde, with the debian-fde name kept as the
+# §8.1 backwards-compat alias symlink.
+assert_contains "G-C7: tooling-copy record stages into /opt/alpine-fde" "$COPY_LINE" \
+    "$DEBIAN_FDE_INSTALL_MNT/opt/alpine-fde"
+assert_not_contains "G-C7: tooling-copy record free of /opt/debian-fde" "$COPY_LINE" \
+    "/opt/debian-fde"
+assert_eq "G-C7/§8.1: guest CLI staged: /usr/local/bin/alpine-fde -> /opt/alpine-fde/bin/alpine-fde" \
+    "/opt/alpine-fde/bin/alpine-fde" \
+    "$(readlink "$DEBIAN_FDE_INSTALL_MNT/usr/local/bin/alpine-fde")"
+assert_eq "G-C7/§8.1: debian-fde backwards-compat alias kept (-> alpine-fde)" \
+    "alpine-fde" "$(readlink "$DEBIAN_FDE_INSTALL_MNT/usr/local/bin/debian-fde")"
+assert_not_contains "G-C7: NO /opt/debian-fde anywhere in the full emitted plan" "$OUT" \
+    "/opt/debian-fde"
 
 # =============================================================================
 # M-02: operator-controlled values are validated at the boundary BEFORE any
@@ -505,13 +519,13 @@ assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$R
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort
 # trap tears the binds down. The failing step is a LATE host record (the
 # §9.1 step 9 state write, made failing by chmod 555 on the target's
-# debian-fde config dir — istate_write's atomic mv dies) so the plan's own
+# alpine-fde config dir — istate_write's atomic mv dies) so the plan's own
 # teardown never runs — the ONLY bind-umount line in the log is the trap's.
 # =============================================================================
 run_install
 assert_eq "L-04a fixture: clean run wrote the state" "installed" \
     "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
-chmod 555 "$MNT_ETC/debian-fde"
+chmod 555 "$MNT_ETC/alpine-fde"
 run_install
 assert_eq "L-04a: failed host step -> fail-closed 64" "64" "$RC"
 assert_contains "L-04a: the failing step is named" "$OUT" "baseline_set_field"
@@ -523,6 +537,6 @@ assert_eq "WR-02 fixture: plan teardown never ran (die before teardown)" "0" \
     "$(grep -c 'umount -R' "$DEBIAN_FDE_TEST_LOG")"
 assert_eq "WR-02: abort trap tore the binds down (incl. efivars)" "1" \
     "$(grep -c "^umount $DEBIAN_FDE_INSTALL_MNT/dev $DEBIAN_FDE_INSTALL_MNT/sys $DEBIAN_FDE_INSTALL_MNT/proc $DEBIAN_FDE_INSTALL_MNT/sys/firmware/efi/efivars\$" "$DEBIAN_FDE_TEST_LOG")"
-chmod 755 "$MNT_ETC/debian-fde"
+chmod 755 "$MNT_ETC/alpine-fde"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

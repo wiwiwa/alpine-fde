@@ -43,11 +43,11 @@ DEBIAN_FDE_ENROLL_LOADED=1
 
 if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../baseline.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 if [ -z "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}/../seal.sh"
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
 fi
 
 # Seams (test injection points):

@@ -192,12 +192,12 @@ _clean_shell_rc() { # <keydir> — env-clean subshell mirroring install.sh's
     (
         unset DEBIAN_FDE_KEYS_LOADED DEBIAN_FDE_COMMON_LOADED
         unset DEBIAN_FDE_KEY_PASSPHRASE DEBIAN_FDE_CMD_DIR
-        mkdir -p "$T/opt/debian-fde/lib/cmd"
-        cp "$REPO/lib/common.sh" "$REPO/lib/keys.sh" "$T/opt/debian-fde/lib/"
-        cp "$REPO/lib/cmd/rotate.sh" "$T/opt/debian-fde/lib/cmd/"
-        export DEBIAN_FDE_CMD_DIR="$T/opt/debian-fde/lib/cmd"
-        . "$T/opt/debian-fde/lib/common.sh"
-        . "$T/opt/debian-fde/lib/keys.sh"
+        mkdir -p "$T/opt/alpine-fde/lib/cmd"
+        cp "$REPO/lib/common.sh" "$REPO/lib/keys.sh" "$T/opt/alpine-fde/lib/"
+        cp "$REPO/lib/cmd/rotate.sh" "$T/opt/alpine-fde/lib/cmd/"
+        export DEBIAN_FDE_CMD_DIR="$T/opt/alpine-fde/lib/cmd"
+        . "$T/opt/alpine-fde/lib/common.sh"
+        . "$T/opt/alpine-fde/lib/keys.sh"
         DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$1" >/dev/null 2>&1
         echo $?
     )

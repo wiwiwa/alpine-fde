@@ -9,8 +9,8 @@
 #      infeasible under TCG, see tests/lib/uki-build.sh)
 #   2. PASSPHRASE UNLOCK (the one documented first-boot prompt; fed from the
 #      embedded kf0, zero console input) of the fresh LUKS2 volume
-#   3. populate the minimal rootfs (§3.3) from the SHA256-pinned Debian
-#      artifact + configure getty/networkd + apt policy + dpkg trims
+#   3. populate the minimal rootfs (§3.3) from the SHA256-pinned Alpine
+#      artifact + configure OpenRC networking/getty + apk repositories
 #   4. §3.3 SIZE BUDGET: installed-rootfs size ≤ budget (the harness var
 #      DEBIAN_FDE_ROOTFS_BUDGET_MIB is the pin of record; default = the 1.4 GB
 #      planning target) + package count tracked
@@ -55,6 +55,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -62,14 +64,12 @@ source "$TESTS/lib/qemu.sh"
 # shellcheck source=../lib/sentinels.sh
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 
-# §3.3 size budget: THE PIN OF RECORD IS THIS HARNESS VAR (default = the 1.4 GB
-# planning target, §3.3). CI overrides it via the environment.
-# G-HW5 re-derive (2026-09-19): under the btrfs-default §9.1 layout the
-# installed rootfs (du of the @ subvolume incl. the shipped btrfs-progs
-# binaries) measured 695460 KiB ≈ 680 MiB / 322 packages (run
-# s00-bootstrap-1789761343) — the ceiling stays the §3.3 planning target,
-# the measured value is the recorded baseline.
-DEBIAN_FDE_ROOTFS_BUDGET_MIB="${DEBIAN_FDE_ROOTFS_BUDGET_MIB:-1434}"
+# §3.3 size budget (G-E1, ADR-12): THE PIN OF RECORD IS THIS HARNESS VAR
+# (default = the ADR-12 planning target ≤ 250 MB, an 80%+ reduction vs the
+# Debian-era 1434 MiB). CI overrides it via the environment. The measured
+# Alpine payload (pinned minirootfs + tooling + stubs) sits far under the
+# ceiling; the assert below records the measured value every run.
+DEBIAN_FDE_ROOTFS_BUDGET_MIB="${DEBIAN_FDE_ROOTFS_BUDGET_MIB:-250}"
 # §13/§9.3 ESP sizing: measured UKI × retention (current + 2 old) + headroom.
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
@@ -109,7 +109,7 @@ assert_contains "enrolled vars: SecureBootEnable ON" \
     "$(keys_vars_get "$RUN/vars-enrolled.fd" SecureBootEnable)" "ON"
 assert_contains "enrolled vars: PK present" "$(keys_vars_get "$RUN/vars-enrolled.fd" PK)" "blob"
 
-echo "# building rootfs payload drive (SHA256-pinned Debian artifact) ..."
+echo "# building rootfs payload drive (SHA256-pinned Alpine artifact, G-E1) ..."
 read -r ROOTFS_SHA ROOTFS_BYTES <<<"$(rootfs_payload_image "$RUN/rootfs-payload.img")"
 [[ -n "$ROOTFS_SHA" ]] || { echo "s00: rootfs payload build failed"; exit 1; }
 assert_file_exists "S-00: rootfs payload drive built" "$RUN/rootfs-payload.img"
@@ -186,9 +186,9 @@ assert_not_contains "no ask-password prompt on the install path (sentinel table)
 assert_contains "rootfs payload hash-verified in-guest" "$LOG" \
     "debian-fde-install: rootfs payload verified"
 assert_contains "rootfs populated (§3.3)" "$LOG" \
-    "debian-fde-install: populating rootfs from the pinned Debian artifact"
-assert_contains "getty/networkd configured (§3.3)" "$LOG" \
-    "debian-fde-install: getty/networkd configured"
+    "debian-fde-install: populating rootfs from the pinned Alpine artifact"
+assert_contains "getty/openrc configured (§3.3)" "$LOG" \
+    "debian-fde-install: getty/openrc configured"
 # stage 3b: §9.1 Btrfs default (G-HW5) — mkfs.btrfs + @/@home/@snapshots
 # subvolumes + subvol=@ mount + the fstab subvolume forms, all proven on the
 # console (harness-owned markers; `btrfs subvolume list` output is the
@@ -219,7 +219,10 @@ else
 fi
 assert_not_contains "install stage never failed" "$LOG" "debian-fde: INSTALL-FAILED"
 
-# stage 4: §3.3 size budget + package count (parsed from the console print)
+# stage 4: §3.3/ADR-12 size budget + package count (parsed from the console
+# print; the package marker is the apk world/db — /lib/apk/db/installed, one
+# leading `P:` line per installed package — re-pinned from the dpkg status
+# marker with the same marker SHAPE, G-E1d)
 ROOTFS_KIB=$(sed -n 's/^debian-fde-rootfs: kib=\([0-9]\{1,\}\) packages=.*/\1/p' "$CONSOLE" | head -1)
 # NB: no end-anchor — the serial chardev log carries a trailing CR on the line
 ROOTFS_PKGS=$(sed -n 's/^debian-fde-rootfs: kib=[0-9]\{1,\} packages=\([0-9]\{1,\}\).*/\1/p' "$CONSOLE" | head -1)
@@ -228,21 +231,21 @@ ROOTFS_PKGS=$(sed -n 's/^debian-fde-rootfs: kib=[0-9]\{1,\} packages=\([0-9]\{1,
 # in the very run where "size measured" correctly recorded not-ok.
 if [[ -n "$ROOTFS_KIB" ]]; then
     ROOTFS_MIB=$(( (ROOTFS_KIB + 1023) / 1024 ))
-    _assert_result ok "installed-rootfs size measured (${ROOTFS_MIB}MiB, $ROOTFS_PKGS packages)" ""
+    _assert_result ok "installed-rootfs size measured (${ROOTFS_MIB}MiB, $ROOTFS_PKGS apk packages)" ""
 else
     ROOTFS_MIB=""
     _assert_result not-ok "installed-rootfs size measured" "no debian-fde-rootfs line in console"
 fi
 if [[ -n "$ROOTFS_KIB" ]] && (( ROOTFS_MIB <= DEBIAN_FDE_ROOTFS_BUDGET_MIB )); then
-    _assert_result ok "§3.3 size budget: ${ROOTFS_MIB}MiB <= budget ${DEBIAN_FDE_ROOTFS_BUDGET_MIB}MiB (pin of record: harness var)" ""
+    _assert_result ok "§3.3 size budget (ADR-12): ${ROOTFS_MIB}MiB <= budget ${DEBIAN_FDE_ROOTFS_BUDGET_MIB}MiB (pin of record: harness var)" ""
 else
     _assert_result not-ok "§3.3 size budget (pin of record: harness var)" \
         "${ROOTFS_MIB:-unmeasured}MiB vs budget ${DEBIAN_FDE_ROOTFS_BUDGET_MIB}MiB"
 fi
 if [[ -n "$ROOTFS_PKGS" ]] && (( ROOTFS_PKGS > 0 )); then
-    _assert_result ok "package count tracked: $ROOTFS_PKGS" ""
+    _assert_result ok "apk package count tracked (world/db): $ROOTFS_PKGS" ""
 else
-    _assert_result not-ok "package count tracked" "packages=${ROOTFS_PKGS:-absent}"
+    _assert_result not-ok "apk package count tracked (world/db)" "packages=${ROOTFS_PKGS:-absent}"
 fi
 
 # stage 5: G-T11b disk-side scans (LUKS payload in-guest; ESP host-side)
@@ -257,19 +260,11 @@ assert_eq "G-T11b: ESP lists no .pem/.key files" "" "$KEYNAMES"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 assert_contains "clean poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
 
-# stage 7: G-T13 prediction check — ukify's predicted PCR 11 (enter-initrd
-# entry) == the {11}-selection PolicyPCR digest over the guest's PRE-UNLOCK
-# reading (the post-phase-word line), NOT the final register.
-PCR11_POST=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$CONSOLE" 2>/dev/null | head -1 | cut -d= -f2)
-POL_ENTER=$(uki_pcrsig_enter_initrd_pol "$RUN/uki-pcrsig.json")
-POL_PREDICTED=$(uki_pcr11_policy_digest "$PCR11_POST")
-if [[ -n "$PCR11_POST" ]]; then
-    assert_eq "G-T13: ukify enter-initrd prediction == pre-unlock PCR 11 state" \
-        "$POL_ENTER" "$POL_PREDICTED"
-else
-    _assert_result not-ok "G-T13: ukify enter-initrd prediction == pre-unlock PCR 11 state" \
-        "no postphase PCR 11 line in console"
-fi
+# stage 7: G-T13 prediction check (tests/lib/prediction.sh) — ukify's
+# predicted PCR 11 (enter-initrd entry) == the {11}-selection PolicyPCR
+# digest over the guest's PRE-UNLOCK reading (the post-phase-word line),
+# NOT the final register. $CONSOLE/$RUN/uki-pcrsig.json are this boot's.
+assert_pcr11_prediction "G-T13"
 
 # --- stage 6: audit --init finalizes the baseline (real CLI) BEFORE any UKI ------
 # G-R1 guard: finalization refuses unless the efivars seam reports

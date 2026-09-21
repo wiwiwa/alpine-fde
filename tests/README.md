@@ -9,7 +9,8 @@ the harness; `lib/` and `bin/` (repo root) hold the Debian FDE tooling itself.
 
 ```sh
 tests/env-check.sh          # exit 1 + MISSING list if a prereq is absent
-tests/run-unit.sh           # runs tests/unit/*.sh, TAP-ish output, rc != 0 on fail
+tests/run-unit.sh           # runs tests/unit/*.sh in parallel (default: nproc), TAP-ish output
+tests/run-unit.sh -j 2      # explicit concurrency (or DEBIAN_FDE_TEST_JOBS)
 tests/run-unit.sh 'pattern' # subset by filename glob, e.g. the swtpm smoke test
 tests/run-e2e.sh            # harness self-test, then every registered scenario
 tests/run-e2e.sh s01        # one scenario (runs the self-test first either way)

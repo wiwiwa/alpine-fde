@@ -27,6 +27,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -118,6 +120,7 @@ swtpm_start "$STATE/tpm" || { echo "s05: swtpm restart failed"; exit 1; }
 cp "$STATE/harness.efi" "$RUN/harness.efi"
 cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"
 cp "$STATE/disk.img" "$RUN/disk.img"
+[[ -f "$STATE/uki-pcrsig.json" ]] && cp "$STATE/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
 # tamper = stock vars copy (no PK, SecureBoot off): SB disabled, keys gone
 keys_vars_unenrolled "$STATE/keys" "$RUN/vars-unenrolled.fd"
 assert_not_contains "unenrolled vars: no SecureBootEnable" \
@@ -157,6 +160,10 @@ else
         "PCR7=$PCR7 enrolled=$PCR7_ENROLLED"
 fi
 assert_eq "PCR 11 unchanged (refusal is purely PCR 7 drift)" "$PCR11_ENROLLED" "$PCR11"
+
+# G-T13/G-E9 (boot reaches the UKI stub): the SB-off tamper drifts PCR 7 only
+# — the PRE-UNLOCK PCR 11 reading must still equal the signed prediction.
+assert_pcr11_prediction "S-05"
 
 assert_contains "token discovered" "$LOG" "$(sentinel_of token_discovered)"
 assert_contains "TPM2 unseal refused (PCR 7 drift)" "$LOG" "$(sentinel_of tpm2_refused)"

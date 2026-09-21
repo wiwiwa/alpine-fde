@@ -138,10 +138,10 @@ assert_contains "plan: fstab @snapshots subvol form" "$INS_OUT" "btrfs subvol=@s
 assert_contains "plan: ESP fstab line" "$INS_OUT" "PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2"
 assert_not_contains "plan: no ext4 fstab root line under btrfs default" "$INS_OUT" "/ ext4 defaults 0 1"
 assert_contains "plan: bootctl install (ESP layout for the in-chroot build)" "$INS_OUT" "bootctl install"
-assert_contains "plan: /etc/debian-fde conf drop" "$INS_OUT" "etc/debian-fde/debian-fde.conf"
+assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 assert_contains "plan: kernel hooks installed (Alpine kernel-hooks.d layout)" "$INS_OUT" \
     "etc/kernel-hooks.d"
-assert_contains "plan: tree staged to /opt/debian-fde" "$INS_OUT" "opt/debian-fde"
+assert_contains "plan: tree staged to /opt/alpine-fde" "$INS_OUT" "opt/alpine-fde"
 assert_contains "plan: teardown (umount + luks close)" "$INS_OUT" "cryptsetup close root-crypt"
 # §4 topology recorded in the target conf (absent file = btrfs default, doc'd)
 assert_contains "plan: conf records ROOT_FS=btrfs" "$INS_OUT" "ROOT_FS=btrfs"
@@ -155,11 +155,11 @@ assert_contains "plan: §9.1 step 2 — pending baseline ON TARGET (baseline wri
 assert_not_contains "plan: NO host-baseline copy anywhere (§9.1)" "$INS_OUT" \
     "cp /etc/alpine-fde/baseline.json"
 assert_contains "plan: §9.1 step 3 — in-chroot platform-key ceremony" "$INS_OUT" \
-    "/opt/debian-fde/bin/debian-fde provision stage1 --mode in-chroot"
+    "/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot"
 assert_contains "plan: §9.1 step 4 — NVRAM enrollment db->KEK->PK via fw_auth_enroll" \
     "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
 assert_contains "plan: §9.1 step 5 — in-chroot ukictl build (boot manager + UKI)" \
-    "$INS_OUT" "/opt/debian-fde/bin/debian-fde ukictl build"
+    "$INS_OUT" "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24/§9.1 step 6: provisional TPM enrollment guest line (Mechanism B, PCR 11)
 assert_contains "plan: §9.1 step 6 — provisional seal guest line (seal_provisional)" \
     "$INS_OUT" 'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'

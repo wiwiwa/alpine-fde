@@ -23,6 +23,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -102,6 +104,13 @@ for _att in 1 2 3; do
 done
 [ "$BOOT_OK" -eq 1 ] || { echo "s11: enroll boot did not reach UNSEALED in 3 attempts — state unusable"; tail -5 "$SNAPDIR/console-enroll.snap" 2>/dev/null; exit 1; }
 echo "# enrollment boot reached UNSEALED — token sealed to TPM A's SRK"
+# G-T13/G-E9 for boot 1 (reaches the UKI stub): pair the helper with the
+# enrolled UKI's signed prediction + this boot's console.
+cp "$ENROLL/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
+_CONSOLE_SAVE="$CONSOLE"
+CONSOLE="$ENROLL/console.log"
+assert_pcr11_prediction "S-11 [enroll]"
+CONSOLE="$_CONSOLE_SAVE"
 
 # --- boot 2: the same disk against a FOREIGN TPM ---------------------------------
 _ensure_run
@@ -141,6 +150,11 @@ assert_not_contains "never UNSEALED" "$LOG" "debian-fde: UNSEALED"
 assert_not_contains "no PCR signature policy consumption" "$LOG" "$(sentinel_of pcr_sig_added)"
 assert_not_contains "interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
+# G-T13/G-E9 for boot 2 (foreign TPM B): a virgin TPM measures the SAME
+# section chain + phase word from zero, so the PRE-UNLOCK PCR 11 reading —
+# and thus the prediction — is unchanged even though the SRK (and the seal)
+# is foreign. $RUN/uki-pcrsig.json is already the booted UKI's prediction.
+assert_pcr11_prediction "S-11 [foreign]"
 
 echo "# run dir: $RUN"
 if [ "$TESTS_FAIL" -eq 0 ]; then

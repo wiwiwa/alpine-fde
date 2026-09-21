@@ -28,7 +28,7 @@ DEBIAN_FDE_BASELINE_LOADED=1
 # Pull in common.sh (exit codes, logging, tpm()) and firmware.sh (efivarfs
 # seam) if they are reachable next to us and not loaded yet. When this file
 # lives at <tree>/lib/baseline.sh, the cmd dir is <tree>/lib/cmd.
-_bl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+_bl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _bl_lib_dir=${_bl_cmd_dir%/*}
 if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_bl_lib_dir/common.sh" ]; then
     # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
@@ -45,7 +45,7 @@ fi
 
 # --- path helpers (all overridable for tests via DEBIAN_FDE_ROOT etc.) ---------
 sp_cmd_dir() {
-    printf '%s\n' "${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}"
+    printf '%s\n' "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}"
 }
 
 # sp_etc_dir — <root>/etc/alpine-fde (root empty → absolute /etc/alpine-fde;
@@ -115,7 +115,7 @@ dmi_field() {
 sbverify_boot_binaries() {
     _sv_cert=${1:-"${DEBIAN_FDE_KEYDIR:-${KEY_PATH:-}}/release.crt"}
     # M-1: on the installed target the signing medium is offline (I4) and
-    # `install` writes no debian-fde.conf — without this fallback the §8.3
+    # `install` writes no alpine-fde.conf — without this fallback the §8.3
     # boot-manager check would be permanently dormant exactly where it matters
     # most. The cert path recorded at provision (§8.4, /etc/alpine-fde/keys/)
     # is read back when the env-based resolution points at nothing.

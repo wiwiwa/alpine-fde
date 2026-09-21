@@ -31,13 +31,18 @@ source "$TESTS/lib/qemu.sh"
 # shellcheck source=../lib/sentinels.sh
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 
-# TPM-absent sentinels: pinned in tests/sentinels-257.13.txt as
+# TPM-absent sentinels: carried (values identical, name-for-name) in the
+# DEFAULT sentinel table tests/sentinels-260.2.txt as
 # tpm_absent_nodevice / tpm_absent_notfound / tpm_absent_fallback (all three
 # observed on this exact path in the 257.13 console, run s10-tpm-absent-*,
 # 2026-09-14; byte-verified per the table's provenance comments). The OLD
 # `tpm_absent` pin ("Could not find TPM2 device", libcryptsetup-token
 # plugin) belongs to a DIFFERENT code path and is never printed when the
 # TPM scan finds nothing — the table entry was replaced by these three.
+#
+# NB: no assert_pcr11_prediction here (G-E9): this machine has NO TPM at all
+# — no PCR 11 state exists to predict, the post-phase reading is empty, and
+# G-T13 is defined only where a measured PCR 11 exists.
 
 # _snap SRC DST — copy the console log (snapshots live in SNAPDIR under
 # ${TMPDIR:-/tmp} so sibling .runs housekeeping cannot take them down; see

@@ -31,6 +31,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -116,6 +118,7 @@ mkdir -p "$RUN/state/tpm"
 cp "$STATE/tpm/tpm2-00.permall" "$RUN/state/tpm/" 2>/dev/null || true
 STATE="$RUN/state"
 
+[[ -f "$STATE/uki-pcrsig.json" ]] && cp "$STATE/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
 UKI_MIB=$(( ($(stat -c%s "$STATE/harness.efi") + 1048575) / 1048576 ))
 ESP_MIB=$(( UKI_MIB * 2 + 8 ))
 esp_make "$RUN/esp.img" "$ESP_MIB" "$STATE/harness.efi" || exit 1
@@ -237,6 +240,13 @@ run_variant() {
     fi
     assert_not_contains "$variant: no emergency shell" "$log" "$(sentinel_of emergency_forbidden)"
     assert_contains "$variant: clean poweroff sentinel" "$log" "debian-fde: POWEROFF"
+    # G-T13/G-E9 (every variant boot reaches the UKI stub): token-JSON tamper
+    # breaks only the token path — the PRE-UNLOCK PCR 11 reading must equal
+    # the enrolled UKI's signed prediction in EVERY variant.
+    _CONSOLE_SAVE="$CONSOLE"
+    CONSOLE="$V/console.log"
+    assert_pcr11_prediction "S-13 [$variant]"
+    CONSOLE="$_CONSOLE_SAVE"
     # IN-08: honest in both directions (missing pid file is not a clean exit)
     if [[ -f "$V/qemu.pid" ]] && ! kill -0 "$(cat "$V/qemu.pid" 2>/dev/null)" 2>/dev/null; then
         _assert_result ok "$variant: guest exited (poweroff, not timeout-kill)" ""

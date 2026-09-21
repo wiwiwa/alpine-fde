@@ -35,6 +35,8 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
+# shellcheck source=../lib/prediction.sh
+source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
@@ -166,6 +168,15 @@ assert_contains "ADR-6: unseal despite PCR 0/2 drift" "$LOG" "debian-fde: UNSEAL
 assert_contains "clean poweroff" "$LOG" "debian-fde: POWEROFF"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 
+# G-T13/G-E9 (boot reaches the UKI stub): the ADR-6 drift is PCR 0/2 only —
+# the PRE-UNLOCK PCR 11 reading must equal the signed prediction. Pair the
+# helper with this boot's console snapshot + the enrolled UKI's prediction.
+cp "$ENROLL/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
+_CONSOLE_SAVE="$CONSOLE"
+CONSOLE="$SNAPDIR/console-boot.snap"
+assert_pcr11_prediction "S-08"
+CONSOLE="$_CONSOLE_SAVE"
+
 GUEST_PCR0=$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$SNAPDIR/console-boot.snap" 2>/dev/null | head -1 | cut -d= -f2)
 if [ -n "$GUEST_PCR0" ] && [ "$GUEST_PCR0" != "$ZERO64" ] && [ "$GUEST_PCR0" != "$PCR0_DRIFTED" ]; then
     _assert_result ok "guest observed PCR 0 drifted further (firmware extended on top of the update)" "pcr0=$GUEST_PCR0"
@@ -197,7 +208,7 @@ else
     _assert_result not-ok "audit setup: post-update PCR 0/2 reconstructed (extend is stateless-deterministic)" \
         "pcr0 $PCR0_POST vs $PCR0_DRIFTED; pcr2 $PCR2_POST vs $PCR2_DRIFTED"
 fi
-mkdir -p "$AUDIT_ROOT/etc/debian-fde" "$AUDIT_ROOT/empty-efivars"
+mkdir -p "$AUDIT_ROOT/etc/alpine-fde" "$AUDIT_ROOT/empty-efivars"
 printf 'UEFI TCG event log fixture for s08\n' >"$RUN/eventlog.fixture"
 EV_SHA=$(sha256sum "$RUN/eventlog.fixture" | cut -d' ' -f1)
 EV_SZ=$(wc -c <"$RUN/eventlog.fixture" | tr -d '[:space:]')
@@ -208,7 +219,7 @@ LIVE_PCR7=$(swtpm_pcrread "$ENROLL/tpm" 7)
 # baseline = LIVE values (match phase control); sb_state/target left empty —
 # empty strings are valid per baseline_validate and make the efivarfs-dependent
 # sections inert on this efivarfs-less host (isolate PCR/eventlog drift).
-cat >"$AUDIT_ROOT/etc/debian-fde/baseline.json" <<EOF
+cat >"$AUDIT_ROOT/etc/alpine-fde/baseline.json" <<EOF
 {
   "schema_version": "1",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -254,7 +265,7 @@ fi
 
 # (b) drift phase: stale baseline pcr0 + mutated eventlog -> rc 1 + DRIFT lines
 sed -i "s/\"pcr0\": \"$PCR0_POST\"/\"pcr0\": \"$(printf 'a%.0s' $(seq 1 64))\"/" \
-    "$AUDIT_ROOT/etc/debian-fde/baseline.json"
+    "$AUDIT_ROOT/etc/alpine-fde/baseline.json"
 printf 'tampered\n' >>"$RUN/eventlog.fixture"
 AUDIT_RC=0
 audit_run "$RUN/audit-drift.log" || AUDIT_RC=$?
@@ -272,7 +283,7 @@ if printf '%s\n' "$DRIFT_LOG" | grep -q '^pcr0 .* DRIFT$' &&
 else
     _assert_result not-ok "audit: DRIFT lines for pcr0 AND eventlog" "log: $DRIFT_LOG"
 fi
-if grep -q '"result": "drift"' "$AUDIT_ROOT/etc/debian-fde/last-audit.json" 2>/dev/null; then
+if grep -q '"result": "drift"' "$AUDIT_ROOT/etc/alpine-fde/last-audit.json" 2>/dev/null; then
     _assert_result ok "audit: last-audit.json records result=drift" ""
 else
     _assert_result not-ok "audit: last-audit.json records result=drift" "missing/incorrect last-audit.json"

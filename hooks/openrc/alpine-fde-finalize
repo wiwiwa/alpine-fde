@@ -17,7 +17,7 @@ depend() {
 }
 
 start() {
-    _aff_dir=${DEBIAN_FDE_CMD_DIR:-/opt/debian-fde/lib/cmd}
+    _aff_dir=${DEBIAN_FDE_CMD_DIR:-/opt/alpine-fde/lib/cmd}
     _aff_lib=${_aff_dir%/*}
     if [ -r "$_aff_lib/install-state.sh" ]; then
         DEBIAN_FDE_CMD_DIR=$_aff_dir

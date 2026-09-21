@@ -41,7 +41,7 @@ fi
 DEBIAN_FDE_TOKEN_LOADED=1
 
 if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
-    _tk_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+    _tk_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
     _tk_lib_dir=${_tk_cmd_dir%/*}
     if [ -r "$_tk_lib_dir/common.sh" ]; then
         # shellcheck disable=SC1090

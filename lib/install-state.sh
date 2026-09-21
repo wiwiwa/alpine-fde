@@ -1,5 +1,5 @@
 #!/bin/sh
-# install-state.sh — /etc/debian-fde/install-state.json: the install ceremony
+# install-state.sh — /etc/alpine-fde/install-state.json: the install ceremony
 # state machine (§8.4, §9.1, ADR-20; gaps G-IL1/G-D11). The vocabulary is
 # exactly `installed` → `provisional-booted` → `finalized`:
 #
@@ -37,7 +37,7 @@ DEBIAN_FDE_INSTALL_STATE_LOADED=1
 # Pull in common.sh (exit codes, logging) and baseline.sh (sp_etc_dir) the
 # same way the cmd files resolve their siblings. When this file lives at
 # <tree>/lib/install-state.sh, the cmd dir is <tree>/lib/cmd.
-_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/debian-fde/lib/cmd}
+_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
 if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
     # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
