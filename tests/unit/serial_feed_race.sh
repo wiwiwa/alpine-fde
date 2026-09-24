@@ -15,7 +15,7 @@
 # makes it boundable and stable). The test:
 #   phase 1  boot via qemu_run (the production wiring), then feed 6
 #            passphrase-length lines through feed_line with a guest that
-#            delays its reads, UNDER ARTIFICIAL HOST LOAD (DEBIAN_FDE_
+#            delays its reads, UNDER ARTIFICIAL HOST LOAD (ALPINE_FDE_
 #            FEEDRACE_LOAD spinners, default 4) — every feed must be consumed.
 #   phase 2  a second boot with -qmp: pause the vCPU, feed ONE 63-char line
 #            with the REAL feed_line (connect -> send -> hold -> close), then
@@ -43,10 +43,10 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/serial.sh"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
-export DEBIAN_FDE_ACCEL="${DEBIAN_FDE_ACCEL:-kvm}"
+export ALPINE_FDE_ACCEL="${ALPINE_FDE_ACCEL:-kvm}"
 
-LOAD="${DEBIAN_FDE_FEEDRACE_LOAD:-4}"   # host spinners (artificial load)
-FIXDIR="${DEBIAN_FDE_CACHE_DIR:-$TESTS/.cache}/serial-feed-race"
+LOAD="${ALPINE_FDE_FEEDRACE_LOAD:-4}"   # host spinners (artificial load)
+FIXDIR="${ALPINE_FDE_CACHE_DIR:-$TESTS/.cache}/serial-feed-race"
 WORK=$(mktemp -d)
 RUN="$WORK/run"
 mkdir -p "$RUN"

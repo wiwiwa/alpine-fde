@@ -91,16 +91,16 @@ assert_eq "require_pkgs: second requested pkg installed too" \
 assert_eq "require_pkgs: third call installed its pkg without re-update" \
     "1" "$(grep -c 'install -y --no-install-recommends pkg-three$' "$FAKE_APT_LOG")"
 
-# --- DEBIAN_FDE_NO_INSTALL=1: loud failure with manual instructions, apt untouched ---
+# --- ALPINE_FDE_NO_INSTALL=1: loud failure with manual instructions, apt untouched ---
 # exit contract: environment failures are FAIL-CLOSED (64), not usage (2) — G-I7
 reset_log
 lines_before=$(wc -l <"$FAKE_APT_LOG")
 rc=0
-msg=$(DEBIAN_FDE_NO_INSTALL=1 require_pkgs absent-a:pkg-a 2>&1) || rc=$?
-assert_rc "require_pkgs: DEBIAN_FDE_NO_INSTALL -> exit 64 (missing tools, fail-closed)" "64" "$rc"
+msg=$(ALPINE_FDE_NO_INSTALL=1 require_pkgs absent-a:pkg-a 2>&1) || rc=$?
+assert_rc "require_pkgs: ALPINE_FDE_NO_INSTALL -> exit 64 (missing tools, fail-closed)" "64" "$rc"
 assert_contains "require_pkgs: manual install line listed" \
     "$msg" "apt-get install -y --no-install-recommends pkg-a"
-assert_eq "require_pkgs: DEBIAN_FDE_NO_INSTALL -> apt untouched" \
+assert_eq "require_pkgs: ALPINE_FDE_NO_INSTALL -> apt untouched" \
     "$lines_before" "$(wc -l <"$FAKE_APT_LOG")"
 
 # --- apt-get absent (non-Debian / stripped PATH): loud failure, manual instructions ---
@@ -261,7 +261,7 @@ assert_contains "require_pkgs: apk recheck failure names apk add" "$out" "apk ad
 assert_eq "require_pkgs: apk recheck failure never suggests apt-get" \
     "0" "$(printf '%s\n' "$out" | grep -c apt-get)"
 
-# --- e2e-mock: real bin/debian-fde dispatches into the real require_pkgs -------------
+# --- e2e-mock: real bin/alpine-fde dispatches into the real require_pkgs -------------
 e2e_cmd="$tmp/e2e-cmd"
 mkdir -p "$e2e_cmd"
 cat >"$e2e_cmd/status.sh" <<'EOF'
@@ -277,10 +277,10 @@ rc=0
 out=$(
     PATH="$APKPATH"
     export PATH
-    DEBIAN_FDE_CMD_DIR="$e2e_cmd"
-    DEBIAN_FDE_CONF="$tmp/absent.conf"
-    export DEBIAN_FDE_CMD_DIR DEBIAN_FDE_CONF
-    "$REPO_ROOT/bin/debian-fde" status e2etool:pkg-e2e 2>&1
+    ALPINE_FDE_CMD_DIR="$e2e_cmd"
+    ALPINE_FDE_CONF="$tmp/absent.conf"
+    export ALPINE_FDE_CMD_DIR ALPINE_FDE_CONF
+    "$REPO_ROOT/bin/alpine-fde" status e2etool:pkg-e2e 2>&1
 ) || rc=$?
 assert_rc "e2e: dispatcher -> real require_pkgs -> apk install succeeds" "0" "$rc"
 assert_contains "e2e: apk update announced" "$out" "apk update ..."
@@ -293,8 +293,8 @@ assert_eq "e2e: apt-get never touched" "" "$(cat "$FAKE_APT_LOG")"
 # halves so a future regression in either direction is caught.
 reset_log
 rc=0
-msg=$(DEBIAN_FDE_NO_INSTALL=1 require_pkgs absent-x:pkg-x 2>&1) || rc=$?
+msg=$(ALPINE_FDE_NO_INSTALL=1 require_pkgs absent-x:pkg-x 2>&1) || rc=$?
 assert_rc "require_pkgs: rc 64 == missing tools (fail-closed environment failure)" "64" "$rc"
-assert_eq "require_pkgs: rc 2 stays reserved for usage, never environment" "2" "$DEBIAN_FDE_USAGE"
+assert_eq "require_pkgs: rc 2 stays reserved for usage, never environment" "2" "$ALPINE_FDE_USAGE"
 
 finish

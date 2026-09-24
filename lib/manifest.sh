@@ -23,10 +23,10 @@
 #
 # Depends on: lib/common.sh, jq, openssl (base64 not needed here), sync (GNU).
 
-if [ -n "${DEBIAN_FDE_MANIFEST_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_MANIFEST_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_MANIFEST_LOADED=1
+ALPINE_FDE_MANIFEST_LOADED=1
 
 MANIFEST_SCHEMA_VERSION=1
 
@@ -42,7 +42,7 @@ manifest_atomic_write() {
     _man_dst=$1
     _man_dir=$(dirname "$_man_dst")
     [ -d "$_man_dir" ] || die "manifest: target directory does not exist: $_man_dir"
-    _man_tmp=$(mktemp "$_man_dir/.debian-fde-manifest.XXXXXX") \
+    _man_tmp=$(mktemp "$_man_dir/.alpine-fde-manifest.XXXXXX") \
         || die "manifest: cannot create temp file in $_man_dir"
     cat >"$_man_tmp" || {
         rm -f "$_man_tmp"
@@ -91,7 +91,7 @@ manifest_transform() {
     _man_file=$1
     _man_filter=$2
     shift 2
-    _man_out=$(mktemp "${TMPDIR:-/tmp}/debian-fde-manifest.XXXXXX") \
+    _man_out=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-manifest.XXXXXX") \
         || die "manifest: mktemp failed"
     if ! jq "$@" "$_man_filter" <"$_man_file" >"$_man_out"; then
         rm -f "$_man_out"
@@ -172,7 +172,7 @@ manifest_prune_to() {
     _man_file=$1
     shift
     manifest_load "$_man_file" >/dev/null 2>&1 || return 0
-    _man_keep=$(mktemp "${TMPDIR:-/tmp}/debian-fde-keep.XXXXXX") \
+    _man_keep=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-keep.XXXXXX") \
         || die "manifest: mktemp failed"
     if [ $# -eq 0 ]; then
         printf '[]\n' >"$_man_keep" # empty keep set -> [] (keeps nothing)

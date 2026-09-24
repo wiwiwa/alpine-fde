@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/bootnext_var_write.sh — `debian-fde bootnext` LoaderEntryOneShot
+# tests/unit/bootnext_var_write.sh — `alpine-fde bootnext` LoaderEntryOneShot
 # mechanics (C-G11): var file = u32le attrs 0x7 + UTF-16LE entry id; write is
 # delete-then-write; no-arg prints current; dry-run writes nothing; invalid
 # entry ids -> usage rc 2.
@@ -11,18 +11,18 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 
-T=$(mktemp -d /tmp/debian-fde-bootnext.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-bootnext.XXXXXX)
 EFIVARS=$T/efivars
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
 VARFILE=$EFIVARS/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 ENTRY='alpine-fde-6.6.0-0-lts.conf'
 
 run_bootnext() { # args...
-    BN_OUT=$("$REPO/bin/debian-fde" bootnext "$@" 2>&1)
+    BN_OUT=$("$REPO/bin/alpine-fde" bootnext "$@" 2>&1)
     BN_RC=$?
 }
 
@@ -93,7 +93,7 @@ else
 fi
 
 # --- 8. no efivars dir on real write -> fail-closed ----------------------------------------------
-export DEBIAN_FDE_EFIVARS_DIR=$T/nonexistent-efivars
+export ALPINE_FDE_EFIVARS_DIR=$T/nonexistent-efivars
 run_bootnext "$ENTRY"
 assert_eq "missing efivarfs -> fail-closed" "64" "$BN_RC"
 

@@ -16,7 +16,7 @@
 #
 # Contract pinned:
 #   1. -j validation: 0 / -1 / abc / attached / missing arg / env presets all
-#      exit 64 with a diagnostic naming -j / DEBIAN_FDE_E2E_JOBS.
+#      exit 64 with a diagnostic naming -j / ALPINE_FDE_E2E_JOBS.
 #   1b. Duplicate ids on the command line: rejected at the same parse gate
 #      with exit 64 (under -j they would fork twin boots sharing one .out
 #      capture — silent log clobber).
@@ -32,7 +32,7 @@
 #   4. Status classes under -j: exit!=0 -> fail, exit 124 -> timeout (named
 #      "timeout-class", never a plain fail), exit 0 with zero `ok` lines ->
 #      fail (vacuous guard); all-pass -> runner exit 0.
-#   5. Prune protection: with jobs > 1 DEBIAN_FDE_PROTECT_DIRS covers the
+#   5. Prune protection: with jobs > 1 ALPINE_FDE_PROTECT_DIRS covers the
 #      s00/s00b state-chain dirs AND every existing .runs dir, re-collected
 #      before EACH worker fork (a late fork protects dirs a finished peer
 #      created; a peer's own fork predates its dir).
@@ -167,7 +167,7 @@ ctl=${PAR_CONTRACT_DIR:?PAR_CONTRACT_DIR unset}
 kind_var="PAR_CONTRACT_KIND_${id}"
 kind=${!kind_var:-pass}
 order() { printf '%s %s\n' "$1" "$id" >>"$ctl/order.log"; }
-protect_dump() { printf '%s\n' "${DEBIAN_FDE_PROTECT_DIRS-}" >>"$ctl/protect-$id.log"; }
+protect_dump() { printf '%s\n' "${ALPINE_FDE_PROTECT_DIRS-}" >>"$ctl/protect-$id.log"; }
 conc() { local op=$1 n pk
     ( flock 9
       n=$(cat "$ctl/conc" 2>/dev/null || echo 0)
@@ -216,7 +216,7 @@ run_registry() {
         export TMPDIR="$sbx/tmp"
         # Above the 16 MB contract floor: abort rather than squeeze a shared
         # tmpfs if headroom evaporates mid-run.
-        export DEBIAN_FDE_E2E_TMP_MIN_FREE_MB=512
+        export ALPINE_FDE_E2E_TMP_MIN_FREE_MB=512
         bash ./run-e2e.sh "$@"
     ) >"$outf" 2>"$errf"
 }
@@ -248,7 +248,7 @@ SBX_A="$SBX_ROOT/a"
 CTL_A="$SBX_A/ctl"
 build_sandbox "$SBX_A"
 
-# --- part 1: contract point 1 — -j / DEBIAN_FDE_E2E_JOBS validation ---------------
+# --- part 1: contract point 1 — -j / ALPINE_FDE_E2E_JOBS validation ---------------
 # Against the REAL file by default: invalid -j exits at the parse gate
 # (before env gate / sweep / self-tests / scenarios) so this is side-effect
 # free. Under a mutation, the mutated sandbox copy so the RED run stays
@@ -269,16 +269,16 @@ _bad_jobs_probe() { # <name> <envspec|-> <needle> <args...>
     fi
     rc=$?
     assert_eq "$name: exit 64 (env/prerequisite class)" "64" "$rc"
-    assert_contains "$name: diagnostic names the -j/DEBIAN_FDE_E2E_JOBS seam" "$err" "$needle"
+    assert_contains "$name: diagnostic names the -j/ALPINE_FDE_E2E_JOBS seam" "$err" "$needle"
 }
-_bad_jobs_probe "-j 0"                 "-" "DEBIAN_FDE_E2E_JOBS" -j 0
-_bad_jobs_probe "-j -1"                "-" "DEBIAN_FDE_E2E_JOBS" -j -1
-_bad_jobs_probe "-j abc"               "-" "DEBIAN_FDE_E2E_JOBS" -j abc
-_bad_jobs_probe "attached -jabc"       "-" "DEBIAN_FDE_E2E_JOBS" -jabc
-_bad_jobs_probe "--jobs=0"             "-" "DEBIAN_FDE_E2E_JOBS" --jobs=0
+_bad_jobs_probe "-j 0"                 "-" "ALPINE_FDE_E2E_JOBS" -j 0
+_bad_jobs_probe "-j -1"                "-" "ALPINE_FDE_E2E_JOBS" -j -1
+_bad_jobs_probe "-j abc"               "-" "ALPINE_FDE_E2E_JOBS" -j abc
+_bad_jobs_probe "attached -jabc"       "-" "ALPINE_FDE_E2E_JOBS" -jabc
+_bad_jobs_probe "--jobs=0"             "-" "ALPINE_FDE_E2E_JOBS" --jobs=0
 _bad_jobs_probe "-j with missing arg"  "-" "-j"                 -j
-_bad_jobs_probe "env DEBIAN_FDE_E2E_JOBS=abc" "DEBIAN_FDE_E2E_JOBS=abc" "DEBIAN_FDE_E2E_JOBS"
-_bad_jobs_probe "env DEBIAN_FDE_E2E_JOBS=0"   "DEBIAN_FDE_E2E_JOBS=0"   "DEBIAN_FDE_E2E_JOBS"
+_bad_jobs_probe "env ALPINE_FDE_E2E_JOBS=abc" "ALPINE_FDE_E2E_JOBS=abc" "ALPINE_FDE_E2E_JOBS"
+_bad_jobs_probe "env ALPINE_FDE_E2E_JOBS=0"   "ALPINE_FDE_E2E_JOBS=0"   "ALPINE_FDE_E2E_JOBS"
 
 # contract point 1b — duplicate ids rejected at the parse gate (same env/arg
 # exit class as -j). Parse-gate exit: side-effect free on the real file. Under

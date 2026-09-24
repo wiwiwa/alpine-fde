@@ -70,7 +70,7 @@ assert_ne() {
 HOOK=$REPO/hooks/mkinitfs/alpine-fde-unseal.sh
 FILES=$REPO/hooks/mkinitfs/features.d/alpine-fde.files
 
-TMP=$(mktemp -d /tmp/debian-fde-unseal.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-unseal.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 BIN=$TMP/bin

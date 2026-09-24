@@ -26,10 +26,10 @@
 # Depends on: lib/common.sh (info/warn/die/require_cmds), openssl, awk (LC_ALL=C),
 # jq only for the signature JSON emitter (policy_sign_json).
 
-if [ -n "${DEBIAN_FDE_POLICY_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_POLICY_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_POLICY_LOADED=1
+ALPINE_FDE_POLICY_LOADED=1
 
 # --- constants (marshaled TPM 2.0 structures, sha256 bank, PCRs 7+11) ----------
 POLICY_CC_PCR='0000017f'
@@ -125,7 +125,7 @@ policy_digest_bin() {
 # trap (POSIX sh has exactly one handler per signal); every path cleans up itself.
 policy_sign() {
     [ $# -eq 4 ] || die "policy_sign: usage: policy_sign <d7hex> <d11hex> <privkey.pem> <out.sig>"
-    _pol_msg=$(mktemp "${TMPDIR:-/tmp}/debian-fde-policy.XXXXXX") || die "policy_sign: mktemp failed"
+    _pol_msg=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-policy.XXXXXX") || die "policy_sign: mktemp failed"
     # subshell: a die inside policy_digest_bin (invalid hex) must not strand
     # _pol_msg (S-L1)
     if ! (policy_digest_bin "$1" "$2") >"$_pol_msg"; then
@@ -143,7 +143,7 @@ policy_sign() {
 # verifies over the policyDigest recomputed from the given PCR values.
 policy_verify() {
     [ $# -eq 4 ] || return 2
-    _pol_msg=$(mktemp "${TMPDIR:-/tmp}/debian-fde-policy.XXXXXX") || return 2
+    _pol_msg=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-policy.XXXXXX") || return 2
     # subshell: a die inside policy_digest_bin (invalid hex) must not strand
     # _pol_msg (S-L1); invalid digests are a verify failure here
     if ! (policy_digest_bin "$2" "$3") >"$_pol_msg"; then
@@ -163,7 +163,7 @@ policy_verify() {
 # EMPTY stdout — never a fingerprint of the empty string. Consumers guard on
 # this (policy_sign_json here; `ukictl build` in lib/cmd/ukictl-build.sh).
 policy_pubkey_fp() {
-    _ppf_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-pkfp.XXXXXX") || return 1
+    _ppf_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-pkfp.XXXXXX") || return 1
     if ! openssl pkey -pubin -in "$1" -outform DER 2>/dev/null >"$_ppf_tmp"; then
         rm -f "$_ppf_tmp"
         return 1
@@ -196,7 +196,7 @@ policy_pubkey_fp() {
 policy_sign_json() {
     [ $# -eq 5 ] || die "policy_sign_json: usage: <d7hex> <d11hex> <privkey.pem> <pubkey.pem> <out.json>"
     require_cmds jq
-    _pol_tmp=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-pcrsig.XXXXXX") || die "policy_sign_json: mktemp failed"
+    _pol_tmp=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-pcrsig.XXXXXX") || die "policy_sign_json: mktemp failed"
     # subshell: a die inside policy_sign (unusable private key) must not
     # strand _pol_tmp (S-L1)
     if ! (policy_sign "$1" "$2" "$3" "$_pol_tmp/sig.bin"); then

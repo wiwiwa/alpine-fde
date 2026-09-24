@@ -1,5 +1,5 @@
 #!/bin/sh
-# lib.sh — tiny assert helpers for Debian FDE unit tests.
+# lib.sh — tiny assert helpers for Alpine FDE unit tests.
 # Usage: source this file, run asserts, end with `finish`.
 
 TEST_PASS=0

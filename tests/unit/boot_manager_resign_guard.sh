@@ -30,7 +30,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$HERE/../lib/assert.sh"
 
-T=$(mktemp -d /tmp/debian-fde-bootmgr-guard.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-bootmgr-guard.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
@@ -44,8 +44,8 @@ export ALPINE_FDE_ESP=$T/esp
 export ALPINE_FDE_ROOT=$T/root
 export ALPINE_FDE_KEYDIR=$T/keys
 export ALPINE_FDE_LIB_DIR=$REPO/lib
-export DEBIAN_FDE_TEST_LOG=$T/cmd.log
-export DEBIAN_FDE_TEST_SBV_STATE=$T/sbv-state
+export ALPINE_FDE_TEST_LOG=$T/cmd.log
+export ALPINE_FDE_TEST_SBV_STATE=$T/sbv-state
 mkdir -p "$T/bin" "$ALPINE_FDE_ESP/EFI/systemd" "$ALPINE_FDE_ESP/EFI/BOOT" \
     "$ALPINE_FDE_KEYDIR" "$ALPINE_FDE_ROOT/etc/alpine-fde" "$T/stub"
 printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi"
@@ -68,11 +68,11 @@ chmod +x "$ALPINE_FDE_BIN"
 export ALPINE_FDE_FAKE_RC=0
 
 # stubs: sbsign "signs" by copying input to --output; sbverify behaves per
-# DEBIAN_FDE_TEST_SBV_MODE — "pass" (always accept), "fail" (always reject),
+# ALPINE_FDE_TEST_SBV_MODE — "pass" (always accept), "fail" (always reject),
 # "failonce" (reject exactly the first invocation, then accept); both record argv
 cat >"$T/stub/sbsign" <<'EOF'
 #!/bin/sh
-printf 'sbsign %s\n' "$*" >>"$DEBIAN_FDE_TEST_LOG"
+printf 'sbsign %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
 out=''
 prev=''
 for a in "$@"; do
@@ -89,11 +89,11 @@ exit 0
 EOF
 cat >"$T/stub/sbverify" <<'EOF'
 #!/bin/sh
-printf 'sbverify %s\n' "$*" >>"$DEBIAN_FDE_TEST_LOG"
-n=$(cat "$DEBIAN_FDE_TEST_SBV_STATE" 2>/dev/null || echo 0)
+printf 'sbverify %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
+n=$(cat "$ALPINE_FDE_TEST_SBV_STATE" 2>/dev/null || echo 0)
 n=$((n + 1))
-printf '%s' "$n" >"$DEBIAN_FDE_TEST_SBV_STATE"
-case "${DEBIAN_FDE_TEST_SBV_MODE:-pass}" in
+printf '%s' "$n" >"$ALPINE_FDE_TEST_SBV_STATE"
+case "${ALPINE_FDE_TEST_SBV_MODE:-pass}" in
     fail) exit 1 ;;
     failonce) [ "$n" -le 1 ] && exit 1 ;;
 esac
@@ -103,22 +103,22 @@ chmod +x "$T/stub/sbsign" "$T/stub/sbverify"
 export PATH="$T/stub:$PATH"
 
 run_hook() { sh "$HOOK" add "$KVER" >/dev/null 2>&1; echo $?; }
-reset_stubs() { : >"$DEBIAN_FDE_TEST_LOG"; : >"$T/calls.log"; printf '0' >"$DEBIAN_FDE_TEST_SBV_STATE"; }
+reset_stubs() { : >"$ALPINE_FDE_TEST_LOG"; : >"$T/calls.log"; printf '0' >"$ALPINE_FDE_TEST_SBV_STATE"; }
 
 # =============================================================================
 # G-U7 / LO-05: already-verifying binaries -> idempotent no-op (never re-sign)
 # =============================================================================
 reset_stubs
-export DEBIAN_FDE_TEST_SBV_MODE=pass
+export ALPINE_FDE_TEST_SBV_MODE=pass
 assert_eq "hook: verify-pass run rc 0" "0" "$(run_hook)"
 assert_eq "hook: boot manager untouched when it already verifies" "unsigned-systemd-boot" \
     "$(cat "$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi")"
 assert_eq "hook: fallback loader untouched when it already verifies" "unsigned-fallback" \
     "$(cat "$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI")"
 assert_eq "hook: zero sbsign calls on the verify-pass path" "0" \
-    "$(grep -c '^sbsign' "$DEBIAN_FDE_TEST_LOG")"
+    "$(grep -c '^sbsign' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "hook: sbverify ran once per ESP binary" "2" \
-    "$(grep -c '^sbverify' "$DEBIAN_FDE_TEST_LOG")"
+    "$(grep -c '^sbverify' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "hook: no build-failed marker on the no-op path" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
 
 # =============================================================================
@@ -127,19 +127,19 @@ assert_eq "hook: no build-failed marker on the no-op path" "0" "$([ -e "$MARKER"
 # signed result) — the real sign-then-install path
 # =============================================================================
 reset_stubs
-export DEBIAN_FDE_TEST_SBV_MODE=failonce
+export ALPINE_FDE_TEST_SBV_MODE=failonce
 assert_eq "hook: sign-after-failed-verify rc 0" "0" "$(run_hook)"
 assert_eq "hook: boot manager re-signed after failed verify" "signed($ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi)" \
     "$(cat "$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi")"
 assert_eq "hook: fallback loader untouched (its verify passed)" "unsigned-fallback" \
     "$(cat "$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI")"
-assert_contains "hook: sbsign uses the keydir release.pem" "$(cat "$DEBIAN_FDE_TEST_LOG")" "sbsign --key $ALPINE_FDE_KEYDIR/release.pem --cert $ALPINE_FDE_KEYDIR/release.crt"
-assert_contains "hook: sbverify gates with the release.crt" "$(cat "$DEBIAN_FDE_TEST_LOG")" "sbverify --cert $ALPINE_FDE_KEYDIR/release.crt"
-L_SBSIGN1=$(grep -nm1 '^sbsign' "$DEBIAN_FDE_TEST_LOG" | cut -d: -f1)
-L_SBVERIFY1=$(grep -nm1 '^sbverify' "$DEBIAN_FDE_TEST_LOG" | cut -d: -f1)
+assert_contains "hook: sbsign uses the keydir release.pem" "$(cat "$ALPINE_FDE_TEST_LOG")" "sbsign --key $ALPINE_FDE_KEYDIR/release.pem --cert $ALPINE_FDE_KEYDIR/release.crt"
+assert_contains "hook: sbverify gates with the release.crt" "$(cat "$ALPINE_FDE_TEST_LOG")" "sbverify --cert $ALPINE_FDE_KEYDIR/release.crt"
+L_SBSIGN1=$(grep -nm1 '^sbsign' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+L_SBVERIFY1=$(grep -nm1 '^sbverify' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
 assert_eq "hook: verify happens BEFORE sign (verify-first order)" "1" "$(( L_SBVERIFY1 < L_SBSIGN1 ? 1 : 0 ))"
 assert_eq "hook: exactly one re-sign (only the failed-verify binary)" "1" \
-    "$(grep -c '^sbsign' "$DEBIAN_FDE_TEST_LOG")"
+    "$(grep -c '^sbsign' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "hook: no staging leftovers on success" "0" \
     "$(find "$ALPINE_FDE_ESP" -name '*.signed.*' | wc -l)"
 assert_eq "hook: no build-failed marker on success" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
@@ -148,7 +148,7 @@ assert_eq "hook: no build-failed marker on success" "0" "$([ -e "$MARKER" ] && e
 # G-U7: sbverify failure (gate) -> rc 64 + marker, binary NOT replaced
 # =============================================================================
 reset_stubs
-export DEBIAN_FDE_TEST_SBV_MODE=fail
+export ALPINE_FDE_TEST_SBV_MODE=fail
 printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi"
 assert_eq "hook: sbverify failure -> rc 64" "64" "$(run_hook)"
 assert_eq "hook: failure marker persisted (ADR-8)" "1" "$([ -f "$MARKER" ] && echo 1 || echo 0)"
@@ -156,12 +156,12 @@ assert_contains "hook: marker names the verification failure" "$(cat "$MARKER")"
 assert_eq "hook: unverified binary NOT installed" "unsigned-systemd-boot" \
     "$(cat "$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi")"
 assert_eq "hook: sign attempted before the gate rejected it (1 sbsign call)" "1" \
-    "$(grep -c '^sbsign' "$DEBIAN_FDE_TEST_LOG")"
+    "$(grep -c '^sbsign' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "hook: verify + gate attempted for the first target (2 sbverify calls)" "2" \
-    "$(grep -c '^sbverify' "$DEBIAN_FDE_TEST_LOG")"
+    "$(grep -c '^sbverify' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "hook: staging leftovers cleaned on failure" "0" \
     "$(find "$ALPINE_FDE_ESP" -name '*.signed.*' | wc -l)"
-unset DEBIAN_FDE_TEST_SBV_MODE
+unset ALPINE_FDE_TEST_SBV_MODE
 
 # =============================================================================
 # G-U7: missing key material -> rc 64 + marker, nothing invoked
@@ -171,7 +171,7 @@ mv "$ALPINE_FDE_KEYDIR/release.pem" "$T/release.pem.bak"
 reset_stubs
 assert_eq "hook: missing release.pem -> rc 64" "64" "$(run_hook)"
 assert_eq "hook: marker persisted for missing key" "1" "$([ -f "$MARKER" ] && echo 1 || echo 0)"
-assert_eq "hook: nothing invoked without the key" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
+assert_eq "hook: nothing invoked without the key" "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 mv "$T/release.pem.bak" "$ALPINE_FDE_KEYDIR/release.pem"
 
 # missing keydir entirely
@@ -190,9 +190,9 @@ mv "$T/BOOTX64.bak" "$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI"
 
 # a success after failures clears the stale marker
 reset_stubs
-export DEBIAN_FDE_TEST_SBV_MODE=pass
+export ALPINE_FDE_TEST_SBV_MODE=pass
 assert_eq "hook: recovery run rc 0" "0" "$(run_hook)"
 assert_eq "hook: stale marker cleared after success" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
-unset DEBIAN_FDE_TEST_SBV_MODE
+unset ALPINE_FDE_TEST_SBV_MODE
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

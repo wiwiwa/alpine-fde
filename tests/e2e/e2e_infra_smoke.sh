@@ -13,7 +13,7 @@
 # console line is cross-checked here).
 #
 # State selection (first match wins):
-#   $DEBIAN_FDE_E2E_STATE | $DEBIAN_FDE_S00_STATE | the newest
+#   $ALPINE_FDE_E2E_STATE | $ALPINE_FDE_S00_STATE | the newest
 #   s00b-enroll-* run dir | the newest s00-bootstrap-* run dir (under
 #   tests/e2e/.runs/).
 #
@@ -32,7 +32,7 @@ PRIKEY_RE='^-----BEGIN [A-Z ]*PRIVATE KEY-----'
 
 _state_dir() {
     local d
-    for d in "${DEBIAN_FDE_E2E_STATE:-}" "${DEBIAN_FDE_S00_STATE:-}"; do
+    for d in "${ALPINE_FDE_E2E_STATE:-}" "${ALPINE_FDE_S00_STATE:-}"; do
         [[ -n "$d" && -d "$d" ]] && { printf '%s\n' "$d"; return 0; }
     done
     # newest first (glob expansion is sorted): s00b (enrolled, newest state)
@@ -46,7 +46,7 @@ _state_dir() {
 }
 
 STATE=$(_state_dir) || {
-    echo "e2e_infra_smoke: nothing to scan — no s00/s00b state dir (run s00/s00b first, or set DEBIAN_FDE_E2E_STATE / DEBIAN_FDE_S00_STATE)" >&2
+    echo "e2e_infra_smoke: nothing to scan — no s00/s00b state dir (run s00/s00b first, or set ALPINE_FDE_E2E_STATE / ALPINE_FDE_S00_STATE)" >&2
     exit 64
 }
 echo "# e2e_infra_smoke: scanning state dir $STATE"
@@ -110,10 +110,10 @@ fi
 
 # --- cross-check the guest's own in-guest scan (s00 console evidence) ---------------
 if [[ -f "$STATE/console.log" ]]; then
-    SCAN_LINE=$(grep -oE 'debian-fde-scan: keyfiles=[0-9]+ pem=[0-9]+' "$STATE/console.log" | head -1)
+    SCAN_LINE=$(grep -oE 'alpine-fde-scan: keyfiles=[0-9]+ pem=[0-9]+' "$STATE/console.log" | head -1)
     if [[ -n "$SCAN_LINE" ]]; then
         assert_eq "in-guest scan (console evidence) reports no key material" \
-            "debian-fde-scan: keyfiles=0 pem=0" "$SCAN_LINE"
+            "alpine-fde-scan: keyfiles=0 pem=0" "$SCAN_LINE"
     else
         echo "# e2e_infra_smoke: NOTE no in-guest scan line in $STATE/console.log (pre-s00 state?) — skipped"
     fi

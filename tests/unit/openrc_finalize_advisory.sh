@@ -13,7 +13,7 @@
 # The REAL hook script is exercised (sourced; start() invoked) against the REAL
 # collaborators lib/install-state.sh + lib/firmware.sh. The completion entry
 # point is intercepted with a RECORDING STUB (fin_service_main defined before
-# the hook runs; finalize.sh honors DEBIAN_FDE_FINALIZE_LOADED and returns
+# the hook runs; finalize.sh honors ALPINE_FDE_FINALIZE_LOADED and returns
 # early, so the stub stands in for the whole completion chain). The full
 # REAL-chain service simulation lives in tests/unit/finalize_service_guard.sh.
 #
@@ -49,10 +49,10 @@ STATE=$T/etc/install-state.json
 ATTEMPT=$T/etc/finalize-attempt.txt
 CALL_LOG=$T/calls.log
 
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_INSTALL_STATE=$STATE
-export DEBIAN_FDE_INSTALL_ATTEMPT=$ATTEMPT
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_INSTALL_STATE=$STATE
+export ALPINE_FDE_INSTALL_ATTEMPT=$ATTEMPT
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
 
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
@@ -83,15 +83,15 @@ write_state() { # STATE — the §8.4 install-state document
 # --- driver: source the REAL hook in a subshell and call start() -----------------
 # SVC_RC / SVC_CALLS: the recording stub's rc and invocation count. The stub is
 # defined BEFORE the hook is sourced; finalize.sh honors
-# DEBIAN_FDE_FINALIZE_LOADED (the hook exports it? no — the HOOK sees it already
+# ALPINE_FDE_FINALIZE_LOADED (the hook exports it? no — the HOOK sees it already
 # set in its environment and skips sourcing finalize.sh), so the stub survives.
 run_hook() { # SVC_RC — the rc the completion stub returns
     SVC_CALLS=0
     ADV_OUT=$(
         exec 2>&1
-        export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
-        DEBIAN_FDE_FINALIZE_LOADED=1
-        export DEBIAN_FDE_FINALIZE_LOADED
+        export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+        ALPINE_FDE_FINALIZE_LOADED=1
+        export ALPINE_FDE_FINALIZE_LOADED
         SVC_RC=$1
         fin_service_main() {
             printf 'CALL fin_service_main\n' >>"$CALL_LOG"
@@ -109,8 +109,8 @@ run_hook() { # SVC_RC — the rc the completion stub returns
 run_hook_no_libs() {
     ADV_OUT=$(
         exec 2>&1
-        DEBIAN_FDE_CMD_DIR="$T/absent/cmd"
-        export DEBIAN_FDE_CMD_DIR
+        ALPINE_FDE_CMD_DIR="$T/absent/cmd"
+        export ALPINE_FDE_CMD_DIR
         SVC_RC=0
         fin_service_main() { return 0; }
         # shellcheck disable=SC1090
@@ -130,7 +130,7 @@ assert_contains "static: depend() needs localmount" "$HOOK_TXT" "need localmount
 assert_contains "static: invokes the completion chain (fin_service_main)" "$HOOK_TXT" \
     "fin_service_main"
 assert_contains "static: skip-sourcing guard so a stub seam is possible" "$HOOK_TXT" \
-    "DEBIAN_FDE_FINALIZE_LOADED"
+    "ALPINE_FDE_FINALIZE_LOADED"
 assert_contains "static: reads the install state (finalized is a no-op)" "$HOOK_TXT" \
     "istate_state"
 assert_contains "static: read-only final SB guard before the completion" "$HOOK_TXT" \
@@ -143,7 +143,7 @@ assert_not_contains "static: no cryptenroll vocabulary in the hook itself" "$HOO
     "cryptenroll"
 assert_not_contains "static: no raw tpm2 vocabulary in the hook itself" "$HOOK_TXT" "tpm2 "
 assert_eq "static: systemd unit deleted" "0" \
-    "$([ -e "$REPO/hooks/systemd/debian-fde-finalize.service" ] && echo 1 || echo 0)"
+    "$([ -e "$REPO/hooks/systemd/alpine-fde-finalize.service" ] && echo 1 || echo 0)"
 
 # =================================================================================
 # 1. provisional-booted + final SB state ⇒ the completion chain IS invoked

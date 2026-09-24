@@ -1,22 +1,22 @@
 #!/bin/sh
-# common.sh — Debian FDE shared runtime: exit-code contract, strict-mode helper,
+# common.sh — Alpine FDE shared runtime: exit-code contract, strict-mode helper,
 # logging, config loader, TCTI wrapper for tpm2-tools, command preconditions.
 # Library only: sourcing has no side effects and never enables strict mode by itself.
 
 # --- exit-code contract (docs/Architecture.md §8.1) ---------------------------
 # shellcheck disable=SC2034  # exit-code API consumed by cmd implementations and tests
-DEBIAN_FDE_OK=0 # success
+ALPINE_FDE_OK=0 # success
 # shellcheck disable=SC2034
-DEBIAN_FDE_DRIFT=1 # drift detected / check failed (a result, not a crash)
-DEBIAN_FDE_USAGE=2 # bad CLI usage — print usage and exit
+ALPINE_FDE_DRIFT=1 # drift detected / check failed (a result, not a crash)
+ALPINE_FDE_USAGE=2 # bad CLI usage — print usage and exit
 # shellcheck disable=SC2034
-DEBIAN_FDE_NOT_IMPLEMENTED=3 # known subcommand whose implementation has not landed yet
-DEBIAN_FDE_FAIL_CLOSED=64    # fail-closed error (missing tools, violated precondition, ...)
+ALPINE_FDE_NOT_IMPLEMENTED=3 # known subcommand whose implementation has not landed yet
+ALPINE_FDE_FAIL_CLOSED=64    # fail-closed error (missing tools, violated precondition, ...)
 
-if [ -n "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_COMMON_LOADED:-}" ]; then
   return 0
 fi
-DEBIAN_FDE_COMMON_LOADED=1
+ALPINE_FDE_COMMON_LOADED=1
 
 # --- strict mode ---------------------------------------------------------------
 # strict_mode — enable errexit + unset-variable errors. Scripts opt in explicitly;
@@ -26,15 +26,15 @@ strict_mode() {
 }
 
 # --- logging (all to stderr; stdout stays clean for data) ----------------------
-# The prefix carries the INVOKED program name: bin/alpine-fde signals
-# DEBIAN_FDE_PROG=alpine-fde (§8.1); unset → historical "debian-fde".
-info() { printf '%s: info: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
-warn() { printf '%s: warn: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
-err() { printf '%s: error: %s\n' "${DEBIAN_FDE_PROG:-debian-fde}" "$*" >&2; }
+# The prefix carries the program name: ALPINE_FDE_PROG may override; the
+# default (and only shipped entrance) is "alpine-fde" (§8.1).
+info() { printf '%s: info: %s\n' "${ALPINE_FDE_PROG:-alpine-fde}" "$*" >&2; }
+warn() { printf '%s: warn: %s\n' "${ALPINE_FDE_PROG:-alpine-fde}" "$*" >&2; }
+err() { printf '%s: error: %s\n' "${ALPINE_FDE_PROG:-alpine-fde}" "$*" >&2; }
 
 # die [-r RC] message... — log an error and exit; default exit code: fail-closed
 die() {
-  _sp_rc=$DEBIAN_FDE_FAIL_CLOSED
+  _sp_rc=$ALPINE_FDE_FAIL_CLOSED
   if [ "${1:-}" = "-r" ]; then
     _sp_rc=$2
     shift 2
@@ -44,11 +44,10 @@ die() {
 }
 
 # --- config ---------------------------------------------------------------------
-# config_path — effective config file path (§8.4). $DEBIAN_FDE_CONF (typically
-# via the ALPINE_FDE_CONF alias, §8.1) overrides the default; clean rename to
-# the Alpine path — no legacy Debian-era fallback.
+# config_path — effective config file path (§8.4). $ALPINE_FDE_CONF overrides
+# the default; the Alpine path is the only spelling (no legacy fallback).
 config_path() {
-  printf '%s\n' "${DEBIAN_FDE_CONF:-/etc/alpine-fde/alpine-fde.conf}"
+  printf '%s\n' "${ALPINE_FDE_CONF:-/etc/alpine-fde/alpine-fde.conf}"
 }
 
 # load_config — parse the KEY=VALUE config into the environment.
@@ -118,30 +117,17 @@ load_config() {
   return 0
 }
 
-# --- environment aliases (§8.1, ADR-15) -------------------------------------------
-# env_alias_apply — ALPINE_FDE_* is the canonical spelling of the DEBIAN_FDE_*
-# environment surface (Debian→Alpine pivot). Copies every set ALPINE_FDE_<NAME>
-# onto its DEBIAN_FDE_<NAME> twin, so ALPINE_FDE_* WINS over a co-set
-# DEBIAN_FDE_* twin; CLI flags are parsed later and beat both. Sourcing this
-# library stays side-effect-free: entry points call this explicitly BEFORE
-# load_config. Resolution order: CLI flags > ALPINE_FDE_* > DEBIAN_FDE_* > conf.
-env_alias_apply() {
-  # shellcheck disable=SC2046  # deliberate word split over the alias table
-  for _sp_a in NO_INSTALL ROOT ESP DISK DISKS BCACHE FS TCTI KEYDIR CONF; do
-    eval "test \"\${ALPINE_FDE_${_sp_a}+x}\"" || continue
-    eval "DEBIAN_FDE_${_sp_a}=\$ALPINE_FDE_${_sp_a}"
-    # shellcheck disable=SC2163  # deliberate dynamic export
-    eval "export DEBIAN_FDE_${_sp_a}"
-  done
-  return 0
-}
+# --- environment ------------------------------------------------------------------
+# The environment namespace is ALPINE_FDE_* (§8.1): the retired DEBIAN_FDE_*
+# spellings are no longer accepted anywhere. Sourcing this library stays
+# side-effect-free; resolution order: CLI flags > ALPINE_FDE_* > conf.
 
 # --- TPM access ------------------------------------------------------------------
 # tpm — run tpm2-tools with the configured TCTI.
-# DEBIAN_FDE_TCTI empty/unset → TPM2TOOLS_TCTI set to empty → tctildr default discovery.
+# ALPINE_FDE_TCTI empty/unset → TPM2TOOLS_TCTI set to empty → tctildr default discovery.
 # `command` bypasses any shell function named tpm2 (no recursion, real binary only).
 tpm() {
-  TPM2TOOLS_TCTI="${DEBIAN_FDE_TCTI:-}" command tpm2 "$@"
+  TPM2TOOLS_TCTI="${ALPINE_FDE_TCTI:-}" command tpm2 "$@"
 }
 
 # --- preconditions -----------------------------------------------------------------
@@ -166,7 +152,7 @@ require_cmds() {
 #     `apt-get update` (once per process), then `apk add <pkg>` or
 #     `DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
 #     <pkg>` per missing pair; binary re-checked after install
-#   * any failure (no backend, DEBIAN_FDE_NO_INSTALL set, backend error, or
+#   * any failure (no backend, ALPINE_FDE_NO_INSTALL set, backend error, or
 #     binary still absent after install) ⇒ die(64, fail-closed) with the exact
 #     manual install line for the backend that ran (ADR-8: fail loudly, never
 #     degrade silently). Environment failures are NOT usage errors: 64 = missing
@@ -190,9 +176,9 @@ require_pkgs() {
     _sp_pkgs="$_sp_pkgs ${_sp_pair#*:}"
   done
 
-  if [ -n "${DEBIAN_FDE_NO_INSTALL:-}" ]; then
+  if [ -n "${ALPINE_FDE_NO_INSTALL:-}" ]; then
     die \
-      "missing packages but DEBIAN_FDE_NO_INSTALL is set — install manually:$_sp_pkgs (apk add$_sp_pkgs | apt-get install -y --no-install-recommends$_sp_pkgs)"
+      "missing packages but ALPINE_FDE_NO_INSTALL is set — install manually:$_sp_pkgs (apk add$_sp_pkgs | apt-get install -y --no-install-recommends$_sp_pkgs)"
   fi
 
   # dual backend: apk (Alpine live host) or apt-get (Debian) — whichever the
@@ -273,7 +259,7 @@ policy_mode_normalize() {
   b | a2 | a-prime-prime | native) printf '%s\n' b ;;
   a | ap | a-prime | combined)
     err "POLICY_MODE=${1:-} is documented-absent (ADR-19): Mechanism B (rung b) is the normative path on Alpine"
-    return "$DEBIAN_FDE_FAIL_CLOSED"
+    return "$ALPINE_FDE_FAIL_CLOSED"
     ;;
   *) return 1 ;;
   esac

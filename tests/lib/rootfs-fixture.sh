@@ -22,12 +22,12 @@
 #   * all others: sha256 computed at pin time from deb.debian.org's
 #     dists/trixie index filenames (see docs in tests/e2e/README.md).
 
-if [[ -n "${_DEBIAN_FDE_ROOTFS_FIXTURE_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_ROOTFS_FIXTURE_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_ROOTFS_FIXTURE_SOURCED=1
+_ALPINE_FDE_ROOTFS_FIXTURE_SOURCED=1
 
-ROOTFS_CACHE_DIR="${DEBIAN_FDE_CACHE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.cache}"
+ROOTFS_CACHE_DIR="${ALPINE_FDE_CACHE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.cache}"
 mkdir -p "$ROOTFS_CACHE_DIR"
 
 _DEB_BASE="http://deb.debian.org/debian"

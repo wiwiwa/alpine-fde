@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/install_dryrun.sh — `debian-fde install` dry-run plan contract
+# tests/unit/install_dryrun.sh — `alpine-fde install` dry-run plan contract
 # (docs/Architecture.md §3.3, §4/§4.1, §8.1, §9.1, §13; ADR-17/ADR-20):
 #   * default runner is dry-run; prints the COMPLETE action plan and EXECUTES
 #     nothing
@@ -36,15 +36,15 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
-T=$(mktemp -d /tmp/debian-fde-install-dryrun.XXXXXX)
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
+T=$(mktemp -d /tmp/alpine-fde-install-dryrun.XXXXXX)
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
 FAKEDISK=$T/disk.img
 : >"$FAKEDISK"
 
@@ -52,20 +52,20 @@ cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
 run_install() { # args...
-    INS_OUT=$("$REPO/bin/debian-fde" install "$@" 2>&1)
+    INS_OUT=$("$REPO/bin/alpine-fde" install "$@" 2>&1)
     INS_RC=$?
 }
 
 # --- 1. usage errors ---------------------------------------------------------------
 run_install
 assert_eq "no --disk -> usage rc 2" "2" "$INS_RC"
-export DEBIAN_FDE_INSTALL_RUNNER=nonsense
+export ALPINE_FDE_INSTALL_RUNNER=nonsense
 run_install --disk "$FAKEDISK"
 assert_eq "unknown runner -> usage rc 2" "2" "$INS_RC"
-export DEBIAN_FDE_INSTALL_RUNNER=chroot
+export ALPINE_FDE_INSTALL_RUNNER=chroot
 run_install --disk "$FAKEDISK"
 assert_eq "destructive runner without --yes -> usage rc 2" "2" "$INS_RC"
-unset DEBIAN_FDE_INSTALL_RUNNER
+unset ALPINE_FDE_INSTALL_RUNNER
 run_install --fs xfs --disk "$FAKEDISK"
 assert_eq "G-ST1: --fs xfs rejected (btrfs|ext4 only) -> usage rc 2" "2" "$INS_RC"
 assert_contains "--fs error names the valid values" "$INS_OUT" "btrfs or ext4"
@@ -76,7 +76,7 @@ run_install --fs ext4 --disk a --disk b
 assert_eq "G-ST3: --fs ext4 is single-disk only -> rc 2" "2" "$INS_RC"
 
 # --- 2. dry-run prints the full plan (G-ST1: btrfs default, ADR-20 unattended) -----
-export DEBIAN_FDE_INSTALL_RUNNER=dry-run
+export ALPINE_FDE_INSTALL_RUNNER=dry-run
 run_install --disk "$FAKEDISK"
 assert_eq "dry-run rc 0" "0" "$INS_RC"
 assert_contains "plan: sfdisk GPT partitioning" "$INS_OUT" "sfdisk"
@@ -157,15 +157,15 @@ assert_contains "plan: ceremony release record pins AES-256 PBKDF2 (ADR-18)" "$I
 assert_eq "plan: exactly three ceremony records" "3" \
     "$(grep -c 'credential ceremony ([123]/3)' <<<"$INS_OUT")"
 assert_not_contains "plan: NO credential env seam in the plan (ADR-20 amended)" "$INS_OUT" \
-    "DEBIAN_FDE_RECOVERY_PASSPHRASE"
+    "ALPINE_FDE_RECOVERY_PASSPHRASE"
 assert_not_contains "plan: NO release-key passphrase env in the plan" "$INS_OUT" \
-    "DEBIAN_FDE_KEY_PASSPHRASE"
+    "ALPINE_FDE_KEY_PASSPHRASE"
 assert_not_contains "plan: NO operator passphrase env consumption" "$INS_OUT" \
-    "DEBIAN_FDE_DISK_PASSPHRASE"
+    "ALPINE_FDE_DISK_PASSPHRASE"
 assert_contains "plan: user account created (§8.1 user account row)" "$INS_OUT" "adduser"
 assert_contains "plan: OpenRC networking enabled (§9.1 step 1)" "$INS_OUT" "rc-update add networking boot"
 assert_contains "plan: network interfaces drop" "$INS_OUT" "etc/network/interfaces"
-assert_not_contains "plan: systemd-networkd drop retired" "$INS_OUT" "20-debian-fde.network"
+assert_not_contains "plan: systemd-networkd drop retired" "$INS_OUT" "20-alpine-fde.network"
 # G-ST4/§8.2: single-disk crypttab is ONE root entry, NO password-cache
 assert_contains "plan: crypttab with mandatory tpm2-device" "$INS_OUT" "luks,tpm2-device=auto,discard"
 assert_not_contains "plan: single topology crypttab has NO password-cache (verbatim §8.2)" \
@@ -297,7 +297,7 @@ assert_eq "order: apk populate before repositories drop" "1" "$(( I_POPULATE < I
 assert_eq "order: repositories drop before the additions txn" "1" "$(( I_REPOS < I_TXN ? 1 : 0 ))"
 
 # --- 2c. NO_REBOOT seam (CI) ---------------------------------------------------------
-DEBIAN_FDE_INSTALL_NO_REBOOT=1 run_install --disk "$FAKEDISK"
+ALPINE_FDE_INSTALL_NO_REBOOT=1 run_install --disk "$FAKEDISK"
 assert_eq "NO_REBOOT=1: rc 0" "0" "$INS_RC"
 assert_not_contains "NO_REBOOT=1: reboot record suppressed" "$INS_OUT" "reboot #"
 run_install --disk "$FAKEDISK" --no-reboot
@@ -448,18 +448,18 @@ run_install --disk "$FAKEDISK"
 CSUM_AFTER=$(sha256sum <"$FAKEDISK")
 assert_eq "fake disk untouched by dry-run" "$CSUM_BEFORE" "$CSUM_AFTER"
 assert_not_contains "dry-run: no real ephemeral keyfile path leaks into the plan (M-01 tmpfs seam)" \
-    "$INS_OUT" "/dev/shm/debian-fde-ephkey"
+    "$INS_OUT" "/dev/shm/alpine-fde-ephkey"
 assert_contains "dry-run: ephemeral keyfile is a placeholder" "$INS_OUT" "<ephemeral-keyfile>"
 
-# --- 7. L-06: DEBIAN_FDE_YES only counts as consent when it is exactly "1" -----
-export DEBIAN_FDE_INSTALL_RUNNER=chroot
-export DEBIAN_FDE_INSTALL_NO_REBOOT=1
-DEBIAN_FDE_YES=0 run_install --disk "$FAKEDISK"
-assert_eq "L-06: DEBIAN_FDE_YES=0 is NOT consent -> usage rc 2" "2" "$INS_RC"
+# --- 7. L-06: ALPINE_FDE_YES only counts as consent when it is exactly "1" -----
+export ALPINE_FDE_INSTALL_RUNNER=chroot
+export ALPINE_FDE_INSTALL_NO_REBOOT=1
+ALPINE_FDE_YES=0 run_install --disk "$FAKEDISK"
+assert_eq "L-06: ALPINE_FDE_YES=0 is NOT consent -> usage rc 2" "2" "$INS_RC"
 assert_contains "L-06: refusal explains the --yes requirement" "$INS_OUT" "requires --yes"
-DEBIAN_FDE_YES=no run_install --disk "$FAKEDISK"
-assert_eq "L-06: DEBIAN_FDE_YES=no is NOT consent -> usage rc 2" "2" "$INS_RC"
-unset DEBIAN_FDE_INSTALL_RUNNER DEBIAN_FDE_INSTALL_NO_REBOOT
+ALPINE_FDE_YES=no run_install --disk "$FAKEDISK"
+assert_eq "L-06: ALPINE_FDE_YES=no is NOT consent -> usage rc 2" "2" "$INS_RC"
+unset ALPINE_FDE_INSTALL_RUNNER ALPINE_FDE_INSTALL_NO_REBOOT
 
 # --- 8. M-02: injected operator inputs die at the boundary (usage rc 2) --------
 run_install --disk "$FAKEDISK" --user 'x; rm -rf /'
@@ -467,25 +467,25 @@ assert_eq "M-02: injected --user -> usage rc 2" "2" "$INS_RC"
 assert_contains "M-02: error names the invalid user" "$INS_OUT" "invalid --user"
 run_install --disk '/dev/sda; reboot -f'
 assert_eq "M-02: injected --disk -> usage rc 2" "2" "$INS_RC"
-DEBIAN_FDE_ESP_SIZE='512M; reboot' run_install --disk "$FAKEDISK"
+ALPINE_FDE_ESP_SIZE='512M; reboot' run_install --disk "$FAKEDISK"
 assert_eq "M-02: injected ESP size -> usage rc 2" "2" "$INS_RC"
-DEBIAN_FDE_MIRROR='http://evil.example/alpine; rm -rf /' run_install --disk "$FAKEDISK"
+ALPINE_FDE_MIRROR='http://evil.example/alpine; rm -rf /' run_install --disk "$FAKEDISK"
 assert_eq "M-02: injected mirror -> usage rc 2" "2" "$INS_RC"
 run_install --disk "$FAKEDISK" --bcache '/dev/nvme0n1; reboot -f'
 assert_eq "M-02: injected --bcache -> usage rc 2" "2" "$INS_RC"
-# WR-01: --keydir/DEBIAN_FDE_KEYDIR rides into eval'd records — same rule
-DEBIAN_FDE_KEYDIR='/x; touch /tmp/pwned' run_install --disk "$FAKEDISK"
-assert_eq "M-02: injected keydir (env DEBIAN_FDE_KEYDIR) -> usage rc 2" "2" "$INS_RC"
-assert_contains "M-02: injected keydir error names the variable" "$INS_OUT" "DEBIAN_FDE_KEYDIR"
+# WR-01: --keydir/ALPINE_FDE_KEYDIR rides into eval'd records — same rule
+ALPINE_FDE_KEYDIR='/x; touch /tmp/pwned' run_install --disk "$FAKEDISK"
+assert_eq "M-02: injected keydir (env ALPINE_FDE_KEYDIR) -> usage rc 2" "2" "$INS_RC"
+assert_contains "M-02: injected keydir error names the variable" "$INS_OUT" "ALPINE_FDE_KEYDIR"
 
 # --- 9. G-C23: ephemeral-key staging contract (direct call, THIS shell) --------
 # unattended: openssl rand (>=256-bit) staged under the tmpfs seam, mode 0600,
 # byte-stable for luksFormat/open/--key-file consumers; dry-run stages nothing.
-export DEBIAN_FDE_INSTALL_RUNNER=chroot
-export DEBIAN_FDE_INSTALL_RUNNER
-export DEBIAN_FDE_YES=1
-export DEBIAN_FDE_TMPDIR=$T
-DEBIAN_FDE_INSTALL_RUNNER=dry-run inst_stage_ephemeral_key
+export ALPINE_FDE_INSTALL_RUNNER=chroot
+export ALPINE_FDE_INSTALL_RUNNER
+export ALPINE_FDE_YES=1
+export ALPINE_FDE_TMPDIR=$T
+ALPINE_FDE_INSTALL_RUNNER=dry-run inst_stage_ephemeral_key
 assert_eq "G-C23: dry-run stages NOTHING (empty _IME_KEYFILE)" "1" \
     "$([ -z "${_IME_KEYFILE:-}" ] && echo 1 || echo 0)"
 inst_stage_ephemeral_key
@@ -493,16 +493,16 @@ _EPH_RC=0
 assert_rc "G-C23: direct call returns rc 0" 0 inst_stage_ephemeral_key
 assert_eq "G-C23: resolver stages _IME_KEYFILE (non-empty)" "1" \
     "$([ -n "${_IME_KEYFILE:-}" ] && echo 1 || echo 0)"
-assert_eq "G-C23: key staged under the tmpfs seam (DEBIAN_FDE_TMPDIR)" "1" \
-    "$([[ "${_IME_KEYFILE:-}" == "$T"/debian-fde-ephkey.* ]] && echo 1 || echo 0)"
+assert_eq "G-C23: key staged under the tmpfs seam (ALPINE_FDE_TMPDIR)" "1" \
+    "$([[ "${_IME_KEYFILE:-}" == "$T"/alpine-fde-ephkey.* ]] && echo 1 || echo 0)"
 assert_eq "G-C23: key-file mode 0600" "600" "$(stat -c '%a' "${_IME_KEYFILE:-}")"
 assert_eq "G-C23: key material is 256-bit hex (64 chars, openssl rand -hex 32)" "64" \
     "$(wc -c <"${_IME_KEYFILE:-/dev/null}" | tr -d '[:space:]')"
 assert_eq "G-C23: _ime_kf carrier matches the staged key-file" "${_IME_KEYFILE:-}" "${_ime_kf:-}"
 rm -f "${_IME_KEYFILE:-}"
-unset _IME_KEYFILE _ime_kf DEBIAN_FDE_TMPDIR
+unset _IME_KEYFILE _ime_kf ALPINE_FDE_TMPDIR
 trap cleanup EXIT # the resolver re-armed the EXIT trap; restore fixture cleanup
-unset DEBIAN_FDE_INSTALL_RUNNER DEBIAN_FDE_YES
+unset ALPINE_FDE_INSTALL_RUNNER ALPINE_FDE_YES
 
 # --- 9b. §8.1 provision row / ADR-18: --keydir is CONSUMED (staged from the ---
 #         signing medium, NO in-chroot keygen) — README "provision stage1 on
@@ -513,7 +513,7 @@ for f in release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.de
     db.esl kek.esl pk.esl db.auth kek.auth pk.auth; do
     printf 'key-material' >"$KEYDIR/$f"
 done
-DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
+ALPINE_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
 assert_eq "keydir: dry-run rc 0" "0" "$INS_RC"
 assert_contains "keydir: plan stages release.pem FROM the medium onto the encrypted root" \
     "$INS_OUT" "cp $KEYDIR/release.pem"
@@ -532,10 +532,10 @@ assert_eq "keydir: staging BEFORE NVRAM enrollment (plan order)" "1" \
 assert_not_contains "keydir: key material NEVER staged to the ESP" "$INS_OUT" \
     "cp $KEYDIR/.*efi"
 # missing/invalid key material fails closed BEFORE any plan record exists
-DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$T/no-such-dir"
+ALPINE_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$T/no-such-dir"
 assert_eq "keydir: nonexistent medium dir -> usage rc 2" "2" "$INS_RC"
 rm -f "$KEYDIR/kek.auth"
-DEBIAN_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
+ALPINE_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
 assert_eq "keydir: missing key artifact (kek.auth) -> usage rc 2" "2" "$INS_RC"
 assert_contains "keydir: error names the missing artifact" "$INS_OUT" "kek.auth"
 printf 'key-material' >"$KEYDIR/kek.auth"
@@ -556,10 +556,10 @@ assert_contains "esp: bootctl install targets the flag mount point" "$INS_OUT" \
     "bootctl install --esp-path=/boot/efi --boot-path=/boot/efi"
 assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
     "/boot/efi/EFI/Linux/alpine-fde-*.efi"
-# dispatcher global --esp (env DEBIAN_FDE_ESP) is consumed too
-DEBIAN_FDE_ESP=/boot/efi run_install --disk "$FAKEDISK"
-assert_eq "esp: env DEBIAN_FDE_ESP dry-run rc 0" "0" "$INS_RC"
-assert_contains "esp: env DEBIAN_FDE_ESP flows into ESP_PATH" "$INS_OUT" "ESP_PATH=/boot/efi"
+# dispatcher global --esp (env ALPINE_FDE_ESP) is consumed too
+ALPINE_FDE_ESP=/boot/efi run_install --disk "$FAKEDISK"
+assert_eq "esp: env ALPINE_FDE_ESP dry-run rc 0" "0" "$INS_RC"
+assert_contains "esp: env ALPINE_FDE_ESP flows into ESP_PATH" "$INS_OUT" "ESP_PATH=/boot/efi"
 # invalid values fail loudly rc 2 BEFORE any plan record
 run_install --disk "$FAKEDISK" --esp /
 assert_eq "esp: / rejected -> usage rc 2" "2" "$INS_RC"
@@ -615,12 +615,12 @@ assert_eq "sizing: unmeasurable (empty) -> 512M default" "512M" \
     "$(inst_esp_size_compute '' 3 $((64 * MIB)))"
 printf 'uki-bytes' >"$T/uki.efi"
 assert_eq "sizing: measured via probe file" "65M" \
-    "$(DEBIAN_FDE_UKI_FILE=$T/uki.efi inst_esp_size)"
+    "$(ALPINE_FDE_UKI_FILE=$T/uki.efi inst_esp_size)"
 assert_eq "sizing: env override wins over measurement" "1G" \
-    "$(DEBIAN_FDE_UKI_FILE=$T/uki.efi DEBIAN_FDE_ESP_SIZE=1G inst_esp_size)"
+    "$(ALPINE_FDE_UKI_FILE=$T/uki.efi ALPINE_FDE_ESP_SIZE=1G inst_esp_size)"
 
 # --- 12. help text (G-C23/C24/C25/C26/C27) --------------------------------------
-HELP_OUT=$("$REPO/bin/debian-fde" install --help 2>&1)
+HELP_OUT=$("$REPO/bin/alpine-fde" install --help 2>&1)
 HELP_RC=$?
 assert_eq "install --help rc 0" "0" "$HELP_RC"
 assert_contains "help: --fs documented" "$HELP_OUT" "--fs btrfs|ext4"
@@ -640,7 +640,7 @@ assert_contains "help: direct reboot documented (no firmware trip)" "$HELP_OUT" 
 assert_contains "help: finalize handoff documented" "$HELP_OUT" "finalize"
 
 # --- 13. pre-upgrade stub (ext4 root -> graceful skip rc 0 per ADR-13) ---------
-PRE_OUT=$("$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PRE_OUT=$("$REPO/bin/alpine-fde" pre-upgrade 2>&1)
 PRE_RC=$?
 assert_eq "pre-upgrade skips ext4 root gracefully (rc 0)" "0" "$PRE_RC"
 assert_contains "pre-upgrade explains ext4 stance" "$PRE_OUT" "btrfs"

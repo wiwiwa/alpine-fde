@@ -26,7 +26,7 @@
 # verbatim.
 #
 # Choreography primitives (all cryptsetup calls go through the
-# DEBIAN_FDE_CRYPTSETUP seam — the same env override enroll-tpm/ukictl-build
+# ALPINE_FDE_CRYPTSETUP seam — the same env override enroll-tpm/ukictl-build
 # and their tests use):
 #   token_free_slot <dev>       smallest free keyslot >= 1 (slot 0 is recovery)
 #   token_next_id   <dev>       smallest free LUKS2 token id
@@ -48,13 +48,13 @@
 # Depends on: lib/common.sh (die/info), lib/baseline.sh parsers are NOT needed
 # here (own jq one-liners); jq; cryptsetup via the seam.
 
-if [ -n "${DEBIAN_FDE_TOKEN_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_TOKEN_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_TOKEN_LOADED=1
+ALPINE_FDE_TOKEN_LOADED=1
 
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
-    _tk_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ]; then
+    _tk_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
     _tk_lib_dir=${_tk_cmd_dir%/*}
     if [ -r "$_tk_lib_dir/common.sh" ]; then
         # shellcheck disable=SC1090
@@ -62,7 +62,7 @@ if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
     fi
 fi
 
-token_cryptsetup() { "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
+token_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
 
 # token_dump <dev> <outfile> — LUKS2 metadata snapshot (fail-closed 64).
 token_dump() {
@@ -77,7 +77,7 @@ token_dump() {
 # index; dies 64 when the metadata is unreadable or no slot is free.
 token_free_slot() {
     [ $# -eq 1 ] || die "token_free_slot: usage: token_free_slot <dev>"
-    _tfs_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-token.XXXXXX") || die "token: mktemp failed"
+    _tfs_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-token.XXXXXX") || die "token: mktemp failed"
     token_dump "$1" "$_tfs_tmp"
     _tfs_slot=$(jq -r '[.keyslots // {} | keys[] | tonumber] as $u |
         [range(1; 32)] | map(select(. as $i | $u | index($i) | not)) | first // empty' \
@@ -90,7 +90,7 @@ token_free_slot() {
 # token_next_id <dev> — smallest free LUKS2 token id (>= 0).
 token_next_id() {
     [ $# -eq 1 ] || die "token_next_id: usage: token_next_id <dev>"
-    _tni_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-token.XXXXXX") || die "token: mktemp failed"
+    _tni_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-token.XXXXXX") || die "token: mktemp failed"
     token_dump "$1" "$_tni_tmp"
     _tni_id=$(jq -r '[.tokens // {} | keys[] | tonumber] as $u |
         [range(0; 64)] | map(select(. as $i | $u | index($i) | not)) | first // empty' \
@@ -157,7 +157,7 @@ token_import() {
     _tim_dev=$1 _tim_json=$2 _tim_id=$3
     _tim_dir=${_tim_json%/*}
     [ -d "$_tim_dir" ] || _tim_dir=${TMPDIR:-/tmp}
-    _tim_tmp=$(mktemp "$_tim_dir/.debian-fde-token-import.XXXXXX") ||
+    _tim_tmp=$(mktemp "$_tim_dir/.alpine-fde-token-import.XXXXXX") ||
         die "token: cannot stage the token import"
     chmod 600 "$_tim_tmp"
     cat "$_tim_json" >"$_tim_tmp"

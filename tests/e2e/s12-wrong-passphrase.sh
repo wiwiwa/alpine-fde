@@ -26,7 +26,7 @@
 # unlocks, so the postphase reading appears and the signed prediction IS
 # asserted there.
 #
-# Reuses s00 state when DEBIAN_FDE_E2E_STATE points at the s00 run dir
+# Reuses s00 state when ALPINE_FDE_E2E_STATE points at the s00 run dir
 # (run-e2e.sh sets it); otherwise builds + boots the enrolled state itself
 # (bootstrap boot + 2 scenario boots).
 
@@ -76,7 +76,7 @@ REFRESHER=$!
 _SWTPM_CLEANUP_TRAP_SET=1
 trap 'kill "$REFRESHER" 2>/dev/null; swtpm_cleanup_all 2>/dev/null' EXIT INT TERM
 
-STATE="${DEBIAN_FDE_E2E_STATE:-}"
+STATE="${ALPINE_FDE_E2E_STATE:-}"
 # _fresh_pcrs <tpm-dir> — force ZEROED PCRs for the NEXT qemu boot (repro-proven
 # 2026-09-24): after a boot exits CLEANLY the swtpm proxy stores the volatile
 # state and the fixture's restart RESTORES it into RAM; a boot served by that
@@ -133,10 +133,10 @@ else
         qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
-            feed_line "$RUN_ENROLLED/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+            feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
-        grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
+        grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s12: bootstrap boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
         echo "--- qemu.stderr (tail):"
@@ -146,7 +146,7 @@ else
             rm -f "$RUN_ENROLLED/console.log"
         fi
     done
-    grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
+    grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
         echo "s12: bootstrap boot did not reach UNSEALED — state unusable"
         exit 1
     }
@@ -156,7 +156,7 @@ else
     # booted console's PCR 7, d11 = the build's enter-initrd prediction; the
     # combined {7,11} entry is what the hook extracts for the finalized token.
     swtpm_ensure "$RUN_ENROLLED/tpm" || { echo "s12: swtpm restart failed"; exit 1; }
-    PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
+    PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
     [[ -n "$PCR7_ENROLLED" ]] || { echo "s12: no PCR 7 in the bootstrap console"; exit 1; }
     D11=$(cat "$RUN_ENROLLED/pcr11-enter-initrd.txt" 2>/dev/null)
     [[ -n "$D11" ]] || { echo "s12: no enter-initrd d11 prediction from the build"; exit 1; }
@@ -166,7 +166,7 @@ else
         "$PCR7_ENROLLED" "$D11" "$RUN_ENROLLED/keys" || exit 1
     uki_baseline_stamp "$RUN_ENROLLED/cli-state" "$PCR7_ENROLLED"
     uki_pcrsig_disk "$RUN_ENROLLED/pcrsig.img" "$RUN_ENROLLED/uki-pcrsig-combined.json" || exit 1
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
     chmod 600 "$RUN_ENROLLED/kf-slot0"
     EFIVARS="$RUN_ENROLLED/efivars-sb-on"
     mkdir -p "$EFIVARS"
@@ -242,7 +242,7 @@ for n in 1 2 3; do
             "no prompt $n in console"
         break
     fi
-    feed_line "$A/serial.sock" "debian-fde-wrong-passphrase-$n"
+    feed_line "$A/serial.sock" "alpine-fde-wrong-passphrase-$n"
 done
 qemu_wait "$A" "$QEMU_TIMEOUT"
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
@@ -272,12 +272,12 @@ assert_not_contains "boot A: never unlocked via the TPM token" "$LOG_A" \
     "$(sentinel_of unseal_unlocked)"
 assert_not_contains "boot A: never unlocked via the recovery passphrase" "$LOG_A" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_not_contains "boot A: never UNSEALED" "$LOG_A" "debian-fde: UNSEALED"
+assert_not_contains "boot A: never UNSEALED" "$LOG_A" "alpine-fde: UNSEALED"
 assert_not_contains "boot A: no emergency shell" "$LOG_A" "$(sentinel_of emergency_forbidden)"
 # tamper scoping: the hook extended PCR 11 exactly as at enroll (same UKI, same
 # stub measurement) — the refusal is purely the PCR 7 drift
-PCR11_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
-PCR11_A=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$A/console.log" | head -1 | cut -d= -f2)
+PCR11_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
+PCR11_A=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$A/console.log" | head -1 | cut -d= -f2)
 assert_eq "boot A: PCR 11 unchanged vs the enrolled boot (drift is PCR 7 only)" \
     "$PCR11_ENROLLED" "$PCR11_A"
 # IN-08: honest in both directions (missing pid file is not a clean exit)
@@ -309,17 +309,17 @@ for n in 1 2; do
             "no prompt $n in console"
         break
     fi
-    feed_line "$B/serial.sock" "debian-fde-wrong-passphrase-$n"
+    feed_line "$B/serial.sock" "alpine-fde-wrong-passphrase-$n"
 done
 if uki_wait_hook_prompt 3 300 "$B"; then
     _assert_result ok "boot B: hook awaiting recovery passphrase 3/3" ""
-    feed_line "$B/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+    feed_line "$B/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 else
     _assert_result not-ok "boot B: hook awaiting recovery passphrase 3/3" \
         "no prompt 3 in console"
 fi
 # Post-unlock exit shape (repro-pinned 2026-09-24): the consumer context boots
-# s00b's harness.efi, which BAKES the debug-shell seam (DEBIAN_FDE_DEBUG_SHELL)
+# s00b's harness.efi, which BAKES the debug-shell seam (ALPINE_FDE_DEBUG_SHELL)
 # for s00b's fed enrollment session. With STAGE=boot (the snapshot payload
 # carries no login marker) an unlocked boot reaches UNSEALED + the postphase
 # PCR 11 print and then hands the console to the harness DEBUG SHELL instead
@@ -331,7 +331,7 @@ fi
 B_SHAPE=''
 i=0
 while (( i < 180 )); do
-    if grep -q "debian-fde: POWEROFF" "$B/console.log" 2>/dev/null; then B_SHAPE=poweroff; break; fi
+    if grep -q "alpine-fde: POWEROFF" "$B/console.log" 2>/dev/null; then B_SHAPE=poweroff; break; fi
     if grep -q "DEBUG SHELL on console" "$B/console.log" 2>/dev/null; then B_SHAPE=debugshell; break; fi
     qpid=$(cat "$B/qemu.pid" 2>/dev/null || true)
     [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null && break   # self-exited
@@ -350,7 +350,7 @@ PROMPTS_B=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_B" || true)
 assert_eq "boot B: exactly 3 prompts (2 wrong + 1 correct, no 4th)" "3" "$PROMPTS_B"
 assert_contains "boot B: correct slot-0 passphrase UNLOCKED via the recovery path" "$LOG_B" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "boot B: hook UNSEALED sentinel" "$LOG_B" "debian-fde: UNSEALED"
+assert_contains "boot B: hook UNSEALED sentinel" "$LOG_B" "alpine-fde: UNSEALED"
 assert_not_contains "boot B: never unlocked via the TPM token (SB-off PCR drift)" "$LOG_B" \
     "$(sentinel_of unseal_unlocked)"
 assert_not_contains "boot B: no emergency shell" "$LOG_B" "$(sentinel_of emergency_forbidden)"

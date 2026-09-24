@@ -35,25 +35,25 @@ source "$REPO/lib/manifest.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# --- CR fix (review B-CR1): esp_dir resolution order — env DEBIAN_FDE_ESP > env
+# --- CR fix (review B-CR1): esp_dir resolution order — env ALPINE_FDE_ESP > env
 # ESP_PATH > persisted conf ESP_PATH (install records the real mount in
 # /etc/alpine-fde/alpine-fde.conf) > /efi default (install + boot-hook parity).
 # All legs run in subshells so the ambient test env stays untouched.
 mkdir -p "$TMP/cr1"
-printf '%s\n' 'ESP_PATH=/efi-from-conf' >"$TMP/cr1/debian-fde.conf"
-cr1=$(unset DEBIAN_FDE_ESP ESP_PATH; DEBIAN_FDE_CONF="$TMP/cr1/debian-fde.conf" esp_dir)
+printf '%s\n' 'ESP_PATH=/efi-from-conf' >"$TMP/cr1/alpine-fde.conf"
+cr1=$(unset ALPINE_FDE_ESP ESP_PATH; ALPINE_FDE_CONF="$TMP/cr1/alpine-fde.conf" esp_dir)
 assert_eq "esp_dir: persisted conf ESP_PATH honored (env unset)" "/efi-from-conf" "$cr1"
-cr2=$(unset DEBIAN_FDE_ESP ESP_PATH DEBIAN_FDE_CONF; esp_dir)
+cr2=$(unset ALPINE_FDE_ESP ESP_PATH ALPINE_FDE_CONF; esp_dir)
 assert_eq "esp_dir: no conf + no env falls back to /efi (matches install/boot hook)" "/efi" "$cr2"
-cr3=$(unset DEBIAN_FDE_ESP; ESP_PATH=/env-esp-path DEBIAN_FDE_CONF="$TMP/cr1/debian-fde.conf" esp_dir)
+cr3=$(unset ALPINE_FDE_ESP; ESP_PATH=/env-esp-path ALPINE_FDE_CONF="$TMP/cr1/alpine-fde.conf" esp_dir)
 assert_eq "esp_dir: ESP_PATH env still wins over the conf" "/env-esp-path" "$cr3"
-cr4=$(unset ESP_PATH; DEBIAN_FDE_ESP=/env-top DEBIAN_FDE_CONF="$TMP/cr1/debian-fde.conf" esp_dir)
-assert_eq "esp_dir: DEBIAN_FDE_ESP wins over everything" "/env-top" "$cr4"
-cr5=$(unset DEBIAN_FDE_ESP ESP_PATH; printf 'ESP_PATH="/efi quoted"\n' >"$TMP/cr1/q.conf"; DEBIAN_FDE_CONF="$TMP/cr1/q.conf" esp_dir)
+cr4=$(unset ESP_PATH; ALPINE_FDE_ESP=/env-top ALPINE_FDE_CONF="$TMP/cr1/alpine-fde.conf" esp_dir)
+assert_eq "esp_dir: ALPINE_FDE_ESP wins over everything" "/env-top" "$cr4"
+cr5=$(unset ALPINE_FDE_ESP ESP_PATH; printf 'ESP_PATH="/efi quoted"\n' >"$TMP/cr1/q.conf"; ALPINE_FDE_CONF="$TMP/cr1/q.conf" esp_dir)
 assert_eq "esp_dir: conf value quotes are stripped (load_config parity)" "/efi quoted" "$cr5"
 
 # --- keep-set math: Debian version sort (6.12.8-1 vs 6.12.10-1 vs 6.9.x) ----------
-export DEBIAN_FDE_ESP="$TMP/esp"
+export ALPINE_FDE_ESP="$TMP/esp"
 mkdir -p "$(esp_uki_dir)"
 for k in 6.12.8-1-amd64 6.12.10-1-amd64 6.1.0-1-amd64 5.15.0-2-amd64 6.12.9-1-amd64; do
     printf 'dummy-uki-%s' "$k" >"$(esp_uki_dir)/alpine-fde-$k.efi"
@@ -100,7 +100,7 @@ assert_eq "prune: removed 6.1.0" "0" "$([ -f "$(esp_uki_dir)/alpine-fde-6.1.0-1-
 assert_eq "prune: removed 5.15.0" "0" "$([ -f "$(esp_uki_dir)/alpine-fde-5.15.0-2-amd64.efi" ] && echo 1 || echo 0)"
 
 # --- current kernel always kept even when an older version sorts lowest ------------
-export DEBIAN_FDE_ESP="$TMP/esp2"
+export ALPINE_FDE_ESP="$TMP/esp2"
 mkdir -p "$(esp_uki_dir)"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 6.3.0-1-amd64 6.4.0-1-amd64; do
     printf 'dummy-%s' "$k" >"$(esp_uki_dir)/alpine-fde-$k.efi"
@@ -116,7 +116,7 @@ keep=$(esp_compute_keep "6.1.0-1-amd64" 0 | sort)
 assert_eq "retention 0 keeps only current" "6.1.0-1-amd64" "$keep"
 
 # --- install is atomic: replaces in place, leaves no staging files -------------------
-export DEBIAN_FDE_ESP="$TMP/esp3"
+export ALPINE_FDE_ESP="$TMP/esp3"
 printf 'uki-v1' >"$TMP/uki1"
 printf 'uki-v2-longer-content' >"$TMP/uki2"
 esp_install_uki "$TMP/uki1" "6.12.8-1-amd64"
@@ -141,7 +141,7 @@ esp_prune_ukis "6.12.8-1-amd64" # keep set containing the only file
 assert_file_exists "prune keeps files in the keep set" "$(esp_uki_path 6.12.8-1-amd64)"
 
 # --- LO-04: a failing rm propagates — prune never reports silent success --------------
-export DEBIAN_FDE_ESP="$TMP/esp-ro"
+export ALPINE_FDE_ESP="$TMP/esp-ro"
 mkdir -p "$(esp_uki_dir)"
 for k in 6.12.8-1-amd64 6.0.0-1-amd64; do
     printf 'dummy-%s' "$k" >"$(esp_uki_path "$k")"
@@ -162,7 +162,7 @@ manifest_new "6.1.0-1-amd64" "fp" | manifest_atomic_write "$M"
 for k in 6.1.0-1-amd64 6.2.0-1-amd64 6.3.0-1-amd64 6.4.0-1-amd64; do
     manifest_upsert "$M" "$k" "p11-$k" "pd-$k" "sig-$k"
 done
-export DEBIAN_FDE_ESP="$TMP/esp2" # restore for the shared decision
+export ALPINE_FDE_ESP="$TMP/esp2" # restore for the shared decision
 # shellcheck disable=SC2046
 manifest_prune_to "$M" $(esp_compute_keep "6.1.0-1-amd64" 2)
 assert_eq "manifest pruned from the same keep set as the ESP" \

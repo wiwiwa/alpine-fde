@@ -21,7 +21,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
@@ -38,14 +38,14 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-token-schema.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-token-schema.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp"
-DEBIAN_FDE_TMPDIR=$TMP/tmp
+ALPINE_FDE_TMPDIR=$TMP/tmp
 KEYDIR=$REPO/fixtures/keys
 
 EXACT_FIELDS="keyslots,tpm2-blob,tpm2-pcr-bank,tpm2-pcrs,tpm2-policy-hash,tpm2-primary-alg,tpm2-pubkey,tpm2-signature,type"
@@ -97,8 +97,8 @@ swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 swtpm_pcrextend "$TPMDIR" 11 fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedc
 pcr_hex() {
     tpm pcrread -Q -o "$TMP/pcr.bin" "sha256:$1" >/dev/null 2>&1

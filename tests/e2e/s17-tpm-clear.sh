@@ -61,9 +61,9 @@ CONSOLE="$RUN/console.log"
 T0=$SECONDS
 
 # CR-02/MD-03: prunes must spare the invocation's chained state dirs
-# (DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 while IFS= read -r _d; do
-    case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
+    case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
     rm -rf "$_d"
 done < <(find "$TESTS/e2e/.runs" -mindepth 1 -maxdepth 1 -type d -printf "%T@\t%p\n" 2>/dev/null | sort -rn | tail -n +3 | cut -f2-)
 
@@ -132,7 +132,7 @@ boot_and_wait() {
 }
 log_of() { cat "$RUN/console-$1.log" 2>/dev/null || true; }
 console_pcr() { # <label> <idx>
-    grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2
+    grep -oE "alpine-fde-pcr sha256:$2=[0-9a-f]{64}" "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2
 }
 
 # --- fixtures ------------------------------------------------------------------
@@ -147,7 +147,7 @@ cp "$RUN/pcrsig.img" "$RUN/uki-6.2.0.efi.pcrsig.img"
 UKI_MIB=$(( ($(stat -c%s "$RUN/uki-6.2.0.efi") + 1048575) / 1048576 ))
 esp_make "$RUN/esp.img" $(( UKI_MIB * 2 + 8 )) "$RUN/uki-6.2.0.efi" || exit 1
 disk_make_luks "$RUN/disk.img" 128 || exit 1
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 
 # efivars seam for the enroll-tpm I5 guard (mkvar pattern from
@@ -164,7 +164,7 @@ echo "# boot v1-baseline (token-less disk -> hook recovery loop, TCG, up to $QEM
 for _attempt in 1 2; do
     qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     qemu_wait "$RUN" "$QEMU_TIMEOUT"
     cp "$CONSOLE" "$RUN/console-v1-baseline.log"
@@ -256,7 +256,7 @@ echo "# boot cleared: fresh SRK, stale sealed blob (TCG, up to $QEMU_TIMEOUT s)"
 qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig-combined.img"
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "debian-fde-cleared-wrong-passphrase-$n"
+        feed_line "$RUN/serial.sock" "alpine-fde-cleared-wrong-passphrase-$n"
     else
         _assert_result not-ok "[clr] hook awaiting recovery passphrase $n/3" \
             "no prompt $n in console"

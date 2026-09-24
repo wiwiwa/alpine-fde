@@ -1,5 +1,5 @@
 #!/bin/sh
-# enroll-tpm.sh — `debian-fde enroll-tpm`: Mechanism B TPM-seal enrollment
+# enroll-tpm.sh — `alpine-fde enroll-tpm`: Mechanism B TPM-seal enrollment
 # (§6.1/§7.1/§9.1/§9.4; ADR-19/ADR-20; gaps G-B3/G-B5/G-B6/G-B7). Alpine has
 # NO systemd-cryptenroll (ADR-19): the seal is lib/seal.sh (tpm2-tools) and the
 # LUKS2 choreography is lib/token.sh — cryptsetup stays the only LUKS2 seam.
@@ -32,7 +32,7 @@
 # pubkey == the keydir release key, pcrs [7,11], keyslot != 0, recovery
 # keyslot 0 byte-identical), then enrolled.json.
 #
-# Signed-policy source (§9.1 step 6): --pcrsig FILE (or DEBIAN_FDE_PCRSIG env)
+# Signed-policy source (§9.1 step 6): --pcrsig FILE (or ALPINE_FDE_PCRSIG env)
 # supplies the release-key-signed .pcrsig JSON the seal embeds; its entry is
 # verified openssl-level against the policy digest recomputed from the entry's
 # own anchored d7/d11 components BEFORE anything is embedded (G-B6, digest-
@@ -45,28 +45,28 @@
 # run as the fresh one is standing (add new keyslot + token FIRST, then remove
 # the old token + kill the old slot) — never a bare wipe (brick risk).
 
-if [ -n "${DEBIAN_FDE_ENROLL_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_ENROLL_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_ENROLL_LOADED=1
+ALPINE_FDE_ENROLL_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
-if [ -z "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
 fi
 
 # Seams (test injection points):
-#   DEBIAN_FDE_CRYPTSETUP    cryptsetup binary override (LUKS2 choreography)
-#   DEBIAN_FDE_BY_UUID_DIR   /dev/disk/by-uuid override
-#   DEBIAN_FDE_ENROLL_LOCK   ensure-once lockfile override (tests; default below)
-#   DEBIAN_FDE_PCRSIG        .pcrsig JSON source for the ensure-once path
-#   DEBIAN_FDE_LUKS_KEYFILE  existing-passphrase key file authorizing luksAddKey
-enrl_cryptsetup() { "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
-enrl_by_uuid_dir() { printf '%s\n' "${DEBIAN_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}"; }
+#   ALPINE_FDE_CRYPTSETUP    cryptsetup binary override (LUKS2 choreography)
+#   ALPINE_FDE_BY_UUID_DIR   /dev/disk/by-uuid override
+#   ALPINE_FDE_ENROLL_LOCK   ensure-once lockfile override (tests; default below)
+#   ALPINE_FDE_PCRSIG        .pcrsig JSON source for the ensure-once path
+#   ALPINE_FDE_LUKS_KEYFILE  existing-passphrase key file authorizing luksAddKey
+enrl_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
+enrl_by_uuid_dir() { printf '%s\n' "${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}"; }
 
 # --- ensure-once serialization (§8.3 one-enrollment invariant; review HW-3) -----
 # The inspect+enroll decision must be atomic: two concurrent `ukictl build`s
@@ -74,15 +74,15 @@ enrl_by_uuid_dir() { printf '%s\n' "${DEBIAN_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}
 # "zero tokens" and both enroll. flock (util-linux, base dep) on a lockfile in
 # /run (tmpfs), /var/lock fallback, overridable for tests.
 enrl_lockfile() {
-    if [ -n "${DEBIAN_FDE_ENROLL_LOCK:-}" ]; then
-        printf '%s\n' "$DEBIAN_FDE_ENROLL_LOCK"
+    if [ -n "${ALPINE_FDE_ENROLL_LOCK:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_ENROLL_LOCK"
         return 0
     fi
-    if mkdir -p /run/debian-fde 2>/dev/null && [ -w /run/debian-fde ]; then
-        printf '%s\n' /run/debian-fde/enroll.lock
+    if mkdir -p /run/alpine-fde 2>/dev/null && [ -w /run/alpine-fde ]; then
+        printf '%s\n' /run/alpine-fde/enroll.lock
         return 0
     fi
-    printf '%s\n' /var/lock/debian-fde-enroll.lock
+    printf '%s\n' /var/lock/alpine-fde-enroll.lock
 }
 
 # enrl_lock_acquire — take the exclusive enrollment lock on fd 9 (bounded wait).
@@ -140,14 +140,14 @@ enrl_policy_mode() {
 
 enroll_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
+Usage: alpine-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
                              [--reseat] [--dry-run]
 
 Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 token;
 ADR-19). Preconditions: finalized baseline, Secure Boot on + SetupMode=0,
 PCR 7 digest-anchor (the .pcrsig entry's d7 == baseline.expected_pcr7 — a
 pure data check; legacy anchor-less .pcrsig keeps the live-PCR-7 read),
-release key in KEYDIR (--keydir / KEY_PATH / DEBIAN_FDE_KEYDIR), LUKS device
+release key in KEYDIR (--keydir / KEY_PATH / ALPINE_FDE_KEYDIR), LUKS device
 resolvable (--uuid takes a LUKS uuid or a /dev/... block-device path). A
 standing enrollment is retired in the SAME run the fresh one is standing
 (--reseat forces it).
@@ -156,7 +156,7 @@ Signed-policy source: --pcrsig FILE (the release-key-signed .pcrsig JSON,
 verified against the fresh live-PCR digest before anything is embedded); when
 absent, the policy is re-signed in-process from the keydir's release.pem over
 the CURRENT PCR 7/11 (the §9.4 re-enroll path; ADR-18 passphrase seam
-applies). DEBIAN_FDE_PCRSIG / DEBIAN_FDE_LUKS_KEYFILE are the env seams.
+applies). ALPINE_FDE_PCRSIG / ALPINE_FDE_LUKS_KEYFILE are the env seams.
 
 Policy mechanism (ADR-19/ADR-20, ladder resolved):
   b              Mechanism B — the normative Alpine pipeline: seal the random
@@ -181,12 +181,12 @@ enrl_preconditions() {
     ENRL_PRE_PUB=''
     ENRL_PRE_DEV=''
     _ep_override=${1:-}
-    _ep_pcrsig=${2:-${DEBIAN_FDE_PCRSIG:-}}
+    _ep_pcrsig=${2:-${ALPINE_FDE_PCRSIG:-}}
     _ep_bl=$(sp_baseline_file)
-    [ -f "$_ep_bl" ] || die "enroll-tpm: no baseline at $_ep_bl (run 'debian-fde provision stage1')"
+    [ -f "$_ep_bl" ] || die "enroll-tpm: no baseline at $_ep_bl (run 'alpine-fde provision stage1')"
     baseline_validate "$_ep_bl" || die "enroll-tpm: baseline invalid: $_ep_bl"
     if ! baseline_is_final "$_ep_bl"; then
-        die "enroll-tpm: baseline expected_pcr7 is pending — finalize after first boot: debian-fde audit --init"
+        die "enroll-tpm: baseline expected_pcr7 is pending — finalize after first boot: alpine-fde audit --init"
     fi
 
     _ep_sb=$(fw_sb_state) || true
@@ -216,7 +216,7 @@ enrl_preconditions() {
         fi
     else
         if ! _ep_live=$(tpm_pcr_read 7) || [ -z "$_ep_live" ]; then
-            die "enroll-tpm: cannot read live PCR 7 (TCTI: ${DEBIAN_FDE_TCTI:-<default>})"
+            die "enroll-tpm: cannot read live PCR 7 (TCTI: ${ALPINE_FDE_TCTI:-<default>})"
         fi
         if [ "$_ep_live" != "$_ep_expected" ]; then
             die "enroll-tpm: PCR 7 drift: live $_ep_live != baseline $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
@@ -224,7 +224,7 @@ enrl_preconditions() {
     fi
 
     _ep_keydir=$(keys_dir)
-    [ -n "$_ep_keydir" ] || die "enroll-tpm: no release key directory configured (set --keydir / KEY_PATH / DEBIAN_FDE_KEYDIR)"
+    [ -n "$_ep_keydir" ] || die "enroll-tpm: no release key directory configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
     [ -d "$_ep_keydir" ] || die "enroll-tpm: release key directory not found: $_ep_keydir"
     _ep_pub="$_ep_keydir/release.pub"
     [ -f "$_ep_pub" ] || die "enroll-tpm: release public key not found: $_ep_pub"
@@ -265,7 +265,7 @@ enrl_record() {
     _er_f=$(sp_enrolled_file)
     _er_dir=${_er_f%/*}
     mkdir -p "$_er_dir"
-    _er_tmp=$(mktemp "$_er_dir/.debian-fde-enrolled.XXXXXX") || {
+    _er_tmp=$(mktemp "$_er_dir/.alpine-fde-enrolled.XXXXXX") || {
         err "enroll-tpm: cannot create temp file for enrolled.json in $_er_dir"
         return 1
     }
@@ -343,7 +343,7 @@ enrl_sign_pcrsig() {
 # On success: rc 0 with ENRL_SLOT / ENRL_TOKEN_ID / ENRL_WIPE set. Any failure:
 # rc 1 with the reason on stderr.
 enrl_run() {
-    _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4 _er_sig_arg=${5:-${DEBIAN_FDE_PCRSIG:-}}
+    _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4 _er_sig_arg=${5:-${ALPINE_FDE_PCRSIG:-}}
     # ADR-16: same release-key floor as enrl_preconditions — this shared core
     # is also the `ukictl build` ensure-once entry, which never passes through
     # the CLI precondition gate
@@ -355,7 +355,7 @@ enrl_run() {
     # stage holds the RANDOM VOLUME PASSPHRASE, so the default is /dev/shm
     # (the repo tmpfs seam; cf. seal_stage_dir), never /tmp. The same root
     # pins the LUKS2 metadata dumps (not secret, scrubbed anyway).
-    _er_pre=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspre.XXXXXX") || return 1
+    _er_pre=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspre.XXXXXX") || return 1
     if ! enrl_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_pre" 2>/dev/null; then
         rm -f "$_er_pre"
         err "enroll-tpm: cannot read LUKS2 metadata of $_er_dev"
@@ -382,9 +382,9 @@ enrl_run() {
 
     # staging: ONE directory holding the .pcrsig, the sealed blob halves, the
     # random volume passphrase and the token JSON — scrubbed on every exit (I1).
-    # The stage root is TMPFS by construction (${DEBIAN_FDE_TMPDIR:-/dev/shm};
+    # The stage root is TMPFS by construction (${ALPINE_FDE_TMPDIR:-/dev/shm};
     # cf. seal_stage_dir) — the /tmp default is BANNED for this directory.
-    _er_stage=$(mktemp -d "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-enroll.XXXXXX") || {
+    _er_stage=$(mktemp -d "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enroll.XXXXXX") || {
         rm -f "$_er_pre"
         return 1
     }
@@ -403,14 +403,14 @@ enrl_run() {
     _er_keydir=${_er_pub%/*}
     _er_rc=0
     (
-        export DEBIAN_FDE_SEAL_STAGE="$_er_stage"
+        export ALPINE_FDE_SEAL_STAGE="$_er_stage"
         if [ ! -f "$_er_stage/pcrsig.json" ]; then
             enrl_sign_pcrsig "$_er_stage" "$_er_keydir" || exit 1
         fi
         seal_finalized "$_er_keydir" "$_er_dev" "$_er_stage/pcrsig.json" \
             "$_er_stage/token.json" || exit 1
         token_add_keyslot "$_er_dev" "$SEAL_PASS_FILE" "$SEAL_SLOT" \
-            "${DEBIAN_FDE_LUKS_KEYFILE:-}" || exit 1
+            "${ALPINE_FDE_LUKS_KEYFILE:-}" || exit 1
         _er_tid=$(token_next_id "$_er_dev") || exit 1
         token_import "$_er_dev" "$_er_stage/token.json" "$_er_tid" || exit 1
         if [ "$ENRL_WIPE" = "yes" ] && [ -n "$_er_old_tok" ]; then
@@ -431,7 +431,7 @@ enrl_run() {
     if [ "$_er_rc" -ne 0 ]; then
         # I1 invariant (c): the staged passphrase is ZEROIZED, not merely
         # unlinked, on the failure path too
-        for _er_p in "$_er_stage"/debian-fde-seal-pass.*; do
+        for _er_p in "$_er_stage"/alpine-fde-seal-pass.*; do
             [ -f "$_er_p" ] && keys_scrub "$_er_p" || :
         done
         rm -rf "$_er_stage"
@@ -441,7 +441,7 @@ enrl_run() {
     fi
 
     # Post-assertions on the fresh metadata (rc-based: the caller decides)
-    _er_post=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspost.XXXXXX") || {
+    _er_post=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspost.XXXXXX") || {
         rm -rf "$_er_stage" "$_er_pre"
         return 1
     }
@@ -466,7 +466,7 @@ enrl_run() {
 
 # enrl_install_state — the persisted installation state (state sibling's API:
 # lib/install-state.sh; the state file is resolved by istate_file() —
-# $DEBIAN_FDE_INSTALL_STATE test override, else $(sp_etc_dir)/install-state.json).
+# $ALPINE_FDE_INSTALL_STATE test override, else $(sp_etc_dir)/install-state.json).
 # Empty output ⇒ no state file (legacy / not-installed build context — the
 # G-IL7 gate PASSES, backward compat with pre-install-state builds and the
 # existing unit tests) or an unreadable document (istate_state reports empty;
@@ -474,7 +474,7 @@ enrl_run() {
 # sourced when present; until it lands, a local jq fallback reads .state
 # (same schema contract: {"state": "installed"|"finalized", ...}).
 enrl_install_state() {
-    if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+    if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
         _eis_lib="$(sp_cmd_dir)/../install-state.sh"
         if [ -r "$_eis_lib" ]; then
             # shellcheck disable=SC1090
@@ -504,12 +504,12 @@ enrl_install_state() {
 enrl_ensure_gate_skip() {
     _eg_state=$(enrl_install_state)
     if [ -n "$_eg_state" ] && [ "$_eg_state" != "finalized" ]; then
-        warn "enroll: install state is '$_eg_state' (not finalized) — skipping the ensure-once enrollment; finalize after first boot ('debian-fde audit --init') and rebuild (§8.1)"
+        warn "enroll: install state is '$_eg_state' (not finalized) — skipping the ensure-once enrollment; finalize after first boot ('alpine-fde audit --init') and rebuild (§8.1)"
         return 0
     fi
     _eg_bl=$(sp_baseline_file)
     if [ -f "$_eg_bl" ] && ! baseline_is_final "$_eg_bl"; then
-        warn "enroll: baseline expected_pcr7 is pending — skipping the ensure-once enrollment (finalize via 'debian-fde audit --init', §8.1)"
+        warn "enroll: baseline expected_pcr7 is pending — skipping the ensure-once enrollment (finalize via 'alpine-fde audit --init', §8.1)"
         return 0
     fi
     return 1
@@ -562,7 +562,7 @@ enrl_ensure_once() {
 # the enrollment lock
 enrl_ensure_once_locked() {
     _ee_dev=$1 _ee_pub=$2
-    _ee_pre=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-enroll-ensure.XXXXXX") || return 1
+    _ee_pre=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enroll-ensure.XXXXXX") || return 1
     if ! enrl_cryptsetup luksDump --dump-json-metadata "$_ee_dev" >"$_ee_pre" 2>/dev/null; then
         rm -f "$_ee_pre"
         err "enroll: cannot read LUKS2 metadata of $_ee_dev"
@@ -608,26 +608,26 @@ enrl_crypttab_uuid() {
 cmd_enroll_tpm_main() {
     strict_mode
 
-    _em_uuid='' _em_reseat=0 _em_pcrsig=${DEBIAN_FDE_PCRSIG:-}
+    _em_uuid='' _em_reseat=0 _em_pcrsig=${ALPINE_FDE_PCRSIG:-}
     while [ $# -gt 0 ]; do
         case $1 in
             --uuid)
-                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "enroll-tpm: --uuid requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "enroll-tpm: --uuid requires an argument"
                 _em_uuid=$2
                 shift
                 ;;
             --pcrsig)
-                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "enroll-tpm: --pcrsig requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "enroll-tpm: --pcrsig requires an argument"
                 _em_pcrsig=$2
                 shift
                 ;;
             --reseat) _em_reseat=1 ;;
-            --dry-run) DEBIAN_FDE_DRY_RUN=1 ;;
+            --dry-run) ALPINE_FDE_DRY_RUN=1 ;;
             -h | --help)
                 enroll_usage
                 return 0
                 ;;
-            *) die -r "$DEBIAN_FDE_USAGE" "enroll-tpm: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "enroll-tpm: unknown argument: $1" ;;
         esac
         shift
     done
@@ -646,8 +646,8 @@ cmd_enroll_tpm_main() {
     # --dry-run: plan only — read the pre-state for the retire decision and the
     # free slot, print the plan, touch nothing (no seal, no enrollment, no
     # enrolled.json)
-    if [ -n "${DEBIAN_FDE_DRY_RUN:-}" ]; then
-        _em_prej=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspre.XXXXXX") || die "enroll-tpm: mktemp failed"
+    if [ -n "${ALPINE_FDE_DRY_RUN:-}" ]; then
+        _em_prej=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspre.XXXXXX") || die "enroll-tpm: mktemp failed"
         enrl_cryptsetup luksDump --dump-json-metadata "$_em_dev" >"$_em_prej" 2>/dev/null ||
             {
                 rm -f "$_em_prej"
@@ -682,7 +682,7 @@ cmd_enroll_tpm_main() {
     if ! enrl_record "$_em_uuid" "$_em_mode" "$ENRL_WIPE" "$ENRL_SLOT" "$_em_pub"; then
         die "enroll-tpm: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
     fi
-    printf 'debian-fde: enrolled (policy_mode=%s, token keyslot %s, wipe=%s); record: %s\n' \
+    printf 'alpine-fde: enrolled (policy_mode=%s, token keyslot %s, wipe=%s); record: %s\n' \
         "$_em_mode" "$ENRL_SLOT" "$ENRL_WIPE" "$(sp_enrolled_file)" >&2
     return 0
 }

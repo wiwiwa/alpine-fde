@@ -45,7 +45,7 @@ source "$TESTS/lib/assert.sh"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 
-D=${DATA_PLANE_D:-$(mktemp -d /tmp/debian-fde-swtpm-dataplane.XXXXXX)}
+D=${DATA_PLANE_D:-$(mktemp -d /tmp/alpine-fde-swtpm-dataplane.XXXXXX)}
 mkdir -p "$D"
 
 cleanup() {

@@ -4,7 +4,7 @@
 # baseline-pinned, so the K1 -> K2 release-key rotation + re-enroll anchors the
 # seal under K2. Real swtpm + real file-backed LUKS2 container + the REAL CLI:
 #   * seal under K1 -> standing enrollment (K1-anchored session unseals)
-#   * swap DEBIAN_FDE_KEYDIR to K2 (baseline STILL pins the K1 pub path — the
+#   * swap ALPINE_FDE_KEYDIR to K2 (baseline STILL pins the K1 pub path — the
 #     decoy proves enroll never consults it) -> re-enroll
 #   * the fresh token's pubkey is K2; a K2-anchored session unseals the fresh
 #     blob and its passphrase unlocks the fresh keyslot
@@ -17,7 +17,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
@@ -36,14 +36,14 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-rotation.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-rotation.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp" "$TMP/by-uuid" "$TMP/efivars" "$TMP/root/etc/alpine-fde"
-DEBIAN_FDE_TMPDIR=$TMP/tmp
+ALPINE_FDE_TMPDIR=$TMP/tmp
 
 # ADR-16: the enroll path fails closed on any release key < RSA-3072, so both
 # rotation credentials are hermetic suite-generated RSA-3072 keydirs (same
@@ -62,15 +62,15 @@ new_keydir() { # DIR CN — complete keydir contract for one rotation credential
 }
 K1=$TMP/key1
 K2=$TMP/key2
-new_keydir "$K1" debian-fde-rotation-k1
-new_keydir "$K2" debian-fde-rotation-k2
+new_keydir "$K1" alpine-fde-rotation-k1
+new_keydir "$K2" alpine-fde-rotation-k2
 
 TPMDIR=$TMP/swtpm
 swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 
 swtpm_pcrextend "$TPMDIR" 7 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 swtpm_pcrextend "$TPMDIR" 11 fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedc
@@ -100,16 +100,16 @@ BL_PCR0="$D7" BL_PCR1="$D7" BL_PCR2="$D7" BL_PCR3="$D7" BL_PCR7="$D7" \
 fde() { # KEYDIR args... — the production CLI against the real container
     local kd=$1
     shift
-    DEBIAN_FDE_BIN_TEST=1 \
-        DEBIAN_FDE_ROOT="$TMP/root" \
-        DEBIAN_FDE_EFIVARS_DIR="$TMP/efivars" \
-        DEBIAN_FDE_BY_UUID_DIR="$TMP/by-uuid" \
-        DEBIAN_FDE_KEYDIR="$kd" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_ENROLL_LOCK="$TMP/enroll.lock" \
-        DEBIAN_FDE_TMPDIR="$TMP/tmp" \
-        DEBIAN_FDE_LUKS_KEYFILE="$TMP/k0" \
-        "$REPO/bin/debian-fde" "$@"
+    ALPINE_FDE_BIN_TEST=1 \
+        ALPINE_FDE_ROOT="$TMP/root" \
+        ALPINE_FDE_EFIVARS_DIR="$TMP/efivars" \
+        ALPINE_FDE_BY_UUID_DIR="$TMP/by-uuid" \
+        ALPINE_FDE_KEYDIR="$kd" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_ENROLL_LOCK="$TMP/enroll.lock" \
+        ALPINE_FDE_TMPDIR="$TMP/tmp" \
+        ALPINE_FDE_LUKS_KEYFILE="$TMP/k0" \
+        "$REPO/bin/alpine-fde" "$@"
 }
 token_doc() { # DUMPFILE OUT — extract the first systemd-tpm2 token document
     jq -r 'first(.tokens // {} | to_entries[] | select(.value.type? == "systemd-tpm2") | .value)' "$1" >"$2"

@@ -26,7 +26,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
 # shellcheck source=../../lib/policy.sh
@@ -45,22 +45,22 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-token-framing.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-token-framing.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp"
-DEBIAN_FDE_TMPDIR=$TMP/tmp
+ALPINE_FDE_TMPDIR=$TMP/tmp
 KEYDIR=$REPO/fixtures/keys
 TPMDIR=$TMP/swtpm
 swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 
 DER=$(openssl pkey -pubin -in "$KEYDIR/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 SEALHASH=$(printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')
@@ -129,9 +129,9 @@ assert_rc "post-assert REFUSES a token lacking tpm2-policy-hash" 1 $?
 
 # --- 3. framing: the staged passphrase IS base64(secret) -----------------------
 SEAL_PASS_FILE='' SEAL_SLOT='' SEAL_POL='' SEAL_MODE=''
-DEBIAN_FDE_SEAL_STAGE=$TMP/stage mkdir_dummy=$TMP/stage
+ALPINE_FDE_SEAL_STAGE=$TMP/stage mkdir_dummy=$TMP/stage
 mkdir -p "$TMP/stage"
-DEBIAN_FDE_SEAL_STAGE=$TMP/stage seal_gen_passphrase
+ALPINE_FDE_SEAL_STAGE=$TMP/stage seal_gen_passphrase
 assert_rc "seal_gen_passphrase rc 0" 0 $?
 assert_eq "passphrase staged under the seal stage dir" "1" \
     "$(case $SEAL_PASS_FILE in "$TMP/stage"/*) echo 1;; *) echo 0;; esac)"
@@ -148,7 +148,7 @@ assert_eq "passphrase is NOT the legacy 64-hex form" "no" \
 # two stages never collide (randomness, not a pinned value)
 PASS1=$(cat "$SEAL_PASS_FILE")
 SEAL_PASS_FILE=''
-DEBIAN_FDE_SEAL_STAGE=$TMP/stage seal_gen_passphrase
+ALPINE_FDE_SEAL_STAGE=$TMP/stage seal_gen_passphrase
 PASS2=$(cat "$SEAL_PASS_FILE")
 assert_eq "a second stage yields a DIFFERENT passphrase" "different" \
     "$([[ -n "$PASS1" && "$PASS1" != "$PASS2" ]] && echo different || echo same)"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# baseline.sh — baseline.json v1 schema + shared helpers for the Debian FDE
+# baseline.sh — baseline.json v1 schema + shared helpers for the Alpine FDE
 # ceremony/lifecycle commands (bucket C: provision/install/enroll/rotate/
 # audit/status/bootnext/doctor).
 #
@@ -20,38 +20,38 @@
 #
 # Library only: sourcing has no side effects.
 
-if [ -n "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_BASELINE_LOADED=1
+ALPINE_FDE_BASELINE_LOADED=1
 
 # Pull in common.sh (exit codes, logging, tpm()) and firmware.sh (efivarfs
 # seam) if they are reachable next to us and not loaded yet. When this file
 # lives at <tree>/lib/baseline.sh, the cmd dir is <tree>/lib/cmd.
-_bl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+_bl_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _bl_lib_dir=${_bl_cmd_dir%/*}
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_bl_lib_dir/common.sh" ]; then
-    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_bl_lib_dir/common.sh" ]; then
+    # shellcheck disable=SC1090  # resolved from ALPINE_FDE_CMD_DIR / install tree
     . "$_bl_lib_dir/common.sh"
 fi
-if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ] && [ -r "$_bl_lib_dir/firmware.sh" ]; then
+if [ -z "${ALPINE_FDE_FIRMWARE_LOADED:-}" ] && [ -r "$_bl_lib_dir/firmware.sh" ]; then
     # shellcheck disable=SC1090
     . "$_bl_lib_dir/firmware.sh"
 fi
-if [ -z "${DEBIAN_FDE_ESP_LOADED:-}" ] && [ -r "$_bl_lib_dir/esp.sh" ]; then
+if [ -z "${ALPINE_FDE_ESP_LOADED:-}" ] && [ -r "$_bl_lib_dir/esp.sh" ]; then
     # shellcheck disable=SC1090
     . "$_bl_lib_dir/esp.sh"
 fi
 
-# --- path helpers (all overridable for tests via DEBIAN_FDE_ROOT etc.) ---------
+# --- path helpers (all overridable for tests via ALPINE_FDE_ROOT etc.) ---------
 sp_cmd_dir() {
-    printf '%s\n' "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}"
+    printf '%s\n' "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}"
 }
 
 # sp_etc_dir — <root>/etc/alpine-fde (root empty → absolute /etc/alpine-fde;
 # ADR-20 §8.4 clean rename — no legacy fallback)
 sp_etc_dir() {
-    printf '%s/etc/alpine-fde\n' "${DEBIAN_FDE_ROOT:-}"
+    printf '%s/etc/alpine-fde\n' "${ALPINE_FDE_ROOT:-}"
 }
 
 sp_baseline_file() { printf '%s/baseline.json\n' "$(sp_etc_dir)"; }
@@ -83,9 +83,9 @@ fw_var_sha256() {
     tail -c +5 "$_fvs_file" | sha256sum | cut -d' ' -f1
 }
 
-# eventlog_path — TCG event log location ($DEBIAN_FDE_EVENTLOG overrides)
+# eventlog_path — TCG event log location ($ALPINE_FDE_EVENTLOG overrides)
 eventlog_path() {
-    printf '%s\n' "${DEBIAN_FDE_EVENTLOG:-/sys/kernel/security/tpm0/binary_bios_measurements}"
+    printf '%s\n' "${ALPINE_FDE_EVENTLOG:-/sys/kernel/security/tpm0/binary_bios_measurements}"
 }
 
 # eventlog_info — print "<sha256> <size>"; rc 1 if the log is absent.
@@ -100,7 +100,7 @@ eventlog_info() {
 
 # dmi_field NAME — print a DMI id field (vendor/version), "" if unavailable
 dmi_field() {
-    _dm_d=${DEBIAN_FDE_DMI_DIR:-/sys/devices/virtual/dmi/id}
+    _dm_d=${ALPINE_FDE_DMI_DIR:-/sys/devices/virtual/dmi/id}
     if [ -r "$_dm_d/$1" ]; then
         tr -d '\n' <"$_dm_d/$1"
     fi
@@ -113,7 +113,7 @@ dmi_field() {
 # tooling / cert are reported as skipped, never failed (status is report-only;
 # audit drifts only on a binary that exists and does not verify).
 sbverify_boot_binaries() {
-    _sv_cert=${1:-"${DEBIAN_FDE_KEYDIR:-${KEY_PATH:-}}/release.crt"}
+    _sv_cert=${1:-"${ALPINE_FDE_KEYDIR:-${KEY_PATH:-}}/release.crt"}
     # M-1: on the installed target the signing medium is offline (I4) and
     # `install` writes no alpine-fde.conf — without this fallback the §8.3
     # boot-manager check would be permanently dormant exactly where it matters
@@ -415,14 +415,14 @@ baseline_set_field() {
 # validated, then moved into place atomically — a mid-capture failure
 # (unreadable PCR, invalid result) leaves the on-disk trust root untouched
 # instead of torn. L-6: the read-modify-write ceremony is serialized with an
-# exclusive flock on <etc>/debian-fde/.baseline.lock so concurrent
+# exclusive flock on <etc>/alpine-fde/.baseline.lock so concurrent
 # finalizations (audit --accept + provision stage2) cannot interleave
 # field-by-field into a mixed baseline that still validates.
 baseline_finalize_from_live() {
     _bff_f=$(sp_baseline_file)
-    [ -f "$_bff_f" ] || die "baseline_finalize: no baseline at $_bff_f (run 'debian-fde provision stage1' first)"
+    [ -f "$_bff_f" ] || die "baseline_finalize: no baseline at $_bff_f (run 'alpine-fde provision stage1' first)"
     baseline_validate "$_bff_f" || die "baseline_finalize: existing baseline invalid"
-    tpm_available || die "no TPM reachable via TCTI '${DEBIAN_FDE_TCTI:-<default>}' — cannot finalize baseline"
+    tpm_available || die "no TPM reachable via TCTI '${ALPINE_FDE_TCTI:-<default>}' — cannot finalize baseline"
     # Guard (§8.1/§9.1): the finalized baseline is the trust root every later
     # `audit` is measured against, so it may only be captured in the machine's
     # FINAL Secure Boot state. Fail-closed 64 before ANY mutation (the baseline
@@ -463,11 +463,11 @@ baseline_finalize_from_live() {
     # stripped so the composed message does not stutter.
     _bff_set() {
         _bff_err=$(baseline_set_pcr "$@" 2>&1) || _bff_fail \
-            "baseline_finalize: $(printf '%s' "$_bff_err" | sed 's/^debian-fde: error: //')"
+            "baseline_finalize: $(printf '%s' "$_bff_err" | sed 's/^alpine-fde: error: //')"
     }
     _bff_set_field() {
         _bff_err=$(baseline_set_field "$@" 2>&1) || _bff_fail \
-            "baseline_finalize: $(printf '%s' "$_bff_err" | sed 's/^debian-fde: error: //')"
+            "baseline_finalize: $(printf '%s' "$_bff_err" | sed 's/^alpine-fde: error: //')"
     }
     # M-3: stage the finalized document next to the target
     _bff_tmp=$(mktemp "${_bff_f%/*}/.baseline-finalize.XXXXXX") ||

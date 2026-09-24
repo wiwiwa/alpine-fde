@@ -41,15 +41,15 @@ for k in 6.1.0-1-amd64 6.2.0-1-amd64 5.15.0-3-amd64; do
     manifest_upsert "$M" "$k" "p11-old-$k" "pd-old-$k" "sig-old-$k"
 done
 
-DEBIAN_FDE_BIN_TEST=1 \
-    DEBIAN_FDE_ROOT="$ROOT" \
-    DEBIAN_FDE_ESP="$ESP" \
-    DEBIAN_FDE_KEYDIR="$KEYDIR" \
-    DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+ALPINE_FDE_BIN_TEST=1 \
+    ALPINE_FDE_ROOT="$ROOT" \
+    ALPINE_FDE_ESP="$ESP" \
+    ALPINE_FDE_KEYDIR="$KEYDIR" \
+    ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
     INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
     RETENTION=2 \
-    "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
+    "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "ukictl build succeeds over the stub inputs" 0 $?
 
 # --- exactly the retained UKI set -----------------------------------------------------
@@ -73,18 +73,18 @@ assert_eq "ESP holds no .pem/.pub/.crt/.json artifacts (I2)" "" \
 # persisted conf (ESP_PATH=...) — exactly how `install` records the real mount.
 # Before the fix this build fell back to /boot/efi (created on the encrypted
 # root, exit 0) — the installed system's kernel updates never reached the boot
-# menu. DEBIAN_FDE_ESP is deliberately NOT set here.
+# menu. ALPINE_FDE_ESP is deliberately NOT set here.
 ESP3="$TMP/esp-from-conf"
 printf '%s\n' "ESP_PATH=$ESP3" >"$TMP/esp.conf"
-env -u DEBIAN_FDE_ESP \
-    DEBIAN_FDE_BIN_TEST=1 \
-    DEBIAN_FDE_ROOT="$ROOT" \
-    DEBIAN_FDE_CONF="$TMP/esp.conf" \
-    DEBIAN_FDE_KEYDIR="$KEYDIR" \
-    DEBIAN_FDE_NO_INSTALL=1 \
+env -u ALPINE_FDE_ESP \
+    ALPINE_FDE_BIN_TEST=1 \
+    ALPINE_FDE_ROOT="$ROOT" \
+    ALPINE_FDE_CONF="$TMP/esp.conf" \
+    ALPINE_FDE_KEYDIR="$KEYDIR" \
+    ALPINE_FDE_NO_INSTALL=1 \
     INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
     RETENTION=2 \
-    "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
+    "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "build with conf-persisted ESP_PATH (no env) succeeds" 0 $?
 assert_file_exists "UKI landed on the conf-recorded ESP" "$ESP3/EFI/Linux/alpine-fde-$KVER.efi"
 

@@ -7,7 +7,7 @@
 #   harness UKI boots; the fixture disk is TOKEN-LESS, so the unlock runs
 #   through the SHIPPED mkinitfs unseal hook's (§8.2; ADR-13) bounded
 #   keyslot-0 recovery-passphrase prompt (fed over serial,
-#   prompt-synchronized) and reaches `debian-fde: UNSEALED` — proves
+#   prompt-synchronized) and reaches `alpine-fde: UNSEALED` — proves
 #   firmware, ESP path, harness AND hook are healthy in THIS session, so
 #   boot 2's refusal is attributable to the missing signature alone.
 # Boot 2 (the scenario): the same ESP slot carries the UNSIGNED build
@@ -76,10 +76,10 @@ RUN="$TESTS/e2e/.runs/s04-unsigned-$(date +%s)"
 SNAPDIR="${TMPDIR:-/tmp}/secpc-e2e-s04-$(date +%s)"
 mkdir -p "$RUN" "$SNAPDIR"
 # housekeeping: keep the 2 newest runs of this prefix (current run included) —
-# never the invocation's chained state dirs (CR-02/MD-03: DEBIAN_FDE_PROTECT_DIRS)
+# never the invocation's chained state dirs (CR-02/MD-03: ALPINE_FDE_PROTECT_DIRS)
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's04-unsigned-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 CONSOLE="$RUN/console.log"
@@ -194,14 +194,14 @@ for _att in 1 2 3; do
     # recovery prompt as the ONLY way in: feed the slot-0 passphrase,
     # prompt-synchronized (the hook's read has NO timeout)
     if uki_wait_hook_prompt 1 300 "$CONTROL"; then
-        feed_line "$CONTROL/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$CONTROL/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _snap_while_running "$(cat "$CONTROL/qemu.pid")" "$CONTROL/console.log" "$SNAPDIR/console-control.snap" &
     _snap_poller1=$!
     _wedge_wait "$CONTROL" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
     wait "$_snap_poller1"
     overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
-    if grep -q "debian-fde: POWEROFF" "$SNAPDIR/console-control.snap" 2>/dev/null; then
+    if grep -q "alpine-fde: POWEROFF" "$SNAPDIR/console-control.snap" 2>/dev/null; then
         BOOT_OK=1
         break
     fi
@@ -214,11 +214,11 @@ else
         "no decisive sentinel in 3 attempts; last console: $(tail -2 "$SNAPDIR/console-control.snap" 2>/dev/null | tr '\n' ' ')"
 fi
 CLOG=$(cat "$SNAPDIR/console-control.snap" 2>/dev/null || true)
-assert_contains "control boot: init ran" "$CLOG" "debian-fde-harness: init started"
+assert_contains "control boot: init ran" "$CLOG" "alpine-fde-harness: init started"
 assert_contains "control boot: hook unlocked via the recovery passphrase (token-less disk)" "$CLOG" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "control boot: firmware accepted signed UKI -> UNSEALED" "$CLOG" "debian-fde: UNSEALED"
-assert_contains "control boot: clean poweroff" "$CLOG" "debian-fde: POWEROFF"
+assert_contains "control boot: firmware accepted signed UKI -> UNSEALED" "$CLOG" "alpine-fde: UNSEALED"
+assert_contains "control boot: clean poweroff" "$CLOG" "alpine-fde: POWEROFF"
 
 # --- boot 2: the scenario — UNSIGNED UKI on the ESP, SB vars unchanged ----------
 _ensure_run
@@ -268,9 +268,9 @@ assert_not_contains "refusal: boot entry never STARTED (refused at load)" "$LOG"
 # menu until the harness hard-timeout kill (the POWEROFF/kernel-powerdown
 # negatives below pin that down; a timeout kill is the expected termination).
 
-assert_not_contains "refusal: no guest init banner" "$LOG" "debian-fde-harness: init started"
+assert_not_contains "refusal: no guest init banner" "$LOG" "alpine-fde-harness: init started"
 for pcr in 0 7 11; do
-    assert_not_contains "refusal: no PCR $pcr line" "$LOG" "debian-fde-pcr sha256:$pcr="
+    assert_not_contains "refusal: no PCR $pcr line" "$LOG" "alpine-fde-pcr sha256:$pcr="
 done
 assert_not_contains "refusal: the unseal hook never ran (no enter-initrd extend)" "$LOG" \
     "$(sentinel_of unseal_pcrextend_ok)"
@@ -278,10 +278,10 @@ assert_not_contains "refusal: no hook token discovery" "$LOG" "$(sentinel_of uns
 assert_not_contains "refusal: never unlocked (token)" "$LOG" "$(sentinel_of unseal_unlocked)"
 assert_not_contains "refusal: never unlocked (recovery passphrase)" "$LOG" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_not_contains "refusal: never UNSEALED" "$LOG" "debian-fde: UNSEALED"
+assert_not_contains "refusal: never UNSEALED" "$LOG" "alpine-fde: UNSEALED"
 assert_not_contains "refusal: no hook recovery prompt" "$LOG" "$(sentinel_of unseal_prompt_re)"
 assert_not_contains "refusal: no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_not_contains "refusal: no harness poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
+assert_not_contains "refusal: no harness poweroff sentinel" "$LOG" "alpine-fde: POWEROFF"
 assert_not_contains "refusal: no Linux kernel banner" "$LOG" "$(sentinel_of linux_banner)"
 
 echo "# run dir: $RUN"

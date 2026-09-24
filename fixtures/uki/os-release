@@ -1,4 +1,4 @@
-ID=debian-fde-test
-NAME="Debian FDE Test OS"
+ID=alpine-fde-test
+NAME="Alpine FDE Test OS"
 VERSION=1 (test)
-PRETTY_NAME="Debian FDE Test OS 1"
+PRETTY_NAME="Alpine FDE Test OS 1"

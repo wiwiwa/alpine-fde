@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/enroll_precondition_matrix.sh — `debian-fde enroll-tpm` after the
+# tests/unit/enroll_precondition_matrix.sh — `alpine-fde enroll-tpm` after the
 # Mechanism B rewire (ADR-19/ADR-20: systemd-cryptenroll is GONE — lib/seal.sh
 # + lib/token.sh do the sealing; cryptsetup stays the LUKS2 seam):
 #   * precondition matrix: SB off / SetupMode=1 / PCR7 drift / pending
@@ -7,13 +7,13 @@
 #     missing release.pub in KEYDIR — all fail-closed 64, NO TPM contact before
 #     the documented precondition (tpm2 recorder wrapper), no enrolled.json
 #   * KEYDIR-explicit key source (G-B7): the enrollment anchors the release key
-#     from DEBIAN_FDE_KEYDIR, NEVER from baseline keys.release_pub_path (the
+#     from ALPINE_FDE_KEYDIR, NEVER from baseline keys.release_pub_path (the
 #     baseline pins a DECOY path throughout)
 #   * policy_mode: b canonical (a2/native aliases); a / ap / a-prime / combined
 #     fail closed 64 citing ADR-19 BEFORE any package/precondition work
 #   * CLI-level happy path with the REAL seal against swtpm (cryptsetup
 #     stubbed): explicit --pcrsig AND the in-process re-sign fallback
-#     (DEBIAN_FDE_PCRSIG unset — release.pem from the keydir via keys_unlock);
+#     (ALPINE_FDE_PCRSIG unset — release.pem from the keydir via keys_unlock);
 #     tampered .pcrsig -> 64, no keyslot, no token, no record (G-B6)
 #   * compact LUKS2 wire shape (real cryptsetup dumps): parsers + reseat work
 #   * dry-run prints the plan, touches nothing; `ukictl enroll` alias: same
@@ -31,7 +31,7 @@ source "$HERE/../lib/assert.sh"
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/policy.sh
@@ -39,7 +39,7 @@ source "$REPO/lib/policy.sh"
 # shellcheck source=../../lib/keys.sh
 source "$REPO/lib/keys.sh"
 
-T=$(mktemp -d /tmp/debian-fde-enroll-matrix.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-enroll-matrix.XXXXXX)
 STATE=$T/swtpm
 FAKEBIN=$T/bin
 EFIVARS=$T/efivars
@@ -55,19 +55,19 @@ mkdir -p "$KEYDIR"
 openssl genrsa -out "$KEYDIR/release.pem" 3072 2>/dev/null
 openssl pkey -in "$KEYDIR/release.pem" -pubout -out "$KEYDIR/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KEYDIR/release.pem" -out "$KEYDIR/release.crt" \
-    -subj /CN=debian-fde-enroll-matrix 2>/dev/null
+    -subj /CN=alpine-fde-enroll-matrix 2>/dev/null
 [ -s "$KEYDIR/release.pem" ] && [ -s "$KEYDIR/release.pub" ] || {
     echo "FAIL: 3072-bit release key fixture did not generate" >&2
     exit 1
 }
 DER=$(openssl pkey -pubin -in "$KEYDIR/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_BY_UUID_DIR=$BYUUID
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_ENROLL_LOCK=$T/enroll.lock
-export DEBIAN_FDE_KEYDIR=$KEYDIR
-export DEBIAN_FDE_CRYPTSETUP=$FAKEBIN/cryptsetup
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_BY_UUID_DIR=$BYUUID
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_ENROLL_LOCK=$T/enroll.lock
+export ALPINE_FDE_KEYDIR=$KEYDIR
+export ALPINE_FDE_CRYPTSETUP=$FAKEBIN/cryptsetup
 
 REAL_TPM2=$(command -v tpm2)
 cleanup() {
@@ -187,7 +187,7 @@ restore_state() { # the default pre/post pair (0 tokens pre; consistent post)
 }
 
 assert_rc "swtpm fixture starts" 0 swtpm_start "$STATE"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 
 LIVE_PCR7=$(swtpm_pcrread "$STATE" 7)
 # swtpm_pcrread's field parser mis-splits two-digit indices ("11:" glues the
@@ -197,7 +197,7 @@ LIVE_PCR11=$(od -An -v -tx1 "$T/pcr11.bin" | tr -d ' \n')
 HEX_AB=$(printf 'ab%.0s' {1..32})
 
 make_baseline() { # PENDING|FINAL — release_pub_path deliberately points at a
-    # DECOY: the enrollment must use DEBIAN_FDE_KEYDIR, never the baseline (G-B7)
+    # DECOY: the enrollment must use ALPINE_FDE_KEYDIR, never the baseline (G-B7)
     case $1 in
         pending) BL_PCR7='pending' ;;
         final) BL_PCR7="$LIVE_PCR7" ;;
@@ -218,7 +218,7 @@ assert_absent() { # DESC PATH
 
 run_enroll() { # args...
     restore_state
-    ENROLL_OUT=$("$REPO/bin/debian-fde" enroll-tpm "$@" 2>&1)
+    ENROLL_OUT=$("$REPO/bin/alpine-fde" enroll-tpm "$@" 2>&1)
     ENROLL_RC=$?
 }
 
@@ -268,10 +268,10 @@ assert_contains "drift message shows both digests" "$ENROLL_OUT" "$HEX_AB"
 # --- 7. missing release.pub in KEYDIR (G-B7: the keydir is the key source) --------------------
 sb_vars 1 0
 make_baseline final
-KEYDIR_SAVED=$DEBIAN_FDE_KEYDIR
-DEBIAN_FDE_KEYDIR=$T/empty-keydir
+KEYDIR_SAVED=$ALPINE_FDE_KEYDIR
+ALPINE_FDE_KEYDIR=$T/empty-keydir
 run_enroll
-DEBIAN_FDE_KEYDIR=$KEYDIR_SAVED
+ALPINE_FDE_KEYDIR=$KEYDIR_SAVED
 assert_eq "missing keydir release.pub -> fail-closed" "64" "$ENROLL_RC"
 
 # --- 8. LUKS uuid unresolvable -----------------------------------------------------------------
@@ -279,7 +279,7 @@ sb_vars 1 0
 make_baseline final
 run_enroll
 assert_eq "unresolvable uuid -> fail-closed" "64" "$ENROLL_RC"
-assert_contains "uuid message names the device" "$ENROLL_OUT" "$DEBIAN_FDE_BY_UUID_DIR/$UUID"
+assert_contains "uuid message names the device" "$ENROLL_OUT" "$ALPINE_FDE_BY_UUID_DIR/$UUID"
 : >"$BYUUID/$UUID" # resolvable from here on
 
 # --- 9. policy_mode ladder at the CLI (b accepted; documented-absent rungs -> 64 ADR-19) --------
@@ -287,7 +287,7 @@ make_baseline final
 run_enroll_mode() { # MODE
     reset_state
     sb_vars 1 0
-    MODE_OUT=$(policy_mode="$1" "$REPO/bin/debian-fde" enroll-tpm 2>&1)
+    MODE_OUT=$(policy_mode="$1" "$REPO/bin/alpine-fde" enroll-tpm 2>&1)
     MODE_RC=$?
 }
 for m in a ap a-prime combined; do
@@ -379,7 +379,7 @@ make_baseline final
 reset_state
 write_compact_pre_token
 write_compact_post_reseat
-ENROLL_OUT=$("$REPO/bin/debian-fde" enroll-tpm --reseat --pcrsig "$PSIG_ANCH" 2>&1)
+ENROLL_OUT=$("$REPO/bin/alpine-fde" enroll-tpm --reseat --pcrsig "$PSIG_ANCH" 2>&1)
 ENROLL_RC=$?
 assert_eq "compact standing token: reseat rc 0" "0" "$ENROLL_RC"
 assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luksKillSlot "$CS_LOG")"
@@ -390,7 +390,7 @@ sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
 assert_eq "dry-run rc 0" "0" "$ENROLL_RC"
 assert_contains "dry-run names the mode" "$ENROLL_OUT" "policy_mode=b"
-assert_contains "dry-run names the device" "$ENROLL_OUT" "$DEBIAN_FDE_BY_UUID_DIR/$UUID"
+assert_contains "dry-run names the device" "$ENROLL_OUT" "$ALPINE_FDE_BY_UUID_DIR/$UUID"
 assert_eq "dry-run: no keyslot mutation" "0" "$(grep -c luksAddKey "$CS_LOG")"
 assert_eq "dry-run: no token import" "0" "$(grep -c 'token import' "$CS_LOG")"
 assert_absent "dry-run writes no enrolled.json" "$(sp_enrolled_file)"
@@ -400,7 +400,7 @@ sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
 PLAN=$(printf '%s\n' "$ENROLL_OUT" | grep 'policy_mode=b')
 reset_state # fresh metadata counter — the alias must see the SAME pre-state
-ALIAS_OUT=$("$REPO/bin/debian-fde" ukictl enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
+ALIAS_OUT=$("$REPO/bin/alpine-fde" ukictl enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
 ALIAS_RC=$?
 assert_eq "ukictl enroll alias: same rc" "0" "$ALIAS_RC"
 assert_contains "ukictl enroll alias: same plan line" "$ALIAS_OUT" "$PLAN"
@@ -444,7 +444,7 @@ restore_state
 rm -f "$T/staged-pass"
 ENRL_RC=0
 wire_stubs
-enrl_run b "$KEYDIR/release.pub" "$DEBIAN_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
+enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
 assert_eq "fn: enrl_run(b) rc 0" "0" "$ENRL_RC"
 assert_eq "fn: seal op invoked once" "1" "$(grep -c seal_finalized "$FNLOG")"
 assert_eq "fn: keyslot added" "1" "$(grep -c token_add_keyslot "$FNLOG")"
@@ -462,7 +462,7 @@ write_pre_token
 write_post_ok
 : >"$FNLOG"
 ENRL_RC=0
-enrl_run b "$KEYDIR/release.pub" "$DEBIAN_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
+enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
 assert_eq "fn reseat: rc 0" "0" "$ENRL_RC"
 assert_eq "fn reseat: ENRL_WIPE=yes" "yes" "$ENRL_WIPE"
 assert_eq "fn reseat: old token removed" "1" "$(grep -c token_remove "$FNLOG")"
@@ -476,7 +476,7 @@ cat >"$T/luks-pre.json" <<'EOF'
 EOF
 : >"$FNLOG"
 ENRL_RC=0
-EE_REASON=$(enrl_run b "$KEYDIR/release.pub" "$DEBIAN_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
+EE_REASON=$(enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
 assert_eq "fn >1 tokens: rc 1" "1" "$ENRL_RC"
 assert_contains "fn >1 tokens: message names the count" "$EE_REASON" "2 systemd-tpm2 tokens"
 assert_eq "fn >1 tokens: NO seal op" "0" "$(grep -c seal_finalized "$FNLOG")"
@@ -487,7 +487,7 @@ reset_state
 write_pre_notoken
 write_post_two
 ENRL_RC=0
-PA_REASON=$(enrl_run b "$KEYDIR/release.pub" "$DEBIAN_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
+PA_REASON=$(enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
 assert_eq "fn post-assert failure: rc 1" "1" "$ENRL_RC"
 assert_contains "fn post-assert failure: names the assert" "$PA_REASON" "exactly 1 systemd-tpm2 token"
 assert_absent "fn post-assert failure: no enrolled.json (caller records only on rc 0)" "$(sp_enrolled_file)"
@@ -498,7 +498,7 @@ write_pre_token
 : >"$FNLOG"
 ENRL_SKIPPED=0
 EO_RC=0
-enrl_ensure_once "$DEBIAN_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" || EO_RC=1
+enrl_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" || EO_RC=1
 assert_eq "ensure-once: standing token stands (rc 0)" "0" "$EO_RC"
 assert_eq "ensure-once: NO seal op (zero TPM ops, s14)" "0" "$(grep -c seal_finalized "$FNLOG")"
 assert_eq "ensure-once: ENRL_ENROLLED stays 0" "0" "$ENRL_ENROLLED"
@@ -515,7 +515,7 @@ EOF
 write_post_ok
 : >"$FNLOG"
 EO2_RC=0
-EO2_OUT=$(enrl_ensure_once "$DEBIAN_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
+EO2_OUT=$(enrl_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
 assert_eq "ensure-once >1 tokens: rc 1" "1" "$EO2_RC"
 assert_contains "ensure-once >1 tokens: names the count" "$EO2_OUT" "2 systemd-tpm2 tokens"
 assert_contains "ensure-once >1 tokens: cites manual intervention" "$EO2_OUT" "manual intervention"

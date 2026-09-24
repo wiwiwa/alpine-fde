@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""serial.py — stdlib-only serial-socket client for the Debian FDE e2e harness.
+"""serial.py — stdlib-only serial-socket client for the Alpine FDE e2e harness.
 
 Talks to a QEMU `-chardev socket,id=...,server=on,wait=off` unix socket
 (the guest's ttyS0). No pexpect/expect dependency (neither exists on this

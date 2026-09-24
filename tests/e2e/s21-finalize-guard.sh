@@ -116,15 +116,16 @@ ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
 DISK_MIB=1600
 
-export QEMU_TIMEOUT="${DEBIAN_FDE_S21_TIMEOUT:-1200}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S21_TIMEOUT:-1200}"
 
-# §13-floor-OK credentials for the in-guest finalize (the *debian-fde*
-# substring is blocklisted by the entropy floor; >=16 chars passes). The
+# §13-floor-OK credentials for the in-guest finalize (the *alpine-fde*
+# substring is blocklisted by the entropy floor, so these avoid it; >=16
+# chars passes). The
 # recovery passphrase is REKEYED into keyslot 0 in-guest (the Stage-1
 # credential-ceremony stand-in); the key passphrase encrypts release.pem at
 # finalize STEP 2 (ADR-18).
-S21_RECOVERY='alpine-fde-s21-recovery-4e8b20'
-S21_KEYPASS='alpine-fde-s21-release-pbkdf2-m5'
+S21_RECOVERY='fde-s21-recovery-4e8b20'
+S21_KEYPASS='fde-s21-release-pbkdf2-m5'
 
 # --- hardening: bounded stages, loud failures, overall budget --------------------
 # Calibrated 2026-09-24: the registry's outer SCENARIO_BUDGET is 1500 s (MD-05b)
@@ -132,7 +133,7 @@ S21_KEYPASS='alpine-fde-s21-release-pbkdf2-m5'
 # hangs (a hung s21 then dies as an anonymous outer rc=124 instead of a loud
 # STAGE-TIMEOUT-OR-HANG). Registry evidence: a full s21 pass takes ~400-600 s;
 # 1350 s = ~2.2x margin while still fitting inside the outer budget.
-OVERALL_BUDGET="${DEBIAN_FDE_S21_BUDGET:-1350}"
+OVERALL_BUDGET="${ALPINE_FDE_S21_BUDGET:-1350}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
 SWTPM_DIRS=()
@@ -198,7 +199,7 @@ CONSOLE="$RUN/console.log"
 
 # Sibling scenarios prune .runs to the 2 newest dirs GLOBALLY — keep THIS run
 # dir the newest while the (long) boots run; prune our OWN superseded runs,
-# never the dirs run-e2e protects (CR-02/MD-03: DEBIAN_FDE_PROTECT_DIRS).
+# never the dirs run-e2e protects (CR-02/MD-03: ALPINE_FDE_PROTECT_DIRS).
 (
     while :; do
         sleep 5
@@ -210,7 +211,7 @@ REFRESHER=$!
 
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's21-finalize-guard-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 
@@ -343,7 +344,7 @@ for _sl in $(ldd "$(command -v openssl)" | awk '$3 ~ /^\// {print $3}'); do
 done
 printf '#!/bin/sh\nexec /opt/sslbin/ld-linux --library-path /opt/sslbin/lib /opt/sslbin/openssl "$@"\n' \
     >"$TOOLING/usr/bin/openssl"
-# cryptsetup output normalizer (the CLI's DEBIAN_FDE_CRYPTSETUP seam; the
+# cryptsetup output normalizer (the CLI's ALPINE_FDE_CRYPTSETUP seam; the
 # LUKS2 JSON mini-parsers anchor on the pretty-printed shape — s00b evidence)
 { printf '#!/bin/sh\n_dump=0\nfor _a in "$@"; do\n    [ "$_a" = "--dump-json-metadata" ] && _dump=1\ndone\nif [ "$_dump" = 1 ]; then\n    /usr/sbin/cryptsetup "$@" | /usr/bin/jq -c . | sed '"'"'s/":"/": "/g; s/":{/": {/g; s/":\\[/": [/g'"'"'\nelse\n    exec /usr/sbin/cryptsetup "$@"\nfi\n'; } \
     >"$TOOLING/usr/bin/cryptsetup-pretty"
@@ -368,7 +369,7 @@ cat >"$TOOLING/etc/alpine-fde/install-state.json" <<JSON
 }
 JSON
 # pending baseline: the pub path is where the DISK rootfs carries it (finalize
-# runs with DEBIAN_FDE_ROOT=/mnt); boot B's in-guest audit --init finalizes it
+# runs with ALPINE_FDE_ROOT=/mnt); boot B's in-guest audit --init finalizes it
 cat >"$TOOLING/etc/alpine-fde/baseline.json" <<JSON
 {
   "schema_version": "1",
@@ -406,14 +407,14 @@ printf '# alpine-fde.conf — harness fixture (comment-only: the environment win
     >"$TOOLING/etc/alpine-fde/alpine-fde.conf"
 run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine-fde/keys/release.pub"
 # release.pem: the release key in the ADR-18 PLAINTEXT staging form (finalize
-# STEP 2 encrypts it in-guest under DEBIAN_FDE_KEY_PASSPHRASE; the fixture's
+# STEP 2 encrypts it in-guest under ALPINE_FDE_KEY_PASSPHRASE; the fixture's
 # db/release identity is ONE key, ADR-11)
 run_stage tooling-release-pem 60 cp "$RUN/keys/db.key" "$TOOLING/etc/alpine-fde/keys/release.pem"
 printf 'root UUID=%s none luks,tpm2-device=auto,discard\n' "$DISK_UUID" >"$TOOLING/etc/crypttab"
 # an unfinalized /etc/motd: one operator line + the EXACT banner line from the
 # product's single source (fde_motd_banner) — boot B's completion chain strips
 # the banner line-exactly and must preserve the operator line
-_BANNER=$(DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd" . "$REPO/lib/install-state.sh" 2>/dev/null; fde_motd_banner)
+_BANNER=$(ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" . "$REPO/lib/install-state.sh" 2>/dev/null; fde_motd_banner)
 { printf 'Welcome to the Alpine FDE harness fixture — operator content stays.\n'; printf '%s\n' "$_BANNER"; } \
     >"$TOOLING/etc/motd"
 grep -c "NOT finalized" "$TOOLING/etc/motd" >/dev/null || {
@@ -473,9 +474,9 @@ tar -tzf "$RUN/enriched.tar.gz" | grep -qxE '\./?etc/alpine-fde/install-state.js
     || { echo "s21: additions missing from the enriched payload"; exit 1; }
 _assert_result ok "S-21 fixture: Stage-1 additions present in the enriched payload tar" ""
 
-DEBIAN_FDE_ROOTFS_SHA="$ROOTFS_SHA" DEBIAN_FDE_ROOTFS_BYTES="$ROOTFS_BYTES" \
+ALPINE_FDE_ROOTFS_SHA="$ROOTFS_SHA" ALPINE_FDE_ROOTFS_BYTES="$ROOTFS_BYTES" \
     run_stage uki_build-installer 1200 \
-    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "debian-fde-stage=install"
+    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "alpine-fde-stage=install"
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 run_stage esp_make-installer 300 esp_make "$RUN/esp-installer.img" \
     $(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB )) "$RUN/harness.efi"
@@ -489,14 +490,14 @@ _qemu_alive "$RUN"
 _rearm_trap
 run_stage qemu_wait-installer "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
-grep -q "debian-fde: POWEROFF" "$RUN/console.log" || {
+grep -q "alpine-fde: POWEROFF" "$RUN/console.log" || {
     echo "s21: installer boot failed (no POWEROFF sentinel)"; exit 1; }
 LOG_INST=$(cat "$RUN/console.log" 2>/dev/null || true)
 assert_contains "installer boot: install stage completed" "$LOG_INST" \
-    "debian-fde-harness: install stage complete"
+    "alpine-fde-harness: install stage complete"
 # the SB-on booted PCR 7 (enrolled vars are deterministic across boots) — the
 # d7 input of boot B's host-composed {7,11} policy signature
-PCR7_SBON=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
+PCR7_SBON=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
 [[ -n "$PCR7_SBON" ]] || { echo "s21: no PCR 7 print in the installer console"; exit 1; }
 # the installed-state handoff shape survived the populate: keyslot 0 only, no token
 META1=$(disk_metadata "$RUN/disk.img")
@@ -508,7 +509,7 @@ assert_eq "installer boot: disk still ZERO tokens" "{}" "$(disk_token_json "$RUN
 # Fixture stage 4: the feeding UKI (§8.2 hook unlock + DEBUG SHELL seam) and
 # the {7,11} policy signature for boot B's token upgrade.
 # ============================================================================
-DEBIAN_FDE_DEBUG_SHELL=1 DEBIAN_FDE_ROOTFS_SHA= DEBIAN_FDE_ROOTFS_BYTES= \
+ALPINE_FDE_DEBUG_SHELL=1 ALPINE_FDE_ROOTFS_SHA= ALPINE_FDE_ROOTFS_BYTES= \
     run_stage uki_build-feed 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness-feed.efi"
 D11_PRED=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
@@ -557,13 +558,13 @@ _run_fed_boot() {
         # (live-seen 2026-09-22 — hook prompts past the 300 s mark); the
         # hook's read has no timeout, so the feed stays prompt-synchronized.
         if uki_wait_hook_prompt "$n" 600 "$bdir"; then
-            feed_line "$bdir/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+            feed_line "$bdir/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         else
             _hang_fail CONSOLE-WAIT "hook recovery prompt $n" "never appeared"
         fi
-        grep -q "debian-fde: UNSEALED" "$bdir/console.log" 2>/dev/null && break
+        grep -q "alpine-fde: UNSEALED" "$bdir/console.log" 2>/dev/null && break
     done
-    wait_console "$bdir" "debian-fde: UNSEALED" 120
+    wait_console "$bdir" "alpine-fde: UNSEALED" 120
     wait_console "$bdir" "DEBUG SHELL on console" 300
 }
 
@@ -582,13 +583,13 @@ _feed_common() {
         'mkdir -p /mnt /run/bu && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && cat /mnt/etc/alpine-fde/install-state.json && ls -l /mnt/etc/init.d/alpine-fde-finalize /mnt/etc/runlevels/default/ && cat /mnt/etc/crypttab && ln -sf /dev/vdb /run/bu/'"$DISK_UUID"' && echo P4-$((41+3))-OK'
     wait_console "$bdir" "P4-44-OK" 300
     # the CLI/service environment: by-uuid seam (no udev reliance), payload
-    # wrappers, and DEBIAN_FDE_ROOT=/mnt — the legs mutate the DISK documents.
-    # DEBIAN_FDE_CMD_DIR points at the shipped lib staged under /opt/alpine-fde
+    # wrappers, and ALPINE_FDE_ROOT=/mnt — the legs mutate the DISK documents.
+    # ALPINE_FDE_CMD_DIR points at the shipped lib staged under /opt/alpine-fde
     # (what the oneshot's own default and the openrc-run service resolve);
-    # DEBIAN_FDE_PCRSIG is the host-composed {7,11} policy on the payload drive
-    # (boot B's token-upgrade input; s19/s20's DEBIAN_FDE_PCRSIG seam).
+    # ALPINE_FDE_PCRSIG is the host-composed {7,11} policy on the payload drive
+    # (boot B's token-upgrade input; s19/s20's ALPINE_FDE_PCRSIG seam).
     feed_line "$bdir/serial.sock" \
-        "export DEBIAN_FDE_NO_INSTALL=1 DEBIAN_FDE_TCTI=device:/dev/tpmrm0 DEBIAN_FDE_BY_UUID_DIR=/run/bu DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd DEBIAN_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty DEBIAN_FDE_ROOT=/mnt DEBIAN_FDE_EVENTLOG=/evtlog-absent DEBIAN_FDE_TMPDIR=/tmp DEBIAN_FDE_KEYDIR=/etc/alpine-fde/keys DEBIAN_FDE_KEY_PASSPHRASE=$S21_KEYPASS DEBIAN_FDE_RECOVERY_PASSPHRASE=$S21_RECOVERY DEBIAN_FDE_PCRSIG=/pcrsig.json && echo P5-\$((43))-OK"
+        "export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty ALPINE_FDE_ROOT=/mnt ALPINE_FDE_EVENTLOG=/evtlog-absent ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S21_KEYPASS ALPINE_FDE_RECOVERY_PASSPHRASE=$S21_RECOVERY ALPINE_FDE_PCRSIG=/pcrsig.json && echo P5-\$((43))-OK"
     wait_console "$bdir" "P5-43-OK" 120
 }
 
@@ -664,14 +665,14 @@ CLI_RC_A=$(_await_rc "$A")
 _feed_postcheck "$A"
 
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
-assert_contains "[boot A] init ran" "$LOG_A" "debian-fde-harness: init started"
+assert_contains "[boot A] init ran" "$LOG_A" "alpine-fde-harness: init started"
 assert_contains "[boot A] the shipped §8.2 hook ran the enter-initrd extend" "$LOG_A" \
     "$(sentinel_of unseal_pcrextend_ok)"
 assert_contains "[boot A] hook found NO token (handoff window shape)" "$LOG_A" \
     "$(sentinel_of unseal_token_missing)"
 assert_contains "[boot A] fed slot-0 recovery passphrase unsealed the volume (§10 way out)" "$LOG_A" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[boot A] UNSEALED" "$LOG_A" "debian-fde: UNSEALED"
+assert_contains "[boot A] UNSEALED" "$LOG_A" "alpine-fde: UNSEALED"
 assert_contains "[boot A] tooling extracted in-guest" "$LOG_A" "P2B-42-OK"
 assert_contains "[boot A] installed-state fixture on disk: state=installed" "$LOG_A" '"state": "installed"'
 assert_contains "[boot A] the advisory oneshot is staged + enabled (init.d + runlevels/default)" "$LOG_A" \
@@ -767,12 +768,12 @@ CLI_RC_B=$(_await_rc "$B")
 _feed_postcheck "$B"
 
 LOG_B=$(cat "$B/console.log" 2>/dev/null || true)
-assert_contains "[boot B] init ran" "$LOG_B" "debian-fde-harness: init started"
+assert_contains "[boot B] init ran" "$LOG_B" "alpine-fde-harness: init started"
 assert_contains "[boot B] hook found NO token before the completion (window shape)" "$LOG_B" \
     "$(sentinel_of unseal_token_missing)"
 assert_contains "[boot B] fed slot-0 recovery passphrase unsealed the volume" "$LOG_B" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[boot B] UNSEALED" "$LOG_B" "debian-fde: UNSEALED"
+assert_contains "[boot B] UNSEALED" "$LOG_B" "alpine-fde: UNSEALED"
 assert_contains "[boot B] pre-state: installed (on disk)" "$LOG_B" '"state": "installed"'
 assert_contains "[boot B] Stage-1 stand-in: recovery rekeyed into keyslot 0" "$LOG_B" "RK-45-OK"
 # the completion flow, in order: passphrase verify -> release.pem -> audit
@@ -784,25 +785,25 @@ assert_contains "[boot B] release.pem encrypted in place (ADR-18)" "$LOG_B" \
 assert_contains "[boot B] audit --init finalized the pending baseline from live values" "$LOG_B" \
     "finalizing the baseline from live values (audit --init"
 assert_contains "[boot B] the member upgraded to Mechanism B {PCR 7, PCR 11}" "$LOG_B" \
-    "debian-fde: member $DISK_UUID: token upgraded to Mechanism B {PCR 7, PCR 11}"
+    "alpine-fde: member $DISK_UUID: token upgraded to Mechanism B {PCR 7, PCR 11}"
 assert_contains "[boot B] no ephemeral keyslot remained (crash-skip of the purge)" "$LOG_B" \
     "no temporary ephemeral keyslot remains — skipping the purge"
 assert_contains "[boot B] the unfinalized MOTD banner cleared" "$LOG_B" \
     "unfinalized MOTD/issue banner cleared"
 assert_contains "[boot B] install finalized marker (§9.1 Stage 3)" "$LOG_B" \
-    "debian-fde: install finalized"
+    "alpine-fde: install finalized"
 assert_contains "[boot B] the §9.1 off-machine backup prompt" "$LOG_B" \
     "back up the key material off-machine now"
 assert_contains "[boot B] audit summary names the finalized baseline" "$LOG_B" \
-    "debian-fde: audit summary: baseline /mnt/etc/alpine-fde/baseline.json"
+    "alpine-fde: audit summary: baseline /mnt/etc/alpine-fde/baseline.json"
 assert_eq "[boot B] production finalize rc 0" "0" "$CLI_RC_B"
 assert_eq "[boot B] token upgraded EXACTLY ONCE (single-member seal)" "1" \
     "$(grep -cF "token upgraded to Mechanism B" <<<"$LOG_B")"
 assert_not_contains "[boot B] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG_B" \
     "$(sentinel_of cryptenroll_enrolled)"
 # ordering: the upgrade precedes the finalized transition (state written LAST)
-_upgrb_line=$(grep -nm1 -F "debian-fde: member $DISK_UUID: token upgraded" "$B/console.log" | cut -d: -f1)
-_finb_line=$(grep -nm1 -F "debian-fde: install finalized" "$B/console.log" | cut -d: -f1)
+_upgrb_line=$(grep -nm1 -F "alpine-fde: member $DISK_UUID: token upgraded" "$B/console.log" | cut -d: -f1)
+_finb_line=$(grep -nm1 -F "alpine-fde: install finalized" "$B/console.log" | cut -d: -f1)
 if [[ -n "$_upgrb_line" && -n "$_finb_line" ]] && (( _upgrb_line < _finb_line )); then
     _assert_result ok "[boot B] token upgrade precedes the finalized transition (state written LAST, §9.1)" ""
 else

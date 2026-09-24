@@ -9,8 +9,10 @@
 # SCANNED (shipped paths): bin/ lib/ hooks/ docs/Architecture.md
 # docs/UserGuide.md README.md.
 # EXCLUDED: tests/, .git, Debian-era provenance records
-# (tests/sentinels-257.13.txt), and the deliberate compat seams (the
-# bin/debian-fde wrapper + DEBIAN_FDE_* env spellings — §8.1 alias contract).
+# (tests/sentinels-257.13.txt). The former compat seams (the bin/debian-fde
+# alias wrapper + the DEBIAN_FDE_* env spellings) were RETIRED in the
+# alpine-fde rename — the debian-fde spellings below are BANNED patterns, not
+# accepted seams.
 #
 # PATTERNS: /opt/debian-fde  /etc/debian-fde  debian-fde-finalize.service
 #           debootstrap  apt-get install  dpkg  systemd-cryptenroll

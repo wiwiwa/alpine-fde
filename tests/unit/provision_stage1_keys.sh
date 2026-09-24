@@ -5,7 +5,7 @@
 #   * EFI_TIME / GUID mixed-endian / UTF-16LE encodings vs golden hex
 #   * authenticated variable packets: WIN_CERTIFICATE_EFI_PKCS structure +
 #     openssl PKCS#7 verification
-#   * `debian-fde provision stage1` end-to-end: key material, ESLs, packets,
+#   * `alpine-fde provision stage1` end-to-end: key material, ESLs, packets,
 #     pending baseline; refuse-overwrite + --force behavior
 #   * `provision stage2` finalizes the baseline (needs a TPM: swtpm fixture)
 
@@ -18,19 +18,19 @@ source "$HERE/../lib/assert.sh"
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/provision.sh
 source "$REPO/lib/cmd/provision.sh"
 
-T=$(mktemp -d /tmp/debian-fde-provision.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-provision.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$T"
 }
 trap cleanup EXIT
-export DEBIAN_FDE_ROOT="$T/root"    # baseline lands at $T/root/etc/alpine-fde
+export ALPINE_FDE_ROOT="$T/root"    # baseline lands at $T/root/etc/alpine-fde
 
 # --- golden: EFI_CERT_X509_GUID mixed-endian + ESL layout ---------------------
 # synthetic 8-byte "cert" 11 12 .. 18, zero owner GUID
@@ -71,7 +71,7 @@ assert_eq "hex_to_bin/bin_to_hex roundtrip (incl NUL)" \
 TS='2026-09-14T01:02:03Z'
 # throwaway 2048-bit signer (openssl, fast enough for tests)
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/signer.key" 2>/dev/null
-openssl req -new -x509 -key "$T/signer.key" -out "$T/signer.pem" -days 30 -sha256 -subj "/O=Debian FDE/CN=Test Signer" 2>/dev/null
+openssl req -new -x509 -key "$T/signer.key" -out "$T/signer.pem" -days 30 -sha256 -subj "/O=Alpine FDE/CN=Test Signer" 2>/dev/null
 printf '\021\042\063\104' >"$T/payload.bin"    # 11 22 33 44
 auth_packet_build "$T/signer.key" "$T/signer.pem" db 'd719b2cb-3d3a-4596-a3bc-dad00e67656f' "$PROV_EFI_ATTRS" \
     "$T/payload.bin" "$TS" "$T/db.auth"
@@ -115,7 +115,7 @@ openssl smime -verify -inform DER -in "$T/db.p7" -content "$T/desc-bad.bin" \
 assert_ne "PKCS7 rejects a tampered descriptor (nonzero rc)" "0" "$?"
 
 # --- real stage1 end-to-end -------------------------------------------------------
-assert_rc "no TPM before fixture: stage1 still works (warns, pcrs pending)" 0 env -u DEBIAN_FDE_TCTI "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys"
+assert_rc "no TPM before fixture: stage1 still works (warns, pcrs pending)" 0 env -u ALPINE_FDE_TCTI "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys"
 for f in release.pem release.pub release.crt pk.priv.pem pk.cert.pem kek.priv.pem kek.cert.pem db.priv.pem db.cert.pem; do
     assert_file_exists "stage1 produced $f" "$T/keys/$f"
 done
@@ -142,7 +142,7 @@ b[16] ^= 0xFF   # flip a byte of SignatureListSize
 open(p, 'wb').write(bytes(b))
 EOF
 assert_rc "esl_verify rejects corrupted size field" 1 esl_verify "$T/db.esl.corrupt"
-# pending baseline written under $DEBIAN_FDE_ROOT
+# pending baseline written under $ALPINE_FDE_ROOT
 BL=$(sp_baseline_file)
 assert_file_exists "stage1 wrote baseline" "$BL"
 assert_rc "stage1 baseline validates" 0 baseline_validate "$BL"
@@ -154,9 +154,9 @@ SUBJ=$(openssl x509 -in "$T/keys/release.crt" -noout -subject)
 assert_contains "release cert subject names Alpine FDE" "$SUBJ" "Alpine FDE Release Key"
 assert_not_contains "release cert subject carries no Debian remnant" "$SUBJ" "Debian"
 # refuse overwrite without --force
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 refuses existing keydir (rc 64)" "64" "$RC"
-assert_rc "stage1 --force overwrites" 0 "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" --force
+assert_rc "stage1 --force overwrites" 0 "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" --force
 
 # --- G-B1: vendor-cert revocation (§6 PCR 7 — "expected value is fully ours") -----
 # dbx entries of type EFI_CERT_X509_SHA256 revoke vendor certs by the SHA256 of
@@ -213,7 +213,7 @@ assert_ne "TBS hash differs from the whole-cert hash" "$TBS" "$(sha256sum <"$T/v
 assert_eq "TBS hash is 64 hex chars" "64" "${#TBS}"
 
 # stage1 e2e with --revoke-cert: dbx.esl + dbx.auth, KEK-authenticated
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" --force --revoke-cert "$T/vendor.crt.pem" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" --force --revoke-cert "$T/vendor.crt.pem" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --revoke-cert rc 0" "0" "$RC"
 assert_file_exists "stage1 produced dbx.esl" "$T/keys/dbx.esl"
 assert_file_exists "stage1 produced dbx.auth" "$T/keys/dbx.auth"
@@ -243,7 +243,7 @@ openssl smime -verify -inform DER -in "$T/dbx.p7" -content "$T/dbx-desc.bin" \
     -CAfile "$T/keys/kek.cert.pem" -out /dev/null 2>"$T/dbx-verify.err"
 assert_eq "dbx.auth PKCS7 verifies under the KEK cert (detached)" "0" "$?"
 # fail-closed on a missing revocation input
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" --force --revoke-cert "$T/nope.pem" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" --force --revoke-cert "$T/nope.pem" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --revoke-cert missing file -> 64" "64" "$RC"
 
 # --- M-03: `--force` WITHOUT `--revoke-cert` must not leave stale dbx artifacts ---
@@ -251,7 +251,7 @@ assert_eq "stage1 --revoke-cert missing file -> 64" "64" "$RC"
 # previous --revoke-cert run would be signed by that JUST-DELETED key —
 # enrolling it would resurrect stale revocation state. The stale packets must
 # be removed loudly (rebuild needs an explicit --revoke-cert re-run).
-M3_OUT=$("$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" --force 2>&1)
+M3_OUT=$("$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" --force 2>&1)
 M3_RC=$?
 assert_eq "M-03: --force without --revoke-cert rc 0" "0" "$M3_RC"
 assert_contains "M-03: loud warn names the stale dbx artifacts" "$M3_OUT" "STALE dbx"
@@ -272,7 +272,7 @@ assert_eq "L-01: 63 hex chars still rejected (length check intact)" "64" "$L1_RC
 
 # --- L-02: --revoke-cert paths accumulate safely (paths with spaces survive) --------
 cp "$T/vendor.crt.pem" "$T/vendor cert.pem"
-L2_OUT=$("$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys" --force \
+L2_OUT=$("$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys" --force \
     --revoke-cert "$T/vendor cert.pem" 2>&1)
 L2_RC=$?
 assert_eq "L-02: --revoke-cert path with spaces rc 0" "0" "$L2_RC"
@@ -284,13 +284,13 @@ mkdir -p "$T/badopenssl"
 printf '#!/bin/sh\nprintf "simulated-openssl-failure (L-03: stderr must not be silenced)\\n" >&2\nexit 1\n' \
     >"$T/badopenssl/openssl"
 chmod +x "$T/badopenssl/openssl"
-L3_OUT=$(PATH="$T/badopenssl:$PATH" "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-l03" 2>&1)
+L3_OUT=$(PATH="$T/badopenssl:$PATH" "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-l03" 2>&1)
 L3_RC=$?
 assert_ne "L-03: broken openssl fails the run" "0" "$L3_RC"
 assert_contains "L-03: openssl failure message is visible (was: 2>/dev/null)" "$L3_OUT" "simulated-openssl-failure"
 
 # without --revoke-cert, no dbx artifacts are produced (never invent vendor hashes)
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-norevoke" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-norevoke" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 without --revoke-cert rc 0" "0" "$RC"
 assert_eq "no dbx.esl without --revoke-cert" "0" "$([ -e "$T/keys-norevoke/dbx.esl" ] && echo 1 || echo 0)"
 
@@ -299,7 +299,7 @@ assert_eq "no dbx.esl without --revoke-cert" "0" "$([ -e "$T/keys-norevoke/dbx.e
 # directory via fw_auth_enroll: db -> KEK -> PK (PK LAST — a PK enrolled first
 # would lock out the later db/KEK writes on real firmware), gated on
 # SetupMode=1 (fail-closed 64 when SetupMode=0). Default DIR: the host efivars
-# when DEBIAN_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR is set; skipped with an
+# when ALPINE_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR is set; skipped with an
 # info line when the leg is requested but no directory resolves.
 E5_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
 E5_GUID_DBASE='d719b2cb-3d3a-4596-a3bc-dad00e67656f'
@@ -312,7 +312,7 @@ mk_efivars() { # DIR SETUPMODE_BYTE
 # leg 1: explicit DIR, SetupMode=1 -> rc 0, all three vars enrolled, PK last
 E5=$T/enroll-efivars
 mk_efivars "$E5" 1
-E5_OUT=$(env -u DEBIAN_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/debian-fde" \
+E5_OUT=$(env -u ALPINE_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/alpine-fde" \
     provision stage1 --keydir "$T/keys-e5" --enroll-efivars "$E5" 2>&1)
 E5_RC=$?
 assert_eq "stage1 --enroll-efivars DIR rc 0" "0" "$E5_RC"
@@ -333,30 +333,30 @@ fi
 # leg 2: flag without DIR, env seam set -> enrolls into the env directory
 E5B=$T/enroll-efivars-env
 mk_efivars "$E5B" 1
-E5B_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR DEBIAN_FDE_EFIVARS_DIR="$E5B" \
-    "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5b" --enroll-efivars ) \
+E5B_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5B" \
+    "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-e5b" --enroll-efivars ) \
     >/dev/null 2>&1; echo $? )
-assert_eq "stage1 --enroll-efivars (no DIR) uses DEBIAN_FDE_EFIVARS_DIR" "0" "$E5B_RC"
+assert_eq "stage1 --enroll-efivars (no DIR) uses ALPINE_FDE_EFIVARS_DIR" "0" "$E5B_RC"
 assert_file_exists "env-seam leg: PK enrolled into the env directory" \
     "$E5B/PK-$E5_GUID_GLOBAL"
 # leg 3: ALPINE_FDE_EFIVARS_DIR spelling works too
 E5C=$T/enroll-efivars-alpine
 mk_efivars "$E5C" 1
-E5C_RC=$( ( env -u DEBIAN_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5C" \
-    "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5c" --enroll-efivars ) \
+E5C_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5C" \
+    "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-e5c" --enroll-efivars ) \
     >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --enroll-efivars honors ALPINE_FDE_EFIVARS_DIR" "0" "$E5C_RC"
 assert_file_exists "ALPINE spelling: PK enrolled" "$E5C/PK-$E5_GUID_GLOBAL"
 # leg 4: SetupMode=0 -> fail-closed 64, nothing enrolled (no half trust root)
 E5D=$T/enroll-efivars-setup0
 mk_efivars "$E5D" 0
-E5D_RC=$( ( "$REPO/bin/debian-fde" provision stage1 --keydir "$T/keys-e5d" \
+E5D_RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-e5d" \
     --enroll-efivars "$E5D" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --enroll-efivars with SetupMode=0 -> 64" "64" "$E5D_RC"
 assert_eq "SetupMode=0: nothing enrolled (fail-closed before any write)" "0" \
     "$([ -e "$E5D/db-$E5_GUID_DBASE" ] && echo 1 || echo 0)"
 # leg 5: leg requested, no DIR, no env -> rc 0 with the loud skip info line
-E5E_OUT=$(env -u DEBIAN_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/debian-fde" \
+E5E_OUT=$(env -u ALPINE_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/alpine-fde" \
     provision stage1 --keydir "$T/keys-e5e" --enroll-efivars 2>&1)
 E5E_RC=$?
 assert_eq "stage1 --enroll-efivars without any efivars dir -> rc 0 (skip)" "0" "$E5E_RC"
@@ -365,7 +365,7 @@ assert_contains "skip is announced with an info line" "$E5E_OUT" \
 # leg 6: flag NOT given -> no leg at all (no enrollment, no skip line)
 E5F=$T/enroll-efivars-notrequested
 mk_efivars "$E5F" 1
-E5F_OUT=$(DEBIAN_FDE_EFIVARS_DIR="$E5F" "$REPO/bin/debian-fde" \
+E5F_OUT=$(ALPINE_FDE_EFIVARS_DIR="$E5F" "$REPO/bin/alpine-fde" \
     provision stage1 --keydir "$T/keys-e5f" 2>&1)
 E5F_RC=$?
 assert_eq "stage1 without --enroll-efivars rc 0" "0" "$E5F_RC"
@@ -373,7 +373,7 @@ assert_eq "no flag: nothing enrolled even with env set" "0" \
     "$([ -e "$E5F/PK-$E5_GUID_GLOBAL" ] && echo 1 || echo 0)"
 
 # --- ADR-18/G-KC3: provision stage1 --mode in-chroot|offline (default offline) ------
-# in-chroot mode: keydir defaults to $DEBIAN_FDE_ROOT/etc/alpine-fde/keys; the
+# in-chroot mode: keydir defaults to $ALPINE_FDE_ROOT/etc/alpine-fde/keys; the
 # ceremony REQUIRES encryption at the end (keys_encrypt_release, PBES2
 # aes-256-cbc/hmacWithSHA256/iter 600000) and SHREDS the pk/kek/db (+release
 # duplicate) plaintext private keys after the ESL/auth-packet build — the
@@ -383,14 +383,14 @@ IC_PASS='ci-inchroot-passphrase-600000'
 enc_rc() { ( keys_is_encrypted "$1" ) >/dev/null 2>&1; echo $?; }
 
 # usage pin: --mode validates its value (usage-class rc 2)
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --mode garbage --keydir "$T/mode-garbage" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --mode garbage --keydir "$T/mode-garbage" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --mode garbage -> usage rc 2" "2" "$RC"
 
 # the in-chroot ceremony end-to-end with the env credential seam (RESOLVED-4)
-IC_OUT=$(DEBIAN_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/debian-fde" provision stage1 --mode in-chroot 2>&1)
+IC_OUT=$(ALPINE_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot 2>&1)
 IC_RC=$?
-assert_eq "stage1 --mode in-chroot rc 0 (default keydir = \$DEBIAN_FDE_ROOT/etc/alpine-fde/keys)" "0" "$IC_RC"
-ICK="$DEBIAN_FDE_ROOT/etc/alpine-fde/keys"
+assert_eq "stage1 --mode in-chroot rc 0 (default keydir = \$ALPINE_FDE_ROOT/etc/alpine-fde/keys)" "0" "$IC_RC"
+ICK="$ALPINE_FDE_ROOT/etc/alpine-fde/keys"
 assert_file_exists "in-chroot: release.pem at the default keydir" "$ICK/release.pem"
 assert_eq "in-chroot: release.pem is ENCRYPTED (ADR-18)" "0" "$(enc_rc "$ICK/release.pem")"
 assert_eq "in-chroot: encrypted release.pem mode 600" "600" "$(stat -c %a "$ICK/release.pem")"
@@ -423,24 +423,24 @@ assert_eq "in-chroot: baseline expected_pcr7 pending" "pending" \
 
 # explicit --keydir wins over the default
 IC2="$T/inchroot-explicit"
-IC2_OUT=$(DEBIAN_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC2" 2>&1)
+IC2_OUT=$(ALPINE_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot --keydir "$IC2" 2>&1)
 assert_eq "stage1 --mode in-chroot --keydir DIR rc 0" "0" "$?"
 assert_eq "in-chroot explicit keydir: release.pem encrypted there" "0" "$(enc_rc "$IC2/release.pem")"
 
 # credential seam: in-chroot without env passphrase and without a tty -> loud 64
 IC3="$T/inchroot-nocred"
-IC3_RC=$( ( unset DEBIAN_FDE_KEY_PASSPHRASE; "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC3" ) </dev/null >/dev/null 2>&1; echo $? )
+IC3_RC=$( ( unset ALPINE_FDE_KEY_PASSPHRASE; "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot --keydir "$IC3" ) </dev/null >/dev/null 2>&1; echo $? )
 assert_eq "in-chroot without credential -> 64 (loud, ADR-18)" "64" "$IC3_RC"
 assert_eq "in-chroot without credential: no ciphertext produced" "1" "$(enc_rc "$IC3/release.pem" 2>/dev/null || echo 1)"
 # floor-violating passphrase: rc 2 BEFORE any ciphertext exists
 IC4="$T/inchroot-floor"
-IC4_RC=$(DEBIAN_FDE_KEY_PASSPHRASE=short "$REPO/bin/debian-fde" provision stage1 --mode in-chroot --keydir "$IC4" >/dev/null 2>&1; echo $?)
+IC4_RC=$(ALPINE_FDE_KEY_PASSPHRASE=short "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot --keydir "$IC4" >/dev/null 2>&1; echo $?)
 assert_eq "in-chroot floor-violating passphrase -> rc 2" "2" "$IC4_RC"
 assert_eq "in-chroot floor violation: no ciphertext written" "1" "$(enc_rc "$IC4/release.pem" 2>/dev/null || echo 1)"
 
 # explicit --mode offline (the documented default) is unchanged: plaintext on the medium
 OF3="$T/keys-offline-explicit"
-RC=$( ( "$REPO/bin/debian-fde" provision stage1 --mode offline --keydir "$OF3" ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --mode offline --keydir "$OF3" ) >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --mode offline rc 0" "0" "$RC"
 assert_eq "offline mode: release.pem stays PLAINTEXT on the medium" "1" "$(enc_rc "$OF3/release.pem")"
 
@@ -452,11 +452,11 @@ mkdir -p "$EV"
 printf '\007\000\000\000\001' >"$EV/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 printf '\007\000\000\000\000' >"$EV/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 printf '\007\000\000\000\001\002\003\004' >"$EV/PK-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-export DEBIAN_FDE_EFIVARS_DIR=$EV
+export ALPINE_FDE_EFIVARS_DIR=$EV
 STATE=$T/swtpm
 assert_rc "swtpm starts" 0 swtpm_start "$STATE"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
-assert_rc "stage2 finalizes pending baseline" 0 "$REPO/bin/debian-fde" provision stage2
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
+assert_rc "stage2 finalizes pending baseline" 0 "$REPO/bin/alpine-fde" provision stage2
 assert_rc "baseline now final" 0 baseline_is_final "$BL"
 PCR7=$(tpm_pcr_read 7)
 assert_eq "expected_pcr7 == live swtpm PCR7 (zero digest)" "$PCR7" "$(baseline_get "$BL" expected_pcr7)"
@@ -464,7 +464,7 @@ assert_eq "pcr0 captured" "$(tpm_pcr_read 0)" "$(baseline_get "$BL" pcr0)"
 _exp_sb=$(fw_sb_state | sed -n 's/.*secureboot=\([01]\).*/\1/p')
 assert_eq "sb_state.secure_boot == live efivarfs value" "$_exp_sb" "$(baseline_get_in "$BL" sb_state secure_boot)"
 # stage2 refuses to run twice on a final baseline
-RC=$( ( "$REPO/bin/debian-fde" provision stage2 ) >/dev/null 2>&1; echo $? )
+RC=$( ( "$REPO/bin/alpine-fde" provision stage2 ) >/dev/null 2>&1; echo $? )
 assert_eq "stage2 on final baseline dies fail-closed" "64" "$RC"
 
 swtpm_stop "$STATE" || true

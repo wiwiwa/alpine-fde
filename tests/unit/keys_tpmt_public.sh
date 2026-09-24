@@ -66,7 +66,7 @@ rc=0
   keys_keyname "$TMP/garbage.pub" "$LEAK/out.name" ) >/dev/null 2>&1 || rc=$?
 assert_rc "keys_keyname: unparseable key -> die 64" 64 $rc
 assert_eq "keys_keyname: no temp leak on the die path (S-L1)" "0" \
-    "$(find "$LEAK" -name 'debian-fde-keyname.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    "$(find "$LEAK" -name 'alpine-fde-keyname.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 rm -rf "$LEAK"
 
 # --- live TPM: loadexternal accepts the construction; Name == fixture == formula ----
@@ -79,8 +79,8 @@ swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 
 keys_keyname "$KEYDIR/release.pub" "$TMP/release.name"
 [ -s "$TMP/release.name" ]

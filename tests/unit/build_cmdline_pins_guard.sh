@@ -96,12 +96,12 @@ calls() {
 }
 
 build() {
-    env DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-        DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+    env ALPINE_FDE_BIN_TEST=1 ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_ESP="$ESP" \
+        ALPINE_FDE_KEYDIR="$REPO/fixtures/keys" ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REC {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 }
 
 # --- 1. rd.shell=0 stripped ----------------------------------------------------------

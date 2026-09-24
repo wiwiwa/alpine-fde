@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/lib/assert.sh — TAP-ish assertion helpers for the Debian FDE harness.
+# tests/lib/assert.sh — TAP-ish assertion helpers for the Alpine FDE harness.
 #
 # Usage: source tests/lib/assert.sh, then call the helpers. Each assertion
 # prints `ok N - <name>` or `not ok N - <name> <detail>` and updates the
@@ -18,10 +18,10 @@
 #   assert_not_contains <name> <haystack> <needle>
 #   assert_file_exists <name> <path>
 
-if [[ -n "${_DEBIAN_FDE_ASSERT_SH_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_ASSERT_SH_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_ASSERT_SH_SOURCED=1
+_ALPINE_FDE_ASSERT_SH_SOURCED=1
 
 export TESTS_PASS=0
 export TESTS_FAIL=0

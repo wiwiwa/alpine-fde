@@ -1,5 +1,5 @@
 #!/bin/sh
-# provision.sh — `debian-fde provision`: one-time signing ceremony + baseline
+# provision.sh — `alpine-fde provision`: one-time signing ceremony + baseline
 # seeding (§8.1, §9.1; gaps C-G2/C-G3).
 #
 #   provision stage1 [--keydir D] [--force]
@@ -18,24 +18,24 @@
 #
 # No TPM operations mutate state here; reads only.
 
-if [ -n "${DEBIAN_FDE_PROVISION_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_PROVISION_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_PROVISION_LOADED=1
+ALPINE_FDE_PROVISION_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
-if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
 fi
 
-if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_FIRMWARE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
 
 # --- EFI binary primitives (pure sh; byte output via awk "%c", gawk/mawk OK) ---
@@ -182,7 +182,7 @@ esl_sha256_revocation_build() {
 prov_cert_tbs_sha256() {
     _ptc_f=$1
     [ -f "$_ptc_f" ] || die "prov_cert_tbs_sha256: cert file missing: $_ptc_f"
-    _ptc_der=$(mktemp "${DEBIAN_FDE_TMPDIR:-${TMPDIR:-/tmp}}/debian-fde-tbs.XXXXXX")
+    _ptc_der=$(mktemp "${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}/alpine-fde-tbs.XXXXXX")
     if ! openssl asn1parse -inform DER -in "$_ptc_f" >/dev/null 2>&1; then
         openssl x509 -in "$_ptc_f" -outform DER -out "$_ptc_der" 2>/dev/null ||
             { rm -f "$_ptc_der"; die "prov_cert_tbs_sha256: not a parseable certificate: $_ptc_f"; }
@@ -257,9 +257,9 @@ auth_packet_build() {
         [ -f "$_ap_f" ] || die "auth_packet_build: missing input: $_ap_f"
     done
     _ap_desc_hex=$(ascii_utf16le_hex "$_ap_var")$(guid_le_hex "$_ap_guid")$(le32_hex "$_ap_attrs")$(efi_time_hex "$_ap_ts")
-    _ap_tmp=${DEBIAN_FDE_TMPDIR:-${TMPDIR:-/tmp}}
-    _ap_desc=$(mktemp "$_ap_tmp/debian-fde-desc.XXXXXX")
-    _ap_p7=$(mktemp "$_ap_tmp/debian-fde-p7.XXXXXX")
+    _ap_tmp=${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}
+    _ap_desc=$(mktemp "$_ap_tmp/alpine-fde-desc.XXXXXX")
+    _ap_p7=$(mktemp "$_ap_tmp/alpine-fde-p7.XXXXXX")
     {
         printf '%s' "$_ap_desc_hex" | hex_to_bin
         cat "$_ap_pay"
@@ -288,8 +288,8 @@ auth_packet_build() {
 
 prov_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde provision stage1 [--keydir DIR] [--mode in-chroot|offline] [--force]
-       debian-fde provision stage2 | debian-fde provision --capture-baseline
+Usage: alpine-fde provision stage1 [--keydir DIR] [--mode in-chroot|offline] [--force]
+       alpine-fde provision stage2 | alpine-fde provision --capture-baseline
 
 stage1  key ceremony (ADR-18):
         --mode offline (default)
@@ -300,17 +300,17 @@ stage1  key ceremony (ADR-18):
             (expected_pcr7 pending until first boot in the final SB state).
         --mode in-chroot
             the §9.1 step-3 ceremony on the target's encrypted root volume:
-            keydir defaults to $DEBIAN_FDE_ROOT/etc/alpine-fde/keys; after the
+            keydir defaults to $ALPINE_FDE_ROOT/etc/alpine-fde/keys; after the
             packet build the release.pem is ENCRYPTED (AES-256 PBKDF2
             HMAC-SHA256, >=600000 iterations, §13 passphrase floor; ADR-18) and
             the PK/KEK/db private keys are shredded — the target keeps certs +
             packets + the encrypted release.pem ONLY. Passphrase:
-            DEBIAN_FDE_KEY_PASSPHRASE or interactive prompt.
+            ALPINE_FDE_KEY_PASSPHRASE or interactive prompt.
         --enroll-efivars [DIR]
             after the packet build, push the db/KEK/PK .auth packets into the
             efivarfs directory DIR via fw_auth_enroll (db -> KEK -> PK, PK
             last; SetupMode=1-gated, fail-closed 64 otherwise). Default DIR:
-            $DEBIAN_FDE_EFIVARS_DIR / $ALPINE_FDE_EFIVARS_DIR when set, else
+            $ALPINE_FDE_EFIVARS_DIR / $ALPINE_FDE_EFIVARS_DIR when set, else
             the leg is skipped with an info line.
 stage2  capture live PCR 0..3+7 + Secure Boot fingerprints + event log and
         finalize the baseline (same path as `audit --init`).
@@ -348,16 +348,16 @@ prov_stage1() {
     while [ $# -gt 0 ]; do
         case $1 in
             --keydir)
-                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --keydir requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "stage1: --keydir requires an argument"
                 _s1_keydir=$2
                 shift
                 ;;
             --mode)
-                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --mode requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "stage1: --mode requires an argument"
                 case $2 in
                     in-chroot | offline) _s1_mode=$2 ;;
                     *)
-                        die -r "$DEBIAN_FDE_USAGE" "stage1: --mode must be 'in-chroot' or 'offline' (got: $2)"
+                        die -r "$ALPINE_FDE_USAGE" "stage1: --mode must be 'in-chroot' or 'offline' (got: $2)"
                         ;;
                 esac
                 shift
@@ -375,7 +375,7 @@ prov_stage1() {
                 fi
                 ;;
             --revoke-cert)
-                [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "stage1: --revoke-cert requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "stage1: --revoke-cert requires an argument"
                 # L-02: accumulate NEWLINE-separated (space-joined paths would
                 # word-split + glob-expand operator-controlled file paths)
                 _s1_revoke="$_s1_revoke$2
@@ -383,16 +383,16 @@ prov_stage1() {
                 shift
                 ;;
             --force) _s1_force=1 ;;
-            *) die -r "$DEBIAN_FDE_USAGE" "stage1: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "stage1: unknown argument: $1" ;;
         esac
         shift
     done
-    _s1_keydir=${_s1_keydir:-${DEBIAN_FDE_KEYDIR:-}}
+    _s1_keydir=${_s1_keydir:-${ALPINE_FDE_KEYDIR:-}}
     if [ -z "$_s1_keydir" ] && [ "$_s1_mode" = "in-chroot" ]; then
         # ADR-18: the in-chroot ceremony lives at the target's key-holding dir
-        [ -n "${DEBIAN_FDE_ROOT:-}" ] \
-            || die "stage1: --mode in-chroot requires DEBIAN_FDE_ROOT (or an explicit --keydir) — the keydir defaults to \$DEBIAN_FDE_ROOT/etc/alpine-fde/keys (ADR-18)"
-        _s1_keydir="${DEBIAN_FDE_ROOT}/etc/alpine-fde/keys"
+        [ -n "${ALPINE_FDE_ROOT:-}" ] \
+            || die "stage1: --mode in-chroot requires ALPINE_FDE_ROOT (or an explicit --keydir) — the keydir defaults to \$ALPINE_FDE_ROOT/etc/alpine-fde/keys (ADR-18)"
+        _s1_keydir="${ALPINE_FDE_ROOT}/etc/alpine-fde/keys"
     fi
     if [ -z "$_s1_keydir" ]; then
         die "stage1: no key directory — pass --keydir (offline signing medium, I4) or use --mode in-chroot (ADR-18)"
@@ -499,14 +499,14 @@ EOF
     if [ "$_s1_enroll_efivars" -eq 1 ]; then
         _s1_ev=$_s1_efivars_dir
         if [ -z "$_s1_ev" ]; then
-            if [ -n "${DEBIAN_FDE_EFIVARS_DIR:-}" ]; then
-                _s1_ev=$DEBIAN_FDE_EFIVARS_DIR
+            if [ -n "${ALPINE_FDE_EFIVARS_DIR:-}" ]; then
+                _s1_ev=$ALPINE_FDE_EFIVARS_DIR
             elif [ -n "${ALPINE_FDE_EFIVARS_DIR:-}" ]; then
                 _s1_ev=$ALPINE_FDE_EFIVARS_DIR
             fi
         fi
         if [ -z "$_s1_ev" ]; then
-            info "stage1: --enroll-efivars requested but no efivars directory available (DEBIAN_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR unset) — skipping the efivarfs enrollment leg"
+            info "stage1: --enroll-efivars requested but no efivars directory available (ALPINE_FDE_EFIVARS_DIR/ALPINE_FDE_EFIVARS_DIR unset) — skipping the efivarfs enrollment leg"
         else
             info "stage1: efivarfs enrollment leg: db -> KEK -> PK from $_s1_keydir into $_s1_ev (SetupMode-gated)"
             fw_auth_enroll "$_s1_ev" "$_s1_keydir"
@@ -597,29 +597,29 @@ EOF
     _s1_bl=$(sp_baseline_file)
     baseline_write "$_s1_bl"
     baseline_validate "$_s1_bl" || die "stage1: produced an invalid baseline"
-    printf 'debian-fde: provision stage1 complete — baseline: %s\n' "$_s1_bl" >&2
+    printf 'alpine-fde: provision stage1 complete — baseline: %s\n' "$_s1_bl" >&2
     return 0
 }
 
 prov_stage2() {
     _s2_bl=$(sp_baseline_file)
-    [ -f "$_s2_bl" ] || die "stage2: no baseline at $_s2_bl (run 'debian-fde provision stage1' first)"
+    [ -f "$_s2_bl" ] || die "stage2: no baseline at $_s2_bl (run 'alpine-fde provision stage1' first)"
     _s2_force=0
     while [ $# -gt 0 ]; do
         case $1 in
             --force) _s2_force=1 ;;
-            *) die -r "$DEBIAN_FDE_USAGE" "stage2: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "stage2: unknown argument: $1" ;;
         esac
         shift
     done
     if baseline_is_final "$_s2_bl"; then
-        [ "$_s2_force" -eq 1 ] || die "stage2: baseline already finalized — use 'debian-fde audit --accept' to re-baseline (§9.4)"
-        [ "${DEBIAN_FDE_YES:-0}" = "1" ] || die "stage2: --force over a FINAL baseline overwrites the PCR 7 binding — set DEBIAN_FDE_YES=1 to confirm, or use 'debian-fde audit --accept' (§9.4)"
+        [ "$_s2_force" -eq 1 ] || die "stage2: baseline already finalized — use 'alpine-fde audit --accept' to re-baseline (§9.4)"
+        [ "${ALPINE_FDE_YES:-0}" = "1" ] || die "stage2: --force over a FINAL baseline overwrites the PCR 7 binding — set ALPINE_FDE_YES=1 to confirm, or use 'alpine-fde audit --accept' (§9.4)"
         warn "stage2: --force re-capturing a FINAL baseline (operator-confirmed)"
     fi
     info "capturing live PCR 0..3+7, Secure Boot fingerprints, event log; finalizing baseline"
     baseline_finalize_from_live
-    printf 'debian-fde: baseline finalized: %s\n' "$_s2_bl" >&2
+    printf 'alpine-fde: baseline finalized: %s\n' "$_s2_bl" >&2
     return 0
 }
 
@@ -631,7 +631,7 @@ cmd_provision_main() {
     _pm_stage=${1:-}
     [ -n "$_pm_stage" ] || {
         prov_usage
-        return "$DEBIAN_FDE_USAGE"
+        return "$ALPINE_FDE_USAGE"
     }
     shift
     case $_pm_stage in
@@ -642,7 +642,7 @@ cmd_provision_main() {
             prov_stage2 "$@"
             ;;
         *)
-            die -r "$DEBIAN_FDE_USAGE" "provision: unknown stage: $_pm_stage (want stage1 | stage2 | --capture-baseline)"
+            die -r "$ALPINE_FDE_USAGE" "provision: unknown stage: $_pm_stage (want stage1 | stage2 | --capture-baseline)"
             ;;
     esac
 }

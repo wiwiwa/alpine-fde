@@ -22,15 +22,15 @@
 #   * A mismatch FAILS CLOSED (exit nonzero, nothing exported, nothing
 #     extracted): unverified bytes must never become a UKI payload.
 
-if [[ -n "${_DEBIAN_FDE_ALPINE_ARTIFACT_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_ALPINE_ARTIFACT_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_ALPINE_ARTIFACT_SOURCED=1
+_ALPINE_FDE_ALPINE_ARTIFACT_SOURCED=1
 
 _ALPINE_ARTIFACT_HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Download-once cache: tests/e2e/.cache (gitignored via the repo's `.*` rule);
-# DEBIAN_FDE_CACHE_DIR keeps one shared cache location possible.
-ALPINE_ARTIFACT_CACHE_DIR="${ALPINE_FDE_ARTIFACT_CACHE_DIR:-${DEBIAN_FDE_CACHE_DIR:-$(cd "$_ALPINE_ARTIFACT_HERE/../e2e" && pwd)/.cache}}"
+# ALPINE_FDE_CACHE_DIR (or ALPINE_FDE_ARTIFACT_CACHE_DIR) relocates it.
+ALPINE_ARTIFACT_CACHE_DIR="${ALPINE_FDE_ARTIFACT_CACHE_DIR:-${ALPINE_FDE_CACHE_DIR:-$(cd "$_ALPINE_ARTIFACT_HERE/../e2e" && pwd)/.cache}}"
 mkdir -p "$ALPINE_ARTIFACT_CACHE_DIR"
 
 # --- the pin (ADR-12/§12) ---------------------------------------------------------

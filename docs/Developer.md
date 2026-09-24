@@ -42,7 +42,7 @@ docs/UserGuide.md         operator guide: workflows, RAID1, bcache, and recovery
 - **Zero-Exfiltration (ADR-18)**: Private keys (`release.pem`) are generated directly in-chroot
   on the encrypted root volume and encrypted at rest with AES-256 PBKDF2; keys must NEVER be
   exported, copied, or backed up off-machine.
-- The installed system stays **minimal** ([Architecture.md §3.2](file:///home/user/debian-fde/docs/Architecture.md#32-installed-system-footprint)): Alpine base via `apk add --root`;
+- The installed system stays **minimal** ([Architecture.md §3.2](file:///home/user/alpine-fde/docs/Architecture.md#32-installed-system-footprint)): Alpine base via `apk add --root`;
   the lean ~200 MB footprint is an inherent benefit of Alpine rather than a formal size requirement.
 - Everything in `docs/Architecture.md` §14 is decided; if code and doc disagree,
   raise it — never work around silently.

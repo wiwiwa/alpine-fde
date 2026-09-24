@@ -17,7 +17,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
@@ -36,15 +36,15 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-rsa3072.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-rsa3072.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp"
-DEBIAN_FDE_TMPDIR=$TMP/tmp # seal staging must land HERE
-export DEBIAN_FDE_ROOT=$TMP/root
+ALPINE_FDE_TMPDIR=$TMP/tmp # seal staging must land HERE
+export ALPINE_FDE_ROOT=$TMP/root
 mkdir -p "$(sp_etc_dir)"
 
 # --- key fixtures (generated at test time; keep runtime sane: one 3072 + one 2048)
@@ -54,11 +54,11 @@ mkdir -p "$KEY3072" "$KEY2048"
 openssl genrsa -out "$KEY3072/release.pem" 3072 2>/dev/null
 openssl pkey -in "$KEY3072/release.pem" -pubout -out "$KEY3072/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KEY3072/release.pem" -out "$KEY3072/release.crt" \
-    -subj /CN=debian-fde-rsa3072-ci 2>/dev/null
+    -subj /CN=alpine-fde-rsa3072-ci 2>/dev/null
 openssl genrsa -out "$KEY2048/release.pem" 2048 2>/dev/null
 openssl pkey -in "$KEY2048/release.pem" -pubout -out "$KEY2048/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KEY2048/release.pem" -out "$KEY2048/release.crt" \
-    -subj /CN=debian-fde-rsa2048-negative 2>/dev/null
+    -subj /CN=alpine-fde-rsa2048-negative 2>/dev/null
 for _k in "$KEY3072" "$KEY2048"; do
     [ -s "$_k/release.pem" ] && [ -s "$_k/release.pub" ] || {
         echo "FAIL: key generation failed for $_k" >&2
@@ -72,8 +72,8 @@ swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 swtpm_pcrextend "$TPMDIR" 7 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 swtpm_pcrextend "$TPMDIR" 11 fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedc
 pcr_hex() {
@@ -150,8 +150,8 @@ keys_scrub "$SEAL_PASS_FILE"
 EFIVARS=$TMP/efivars
 BYUUID=$TMP/by-uuid
 UUID=12345678-90ab-cdef-1234-567890abcdef
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_BY_UUID_DIR=$BYUUID
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_BY_UUID_DIR=$BYUUID
 mkdir -p "$EFIVARS" "$BYUUID"
 mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte (efivars fixture)
     printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"
@@ -162,7 +162,7 @@ mkvar SetupMode 0
 BL_PCR0="$D7" BL_PCR1="$D7" BL_PCR2="$D7" BL_PCR3="$D7" BL_PCR7="$D7" \
     BL_TARGET_LUKS_UUID="$UUID" baseline_write "$(sp_baseline_file)"
 
-DEBIAN_FDE_KEYDIR=$KEY2048
+ALPINE_FDE_KEYDIR=$KEY2048
 PRE2048_OUT=$(enrl_preconditions 2>&1)
 PRE2048_RC=$?
 assert_eq "enroll path entry: 2048-bit release key -> refuse rc 2 (ADR-16)" "2" "$PRE2048_RC"
@@ -170,7 +170,7 @@ assert_contains "enroll-path refusal cites ADR-16" "$PRE2048_OUT" "ADR-16"
 assert_contains "enroll-path refusal names the offending key size" "$PRE2048_OUT" "2048"
 assert_contains "enroll-path refusal states the floor" "$PRE2048_OUT" "3072"
 
-DEBIAN_FDE_KEYDIR=$KEY3072
+ALPINE_FDE_KEYDIR=$KEY3072
 enrl_preconditions 2>"$TMP/pre3072.err"
 assert_rc "enroll path entry: 3072-bit release key passes" 0 $?
 assert_eq "resolved pubkey is the 3072-bit keydir's release.pub" "$KEY3072/release.pub" "$ENRL_PRE_PUB"

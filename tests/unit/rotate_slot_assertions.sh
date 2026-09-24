@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/rotate_slot_assertions.sh — `debian-fde rotate`:
+# tests/unit/rotate_slot_assertions.sh — `alpine-fde rotate`:
 #   * §13 entropy floor enforced (weak passphrase -> fail-closed, no cryptsetup)
 #   * device resolution via baseline target.luks_uuid -> by-uuid dir
 #   * luksChangeKey argv: --key-slot 0 + Argon2id KDF pins
@@ -20,24 +20,24 @@ source "$HERE/../lib/assert.sh"
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/rotate.sh
 source "$REPO/lib/cmd/rotate.sh"
 
-T=$(mktemp -d /tmp/debian-fde-rotate.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-rotate.XXXXXX)
 FAKEBIN=$T/bin
 UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
-export DEBIAN_FDE_BY_UUID_DIR=$T/by-uuid
-export DEBIAN_FDE_NO_INSTALL=1
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
+export ALPINE_FDE_BY_UUID_DIR=$T/by-uuid
+export ALPINE_FDE_NO_INSTALL=1
 export PATH="$FAKEBIN:$PATH"
 export COUNTER=$T/counter PRE_JSON=$T/luks-pre.json POST_JSON=$T/luks-post.json
 export CS_STAT=$T/cs-stat.log CS_SLOW=$T/cs-slow POSTFAIL=$T/postfail PRE_AT3=$T/pre-at3 PRE3_JSON=$T/luks-pre3.json
-export DEBIAN_FDE_OLD_PASSPHRASE='old-passphrase-here'
-export DEBIAN_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
+export ALPINE_FDE_OLD_PASSPHRASE='old-passphrase-here'
+export ALPINE_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
 
 cleanup() {
     swtpm_cleanup_all
@@ -158,7 +158,7 @@ make_baseline() { # luks_uuid-value
 }
 
 run_rotate() { # args...
-    ROT_OUT=$("$REPO/bin/debian-fde" rotate "$@" 2>&1)
+    ROT_OUT=$("$REPO/bin/alpine-fde" rotate "$@" 2>&1)
     ROT_RC=$?
 }
 
@@ -189,20 +189,20 @@ assert_eq "unresolvable device -> fail-closed" "64" "$ROT_RC"
 # --- 4. weak passphrase -> fail-closed, cryptsetup NOT invoked ---------------------------
 : >"$T/by-uuid/$UUID"
 reset_state
-export DEBIAN_FDE_NEW_PASSPHRASE='short1!'
+export ALPINE_FDE_NEW_PASSPHRASE='short1!'
 run_rotate
 assert_eq "weak passphrase -> fail-closed" "64" "$ROT_RC"
 assert_contains "floor message present" "$ROT_OUT" "entropy floor"
 assert_eq "cryptsetup never invoked on weak passphrase" "0" "$(wc -l <"$CS_LOG")"
-export DEBIAN_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
+export ALPINE_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
 
 # --- 5. blocklisted passphrase -------------------------------------------------------------
-export DEBIAN_FDE_NEW_PASSPHRASE='correct-horse-battery-password'
+export ALPINE_FDE_NEW_PASSPHRASE='correct-horse-battery-password'
 run_rotate
 assert_eq "blocklisted passphrase -> fail-closed" "64" "$ROT_RC"
-export DEBIAN_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
+export ALPINE_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
 
-# --- 5b. §11 I1 fail-closed chain: unwritable DEBIAN_FDE_TMPDIR -> 64, no leak ----
+# --- 5b. §11 I1 fail-closed chain: unwritable ALPINE_FDE_TMPDIR -> 64, no leak ----
 # rotate must fail closed (64) when the passphrase temp files cannot be created
 # (rotate.sh mktemp chain) — and no passphrase file may be left behind anywhere
 # under the requested tmpdir.
@@ -210,17 +210,17 @@ reset_state
 ROT_TMPDIR=$T/rot-tmp
 mkdir -p "$ROT_TMPDIR"
 chmod 500 "$ROT_TMPDIR"   # r-x: traversable, not writable (uid!=root)
-DEBIAN_FDE_TMPDIR="$ROT_TMPDIR" run_rotate
-assert_eq "unwritable DEBIAN_FDE_TMPDIR -> fail-closed 64" "64" "$ROT_RC"
+ALPINE_FDE_TMPDIR="$ROT_TMPDIR" run_rotate
+assert_eq "unwritable ALPINE_FDE_TMPDIR -> fail-closed 64" "64" "$ROT_RC"
 assert_contains "fail-closed message names the temp-file failure" "$ROT_OUT" "cannot create temp file"
 assert_eq "no passphrase/temp file leaked under the unwritable tmpdir" "" \
-    "$(find "$ROT_TMPDIR" -type f -name 'debian-fde-rot-*' -print -quit)"
+    "$(find "$ROT_TMPDIR" -type f -name 'alpine-fde-rot-*' -print -quit)"
 assert_eq "cryptsetup never invoked (mktemp chain precedes it)" "0" "$(wc -l <"$CS_LOG")"
 chmod 700 "$ROT_TMPDIR"   # restore so the EXIT cleanup can remove it
 
 # --- 5c. M-4: env passphrase with embedded newline -> floor reject, no cryptsetup -
 reset_state
-DEBIAN_FDE_NEW_PASSPHRASE="$(printf 'Val1d-Pass\nline-two')" run_rotate
+ALPINE_FDE_NEW_PASSPHRASE="$(printf 'Val1d-Pass\nline-two')" run_rotate
 assert_eq "newline passphrase -> fail-closed" "64" "$ROT_RC"
 assert_contains "floor message names control characters" "$ROT_OUT" "control characters"
 assert_eq "cryptsetup never invoked for newline passphrase" "0" "$(wc -l <"$CS_LOG")"
@@ -241,8 +241,8 @@ assert_eq "exactly one luksChangeKey invocation" "1" "$(grep -c luksChangeKey "$
 TMP_PATHS=$(sed -n 's/^MODE [0-9]* //p' "$CS_STAT")
 OLD_TMP=$(printf '%s\n' "$TMP_PATHS" | head -n1)
 NEW_TMP=$(printf '%s\n' "$TMP_PATHS" | sed -n '2p')
-assert_contains "old passphrase temp under /dev/shm (tmpfs, I1)" "$OLD_TMP" "/dev/shm/debian-fde-rot-old."
-assert_contains "new passphrase temp under /dev/shm (tmpfs, I1)" "$NEW_TMP" "/dev/shm/debian-fde-rot-new."
+assert_contains "old passphrase temp under /dev/shm (tmpfs, I1)" "$OLD_TMP" "/dev/shm/alpine-fde-rot-old."
+assert_contains "new passphrase temp under /dev/shm (tmpfs, I1)" "$NEW_TMP" "/dev/shm/alpine-fde-rot-new."
 assert_eq "passphrase temp files mode 0600 at call time" "600
 600" "$(sed -n 's/^MODE \([0-9]*\) .*/\1/p' "$CS_STAT")"
 if [ -e "$OLD_TMP" ] || [ -e "$NEW_TMP" ]; then
@@ -333,9 +333,9 @@ assert_eq "dry-run: cryptsetup not invoked" "0" "$(wc -l <"$CS_LOG")"
 # --- 11. --reseat-tpm delegates to enroll-tpm (swtpm + stub cryptsetup: the
 # Mechanism B seal path, ADR-19/ADR-20 — no systemd-cryptenroll anywhere) ------
 assert_rc "swtpm fixture starts" 0 swtpm_start "$T/swtpm"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 LIVE=$(swtpm_pcrread "$T/swtpm" 7)
-mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$DEBIAN_FDE_EFIVARS_DIR/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
+mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$ALPINE_FDE_EFIVARS_DIR/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 mkvar SecureBoot 1
 mkvar SetupMode 0
 # the enrollment anchors the release key from the KEYDIR (G-B7) — a REAL key so
@@ -346,13 +346,13 @@ mkvar SetupMode 0
 openssl genrsa -out "$T/keys/release.pem" 3072 2>/dev/null
 openssl pkey -in "$T/keys/release.pem" -pubout -out "$T/keys/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$T/keys/release.pem" -out "$T/keys/release.crt" \
-    -subj /CN=debian-fde-rotate-reseat 2>/dev/null
+    -subj /CN=alpine-fde-rotate-reseat 2>/dev/null
 [ -s "$T/keys/release.pub" ] && [ -s "$T/keys/release.crt" ] || {
     echo "FAIL: cannot generate the RSA-3072 reseat keydir" >&2
     exit 1
 }
-DEBIAN_FDE_KEYDIR="$T/keys"
-export DEBIAN_FDE_KEYDIR
+ALPINE_FDE_KEYDIR="$T/keys"
+export ALPINE_FDE_KEYDIR
 cp "$T/keys/release.pub" "$T/keys/release.pub.pem"
 BL_PCR0="$LIVE" BL_PCR1="$LIVE" BL_PCR2="$LIVE" BL_PCR3="$LIVE" BL_PCR7="$LIVE" \
     BL_KEYS_RELEASE_PUB_PATH="$T/keys/release.pub.pem" BL_TARGET_LUKS_UUID="$UUID" \
@@ -399,7 +399,7 @@ assert_eq "reseat: enrolled.json token keyslot (free slot)" "3" "$(baseline_get 
 # The stubbed luksChangeKey lingers (CS_SLOW); the driver backgrounds rotate under
 # job control (set -m keeps SIGINT trappable for async children), signals INT once
 # the passphrase files exist, and requires: rotation NOT completed, and no
-# debian-fde-rot-* file left anywhere under the requested tmpdir.
+# alpine-fde-rot-* file left anywhere under the requested tmpdir.
 reset_state
 mkdir -p "$T/rottmp"
 touch "$CS_SLOW"
@@ -407,7 +407,7 @@ touch "$CS_SLOW"
 INT_RC_FILE=$T/int-rc
 (
     set -m
-    DEBIAN_FDE_TMPDIR="$T/rottmp" "$REPO/bin/debian-fde" rotate >"$T/int-out" 2>&1 &
+    ALPINE_FDE_TMPDIR="$T/rottmp" "$REPO/bin/alpine-fde" rotate >"$T/int-out" 2>&1 &
     ROT_PID=$!
     for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         [ -s "$CS_LOG" ] && break
@@ -423,7 +423,7 @@ ROT_OUT=$(cat "$T/int-out")
 assert_eq "SIGINT: rotate interrupted (rc 130), not run to completion" "130" "$ROT_INT_RC"
 assert_not_contains "SIGINT: rotation must not complete" "$ROT_OUT" "keyslot-0 passphrase changed"
 assert_eq "SIGINT: no passphrase/temp file left under the tmpdir (M-2)" "" \
-    "$(find "$T/rottmp" -type f -name 'debian-fde-rot-*' -print -quit)"
+    "$(find "$T/rottmp" -type f -name 'alpine-fde-rot-*' -print -quit)"
 
 # --- 13. L-4: jq missing -> ADR-15 loud refusal before any cryptsetup call -----------
 # Every post-assertion parser is jq-based with fail-vacuous fallbacks; without jq

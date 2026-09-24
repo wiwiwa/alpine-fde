@@ -1,6 +1,6 @@
 #!/bin/sh
 # firmware_efivars_seam.sh — unit tests for lib/firmware.sh with an injected
-# efivars directory (DEBIAN_FDE_EFIVARS_DIR). No real firmware or TPM required.
+# efivars directory (ALPINE_FDE_EFIVARS_DIR). No real firmware or TPM required.
 
 TEST_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$TEST_DIR/../.." && pwd)
@@ -34,9 +34,9 @@ mkvar_attrsonly() {
 
 # --- fw_efivars_dir resolution ---
 assert_eq "fw_efivars_dir default" "/sys/firmware/efi/efivars" \
-    "$(DEBIAN_FDE_EFIVARS_DIR='' fw_efivars_dir)"
-assert_eq "fw_efivars_dir DEBIAN_FDE_EFIVARS_DIR override" "/x/efivars" \
-    "$(DEBIAN_FDE_EFIVARS_DIR=/x/efivars fw_efivars_dir)"
+    "$(ALPINE_FDE_EFIVARS_DIR='' fw_efivars_dir)"
+assert_eq "fw_efivars_dir ALPINE_FDE_EFIVARS_DIR override" "/x/efivars" \
+    "$(ALPINE_FDE_EFIVARS_DIR=/x/efivars fw_efivars_dir)"
 
 # --- secure state: SB on, not in setup mode, PK set ---
 secure="$tmp/secure"
@@ -44,7 +44,7 @@ mkdir -p "$secure"
 mkvar_byte "$secure" SecureBoot 1
 mkvar_byte "$secure" SetupMode 0
 mkvar_str "$secure" PK "PKPAYLOAD"
-DEBIAN_FDE_EFIVARS_DIR="$secure"
+ALPINE_FDE_EFIVARS_DIR="$secure"
 out=$(fw_sb_state)
 rc=$?
 assert_rc "fw_sb_state: secure state -> rc 0" "0" "$rc"
@@ -56,7 +56,7 @@ mkdir -p "$sb_off"
 mkvar_byte "$sb_off" SecureBoot 0
 mkvar_byte "$sb_off" SetupMode 0
 mkvar_str "$sb_off" PK "PKPAYLOAD"
-DEBIAN_FDE_EFIVARS_DIR="$sb_off"
+ALPINE_FDE_EFIVARS_DIR="$sb_off"
 rc=0
 out=$(fw_sb_state) || rc=$?
 assert_rc "fw_sb_state: SB off -> rc 1" "1" "$rc"
@@ -68,7 +68,7 @@ mkdir -p "$setupmode"
 mkvar_byte "$setupmode" SecureBoot 1
 mkvar_byte "$setupmode" SetupMode 1
 mkvar_str "$setupmode" PK "PKPAYLOAD"
-DEBIAN_FDE_EFIVARS_DIR="$setupmode"
+ALPINE_FDE_EFIVARS_DIR="$setupmode"
 rc=0
 out=$(fw_sb_state) || rc=$?
 assert_rc "fw_sb_state: setup mode still rc 0 (SB on)" "0" "$rc"
@@ -79,14 +79,14 @@ attrsonly="$tmp/attrsonly"
 mkdir -p "$attrsonly"
 mkvar_attrsonly "$attrsonly" SecureBoot
 mkvar_attrsonly "$attrsonly" PK
-DEBIAN_FDE_EFIVARS_DIR="$attrsonly"
+ALPINE_FDE_EFIVARS_DIR="$attrsonly"
 rc=0
 out=$(fw_sb_state) || rc=$?
 assert_rc "fw_sb_state: attrs-only SecureBoot -> rc 1" "1" "$rc"
 assert_eq "fw_sb_state: attrs-only treated as absent" "secureboot=0 setup_mode=1 pk=0" "$out"
 
 # --- efivars dir missing entirely -> documented degraded kv, rc 1 ---
-DEBIAN_FDE_EFIVARS_DIR="$tmp/no-such-dir"
+ALPINE_FDE_EFIVARS_DIR="$tmp/no-such-dir"
 rc=0
 out=$(fw_sb_state) || rc=$?
 assert_rc "fw_sb_state: missing dir -> rc 1" "1" "$rc"
@@ -96,7 +96,7 @@ assert_eq "fw_sb_state: missing dir kv" "secureboot=0 setup_mode=1 pk=0" "$out"
 empty="$tmp/empty"
 mkdir -p "$empty"
 # shellcheck disable=SC2034  # consumed by fw_sb_state subshells below
-DEBIAN_FDE_EFIVARS_DIR="$empty"
+ALPINE_FDE_EFIVARS_DIR="$empty"
 rc=0
 out=$(fw_sb_state) || rc=$?
 assert_rc "fw_sb_state: empty dir -> rc 1" "1" "$rc"
@@ -114,7 +114,7 @@ VGUID='11223344-5566-7788-9900-aabbccddeeff'          # vendor-namespace lookali
 DBXGUID='d719b2cb-3d3a-4596-a3bc-dad00e67656f'        # EFI_IMAGE_SECURITY_DATABASE
 
 # fw_var_sha256 (lib/baseline.sh) needs die/log helpers — pull the lib tree in
-export DEBIAN_FDE_CMD_DIR="$REPO_ROOT/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO_ROOT/lib/cmd"
 # shellcheck disable=SC1091
 . "$REPO_ROOT/lib/baseline.sh"
 
@@ -197,7 +197,7 @@ out=$(fw_find_var "$dbxamb" dbx 2>/dev/null) || rc=$?
 assert_rc "dbx: both canonical namespaces -> die 64" 64 "$rc"
 
 # --- fw_var_sha256: absent rc 1, ambiguity rc 64 (NOT collapsed), payload sha --
-DEBIAN_FDE_EFIVARS_DIR="$dbamb"
+ALPINE_FDE_EFIVARS_DIR="$dbamb"
 rc=0
 out=$(fw_var_sha256 PK) || rc=$?
 assert_rc "fw_var_sha256: absent variable -> rc 1" 1 "$rc"
@@ -209,7 +209,7 @@ _fvs_err=$(fw_var_sha256 db 2>&1 >/dev/null)
 assert_contains "fw_var_sha256: ambiguity warns loudly" "$_fvs_err" \
     "ambiguous EFI variable db"
 
-DEBIAN_FDE_EFIVARS_DIR="$kek"
+ALPINE_FDE_EFIVARS_DIR="$kek"
 # known payload "KEKCANON" behind the 4-byte attrs header
 KEK_SHA=$(printf 'KEKCANON' | sha256sum | cut -d' ' -f1)
 assert_eq "fw_var_sha256: sha256 of payload after attrs header" "$KEK_SHA" \

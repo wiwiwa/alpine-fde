@@ -5,7 +5,7 @@
 # are refused BY UPSTREAM CODE (asserted from upstream's own debug log, never
 # from our gates).
 #
-# GATED: without DEBIAN_FDE_INTEROP_ORACLE=1 this suite exits 0 without
+# GATED: without ALPINE_FDE_INTEROP_ORACLE=1 this suite exits 0 without
 # running (the documented gate — the only silent skip). With the gate set but
 # a prerequisite missing (bwrap, swtpm, the pinned deb cache), it reports a
 # loud SKIP-diagnostic and exits 77 — it never degrades to best-effort.
@@ -18,8 +18,8 @@ REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-if [[ "${DEBIAN_FDE_INTEROP_ORACLE:-}" != "1" ]]; then
-    echo "interop-oracle-mechb: gate DEBIAN_FDE_INTEROP_ORACLE=1 not set — oracle does not run (ADR-19 scope guard)"
+if [[ "${ALPINE_FDE_INTEROP_ORACLE:-}" != "1" ]]; then
+    echo "interop-oracle-mechb: gate ALPINE_FDE_INTEROP_ORACLE=1 not set — oracle does not run (ADR-19 scope guard)"
     exit 0
 fi
 
@@ -48,10 +48,10 @@ done < <(rootfs_pin_names)
 source "$HERE/../lib/interop-oracle.sh"
 
 KEYDIR=$REPO/fixtures/keys
-TMP=$(mktemp -d /tmp/debian-fde-interop-oracle.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-interop-oracle.XXXXXX)
 cleanup() {
     if declare -F swtpm_cleanup_all >/dev/null 2>&1; then swtpm_cleanup_all; fi
-    [[ "${DEBIAN_FDE_INTEROP_KEEP:-}" == "1" ]] || rm -rf "$TMP"
+    [[ "${ALPINE_FDE_INTEROP_KEEP:-}" == "1" ]] || rm -rf "$TMP"
 }
 trap cleanup EXIT
 
@@ -66,9 +66,9 @@ bash -n "$HERE/../lib/interop-oracle.sh" && assert_eq "oracle lib: bash -n clean
     assert_eq "oracle lib: bash -n clean" "0" "1"
 
 # fail-closed when the gate is not exactly 1 (the scaffold contract, re-checked)
-( unset DEBIAN_FDE_INTEROP_ORACLE; interop_oracle_assert_ready >/dev/null 2>&1 )
+( unset ALPINE_FDE_INTEROP_ORACLE; interop_oracle_assert_ready >/dev/null 2>&1 )
 assert_rc "gate: unset -> fail closed 64" 64 $?
-( DEBIAN_FDE_INTEROP_ORACLE=0 interop_oracle_assert_ready >/dev/null 2>&1 )
+( ALPINE_FDE_INTEROP_ORACLE=0 interop_oracle_assert_ready >/dev/null 2>&1 )
 assert_rc "gate: not exactly 1 -> fail closed 64" 64 $?
 
 # --- 2. the real seal: swtpm + seal_finalized + token choreography -----------

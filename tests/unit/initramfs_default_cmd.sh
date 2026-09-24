@@ -49,7 +49,7 @@ PATH="$SHIM:$PATH"
 unset INITRAMFS_CMD
 
 # deterministic topology: absent conf ⇒ btrfs default
-export DEBIAN_FDE_CONF="$TMP/conf-absent"
+export ALPINE_FDE_CONF="$TMP/conf-absent"
 
 initramfs_build "$TMP/initrd.img" "6.6.63-0-lts"
 assert_rc "default initramfs_build (INITRAMFS_CMD unset) succeeds via the mkinitfs shim" 0 $?
@@ -79,7 +79,7 @@ assert_eq "no dracut argv leaks into the mkinitfs invocation" "" \
 
 # --- G-ST5 topology: ROOT_FS=ext4 flips the fs driver feature --------------------
 printf 'ROOT_FS=ext4\n' >"$TMP/conf-ext4"
-DEBIAN_FDE_CONF="$TMP/conf-ext4" initramfs_build "$TMP/initrd-ext4.img" "6.6.63-0-lts"
+ALPINE_FDE_CONF="$TMP/conf-ext4" initramfs_build "$TMP/initrd-ext4.img" "6.6.63-0-lts"
 assert_rc "topology ext4 (conf ROOT_FS=ext4): initramfs_build succeeds" 0 $?
 FEATURES_EXT4=$(grep -A1 -x -- '-F' "$ARGV" | tail -n 1)
 assert_contains "topology ext4: ext4 driver feature present" "$FEATURES_EXT4" "ext4"
@@ -94,7 +94,7 @@ assert_contains "topology ext4: cryptsetup still pinned" "$FEATURES_EXT4" "crypt
 
 # --- BCACHE=1: nothing on the argv (bcache rides features.d/alpine-fde.files) ----
 printf 'ROOT_FS=btrfs\nBCACHE=1\n' >"$TMP/conf-bcache"
-DEBIAN_FDE_CONF="$TMP/conf-bcache" initramfs_build "$TMP/initrd-bc.img" "6.6.63-0-lts"
+ALPINE_FDE_CONF="$TMP/conf-bcache" initramfs_build "$TMP/initrd-bc.img" "6.6.63-0-lts"
 assert_rc "topology bcache (conf BCACHE=1): initramfs_build succeeds" 0 $?
 FEATURES_BC=$(grep -A1 -x -- '-F' "$ARGV" | tail -n 1)
 assert_not_contains "topology bcache: no bcache wiring on the argv (rides alpine-fde.files)" \

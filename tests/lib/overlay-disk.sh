@@ -29,10 +29,10 @@
 # with a per-extension format (`.qcow2` -> qcow2, anything else -> raw) —
 # base images stay raw, overlays are named *.qcow2.
 
-if [[ -n "${_DEBIAN_FDE_OVERLAY_DISK_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_OVERLAY_DISK_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_OVERLAY_DISK_SOURCED=1
+_ALPINE_FDE_OVERLAY_DISK_SOURCED=1
 
 OVERLAY_LOCK_FDS=()
 

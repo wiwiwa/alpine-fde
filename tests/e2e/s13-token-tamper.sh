@@ -33,7 +33,7 @@
 # the attacker's unprivileged write primitive; an "in use" token cannot be
 # overwritten directly).
 #
-# Reuses s00 state when DEBIAN_FDE_E2E_STATE points at the s00 run dir
+# Reuses s00 state when ALPINE_FDE_E2E_STATE points at the s00 run dir
 # (run-e2e.sh sets it); otherwise builds + boots the enrolled state itself
 # (bootstrap boot + one boot per variant).
 
@@ -125,7 +125,7 @@ _wedge_wait() {
     return 124
 }
 
-STATE="${DEBIAN_FDE_E2E_STATE:-}"
+STATE="${ALPINE_FDE_E2E_STATE:-}"
 if [[ -n "$STATE" && -f "$STATE/disk.img" && -d "$STATE/tpm" && -f "$STATE/harness.efi" \
     && -f "$STATE/pcrsig.img" && -d "$STATE/keys" && -f "$STATE/vars-enrolled.fd" ]]; then
     echo "# reusing enrolled state from $STATE"
@@ -149,10 +149,10 @@ else
         qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
-            feed_line "$RUN_ENROLLED/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+            feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         _wedge_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
-        grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
+        grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s13: bootstrap boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
         echo "--- qemu.stderr (tail):"
@@ -162,7 +162,7 @@ else
             rm -f "$RUN_ENROLLED/console.log"
         fi
     done
-    grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
+    grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
         echo "s13: bootstrap boot did not reach UNSEALED — state unusable"
         exit 1
     }
@@ -171,7 +171,7 @@ else
     # enter-initrd prediction; the combined {7,11} entry is what the hook
     # extracts for the finalized token.
     swtpm_ensure "$RUN_ENROLLED/tpm" || { echo "s13: swtpm restart failed"; exit 1; }
-    PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
+    PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
     [[ -n "$PCR7_ENROLLED" ]] || { echo "s13: no PCR 7 in the bootstrap console"; exit 1; }
     D11=$(cat "$RUN_ENROLLED/pcr11-enter-initrd.txt" 2>/dev/null)
     [[ -n "$D11" ]] || { echo "s13: no enter-initrd d11 prediction from the build"; exit 1; }
@@ -181,7 +181,7 @@ else
         "$PCR7_ENROLLED" "$D11" "$RUN_ENROLLED/keys" || exit 1
     uki_baseline_stamp "$RUN_ENROLLED/cli-state" "$PCR7_ENROLLED"
     uki_pcrsig_disk "$RUN_ENROLLED/pcrsig.img" "$RUN_ENROLLED/uki-pcrsig-combined.json" || exit 1
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
     chmod 600 "$RUN_ENROLLED/kf-slot0"
     EFIVARS="$RUN_ENROLLED/efivars-sb-on"
     mkdir -p "$EFIVARS"
@@ -363,7 +363,7 @@ run_variant() {
         local n
         for n in 1 2 3; do
             if uki_wait_hook_prompt "$n" 300 "$V"; then
-                feed_line "$V/serial.sock" "debian-fde-$variant-wrong-passphrase-$n"
+                feed_line "$V/serial.sock" "alpine-fde-$variant-wrong-passphrase-$n"
             else
                 _assert_result not-ok "$variant: hook awaiting recovery passphrase $n/3" \
                     "no prompt $n in console"
@@ -384,7 +384,7 @@ run_variant() {
                 feed_line "$V/serial.sock" 'poweroff -f'
                 break
             fi
-            grep -q "debian-fde: POWEROFF" "$V/console.log" 2>/dev/null && break
+            grep -q "alpine-fde: POWEROFF" "$V/console.log" 2>/dev/null && break
             _qpid=$(cat "$V/qemu.pid" 2>/dev/null || true)
             [[ -z "$_qpid" ]] || ! kill -0 "$_qpid" 2>/dev/null && break
             sleep 1
@@ -395,7 +395,7 @@ run_variant() {
     local log
     log=$(cat "$V/console.log" 2>/dev/null || true)
 
-    assert_contains "$variant: init ran" "$log" "debian-fde-harness: init started"
+    assert_contains "$variant: init ran" "$log" "alpine-fde-harness: init started"
     assert_contains "$variant: hook ran the enter-initrd extend" "$log" \
         "$(sentinel_of unseal_pcrextend_ok)"
     assert_contains "$variant: hook discovered the {7,11} token (still valid LUKS2 metadata)" "$log" \
@@ -420,13 +420,13 @@ run_variant() {
             "$(sentinel_of unseal_unlocked)"
         assert_not_contains "$variant: never unlocked (recovery passphrase)" "$log" \
             "$(sentinel_of unseal_pass_unlocked)"
-        assert_not_contains "$variant: never UNSEALED" "$log" "debian-fde: UNSEALED"
+        assert_not_contains "$variant: never UNSEALED" "$log" "alpine-fde: UNSEALED"
     else
         # inert-metadata variant: the OBSERVED hook behavior is an unchanged
         # token unlock (documented deviation, see header) — asserted honestly
         assert_contains "$variant: tamper is INERT for the hook (token unlock proceeded)" "$log" \
             "$(sentinel_of unseal_unlocked)"
-        assert_contains "$variant: harness UNSEALED sentinel" "$log" "debian-fde: UNSEALED"
+        assert_contains "$variant: harness UNSEALED sentinel" "$log" "alpine-fde: UNSEALED"
         # G-T13/G-E9: boot UNSEALED -> post-hook postphase PCR 11 must equal
         # the booted UKI's signed prediction
         _CONSOLE_SAVE="$CONSOLE"

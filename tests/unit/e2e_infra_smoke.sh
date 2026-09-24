@@ -122,7 +122,7 @@ objcopy -O binary --only-section=.osrel "$WORK/run/uki-pcrsigned.efi" \
 assert_eq "uki: embedded .osrel is the real os-release content (not a literal path)" \
     "$(cat "$WORK/run/os-release.txt")" "$(cat "$WORK/run/osrel.bin" 2>/dev/null)"
 # sbverify: the outer signature validates against our release cert
-if sbverify --list "$WORK/run/harness.efi" 2>&1 | grep -q "debian-fde-test-release"; then
+if sbverify --list "$WORK/run/harness.efi" 2>&1 | grep -q "alpine-fde-test-release"; then
     _assert_result ok "uki: sbverify shows release-cert signature" ""
 else
     _assert_result not-ok "uki: sbverify shows release-cert signature" "signature subject not found"
@@ -187,7 +187,7 @@ assert_file_exists "uki: pcrsig payload drive" "$WORK/run/pcrsig.img"
 # uki_initrd_inventory is the cpio listing emitter; the DEFAULT build's initrd
 # must satisfy the I6 allowlist policy: no compilers/linkers, no package tools
 # (apk/apt/dpkg), and no interactive shell — the debug-shell seam is proven
-# absent in the default build and armed only under DEBIAN_FDE_DEBUG_SHELL.
+# absent in the default build and armed only under ALPINE_FDE_DEBUG_SHELL.
 INV=$(uki_initrd_inventory "$WORK/run/initrd.cpio" 2>/dev/null)
 if [[ -n "$INV" ]]; then
     _assert_result ok "inventory: uki_initrd_inventory emits the cpio listing" ""
@@ -208,7 +208,7 @@ INV_HIT=$(grep -Fx -e bash -e dash -e zsh -e ksh -e csh -e tcsh -e sulogin -e nu
     <<<"$INV_BASENAMES" | tr '\n' ' ' || true)
 assert_eq "inventory: no interactive shells/login/getty beyond the busybox init shell" "" "$INV_HIT"
 # debug-shell seam: the default build bakes the guard EMPTY (substituted, no
-# placeholder residue); with DEBIAN_FDE_DEBUG_SHELL=1 the same seam arms it.
+# placeholder residue); with ALPINE_FDE_DEBUG_SHELL=1 the same seam arms it.
 if grep -q '@@DEBUG_SHELL@@' "$WORK/run/guest-tree/init"; then
     _assert_result not-ok "default build: @@DEBUG_SHELL@@ placeholder substituted" "placeholder residue in init"
 else
@@ -217,12 +217,12 @@ fi
 DISABLED=$(grep -cF 'if [ -n "" ]; then' "$WORK/run/guest-tree/init")
 assert_eq "default build: debug-shell seam DISABLED (empty -n guard)" "1" "$DISABLED"
 mkdir -p "$WORK/debug-tree"
-if bash -c 'set -u; source "$1/lib/uki-build.sh"; DEBIAN_FDE_DEBUG_SHELL=1 uki_initrd_write_init "$2"' \
+if bash -c 'set -u; source "$1/lib/uki-build.sh"; ALPINE_FDE_DEBUG_SHELL=1 uki_initrd_write_init "$2"' \
     _ "$TESTS" "$WORK/debug-tree" 2>/dev/null; then
     ENABLED=$(grep -cF 'if [ -n "1" ]; then' "$WORK/debug-tree/init")
-    assert_eq "DEBIAN_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "1" "$ENABLED"
+    assert_eq "ALPINE_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "1" "$ENABLED"
 else
-    assert_eq "DEBIAN_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "init written" "uki_initrd_write_init failed"
+    assert_eq "ALPINE_FDE_DEBUG_SHELL=1: debug-shell seam ARMED (guard 1)" "init written" "uki_initrd_write_init failed"
 fi
 
 # --- rootfs fixture: pins verify (downloads cached from the earlier run) ---------
@@ -276,7 +276,7 @@ def feed():
     conn, _ = srv.accept()
     try:
         time.sleep(0.3)
-        conn.sendall(b"debian-fde: UNSEALED\r\n")
+        conn.sendall(b"alpine-fde: UNSEALED\r\n")
         time.sleep(1.5)   # keep the socket open while the client matches
     except (BrokenPipeError, ConnectionResetError):
         pass
@@ -284,7 +284,7 @@ def feed():
         conn.close()
 t = threading.Thread(target=feed); t.start()
 time.sleep(0.2)
-r = subprocess.run([sys.executable, script, path, "read_until", "debian-fde: UNSEALED", "5"],
+r = subprocess.run([sys.executable, script, path, "read_until", "alpine-fde: UNSEALED", "5"],
                    capture_output=True)
 t.join(timeout=5)
 sys.exit(r.returncode)
@@ -418,35 +418,35 @@ if [[ -f "$WORK/esp-scan.img" ]]; then
 fi
 
 # --- accelerator contract (§12): /dev/kvm is REQUIRED for e2e --------------------
-# Default DEBIAN_FDE_ACCEL=kvm: an unusable KVM is a LOUD failure (rc!=0, the
-# message names /dev/kvm) — never a silent TCG downgrade. DEBIAN_FDE_ACCEL=tcg
+# Default ALPINE_FDE_ACCEL=kvm: an unusable KVM is a LOUD failure (rc!=0, the
+# message names /dev/kvm) — never a silent TCG downgrade. ALPINE_FDE_ACCEL=tcg
 # is the explicit dev escape hatch, honored verbatim; every other value
 # (including the old silent 'auto') is rejected. Decision is once-per-process,
 # so every case runs _qemu_accel_choose in a fresh subshell.
-ACC=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=kvm; _qemu_kvm_ok() { return 0; }; \
+ACC=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=kvm; _qemu_kvm_ok() { return 0; }; \
     _qemu_accel_choose 2>/dev/null && printf '%s' "$_qemu_accel" ) )
 assert_eq "accel: explicit kvm + working KVM -> kvm" "kvm" "$ACC"
-ACC=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 0; }; \
+ACC=$( ( _qemu_accel=''; unset ALPINE_FDE_ACCEL; _qemu_kvm_ok() { return 0; }; \
     _qemu_accel_choose 2>/dev/null && printf '%s' "$_qemu_accel" ) )
 assert_eq "accel: DEFAULT is kvm (working KVM -> kvm, never tcg)" "kvm" "$ACC"
-ACC_RC=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
+ACC_RC=$( ( _qemu_accel=''; unset ALPINE_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
     _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
 assert_eq "accel: default + unusable /dev/kvm -> fail closed (rc!=0)" "1" "$ACC_RC"
-MSG=$( ( _qemu_accel=''; unset DEBIAN_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
+MSG=$( ( _qemu_accel=''; unset ALPINE_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
     _qemu_accel_choose 2>&1 >/dev/null ) )
 assert_contains "accel: failure message names /dev/kvm" "$MSG" "/dev/kvm"
 assert_not_contains "accel: unusable KVM never downgrades to tcg" "$MSG" "using tcg"
-TCG=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=tcg; _qemu_accel_choose 2>/dev/null \
+TCG=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=tcg; _qemu_accel_choose 2>/dev/null \
     && printf '%s' "$_qemu_accel" ) )
-assert_eq "accel: explicit DEBIAN_FDE_ACCEL=tcg honored verbatim" "tcg" "$TCG"
-INV=$( ( _qemu_accel=''; DEBIAN_FDE_ACCEL=auto; _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
+assert_eq "accel: explicit ALPINE_FDE_ACCEL=tcg honored verbatim" "tcg" "$TCG"
+INV=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=auto; _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
 assert_eq "accel: 'auto' (silent-decision mode) rejected" "1" "$INV"
 
 # --- KVM probe hardening (G-K1): the probe guest must be SELF-TERMINATING --------
 # A `-machine none` guest with no QMP `quit` idles forever, so the historical
 # `timeout 30 qemu …` probe paid a ~30s hang on EVERY refusal. The probe now
 # drives QMP over stdio (qmp_capabilities + quit) under `timeout` with the
-# DEBIAN_FDE_KVM_PROBE_TIMEOUT bound (default 10): success ONLY = KVM-accelerated
+# ALPINE_FDE_KVM_PROBE_TIMEOUT bound (default 10): success ONLY = KVM-accelerated
 # qemu starts AND exits cleanly within the bound. Unit tests exercise the
 # _qemu_kvm_probe_run helper seam through a PATH-stubbed qemu (the /dev/kvm
 # existence+writability gate cannot be forced here); every case runs in a fresh
@@ -502,17 +502,17 @@ ln -sf "$(command -v timeout)" "$PROBE_STUB/only-timeout/timeout"
 RC=$( ( PATH="$PROBE_STUB/only-timeout"; _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
 assert_ne "kvm-probe: missing qemu -> probe run fails" "0" "$RC"
 
-# (e) DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 with the hanging stub -> refuses in < 6s
+# (e) ALPINE_FDE_KVM_PROBE_TIMEOUT=1 with the hanging stub -> refuses in < 6s
 rm -f "$PROBE_STUB/sigterm.marker"
 T0=$SECONDS
-RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; DEBIAN_FDE_KVM_PROBE_TIMEOUT=1; \
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; ALPINE_FDE_KVM_PROBE_TIMEOUT=1; \
     _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
 ELAPSED=$((SECONDS - T0))
 assert_eq "kvm-probe: bound=1 expiry -> rc 124" "124" "$RC"
 if (( ELAPSED < 6 )); then
-    _assert_result ok "kvm-probe: DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 honored (elapsed=${ELAPSED}s < 6s)" ""
+    _assert_result ok "kvm-probe: ALPINE_FDE_KVM_PROBE_TIMEOUT=1 honored (elapsed=${ELAPSED}s < 6s)" ""
 else
-    _assert_result not-ok "kvm-probe: DEBIAN_FDE_KVM_PROBE_TIMEOUT=1 honored" "elapsed=${ELAPSED}s >= 6s"
+    _assert_result not-ok "kvm-probe: ALPINE_FDE_KVM_PROBE_TIMEOUT=1 honored" "elapsed=${ELAPSED}s >= 6s"
 fi
 
 # (f) argv pin: the probe cannot silently degrade into a non-KVM check
@@ -528,9 +528,9 @@ assert_contains "kvm-probe: argv pins -accel kvm" "$ARGV" "-accel kvm"
 assert_contains "kvm-probe: argv pins -machine none" "$ARGV" "-machine none"
 assert_contains "kvm-probe: argv pins -qmp stdio (self-terminating QMP quit)" "$ARGV" \
     "-qmp stdio"
-RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; DEBIAN_FDE_KVM_PROBE_TIMEOUT=notaseconds; \
+RC=$( ( PATH="$PROBE_STUB/bin:$PATH"; ALPINE_FDE_KVM_PROBE_TIMEOUT=notaseconds; \
     _qemu_kvm_probe_run >/dev/null 2>&1; echo $? ) )
-assert_ne "kvm-probe: invalid DEBIAN_FDE_KVM_PROBE_TIMEOUT fails closed" "0" "$RC"
+assert_ne "kvm-probe: invalid ALPINE_FDE_KVM_PROBE_TIMEOUT fails closed" "0" "$RC"
 
 # --- G-E2: sentinel fixtures — parse, cross-fixture collisions, consumers --------
 # Every versioned fixture must parse (name<TAB>string rows only, no duplicate
@@ -582,21 +582,21 @@ done
 assert_eq "sentinels: every referenced name resolves in the default (260.2) table" "" "$SENT_MISSING"
 
 # --- G-E11: ADR-19 interop oracle scaffold — fail-closed + scope guards ----------
-# The oracle is CI-only and gated: without DEBIAN_FDE_INTEROP_ORACLE=1, or
+# The oracle is CI-only and gated: without ALPINE_FDE_INTEROP_ORACLE=1, or
 # without bwrap on PATH, everything about it refuses (rc 64). The scope guard
 # must pass on the CURRENT tree: shipped bin/+lib/+hooks carry no bwrap /
 # Debian-runtime references. The oracle BODY is intentionally absent (scaffold).
 source "$TESTS/lib/interop-oracle.sh"
 assert_eq "interop-oracle: rootfs assembly seam exists (scaffold)" "function" \
     "$(declare -F interop_oracle_rootfs >/dev/null && echo function || echo missing)"
-RC=$( ( unset DEBIAN_FDE_INTEROP_ORACLE; interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+RC=$( ( unset ALPINE_FDE_INTEROP_ORACLE; interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
 assert_eq "interop-oracle: gate env unset -> fail closed (rc 64)" "64" "$RC"
-RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=0 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+RC=$( ( ALPINE_FDE_INTEROP_ORACLE=0 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
 assert_eq "interop-oracle: gate env not exactly 1 -> fail closed (rc 64)" "64" "$RC"
 mkdir -p "$WORK/no-bwrap"
-RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=1 PATH="$WORK/no-bwrap" interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+RC=$( ( ALPINE_FDE_INTEROP_ORACLE=1 PATH="$WORK/no-bwrap" interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
 assert_eq "interop-oracle: gate set but bwrap absent -> fail closed (rc 64)" "64" "$RC"
-RC=$( ( DEBIAN_FDE_INTEROP_ORACLE=1 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
+RC=$( ( ALPINE_FDE_INTEROP_ORACLE=1 interop_oracle_assert_ready >/dev/null 2>&1; echo $? ) )
 assert_eq "interop-oracle: gate set + bwrap present -> ready (rc 0)" "0" "$RC"
 if interop_scope_check "$TESTS/.." >/dev/null 2>&1; then
     _assert_result ok "interop-oracle: scope guard passes on the current tree (bin/lib/hooks clean)" ""

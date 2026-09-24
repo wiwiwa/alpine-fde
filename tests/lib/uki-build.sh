@@ -5,13 +5,13 @@
 # Builds a Unified Kernel Image whose initramfs is a small busybox-based
 # harness that:
 #   * mounts proc/sys/dev(run,tmpfs), loads the disk/dm modules,
-#   * waits for /dev/tpmrm0 and prints `debian-fde-pcr sha256:<idx>=<hex>`
+#   * waits for /dev/tpmrm0 and prints `alpine-fde-pcr sha256:<idx>=<hex>`
 #     for PCRs 0, 7, 11 (machine-readable, consumed by scenarios),
 #   * enrolls a systemd-tpm2 token IN-GUEST on an unenrolled LUKS volume
 #     (the §12 S-00b "enroll from the guest" pattern, miniaturized),
 #   * runs the real systemd-cryptsetup (trixie 257.13, from the pinned deb)
 #     with the signed-PCR policy (tpm2-signature= + .pcrsig),
-#   * prints `debian-fde: UNSEALED` / `debian-fde: PROMPT-FAILED`, powers off.
+#   * prints `alpine-fde: UNSEALED` / `alpine-fde: PROMPT-FAILED`, powers off.
 #
 # GUEST ROOTFS (G-E1, ADR-12/§12): the S-00 payload populated into the LUKS
 # image is the SHA256-pinned ALPINE minirootfs artifact
@@ -61,10 +61,10 @@
 # giving up." — no ask-password agent needed (there is none in this initrd
 # and the fallback prompt cannot read the serial console).
 
-if [[ -n "${_DEBIAN_FDE_UKI_BUILD_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_UKI_BUILD_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_UKI_BUILD_SOURCED=1
+_ALPINE_FDE_UKI_BUILD_SOURCED=1
 
 _HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 _UKI_REPO_ROOT=$(cd "$_HERE/../.." && pwd)
@@ -257,7 +257,7 @@ uki_initrd_write_init() {
     local tree="$1"
     cat >"$tree/init" <<'INIT'
 #!/bin/sh
-# Debian FDE harness initramfs /init (busybox). See tests/lib/uki-build.sh.
+# Alpine FDE harness initramfs /init (busybox). See tests/lib/uki-build.sh.
 export PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/systemd
 /bin/busybox mkdir -p /proc /sys /dev /run /tmp /etc /opt/tpm
@@ -269,12 +269,12 @@ export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/syste
 # make sure our output reaches the console even if the kernel could not open
 # the initial console from a node-less cpio
 [ -c /dev/console ] && exec >/dev/console 2>&1 </dev/console
-echo "debian-fde-harness: init started"
+echo "alpine-fde-harness: init started"
 
 # modules: crypto for LUKS2 aes-xts, device-mapper, virtio disk
 for m in @@MODULES@@; do
     if [ -f "/modules/$m.ko" ]; then
-        busybox insmod "/modules/$m.ko" 2>/dev/null || echo "debian-fde-harness: insmod $m failed (maybe builtin)"
+        busybox insmod "/modules/$m.ko" 2>/dev/null || echo "alpine-fde-harness: insmod $m failed (maybe builtin)"
     fi
 done
 
@@ -282,9 +282,9 @@ done
 # cmdline tamper actually reached the kernel). Printed TWICE: kernel printk
 # can interleave into userspace console writes (observed live, lines split
 # mid-print), so scenarios match the first line that survived whole.
-echo "debian-fde-cmdline $(cat /proc/cmdline)"
+echo "alpine-fde-cmdline $(cat /proc/cmdline)"
 busybox sleep 0.3
-echo "debian-fde-cmdline2 $(cat /proc/cmdline)"
+echo "alpine-fde-cmdline2 $(cat /proc/cmdline)"
 
 # efivarfs: systemd-pcrextend checks the stub's EFI variables (StubPcrKernelImage)
 # to decide whether to extend PCR 11 — without the mount it logs "Kernel stub
@@ -293,7 +293,7 @@ echo "debian-fde-cmdline2 $(cat /proc/cmdline)"
 # the tpm2_pcrextend fallback below still applies the identical extend.
 busybox mkdir -p /sys/firmware/efi/efivars
 busybox mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null \
-    || echo "debian-fde-harness: efivarfs not mounted (pcrextend fallback will be used)"
+    || echo "alpine-fde-harness: efivarfs not mounted (pcrextend fallback will be used)"
 
 # udev in the initrd (the dracut pattern): systemd-cryptsetup's dm attach must
 # happen with udev sync so 55-dm.rules registers /dev/mapper/root and the
@@ -310,9 +310,9 @@ mkdir -p /run/udev
 udev_err=$(/usr/lib/systemd/systemd-udevd --daemon 2>&1)
 udev_rc=$?
 if [ "$udev_rc" = "0" ] && [ -e /run/udev/control ]; then
-    echo "debian-fde-harness: udevd running (dm attach will be udev-registered)"
+    echo "alpine-fde-harness: udevd running (dm attach will be udev-registered)"
 else
-    echo "debian-fde-harness: udevd NOT started (rc=$udev_rc): $udev_err"
+    echo "alpine-fde-harness: udevd NOT started (rc=$udev_rc): $udev_err"
 fi
 
 # coldplug (the dracut pattern): udevd started AFTER the kernel already
@@ -326,10 +326,10 @@ fi
 if [ "$udev_rc" = "0" ] && [ -e /run/udev/control ]; then
     if udevadm trigger --type=devices --action=add 2>&1; then
         udevadm settle --timeout=15 \
-            || echo "debian-fde-harness: WARNING udevadm settle timed out (by-uuid links may be incomplete)"
-        echo "debian-fde-harness: coldplug settled; by-uuid: $(ls /dev/disk/by-uuid 2>/dev/null | tr '\n' ' ')"
+            || echo "alpine-fde-harness: WARNING udevadm settle timed out (by-uuid links may be incomplete)"
+        echo "alpine-fde-harness: coldplug settled; by-uuid: $(ls /dev/disk/by-uuid 2>/dev/null | tr '\n' ' ')"
     else
-        echo "debian-fde-harness: WARNING udevadm trigger FAILED — /dev/disk/by-uuid will not resolve"
+        echo "alpine-fde-harness: WARNING udevadm trigger FAILED — /dev/disk/by-uuid will not resolve"
     fi
 fi
 
@@ -337,17 +337,17 @@ fi
 if [ -b /dev/vdc ]; then
     busybox dd if=/dev/vdc bs=4096 count=16 2>/dev/null | busybox tr -d '\000' > /pcrsig.json
 fi
-[ -s /pcrsig.json ] && echo "debian-fde-harness: pcrsig payload loaded ($(busybox wc -c < /pcrsig.json) bytes): $(head -c 60 /pcrsig.json)" || echo "debian-fde-harness: pcrsig payload MISSING"
+[ -s /pcrsig.json ] && echo "alpine-fde-harness: pcrsig payload loaded ($(busybox wc -c < /pcrsig.json) bytes): $(head -c 60 /pcrsig.json)" || echo "alpine-fde-harness: pcrsig payload MISSING"
 # stage selector via the PAYLOAD DRIVE (uki_stage_login_drive): the word
 # "login" at offset 64 KiB (the pcrsig region is the first 64 KiB; the tooling
-# tail rides after it). The cmdline word debian-fde-stage= keeps working; the
+# tail rides after it). The cmdline word alpine-fde-stage= keeps working; the
 # drive marker exists because the §8.2 unseal hook's {7,11} policy is bound to
 # THIS UKI's measured PCR 11 — a cmdline-variant UKI changes the stub
 # measurement and the zero-input token unlock can never match (s00b boot C).
 if [ -b /dev/vdc ]; then
     busybox dd if=/dev/vdc bs=1 skip=65536 count=8 2>/dev/null | busybox tr -d '\000' > /fde-stage
     [ "$(cat /fde-stage 2>/dev/null)" = "login" ] \
-        && echo "debian-fde-harness: payload drive selects stage=login (unmeasured channel)"
+        && echo "alpine-fde-harness: payload drive selects stage=login (unmeasured channel)"
 fi
 # ALSO install it at the token plugin's auto-search location (CONF_PATHS("systemd")
 # + tpm2-pcr-signature.json — the dracut/trixie initrd production pattern). The
@@ -366,9 +366,9 @@ while [ ! -c /dev/tpmrm0 ] && [ "$i" -lt 50 ]; do
     busybox sleep 0.1
 done
 if [ -c /dev/tpmrm0 ]; then
-    echo "debian-fde-harness: /dev/tpmrm0 present"
+    echo "alpine-fde-harness: /dev/tpmrm0 present"
 else
-    echo "debian-fde-harness: /dev/tpmrm0 ABSENT after timeout"
+    echo "alpine-fde-harness: /dev/tpmrm0 ABSENT after timeout"
 fi
 
 # print PCRs (host-closure tpm2-tools under /opt/tpm, own loader)
@@ -398,10 +398,10 @@ pcr_hex() {
 for pcr in 0 7 11; do
     hex=$(pcr_hex "$pcr")
     if [ -z "$hex" ]; then
-        echo "debian-fde-harness: pcrread $pcr RAW OUTPUT:"
+        echo "alpine-fde-harness: pcrread $pcr RAW OUTPUT:"
         $TPM2 -T device:/dev/tpmrm0 sha256:$pcr 2>&1 | head -4
     fi
-    echo "debian-fde-pcr sha256:$pcr=$hex"
+    echo "alpine-fde-pcr sha256:$pcr=$hex"
 done
 
 # pcrextend_enter_initrd — extend PCR 11 with the enter-initrd PHASE WORD
@@ -420,36 +420,36 @@ done
 # H("enter-initrd") via the host tpm2-tools closure — the extend value is
 # identical (the PCR does not care which tool computed it).
 pcrextend_enter_initrd() {
-    echo "debian-fde-harness: extending PCR 11 (enter-initrd phase word)"
+    echo "alpine-fde-harness: extending PCR 11 (enter-initrd phase word)"
     pcr11_pre=$(pcr_hex 11)
     if /usr/lib/systemd/systemd-pcrextend enter-initrd \
             && [ "$(pcr_hex 11)" != "$pcr11_pre" ]; then
-        echo "debian-fde-harness: pcrextend ok (systemd-pcrextend)"
+        echo "alpine-fde-harness: pcrextend ok (systemd-pcrextend)"
     else
-        echo "debian-fde-harness: systemd-pcrextend skipped/failed — trying tpm2_pcrextend"
+        echo "alpine-fde-harness: systemd-pcrextend skipped/failed — trying tpm2_pcrextend"
         word_digest=$(printf 'enter-initrd' | sha256sum | awk '{print $1}')
         if /opt/tpm/ld-linux-x86-64.so.2 --library-path /opt/tpm/lib /opt/tpm/bin/tpm2_pcrextend \
                 -T device:/dev/tpmrm0 "11:sha256=$word_digest" \
                 && [ "$(pcr_hex 11)" != "$pcr11_pre" ]; then
-            echo "debian-fde-harness: pcrextend ok (tpm2_pcrextend)"
+            echo "alpine-fde-harness: pcrextend ok (tpm2_pcrextend)"
         else
-            echo "debian-fde-harness: pcrextend FAILED — unlock cannot match the signed policy"
+            echo "alpine-fde-harness: pcrextend FAILED — unlock cannot match the signed policy"
         fi
     fi
-    echo "debian-fde-pcr-postphase sha256:11=$(pcr_hex 11)"
+    echo "alpine-fde-pcr-postphase sha256:11=$(pcr_hex 11)"
 }
 
 # ---- unlock mechanism selection (§8.2 fixture, Architecture.md §12) ----------
 # DEFAULT: the SHIPPED mkinitfs unseal hook (hooks/mkinitfs/alpine-fde-unseal.
 # sh) — the Alpine-contract unlock of record (ADR-13). The 257.13
 # systemd-cryptsetup unlock oracle remains available, opt-in, for scenarios
-# that explicitly document it: boot with `debian-fde-unlock=oracle`.
+# that explicitly document it: boot with `alpine-fde-unlock=oracle`.
 UNLOCK=hook
 for _w in $(cat /proc/cmdline); do
-    case "$_w" in debian-fde-unlock=oracle) UNLOCK=oracle ;;
+    case "$_w" in alpine-fde-unlock=oracle) UNLOCK=oracle ;;
     esac
 done
-echo "debian-fde-harness: unlock mechanism: $UNLOCK"
+echo "alpine-fde-harness: unlock mechanism: $UNLOCK"
 
 if [ "$UNLOCK" = "oracle" ]; then
 pcrextend_enter_initrd
@@ -457,7 +457,7 @@ fi  # UNLOCK=oracle phase extension
 
 DISK=/dev/vdb
 
-# ---- §12 S-00 installer stage (cmdline: debian-fde-stage=install) -------------
+# ---- §12 S-00 installer stage (cmdline: alpine-fde-stage=install) -------------
 # The one-time PASSPHRASE unlock of the freshly laid LUKS2 volume (the only
 # documented first-boot prompt; here fed from the embedded /kf0, ZERO console
 # input — no enrollment exists yet), then populate the minimal rootfs (§3.3)
@@ -475,16 +475,16 @@ installer_stage() {
     # hook never runs here and the oracle branch is never reached — the
     # stage dispatch powers off before either).
     pcrextend_enter_initrd
-    echo "debian-fde-install: one-time passphrase unlock (slot 0, documented first-boot prompt)"
+    echo "alpine-fde-install: one-time passphrase unlock (slot 0, documented first-boot prompt)"
     /usr/sbin/cryptsetup open --type luks --key-file /kf0 "$DISK" root
     cs_rc=$?
     if [ "$cs_rc" -ne 0 ] || [ ! -e /dev/mapper/root ]; then
-        echo "debian-fde-install: passphrase unlock FAILED (cryptsetup rc=$cs_rc)"
+        echo "alpine-fde-install: passphrase unlock FAILED (cryptsetup rc=$cs_rc)"
         return 1
     fi
-    echo "debian-fde-install: root volume unlocked via passphrase (no enrollment yet)"
+    echo "alpine-fde-install: root volume unlocked via passphrase (no enrollment yet)"
     if [ ! -b /dev/vdc ]; then
-        echo "debian-fde-install: rootfs payload drive /dev/vdc MISSING"
+        echo "alpine-fde-install: rootfs payload drive /dev/vdc MISSING"
         return 1
     fi
     busybox dd if=/dev/vdc of=/rootfs.tar bs=1M 2>/dev/null
@@ -494,42 +494,42 @@ installer_stage() {
     # hash-verify against the build-time pin.
     busybox truncate -s @@ROOTFS_BYTES@@ /rootfs.tar
     echo "@@ROOTFS_SHA@@  /rootfs.tar" | sha256sum -c - || {
-        echo "debian-fde-install: pinned rootfs artifact hash MISMATCH"; return 1; }
-    echo "debian-fde-install: rootfs payload verified ($(du -k /rootfs.tar | cut -f1) KiB)"
+        echo "alpine-fde-install: pinned rootfs artifact hash MISMATCH"; return 1; }
+    echo "alpine-fde-install: rootfs payload verified ($(du -k /rootfs.tar | cut -f1) KiB)"
     # §9.1 default filesystem (G-HW5, revised-design BASE matrix): Btrfs with
     # the @/@home/@snapshots subvolume layout. mkfs.btrfs + the `btrfs`
     # multitool come from the pinned btrfs-progs deb (packed into this
     # initrd). The legacy flat fs stays production-only (`install --fs ext4`);
     # no harness scenario exercises it, so there is no ext4 seam here.
     mkfs.btrfs -f /dev/mapper/root >/tmp/mkfs.log 2>&1 || {
-        echo "debian-fde-install: mkfs.btrfs FAILED"; busybox tail -5 /tmp/mkfs.log; return 1; }
+        echo "alpine-fde-install: mkfs.btrfs FAILED"; busybox tail -5 /tmp/mkfs.log; return 1; }
     ROOTFS_UUID=$(awk '/^UUID:/ {print $2; exit}' /tmp/mkfs.log)
     if [ -z "$ROOTFS_UUID" ]; then
         ROOTFS_UUID=$(btrfs filesystem show /dev/mapper/root 2>/dev/null | awk '/uuid:/ {print $NF; exit}')
     fi
     if [ -z "$ROOTFS_UUID" ]; then
-        echo "debian-fde-install: no btrfs UUID — cannot write the §9.1 fstab"; return 1
+        echo "alpine-fde-install: no btrfs UUID — cannot write the §9.1 fstab"; return 1
     fi
-    echo "debian-fde-install: btrfs rootfs created (uuid=$ROOTFS_UUID)"
+    echo "alpine-fde-install: btrfs rootfs created (uuid=$ROOTFS_UUID)"
     mkdir -p /btop
     busybox mount -t btrfs /dev/mapper/root /btop || {
-        echo "debian-fde-install: btrfs top-level mount FAILED"; return 1; }
+        echo "alpine-fde-install: btrfs top-level mount FAILED"; return 1; }
     SVOK=1
     btrfs subvolume create /btop/@ >/dev/null 2>&1 || SVOK=0
     btrfs subvolume create /btop/@home >/dev/null 2>&1 || SVOK=0
     btrfs subvolume create /btop/@snapshots >/dev/null 2>&1 || SVOK=0
     busybox umount /btop
     if [ "$SVOK" != "1" ]; then
-        echo "debian-fde-install: btrfs subvolume create FAILED"; return 1
+        echo "alpine-fde-install: btrfs subvolume create FAILED"; return 1
     fi
-    echo "debian-fde-install: subvolumes created (@ @home @snapshots)"
+    echo "alpine-fde-install: subvolumes created (@ @home @snapshots)"
     mkdir -p /newroot
     busybox mount -t btrfs -o subvol=@ /dev/mapper/root /newroot || {
-        echo "debian-fde-install: root mount FAILED (btrfs subvol=@)"; return 1; }
-    echo "debian-fde-install: root mounted (btrfs subvol=@)"
-    echo "debian-fde-install: populating rootfs from the pinned Alpine artifact (§3.3)"
+        echo "alpine-fde-install: root mount FAILED (btrfs subvol=@)"; return 1; }
+    echo "alpine-fde-install: root mounted (btrfs subvol=@)"
+    echo "alpine-fde-install: populating rootfs from the pinned Alpine artifact (§3.3)"
     gzip -dc /rootfs.tar | tar -xf - -C /newroot || {
-        echo "debian-fde-install: rootfs untar FAILED"; return 1; }
+        echo "alpine-fde-install: rootfs untar FAILED"; return 1; }
     # §3.3/§9.1 config drops — mirror what production install writes
     # (lib/cmd/install.sh): /etc/apk/repositories = inst_repo_lines (the
     # mirror's main + community), /etc/network/interfaces = the OpenRC
@@ -548,7 +548,7 @@ installer_stage() {
     else
         printf '%s\n' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >>/newroot/etc/inittab
     fi
-    echo "debian-fde-install: getty/openrc configured (§3.3)"
+    echo "alpine-fde-install: getty/openrc configured (§3.3)"
     # §9.1 mountpoints inside @ — the fstab entries below mount @home and
     # @snapshots here at boot. (No btrfs userspace copy: the initrd's pinned
     # btrfs-progs binaries are glibc builds and cannot execute on the musl
@@ -568,7 +568,7 @@ installer_stage() {
         "UUID=$ROOTFS_UUID /home btrfs subvol=@home,defaults 0 2" \
         "UUID=$ROOTFS_UUID /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
         > /newroot/etc/fstab
-    echo "debian-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) written"
+    echo "alpine-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) written"
     # §9.1 step 10 / ADR-20 amended: the install-state marker, schema v1 in
     # the lib/install-state.sh shape (two-space indent, quoted values). The
     # unseal hook's Stage-2 transition and the first-boot finalization
@@ -581,11 +581,11 @@ installer_stage() {
         printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
         printf '}\n'
     } > /newroot/etc/alpine-fde/install-state.json
-    echo "debian-fde-install: install-state marked installed (§9.1 step 10)"
+    echo "alpine-fde-install: install-state marked installed (§9.1 step 10)"
     # console proof of the on-disk fstab forms (asserted verbatim by S-00)
     while read -r _fl; do
         case "$_fl" in \#*) continue ;; esac
-        echo "debian-fde-btrfs: fstab| $_fl"
+        echo "alpine-fde-btrfs: fstab| $_fl"
     done < /newroot/etc/fstab
     # machine-readable installed size + package count (§3.3/ADR-12 budget,
     # asserted by S-00). Package marker = the apk world/db: /lib/apk/db/
@@ -596,12 +596,12 @@ installer_stage() {
     else
         packages=0
     fi
-    echo "debian-fde-rootfs: kib=$(du -sk /newroot | cut -f1) packages=$packages"
+    echo "alpine-fde-rootfs: kib=$(du -sk /newroot | cut -f1) packages=$packages"
     # §9.1 subvolume presence — the on-disk evidence S-00 asserts (the mounted
     # root IS the @ subvolume; the list shows every subvolume on the volume)
-    echo "debian-fde-btrfs: subvolume list (on-disk evidence):"
+    echo "alpine-fde-btrfs: subvolume list (on-disk evidence):"
     btrfs subvolume list /newroot || {
-        echo "debian-fde-install: btrfs subvolume list FAILED"; return 1; }
+        echo "alpine-fde-install: btrfs subvolume list FAILED"; return 1; }
     # I2/I4 disk-side scan: no private key material anywhere on the LUKS payload.
     #   keyfiles: .pem/.key OUTSIDE the public trust store (the Debian CA
     #     bundle ships hundreds of PUBLIC .pem certs — /etc/ssl/certs,
@@ -616,7 +616,7 @@ installer_stage() {
     #     code literal), on a python cryptography constant and on INDENTED
     #     sample keys in cloud-init doc examples (all observed live
     #     2026-09-17 against this exact tree).
-    echo "debian-fde-scan: keyfiles=$(find /newroot \( -path /newroot/etc/ssl/certs -o -path /newroot/usr/lib/ssl/certs -o -path /newroot/usr/lib/ssl/cert.pem -o -path /newroot/etc/ssl/cert.pem -o -path /newroot/etc/ssl1.1/cert.pem \) -prune -o \( -name '*.pem' -o -name '*.key' \) -print | wc -l) pem=$(grep -rIlE '^-----BEGIN [A-Z ]*PRIVATE KEY-----' /newroot 2>/dev/null | wc -l)"
+    echo "alpine-fde-scan: keyfiles=$(find /newroot \( -path /newroot/etc/ssl/certs -o -path /newroot/usr/lib/ssl/certs -o -path /newroot/usr/lib/ssl/cert.pem -o -path /newroot/etc/ssl/cert.pem -o -path /newroot/etc/ssl1.1/cert.pem \) -prune -o \( -name '*.pem' -o -name '*.key' \) -print | wc -l) pem=$(grep -rIlE '^-----BEGIN [A-Z ]*PRIVATE KEY-----' /newroot 2>/dev/null | wc -l)"
     busybox umount /newroot
     /usr/sbin/cryptsetup close root
     return 0
@@ -624,7 +624,7 @@ installer_stage() {
 
 STAGE=boot
 for _w in $(cat /proc/cmdline); do
-    case "$_w" in debian-fde-stage=*) STAGE=${_w#debian-fde-stage=} ;;
+    case "$_w" in alpine-fde-stage=*) STAGE=${_w#alpine-fde-stage=} ;;
     esac
 done
 # the payload-drive marker OVERRIDES the (measured) cmdline word — the login
@@ -633,18 +633,18 @@ done
 [ "$(cat /fde-stage 2>/dev/null)" = "login" ] && STAGE=login
 if [ "$STAGE" = "install" ]; then
     if installer_stage; then
-        echo "debian-fde-harness: install stage complete"
-        echo "debian-fde: POWEROFF"
+        echo "alpine-fde-harness: install stage complete"
+        echo "alpine-fde: POWEROFF"
         sync
         busybox poweroff -f
     else
-        echo "debian-fde: INSTALL-FAILED"
+        echo "alpine-fde: INSTALL-FAILED"
         sync
         busybox poweroff -f
     fi
 fi
 
-# ---- §12 S-01 login stage (cmdline: debian-fde-stage=login) -------------------
+# ---- §12 S-01 login stage (cmdline: alpine-fde-stage=login) -------------------
 # After the TOKEN unlock succeeded (zero console input — the §12 S-01 happy
 # path), hand the machine to the populated installed system: switch_root into
 # the real Debian root; systemd + getty-generator put `login:` on the serial
@@ -659,20 +659,20 @@ login_stage() {
     mkdir -p /newroot
     # §9.1: the installed root is the @ subvolume of the LUKS volume (G-HW5)
     busybox mount -t btrfs -o subvol=@ /dev/mapper/root /newroot || {
-        echo "debian-fde-login: root mount FAILED (btrfs subvol=@)"; return 1; }
+        echo "alpine-fde-login: root mount FAILED (btrfs subvol=@)"; return 1; }
     busybox grep -Eq 'subvol=/?@(,| )' /proc/mounts \
-        && echo "debian-fde-btrfs: root mounted subvol=@ (login stage)"
+        && echo "alpine-fde-btrfs: root mounted subvol=@ (login stage)"
     # settle: give the udev event pipeline a bounded window to finish the
     # persistent by-uuid links for the dm volume (they are what the installed
     # system's fstab resolves). Loud on timeout, never fatal.
     i=0
     while [ -z "$(ls /dev/disk/by-uuid 2>/dev/null)" ]; do
         [ "$i" -lt 20 ] && { i=$((i + 1)); busybox sleep 0.5; continue; }
-        echo "debian-fde-harness: WARNING no /dev/disk/by-uuid links after 10s (fstab submounts will not resolve)"
+        echo "alpine-fde-harness: WARNING no /dev/disk/by-uuid links after 10s (fstab submounts will not resolve)"
         break
     done
     if [ -n "$(ls /dev/disk/by-uuid 2>/dev/null)" ]; then
-        echo "debian-fde-harness: udev by-uuid links present: $(ls /dev/disk/by-uuid | tr '\n' ' ')"
+        echo "alpine-fde-harness: udev by-uuid links present: $(ls /dev/disk/by-uuid | tr '\n' ' ')"
     fi
     # stop the initrd udevd so the installed system's own udevd starts
     # cleanly; the /run/udev device db (by-uuid entries for the dm volume)
@@ -688,13 +688,13 @@ login_stage() {
     # Move them onto the new root first — exactly what dracut/systemd's
     # switch_root does internally.
     busybox mount -o move /dev /newroot/dev \
-        || echo "debian-fde-harness: /dev move FAILED (mapper node + by-uuid links lost)"
-    busybox mount -o move /proc /newroot/proc || echo "debian-fde-harness: /proc move FAILED"
-    busybox mount -o move /sys /newroot/sys || echo "debian-fde-harness: /sys move FAILED"
+        || echo "alpine-fde-harness: /dev move FAILED (mapper node + by-uuid links lost)"
+    busybox mount -o move /proc /newroot/proc || echo "alpine-fde-harness: /proc move FAILED"
+    busybox mount -o move /sys /newroot/sys || echo "alpine-fde-harness: /sys move FAILED"
     busybox mount -o move /run /newroot/run \
-        || echo "debian-fde-harness: /run move FAILED (udev device db lost)"
-    echo "debian-fde-harness: switching to the installed system (zero console input so far)"
-    echo "debian-fde: SWITCH-ROOT"
+        || echo "alpine-fde-harness: /run move FAILED (udev device db lost)"
+    echo "alpine-fde-harness: switching to the installed system (zero console input so far)"
+    echo "alpine-fde: SWITCH-ROOT"
     exec busybox switch_root /newroot /sbin/init
 }
 
@@ -704,7 +704,7 @@ login_stage() {
 # initrd has no agent socket and no controlling TTY, so ask_password_auto()
 # returns ENOENT and serial-fed input is never consumed (see s01 history) —
 # hence this minimal harness equivalent, gated behind the
-# `debian-fde-console-fallback` kernel cmdline flag: without the flag the token
+# `alpine-fde-console-fallback` kernel cmdline flag: without the flag the token
 # refusal path stays exactly as s01 proved it (deterministic lockout, no read).
 #
 # Ordering contract (257.13 semantics): the TOKEN path is always attempted
@@ -725,13 +725,13 @@ console_passphrase_loop() {
     n=0
     while [ "$n" -lt 3 ]; do
         n=$((n + 1))
-        echo "debian-fde-harness: passphrase attempt $n/3 (awaiting console line)"
+        echo "alpine-fde-harness: passphrase attempt $n/3 (awaiting console line)"
         line=
         read -t 20 -r line
         read_rc=$?
-        echo "debian-fde-harness: read done (rc=$read_rc len=${#line})"
+        echo "alpine-fde-harness: read done (rc=$read_rc len=${#line})"
         if [ "$read_rc" -ne 0 ] || [ -z "$line" ]; then
-            echo "debian-fde-harness: passphrase attempt $n rejected (read rc=$read_rc: timeout/empty)"
+            echo "alpine-fde-harness: passphrase attempt $n rejected (read rc=$read_rc: timeout/empty)"
             continue
         fi
         printf '%s' "$line" > /tmp/kf-try
@@ -740,33 +740,33 @@ console_passphrase_loop() {
         cs_rc=$?
         cat /tmp/cs.log
         if [ "$cs_rc" -eq 0 ] && [ -e /dev/mapper/root ]; then
-            echo "debian-fde-harness: passphrase unlock ok (attempt $n)"
-            echo "debian-fde: UNSEALED"
+            echo "alpine-fde-harness: passphrase unlock ok (attempt $n)"
+            echo "alpine-fde: UNSEALED"
             return 0
         fi
-        echo "debian-fde-harness: passphrase attempt $n rejected (cryptsetup rc=$cs_rc)"
+        echo "alpine-fde-harness: passphrase attempt $n rejected (cryptsetup rc=$cs_rc)"
     done
-    echo "debian-fde-harness: passphrase attempts exhausted (3 failures)"
+    echo "alpine-fde-harness: passphrase attempts exhausted (3 failures)"
     return 1
 }
 
 if [ "$UNLOCK" = "oracle" ]; then
-# ---- 257.13 unlock ORACLE (opt-in: debian-fde-unlock=oracle) -----------------
+# ---- 257.13 unlock ORACLE (opt-in: alpine-fde-unlock=oracle) -----------------
 # Kept verbatim as the Debian-era provenance record; its sentinels live in
 # tests/sentinels-257.13.txt. The DEFAULT path is the §8.2 hook branch below.
 #
 # enroll a systemd-tpm2 token in-guest when the volume has none yet
 # (the S-00b pattern: enrollment from the guest, against live PCRs)
 if ! /usr/sbin/cryptsetup luksDump --dump-json-metadata "$DISK" 2>/dev/null | grep -q '"systemd-tpm2"'; then
-    echo "debian-fde-harness: no systemd-tpm2 token — enrolling in-guest"
+    echo "alpine-fde-harness: no systemd-tpm2 token — enrolling in-guest"
     systemd-cryptenroll \
         --unlock-key-file=/kf0 \
         --tpm2-device=auto --wipe-slot=tpm2 \
         --tpm2-pcrs=7 \
         --tpm2-public-key=/rel.pub --tpm2-public-key-pcrs=11 \
-        "$DISK" || echo "debian-fde-harness: cryptenroll failed rc=$?"
+        "$DISK" || echo "alpine-fde-harness: cryptenroll failed rc=$?"
 else
-    echo "debian-fde-harness: systemd-tpm2 token present — skipping enrollment"
+    echo "alpine-fde-harness: systemd-tpm2 token present — skipping enrollment"
 fi
 
 # unlock with the signed-PCR policy: real trixie 257.13 systemd-cryptsetup.
@@ -782,28 +782,28 @@ fi
 # log_debug-only sentinel "Adding PCR signature policy.".
 # WAVE-2 DEBUG (kept through the spike): prove the payload is visible at
 # unlock time (the ls line below).
-echo "debian-fde-harness: starting unlock attempt"
+echo "alpine-fde-harness: starting unlock attempt"
 ls -la /pcrsig.json 2>&1
 SYSTEMD_LOG_LEVEL=debug /usr/lib/systemd/systemd-cryptsetup attach root "$DISK" "" \
     "tpm2-device=auto,tpm2-signature=/pcrsig.json,tries=1" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && [ -e /dev/mapper/root ]; then
-    echo "debian-fde: UNSEALED"
+    echo "alpine-fde: UNSEALED"
     if [ "$STAGE" = "login" ]; then
         login_stage   # exec switch_root — never returns on success
-        echo "debian-fde: LOGIN-STAGE-FAILED"
+        echo "alpine-fde: LOGIN-STAGE-FAILED"
         sync
         busybox poweroff -f
     fi
-elif grep -q debian-fde-console-fallback /proc/cmdline; then
-    echo "debian-fde-harness: token refused (rc=$rc) — console passphrase fallback armed"
+elif grep -q alpine-fde-console-fallback /proc/cmdline; then
+    echo "alpine-fde-harness: token refused (rc=$rc) — console passphrase fallback armed"
     if console_passphrase_loop; then
         :  # UNSEALED printed inside the loop
     else
-        echo "debian-fde: PROMPT-FAILED rc=3"
+        echo "alpine-fde: PROMPT-FAILED rc=3"
     fi
 else
-    echo "debian-fde: PROMPT-FAILED rc=$rc"
+    echo "alpine-fde: PROMPT-FAILED rc=$rc"
 fi
 
 else
@@ -817,7 +817,7 @@ else
 # fail-closed `poweroff -f`. /init does NOT extend PCR 11 on this path (the
 # hook does; a second extend would overshoot the signed enter-initrd
 # prediction).
-echo "debian-fde-harness: staging the unseal hook environment (§8.2)"
+echo "alpine-fde-harness: staging the unseal hook environment (§8.2)"
 # the hook calls bare tpm2_* verbs (PATH names) and bare openssl under the
 # ambient TCTI — the /usr/bin wrappers pin the /opt loaders, and here we pin
 # the device TCTI the way a production mkinitfs image does.
@@ -830,8 +830,8 @@ export TPM2TOOLS_TCTI=device:/dev/tpmrm0
 # unseal_state_flip).
 mkdir -p /sysroot /run/cryptsetup
 if ! LUKS_UUID=$(cryptsetup luksUUID "$DISK" 2>/dev/null) || [ -z "$LUKS_UUID" ]; then
-    echo "debian-fde-harness: cryptsetup luksUUID FAILED — cannot stage crypttab"
-    echo "debian-fde: PROMPT-FAILED rc=1"
+    echo "alpine-fde-harness: cryptsetup luksUUID FAILED — cannot stage crypttab"
+    echo "alpine-fde: PROMPT-FAILED rc=1"
     sync
     busybox poweroff -f
 fi
@@ -839,7 +839,7 @@ fi
 # it for root/root<N> members and resolves the UUID= via /dev/disk/by-uuid
 # (the initrd udevd above registered the links).
 printf '%s\n' "root UUID=$LUKS_UUID none" > /etc/crypttab
-echo "debian-fde-harness: crypttab staged: $(cat /etc/crypttab)"
+echo "alpine-fde-harness: crypttab staged: $(cat /etc/crypttab)"
 # FDE_EXTRA_DIR: the signed .pcrsig travels on the payload drive
 # (uki_pcrsig_disk) — stage it with the release public key at the hook's
 # seam path. When the drive is missing, fall back to the UKI stub's
@@ -851,21 +851,21 @@ if [ -s /pcrsig.json ]; then
     FDE_EXTRA_DIR=/fde-extra
 else
     FDE_EXTRA_DIR=/.extra
-    echo "debian-fde-harness: payload pcrsig MISSING — FDE_EXTRA_DIR falls back to the stub /.extra"
+    echo "alpine-fde-harness: payload pcrsig MISSING — FDE_EXTRA_DIR falls back to the stub /.extra"
 fi
 export FDE_EXTRA_DIR
-echo "debian-fde-harness: invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
+echo "alpine-fde-harness: invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
 sh /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
 hook_rc=$?
 if [ -e /dev/mapper/root ]; then
-    echo "debian-fde: UNSEALED"
+    echo "alpine-fde: UNSEALED"
     # this reading is POST hook-extend: exactly the value the ukify
     # enter-initrd .pcrsig prediction covers (G-T13; the hook printed
     # unseal_pcrextend_ok above)
-    echo "debian-fde-pcr-postphase sha256:11=$(pcr_hex 11)"
+    echo "alpine-fde-pcr-postphase sha256:11=$(pcr_hex 11)"
     if [ "$STAGE" = "login" ]; then
         login_stage   # exec switch_root — never returns on success
-        echo "debian-fde: LOGIN-STAGE-FAILED"
+        echo "alpine-fde: LOGIN-STAGE-FAILED"
         sync
         busybox poweroff -f
     fi
@@ -874,31 +874,31 @@ else
     # 3-strike fail-closed poweroff (§8.2, no shell offered). This branch is
     # the belt for a nonzero hook exit that somehow returned — it must not
     # fall through to any shell.
-    echo "debian-fde: PROMPT-FAILED rc=$hook_rc"
+    echo "alpine-fde: PROMPT-FAILED rc=$hook_rc"
     sync
     busybox poweroff -f
 fi
 fi  # UNLOCK=hook / oracle
 if [ -n "@@DEBUG_SHELL@@" ]; then
-    echo "debian-fde-harness: DEBUG SHELL on console (input via serial)"
+    echo "alpine-fde-harness: DEBUG SHELL on console (input via serial)"
     exec /bin/sh </dev/console >/dev/console 2>&1
 fi
-echo "debian-fde-harness: powering off"
-echo "debian-fde: POWEROFF"
+echo "alpine-fde-harness: powering off"
+echo "alpine-fde: POWEROFF"
 sync
 busybox poweroff -f
 INIT
     # bake the module list (ordered, from modules.dep analysis at pin time)
     # and the rootfs artifact pins consumed by the S-00 installer stage
     sed -i "s/@@MODULES@@/$UKI_MODULES/" "$tree/init"
-    sed -i "s/@@ROOTFS_SHA@@/${DEBIAN_FDE_ROOTFS_SHA:-none}/" "$tree/init"
-    sed -i "s/@@ROOTFS_BYTES@@/${DEBIAN_FDE_ROOTFS_BYTES:-0}/" "$tree/init"
-    # apk repositories drop (inst_repo_lines shape): DEBIAN_FDE_MIRROR is the
+    sed -i "s/@@ROOTFS_SHA@@/${ALPINE_FDE_ROOTFS_SHA:-none}/" "$tree/init"
+    sed -i "s/@@ROOTFS_BYTES@@/${ALPINE_FDE_ROOTFS_BYTES:-0}/" "$tree/init"
+    # apk repositories drop (inst_repo_lines shape): ALPINE_FDE_MIRROR is the
     # production mirror env (lib/cmd/install.sh), community = the sibling URL
-    local apk_mirror="${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"
+    local apk_mirror="${ALPINE_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"
     sed -i "s|@@APK_MIRROR@@|$apk_mirror|" "$tree/init"
     sed -i "s|@@APK_MIRROR_COMMUNITY@@|${apk_mirror%/main}/community|" "$tree/init"
-    if [[ -n "${DEBIAN_FDE_DEBUG_SHELL:-}" ]]; then
+    if [[ -n "${ALPINE_FDE_DEBUG_SHELL:-}" ]]; then
         sed -i 's/@@DEBUG_SHELL@@/1/' "$tree/init"
     else
         sed -i 's/@@DEBUG_SHELL@@//' "$tree/init"
@@ -982,7 +982,7 @@ uki_initrd_pack() {
 #   guest tree -> initramfs -> ukify (pcr-signed) -> sbsign -> .pcrsig extract.
 # Writes <run-dir>/uki-pcrsig.json (the signed prediction) on success.
 # Optional extra args are APPENDED to the kernel cmdline (s12's
-# `debian-fde-console-fallback` flag). They change the .cmdline section bytes,
+# `alpine-fde-console-fallback` flag). They change the .cmdline section bytes,
 # hence the PCR 11 prediction — ukify signs the new prediction, so the extra
 # cmdline is not a tamper, it is a (signed) UKI variant.
 uki_build() {
@@ -1010,7 +1010,7 @@ uki_build() {
     # in-guest cryptenroll), release key, decompressed modules (the .pcrsig
     # JSON travels on its own drive, see uki_pcrsig_disk — NOT in the
     # initramfs, it would change its own prediction)
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$tree/kf0"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$tree/kf0"
     chmod 600 "$tree/kf0"
     cp "$kd/release.pub" "$tree/rel.pub"
     local mdir="$tree/modules"
@@ -1052,7 +1052,7 @@ uki_build() {
     done
     echo "uki-build: unseal-hook closure pinned (hook + 10 tpm2 verbs + openssl + cryptsetup); initrd $(du -k "$run/initrd.cpio" | cut -f1) KiB"
     # cmdline + os-release inputs
-    printf 'ID=debian-fde-harness\nVERSION_ID=1\nNAME=Debian FDE harness UKI\n' >"$run/os-release.txt"
+    printf 'ID=alpine-fde-harness\nVERSION_ID=1\nNAME=Alpine FDE harness UKI\n' >"$run/os-release.txt"
     printf '%s\n' "$UKI_KERNEL_CMDLINE${extra_cmdline:+ $extra_cmdline}" >"$run/cmdline.txt"
     # enter-initrd PCR 11 prediction for THIS exact build (ukify --measure,
     # the same inputs the .pcrsig pol entries are derived from). Consumed by
@@ -1140,7 +1140,7 @@ dp.append(elem)
 for name in ("Boot0002", "Boot0003", "Boot0004"):
     varlist.delete(name)
 
-title = "Debian FDE harness (tampered options)"
+title = "Alpine FDE harness (tampered options)"
 varlist.set_boot_entry(0x0002, title, dp, optdata.encode("utf-16-le"))
 store.write_varstore(fd, varlist)
 VEOF
@@ -1173,15 +1173,15 @@ esp_make() {
 # an unaligned image would be rounded DOWN, truncating the payload; /init dd's
 # the device whole, trims back to the payload size and hash-verifies against
 # the @@ROOTFS_SHA@@ pin baked at build time). Prints "<sha256> <bytes>"; the
-# S-00 scenario passes both back via DEBIAN_FDE_ROOTFS_SHA / DEBIAN_FDE_ROOTFS_
-# BYTES before calling uki_build with the `debian-fde-stage=install` word.
+# S-00 scenario passes both back via ALPINE_FDE_ROOTFS_SHA / ALPINE_FDE_ROOTFS_
+# BYTES before calling uki_build with the `alpine-fde-stage=install` word.
 #
 # DERIVED PAYLOAD (G-E1, ADR-12/§12): the PINNED upstream artifact is the
 # Alpine minirootfs (tests/lib/alpine-artifact.sh — downloaded once,
 # SHA256-verified, fail-closed). The §3.3 additions set cannot be pre-installed
 # without apk transactions, so the harness payload = mini rootfs + the
 # alpine-fde tooling tree (production inst_tooling_copy_cmd shape:
-# bin/lib/hooks/docs -> /opt/debian-fde + /usr/local/bin symlinks) + the
+# bin/lib/hooks/docs -> /opt/alpine-fde + /usr/local/bin symlinks) + the
 # host-closure stub binaries (the s00b "/opt" pattern: tpm2 multitool, jq,
 # flock — each with its own ld-linux + ldd closure, wrapped from
 # /usr/local/bin; a musl guest cannot execute the host's glibc builds
@@ -1217,17 +1217,17 @@ rootfs_payload_image() {
         #    into VCS/harness residue)
         local tree="$tmp/tree" d repo_root
         repo_root=$(cd "$_HERE/../.." && pwd)
-        mkdir -p "$tree/opt/debian-fde" "$tree/usr/local/bin"
+        mkdir -p "$tree/opt/alpine-fde" "$tree/usr/local/bin"
         for d in bin lib hooks docs; do
-            mkdir -p "$tree/opt/debian-fde/$d"
-            if ! cp -r "$repo_root/$d/." "$tree/opt/debian-fde/$d/"; then
+            mkdir -p "$tree/opt/alpine-fde/$d"
+            if ! cp -r "$repo_root/$d/." "$tree/opt/alpine-fde/$d/"; then
                 rm -rf "$tmp"
                 echo "uki-build: tooling copy failed: $d" >&2
                 return 1
             fi
         done
-        ln -sfn /opt/debian-fde/bin/debian-fde "$tree/usr/local/bin/debian-fde"
-        ln -sfn /opt/debian-fde/bin/alpine-fde "$tree/usr/local/bin/alpine-fde"
+        ln -sfn /opt/alpine-fde/bin/alpine-fde "$tree/usr/local/bin/alpine-fde"
+        ln -sfn /opt/alpine-fde/bin/alpine-fde "$tree/usr/local/bin/alpine-fde"
         # 3. stub binaries — the s00b /opt host-closure pattern
         if ! _uki_payload_stub "$tree" tpm2 /opt/tpm/bin /usr/local/bin/tpm2 \
             || ! _uki_payload_stub "$tree" jq /opt/jqbin /usr/local/bin/jq \
@@ -1317,7 +1317,7 @@ PYEOF
 # policy_digest over (d7, d11) release-signed exactly the way `pcrsign`
 # (lib/cmd/pcrsign.sh) signs a finalized enrollment — policy_digest_bin |
 # openssl dgst -sha256 -sign. This is the entry a finalized Mechanism B token
-# (enrl_run -> seal_finalized, G-B6) requires in DEBIAN_FDE_PCRSIG, and the
+# (enrl_run -> seal_finalized, G-B6) requires in ALPINE_FDE_PCRSIG, and the
 # entry the §8.2 hook extracts for a {7,11}-selection token. NOT a fantasy
 # shape: identical fields (pcrs/pkfp/pol/sig — plus the digest-anchor fields
 # d7/d11 the shipped CLI's policy_sign_json also records) and signing recipe
@@ -1371,7 +1371,7 @@ uki_release_key_floor() {
         openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
             -out "$kd/db.key" 2>/dev/null &&
             openssl req -x509 -new -key "$kd/db.key" -days 30 \
-                -subj "/CN=debian-fde-test-release" -out "$kd/db.crt" 2>/dev/null &&
+                -subj "/CN=alpine-fde-test-release" -out "$kd/db.crt" 2>/dev/null &&
             openssl x509 -in "$kd/db.crt" -pubkey -noout >"$kd/release.pub"
     ) || { echo "uki-build: release-key floor reissue FAILED" >&2; return 1; }
 }
@@ -1406,7 +1406,7 @@ uki_wait_hook_prompt() {
 # uki_host_enroll_finalized <efivars-dir> <pcrsig.json> <luks-dev-or-uuid>
 #                           <keydir> <slot0-keyfile> [state-root] — run the
 # REAL production CLI enroll-tpm host-side against the fixture swtpm
-# (DEBIAN_FDE_TCTI=SWTPM_TCTI, exported by swtpm_start), producing the
+# (ALPINE_FDE_TCTI=SWTPM_TCTI, exported by swtpm_start), producing the
 # finalized {7,11} Mechanism B token the §8.2 hook consumes. The caller must
 # have: a finalized baseline expected_pcr7 (uki_baseline_stamp — the booted
 # console's PCR 7) and composed <pcrsig.json> via uki_pcrsig_append_combined.
@@ -1417,13 +1417,13 @@ uki_wait_hook_prompt() {
 # needed. The TPM itself must still be serving (getcap probe + SRK seal).
 uki_host_enroll_finalized() {
     local efivars=$1 pcrsig=$2 dev=$3 keydir=$4 keyfile=$5 root=${6:-}
-    DEBIAN_FDE_ROOT="$root" \
-        DEBIAN_FDE_TCTI="${SWTPM_TCTI:?uki_host_enroll_finalized: swtpm not started}" \
-        DEBIAN_FDE_EFIVARS_DIR="$efivars" \
-        DEBIAN_FDE_KEYDIR="$keydir" \
-        DEBIAN_FDE_LUKS_KEYFILE="$keyfile" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        "$_UKI_REPO_ROOT/bin/debian-fde" enroll-tpm --uuid "$dev" --pcrsig "$pcrsig"
+    ALPINE_FDE_ROOT="$root" \
+        ALPINE_FDE_TCTI="${SWTPM_TCTI:?uki_host_enroll_finalized: swtpm not started}" \
+        ALPINE_FDE_EFIVARS_DIR="$efivars" \
+        ALPINE_FDE_KEYDIR="$keydir" \
+        ALPINE_FDE_LUKS_KEYFILE="$keyfile" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        "$_UKI_REPO_ROOT/bin/alpine-fde" enroll-tpm --uuid "$dev" --pcrsig "$pcrsig"
 }
 
 # uki_baseline_stamp <root> <pcr7hex> — write the finalized baseline.json

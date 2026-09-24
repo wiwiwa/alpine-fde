@@ -20,17 +20,16 @@
 # signature).
 #
 # ADR-18 custody: release.pem may be the ENCRYPTED on-target form. This hook
-# unlocks it ONCE via keys_unlock (ALPINE_FDE_KEY_PASSPHRASE env seam —
-# DEBIAN_FDE_KEY_PASSPHRASE accepted as the compat spelling — or the no-echo
-# TTY prompt) and signs with the UNLOCKED tmpfs path. §9.2 single-unlock: the
+# unlocks it ONCE via keys_unlock (the ALPINE_FDE_KEY_PASSPHRASE env seam or
+# the no-echo TTY prompt) and signs with the UNLOCKED tmpfs path. §9.2 single-unlock: the
 # unlock happens BEFORE the `ukictl build` child, and the staged decrypted
-# path is handed to that child through the staged keydir seam (DEBIAN_FDE_KEYDIR,
+# path is handed to that child through the staged keydir seam (ALPINE_FDE_KEYDIR,
 # the spelling the runtime libs consume) so the build child and the
 # boot-manager re-sign leg share exactly ONE unlock/passphrase prompt per hook
 # invocation. The decrypted copy is zeroized+removed by the hook's single EXIT
 # trap on EVERY exit path. A plaintext release.pem (offline medium) keeps the
-# previous behavior with no passphrase interaction. The canonical ALPINE_FDE_*
-# spelling wins when both are set (§8.1).
+# previous behavior with no passphrase interaction. The env namespace is
+# ALPINE_FDE_* only (§8.1).
 #
 # ADR-8: a failing build is a LOUD failure — the nonzero exit propagates to
 # the kernel hook runner, the failure marker is persisted under
@@ -44,8 +43,7 @@
 # ALPINE_FDE_ESP (ESP mount, default /efi), ALPINE_FDE_KEYDIR (default
 # /etc/alpine-fde/keys), ALPINE_FDE_KEY_PASSPHRASE (credential-agent seam,
 # ADR-18), ALPINE_FDE_LIB_DIR (runtime; derived from this script's location,
-# falling back to /usr/share/alpine-fde/lib) — every one also under its
-# DEBIAN_FDE_* compat spelling.
+# falling back to /usr/share/alpine-fde/lib).
 
 set -u
 
@@ -63,20 +61,15 @@ case $event in
         ;;
 esac
 
-# --- dual env seam: ALPINE_FDE_* canonical, DEBIAN_FDE_* compat ------------------
-ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-${DEBIAN_FDE_BIN:-alpine-fde}}
-ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-${DEBIAN_FDE_ROOT:-}}
-ALPINE_FDE_ESP=${ALPINE_FDE_ESP:-${DEBIAN_FDE_ESP:-/efi}}
-ALPINE_FDE_KEYDIR=${ALPINE_FDE_KEYDIR:-${DEBIAN_FDE_KEYDIR:-/etc/alpine-fde/keys}}
-ALPINE_FDE_LIB_DIR=${ALPINE_FDE_LIB_DIR:-${DEBIAN_FDE_LIB_DIR:-}}
-if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
-    ALPINE_FDE_KEY_PASSPHRASE=$DEBIAN_FDE_KEY_PASSPHRASE
-fi
-# keys_unlock consumes the DEBIAN_FDE_KEY_PASSPHRASE spelling: hand the
-# canonical value down (never the reverse when the canonical is set)
+# --- env seam: the ALPINE_FDE_* namespace (§8.1) ---------------------------------
+ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-alpine-fde}
+ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-}
+ALPINE_FDE_ESP=${ALPINE_FDE_ESP:-/efi}
+ALPINE_FDE_KEYDIR=${ALPINE_FDE_KEYDIR:-/etc/alpine-fde/keys}
+ALPINE_FDE_LIB_DIR=${ALPINE_FDE_LIB_DIR:-}
+# keys_unlock consumes ALPINE_FDE_KEY_PASSPHRASE: export it when set
 if [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
-    DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
-    export DEBIAN_FDE_KEY_PASSPHRASE
+    export ALPINE_FDE_KEY_PASSPHRASE
 fi
 
 FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
@@ -135,11 +128,11 @@ if keys_is_encrypted "$_hook_keyfile"; then
     _hook_keyfile=$_hook_unlocked
     # staged keydir seam (§9.2 single-unlock): a tmpfs view of the keydir whose
     # release.pem IS the decrypted copy, handed to the `ukictl build` child via
-    # DEBIAN_FDE_KEYDIR (the spelling lib/keys.sh keys_dir consumes) so the
+    # ALPINE_FDE_KEYDIR (the spelling lib/keys.sh keys_dir consumes) so the
     # child classifies it plaintext and performs ZERO unlock interaction
     # instead of prompting a second time
-    _hook_stage_keydir=$(mktemp -d "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-hook-keys.XXXXXX") \
-        || guard_fail "staging keydir mktemp failed (${DEBIAN_FDE_TMPDIR:-/dev/shm} usable?)"
+    _hook_stage_keydir=$(mktemp -d "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-hook-keys.XXXXXX") \
+        || guard_fail "staging keydir mktemp failed (${ALPINE_FDE_TMPDIR:-/dev/shm} usable?)"
     ln -s "$_hook_keyfile" "$_hook_stage_keydir/release.pem"
     ln -s "$ALPINE_FDE_KEYDIR/release.crt" "$_hook_stage_keydir/release.crt"
     # the child's keys_check judges completeness on the staged view: mirror
@@ -157,7 +150,7 @@ if keys_is_encrypted "$_hook_keyfile"; then
 fi
 
 if [ -n "$_hook_stage_keydir" ]; then
-    DEBIAN_FDE_KEYDIR="$_hook_stage_keydir" "$ALPINE_FDE_BIN" ukictl build "$kver"
+    ALPINE_FDE_KEYDIR="$_hook_stage_keydir" "$ALPINE_FDE_BIN" ukictl build "$kver"
 else
     "$ALPINE_FDE_BIN" ukictl build "$kver"
 fi

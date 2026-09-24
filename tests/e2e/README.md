@@ -7,7 +7,7 @@ enrolls in-guest (Mechanism A″ flags), consumes the release-key-signed
 `.pcrsig` and reaches the `unlocked` sentinel (`Volume … activated with a LUKS
 token.` — table key `unlocked` in `tests/sentinels-257.13.txt`; console keys
 are referenced by NAME throughout this README — the strings drift across
-systemd releases, the table is the pin) + `debian-fde: UNSEALED`;
+systemd releases, the table is the pin) + `alpine-fde: UNSEALED`;
 `s01-happy-lite` proves the tamper side (SB-off → PCR 7 drift → unseal
 refused → retry cap → locked out, no prompt). Wave 3 adds the §10 fail-closed
 scenario family: `s05` (SB-off row + PCR forensics), `s06` (the §12 trap:
@@ -27,7 +27,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 - **`s00-bootstrap-lite.sh`** — the full §12 S-00: installer UKI (passphrase
   unlock from the embedded kf0, ZERO console input) → populate the minimal
   rootfs (§3.3) from the SHA256-pinned artifact → §3.3 size-budget assertion
-  (budget var `DEBIAN_FDE_ROOTFS_BUDGET_MIB` is the pin of record; planning
+  (budget var `ALPINE_FDE_ROOTFS_BUDGET_MIB` is the pin of record; planning
   target ≤1.4 GB) + package count → G-T11b disk-side key-material scans →
   `audit --init` finalizes the baseline via the REAL CLI (fail-closed unless
   the efivars seam reports SecureBoot=1 SetupMode=0 — the Wave-1 guard) →
@@ -49,7 +49,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
   evidence in the run dirs). Measured size under btrfs-default:
   **680 MiB / 322 packages** (du of `@` incl. the shipped btrfs-progs
   binaries) — the budget pin stays the §3.3 planning target with the
-  measurement recorded at `DEBIAN_FDE_ROOTFS_BUDGET_MIB` (s00). The legacy
+  measurement recorded at `ALPINE_FDE_ROOTFS_BUDGET_MIB` (s00). The legacy
   flat fs remains production-only (`install --fs ext4`); no scenario
   exercises it, so the harness carries no ext4 seam. The pristine s00b
   cache is generation-marked (`FORMAT: btrfs-2`): pre-btrfs disks (ext4
@@ -98,17 +98,17 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 |---|---|
 | `../run-e2e.sh` | Orchestrator: env-check → harness self-test (infra smoke) → named/default scenarios (sequential by default; `-j N` runs up to N concurrent workers, with the s00→s00b chain always first and alone — see tests/README.md "Runner contract details") → per-scenario TAP output → G-T11b artifact scan → aggregated results JSON (`e2e/.runs/results-<ts>.json`) → nonzero exit on failure. Registry inside maps `s00, s00b, s01..s17` (the original §10/§12 matrix rows) PLUS the literal W2b rows `s19..s22` (§10 BASE matrix + §12 S-19..S-22) plus `s18` (appended at runtime so the literal table stays §10/§12-matrix-only). A registered id with NO scenario file is a FAILURE (`missing`), never a pending pass. The W2b scenarios bootstrap IN-SCENARIO (each builds its own fixtures and consumes no s00/s00b state — they are not in `_STATE_CONSUMERS`), so the `-j` s00/s00b hoist cannot misorder them and they run as ordinary independent workers. |
 | `s00-bootstrap-lite.sh` | Full §12 S-00 (see "Full-bootstrap wave" above): installer UKI boot → passphrase unlock (one documented prompt, zero console input) → pinned-artifact rootfs populate (§3.3) → size budget + package count → disk-side scans → real-CLI `audit --init` baseline finalize (SB-state-guarded) → G-T13 prediction check → ESP-size assertion. Prints `RUNDIR <path>`. |
-| `s00b-enroll-cache.sh` | §12 S-00b + S-01 (continues s00): in-guest production-CLI enroll (ensure-once), pristine-state cache with SHA manifest, then the zero-input `login:` happy path. Consumes `DEBIAN_FDE_S00_STATE` (set by run-e2e.sh when s00 ran in the same invocation), else the verified cache, else self-bootstraps. Prints `RUNDIR <path>` (the ENROLLED state consumed by s01/s05/s06/s07/s09/s12/s13/s18). |
+| `s00b-enroll-cache.sh` | §12 S-00b + S-01 (continues s00): in-guest production-CLI enroll (ensure-once), pristine-state cache with SHA manifest, then the zero-input `login:` happy path. Consumes `ALPINE_FDE_S00_STATE` (set by run-e2e.sh when s00 ran in the same invocation), else the verified cache, else self-bootstraps. Prints `RUNDIR <path>` (the ENROLLED state consumed by s01/s05/s06/s07/s09/s12/s13/s18). |
 | `s09-tpm-da-locked.sh` | §10 DA-locked row (G-T15): armed + enforced dictionary-attack lockout on swtpm; boots, refuses, bounded 3-strike fallback, clean poweroff; §7.1 budget-preservation asserted via the enforcement probe (see "Full-bootstrap wave" for the swtpm-leniency caveat). |
 | `s18-foreign-pcrsig.sh` | §6.1 foreign-signer negative control (G-T5): correct pol entries, foreign signature → firmware boots (outer sig ours) → policy refuses → bounded fallback → poweroff (see "Full-bootstrap wave"). |
-| `s19-bcache-crash.sh` | §10 cache-SSD-failure row + §12 S-19 (hybrid bcache crash consistency) on the Alpine contract: writethrough bcache stack laid in-guest, raw-offset rescue read on member loss (a CLEAN backing never fabricates a cache-less bcache0 — asserted), replacement-cache re-attach, production `alpine-fde finalize` (recovery-passphrase authorized, Mechanism B {PCR 7, PCR 11} token upgrade, ADR-18 release.pem), host `pcrsign` {7,11} re-sign over the rebuilt ESP, zero-input token unlock end-to-end. Pins `debian-fde-unlock=oracle`: the raw-backing topology cannot host the §8.2 hook's crypttab resolution (documented in the header). |
-| `s20-raid1-member-loss.sh` | §10 RAID1 rows + §12 S-20: btrfs raid1 across two LUKS members; plain mount of a missing-member pool FAILS closed and `-o degraded` is the only rescue; production finalize upgrades BOTH members to the Mechanism B {7,11} token (recovery rekeyed to a §13-floored passphrase first — the Stage-1 stand-in); zero-input token unlock + non-degraded full-pool reassembly, canary intact. Pins `debian-fde-unlock=oracle` for the fed sessions (documented). |
+| `s19-bcache-crash.sh` | §10 cache-SSD-failure row + §12 S-19 (hybrid bcache crash consistency) on the Alpine contract: writethrough bcache stack laid in-guest, raw-offset rescue read on member loss (a CLEAN backing never fabricates a cache-less bcache0 — asserted), replacement-cache re-attach, production `alpine-fde finalize` (recovery-passphrase authorized, Mechanism B {PCR 7, PCR 11} token upgrade, ADR-18 release.pem), host `pcrsign` {7,11} re-sign over the rebuilt ESP, zero-input token unlock end-to-end. Pins `alpine-fde-unlock=oracle`: the raw-backing topology cannot host the §8.2 hook's crypttab resolution (documented in the header). |
+| `s20-raid1-member-loss.sh` | §10 RAID1 rows + §12 S-20: btrfs raid1 across two LUKS members; plain mount of a missing-member pool FAILS closed and `-o degraded` is the only rescue; production finalize upgrades BOTH members to the Mechanism B {7,11} token (recovery rekeyed to a §13-floored passphrase first — the Stage-1 stand-in); zero-input token unlock + non-degraded full-pool reassembly, canary intact. Pins `alpine-fde-unlock=oracle` for the fed sessions (documented). |
 | `s21-finalize-guard.sh` | §10 "first boot with Secure Boot OFF" + §12 S-21, ADR-20 AMENDED: an `installed`-state disk staged with the REAL advisory oneshot (`/etc/init.d/alpine-fde-finalize` + the rc-update `default` record — byte-for-byte the installer's Stage-1 step 7; NO systemd anywhere). Boot A (SB-off, fed boots ride the SHIPPED §8.2 hook unlock): the oneshot stays ADVISORY (rc 0 + the not-finalized warning + the SB-off reading), the service completion (fin_service_main) fails CONTAINED to the ADR-8 retry-next-boot marker — no baseline capture, no token upgrade, no state flip — and the guided `alpine-fde finalize` halts fail-closed (rc 64) at the fw_sb_state gate. Boot B (SB-on, positive control): the shared completion chain runs end-to-end (passphrase verify → release.pem ADR-18 → audit --init → {7,11} upgrade → ephemeral-purge crash-skip → MOTD banner stripped line-exactly → state `finalized` LAST); host asserts the token binds [7,11] on keyslot 1. |
 | `s22-handoff-immunity.sh` | §12 S-22 + §2.1 T2c provisional-window rows, ADR-20 AMENDED: the window carries a REAL PCR-11-only provisional token beside recovery keyslot 0 (host-side `seal_provisional` + token commit — the installer's step-6 recipe against the fixture swtpm). Boot 1: recovery-at-keyslot-0 is the only way in from install. Boot 2: the STANDING signed UKI auto-unseals with ZERO console input. Host completion leg: the guided finalize drives the shared Stage-2==Stage-3 chain into the {7,11} binding (token on keyslot 1, I1 two-keyslot at-rest). Boot 3: a tampered-cmdline UKI is REFUSED (the PolicyPCR digest misses) → 3 wrong passphrases → 3-strike fail-closed, metadata untouched. |
-| `s01-happy-lite.sh` | LITE tamper variant: boots the s00-enrolled disk under SB-OFF (stock) vars → PCR 7 drift → policy must refuse → fallback prompt → 3 wrong passphrases. Reuses s00 artifacts via `DEBIAN_FDE_E2E_STATE` (set by run-e2e.sh). |
+| `s01-happy-lite.sh` | LITE tamper variant: boots the s00-enrolled disk under SB-OFF (stock) vars → PCR 7 drift → policy must refuse → fallback prompt → 3 wrong passphrases. Reuses s00 artifacts via `ALPINE_FDE_E2E_STATE` (set by run-e2e.sh). |
 | `s05-sb-off.sh` | §10 row "SB disabled": SB-off boot of the enrolled disk, PCR 7 drift asserted against the enrolled boot's console (and PCR 11 asserted UNCHANGED — the refusal is purely PCR 7), refused → retry cap → poweroff. |
 | `s06-token-trap.sh` | §12 trap case / I3: SB-off vars + `tpm2_pubkey` swapped for a VALID foreign RSA key via host-side `cryptsetup token remove` + `token import` + otherwise-valid `.pcrsig` → unseal must STILL fail. |
-| `s07-loader-options.sh` | §12 cmdline-tamper row (I5): a release-key-signed UKI VARIANT whose `.cmdline` carries one extra word is booted with the STALE (clean-cmdline) `.pcrsig` payload — the attacker's primitive, since the payload drive is unsigned on the wire. The stub measures the tampered effective cmdline into PCR 11 → the trial digest matches NO signed entry → refused. Guest `debian-fde-cmdline` prints (twice, printk-interleave-robust) prove the word reached the kernel. See the deviation note in the scenario header for why the literal loader-entry vector is not exercisable on trixie. |
+| `s07-loader-options.sh` | §12 cmdline-tamper row (I5): a release-key-signed UKI VARIANT whose `.cmdline` carries one extra word is booted with the STALE (clean-cmdline) `.pcrsig` payload — the attacker's primitive, since the payload drive is unsigned on the wire. The stub measures the tampered effective cmdline into PCR 11 → the trial digest matches NO signed entry → refused. Guest `alpine-fde-cmdline` prints (twice, printk-interleave-robust) prove the word reached the kernel. See the deviation note in the scenario header for why the literal loader-entry vector is not exercisable on trixie. |
 | `s12-wrong-passphrase.sh` | §10 passphrase way out: token refused first (SB-off, PCR 7 drift, no key file), then the harness-only console passphrase loop reads 3 lines from `/dev/console` into plain `cryptsetup open --key-file` attaches. Boot A: 3 wrong → exhausted → poweroff. Boot B (recovery positive control): wrong, wrong, correct slot-0 passphrase → UNSEALED. |
 | `s13-token-tamper.sh` | Token-tamper suite (I3), SB-enrolled vars, one boot per variant: `pubkey-swap` / `blob-corrupt` / `policy-corrupt` / `version-99` (unknown field) — each host-tampered via `cryptsetup token import`, each must fail closed. |
 | `../lib/keys-fixture.sh` | Throwaway PK/KEK/db ceremony + offline OVMF var enrollment via `virt-fw-vars` (`keys_vars_enrolled/unenrolled/get/secureboot_on`). |
@@ -136,7 +136,7 @@ Verified by direct execution, 2026-09-14:
   .cmdline/.osrel/.sbat/.pcrpkey/.pcrsig`; `.pcrsig` JSON carries 4 entries
   (ukify 261 default 4-phase ladder), `sbverify` validates the release-cert
   signature. Guest closure gate passes.
-- **qemu.sh + serial**: s00-lite boots to `debian-fde-harness: init started` …
+- **qemu.sh + serial**: s00-lite boots to `alpine-fde-harness: init started` …
   clean poweroff in ~134 s TCG wall time; console fully captured to
   `<rundir>/console.log`; PCR 0/7/11 all print (after the PCR-parse fix, see
   below); OVMF+TPM passthrough works; the `cryptenroll_enrolled` sentinel
@@ -149,7 +149,7 @@ Verified by direct execution, 2026-09-14:
   in `.runs/results-*.json`).
 - **s00-lite assertions**: **16/16 pass** — including the STRONG tier:
   `.pcrsig` consumed by the real 257.13 cryptsetup, `Volume root activated
-  with a LUKS token.`, `debian-fde: UNSEALED`, clean poweroff.
+  with a LUKS token.`, `alpine-fde: UNSEALED`, clean poweroff.
 - **s01-lite assertions**: **11/11 pass** — SB-off boot: TPM2 unseal refused
   (PCR 7 drift), retry cap reached, interactive prompt never appears, never
   unlocked, clean poweroff.
@@ -163,7 +163,7 @@ Verified by direct execution, 2026-09-14:
   pubkey moved) + otherwise-valid `.pcrsig` → unseal refused, fail closed.
 - **s07-lite (Wave 3)**: **15/15 pass** — release-key-signed UKI variant with
   one extra cmdline word + the STALE (clean-cmdline) `.pcrsig` payload:
-  `debian-fde-cmdline` shows the tamper word reached the kernel, PCR 11
+  `alpine-fde-cmdline` shows the tamper word reached the kernel, PCR 11
   drifted, the trial digest matched NO signed entry (the `pcr_sig_missing`
   sentinel), refused → poweroff. Host-side assertions prove the shipped
   `.pcrsig` is the stale one (pol divergence).
@@ -244,7 +244,7 @@ formula over `8e6fd90d…` = `aafbc3cf…` = the session policy digest the guest
 printed = the signed entry's `pol`. Unseal completed ("Completed TPM2 key
 unsealing in 802 ms"), the `unlocked` sentinel (`Volume … activated with a
 LUKS token.`, table key `unlocked`),
-`debian-fde: UNSEALED`.
+`alpine-fde: UNSEALED`.
 
 For completeness, the PCR 11 section-chain model that both measure versions
 implement (and the sd-stub executes, in `unified_sections[]` enumeration
@@ -265,7 +265,7 @@ bit-exactly by simulating the PE section table of the preserved UKI.
    VALUE (pre/post PCR comparison) and falls back to
    `tpm2_pcrextend 11:sha256=H("enter-initrd")` (host closure under
    `/opt/tpm`) — identical extend value, the PCR does not care which tool
-   computed it. New assertion surface: `debian-fde-pcr-postphase sha256:11=…`.
+   computed it. New assertion surface: `alpine-fde-pcr-postphase sha256:11=…`.
 2. **The signature is ALSO installed as `/etc/systemd/tpm2-pcr-signature.json`**
    (`CONF_PATHS("systemd")` + default name — the dracut/trixie initrd
    pattern): the cryptsetup-tokens plugin still receives
@@ -299,10 +299,10 @@ Since a key file would displace the token (fix 3), s01 runs the unlock with
 `tries=1`: the single token attempt is REFUSED (SB-off → PCR 7 drift → the
 static `PolicyPCR(7)` term of the sealed object no longer matches; console:
 the `tpm2_refused` sentinel) → the `retry_cap` sentinel →
-`debian-fde: PROMPT-FAILED` → clean poweroff.
+`alpine-fde: PROMPT-FAILED` → clean poweroff.
 
 **s12's harness-only console passphrase loop** (gated behind the
-`debian-fde-console-fallback` cmdline word on a signed UKI variant): after a
+`alpine-fde-console-fallback` cmdline word on a signed UKI variant): after a
 REFUSED token attempt, `/init` reads up to 3 lines from `/dev/console`
 (busybox `read -t 20 -r`; the kernel console comes up canonical+echo, ICRNL
 folds the serial NL, so no `stty` repair is needed — nothing in this initrd
@@ -395,10 +395,10 @@ a run with zero scenarios executed is also a failure. The literal table in
 `run-e2e.sh` (grep'd by `tests/unit/e2e_infra_smoke.sh`) keeps one row per
 matrix id with the current script name as documentation. Scenario scripts
 that consume the ENROLLED s00b artifacts (`s01 s05 s06 s07 s09 s12 s13
-s18`) honor `DEBIAN_FDE_E2E_STATE`; **each snapshots the shared state into
+s18`) honor `ALPINE_FDE_E2E_STATE`; **each snapshots the shared state into
 its own run dir at start** and keeps the dir's mtime fresh — sibling
 scenarios prune `.runs` to the 2 newest dirs globally (never the dirs listed
-in `DEBIAN_FDE_PROTECT_DIRS`, which `run-e2e.sh` exports for the state dirs
+in `ALPINE_FDE_PROTECT_DIRS`, which `run-e2e.sh` exports for the state dirs
 its own invocation chains on), and a mid-boot prune
 of the shared state dir or of an actively-written run dir otherwise unlinks
 `console.log` mid-boot (observed live 2026-09-14, s07 first attempt).
@@ -406,7 +406,7 @@ Artifacts per run live in `e2e/.runs/<scenario>-<ts>/` (gitignored):
 console.log, qemu.{stdout,stderr}, vars, keys, disk.img, UKI, swtpm state.
 Keep big artifacts out of git and out of the repo root. Under a parallel
 `-j` invocation the runner protects ALL existing `.runs` dirs from these
-prunes for the whole run (via the same `DEBIAN_FDE_PROTECT_DIRS` filter) —
+prunes for the whole run (via the same `ALPINE_FDE_PROTECT_DIRS` filter) —
 a peer's rundir is never pruned mid-run; see tests/README.md.
 
 ## Results provenance (assembly convention)
@@ -427,7 +427,7 @@ Validated green under TCG against the PRIOR (Debian-era) contract: s20
 2026-09-19 (54 asserts, wall 912 s), s19 2026-09-20 (43 asserts, wall 992 s;
 first-ever validation), s21/s22 in the prior same-day pass (28/30 asserts).
 The 2026-09-21 Alpine-contract migration (s19/s20 path re-pin + the documented
-`debian-fde-unlock=oracle` pin; s21 re-written to the amended ADR-20 semantics
+`alpine-fde-unlock=oracle` pin; s21 re-written to the amended ADR-20 semantics
 — advisory oneshot + contained service failure + fail-closed SB gate; s22
 re-written to the amended T2c provisional-window shape with a real PCR-11
 token) is static-verified (`bash -n`, product-message cross-checks against
@@ -443,7 +443,7 @@ silent):
   tooling tail; the `finalized` write stays scenario-ephemeral in-guest.
   `sp_etc_dir` resolves `<root>/etc/alpine-fde/` with NO legacy fallback
   (lib/baseline.sh), so the host-side baseline stub must live THERE (the
-  retired `/etc/debian-fde` path is denied by tests/unit/residue_guard.sh in
+  retired `/etc/alpine-fde` path is denied by tests/unit/residue_guard.sh in
   shipped paths).
 - **Mechanism B entry shape** (s20/s21/s22): finalize upgrades tokens via
   `seal_upgrade_token` and NEVER invokes cryptenroll; members enter finalize
@@ -469,7 +469,7 @@ silent):
   hook is the unlock of record and its bounded recovery loop feeds
   prompt-synchronized via `uki_wait_hook_prompt` (the hook's read has NO
   timeout); s19/s20's multi-command fed sessions instead pin the opt-in
-  `debian-fde-unlock=oracle` unlock, whose console-fallback + DEBUG SHELL
+  `alpine-fde-unlock=oracle` unlock, whose console-fallback + DEBUG SHELL
   seams they were built on (documented in both headers).
 
 ## Remaining gaps / follow-ups
@@ -522,7 +522,7 @@ silent):
 
 ## Budget / accelerator
 
-The accelerator is autodetected (`DEBIAN_FDE_ACCEL=kvm|tcg|auto`, default
+The accelerator is autodetected (`ALPINE_FDE_ACCEL=kvm|tcg|auto`, default
 auto — see tests/README.md "Runner contract details"): on a host with a
 working `/dev/kvm` every guest boots under KVM; otherwise TCG exactly as
 before. Every run logs the choice once (`qemu-accel: using <accel> …`) and

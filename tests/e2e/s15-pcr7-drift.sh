@@ -14,7 +14,7 @@
 #           OWN prompt -> UNSEALED; console records the enrolled PCR 7.
 #   host    the REAL production CLI enrolls the finalized {7,11} token
 #           (combined .pcrsig entry over the enrolled d7 + the build's
-#           enter-initrd d11); real `debian-fde audit` run against a live
+#           enter-initrd d11); real `alpine-fde audit` run against a live
 #           (synthesized) drifted PCR 7 -> exit 1 + "pcr7 DRIFT";
 #           `audit --accept --yes` re-baselines -> exit 0. (§9.4 detection,
 #           REAL CLI)
@@ -71,9 +71,9 @@ CONSOLE="$RUN/console.log"
 T0=$SECONDS
 
 # CR-02/MD-03: prunes must spare the invocation's chained state dirs
-# (DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 while IFS= read -r _d; do
-    case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
+    case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
     rm -rf "$_d"
 done < <(find "$TESTS/e2e/.runs" -mindepth 1 -maxdepth 1 -type d -printf "%T@\t%p\n" 2>/dev/null | sort -rn | tail -n +3 | cut -f2-)
 
@@ -120,10 +120,10 @@ _fresh_pcrs() {
 # shellcheck disable=SC2120  # bare calls (plain audit) are intentional
 _audit_cli() {
     _ensure_tpm || { echo "s15: swtpm not serving (audit)"; return 64; }
-    DEBIAN_FDE_ROOT="$RUN/rootfs" \
-        DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-        DEBIAN_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
-        DEBIAN_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
+    ALPINE_FDE_ROOT="$RUN/rootfs" \
+        ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+        ALPINE_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
+        ALPINE_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
         "$REPO/bin/alpine-fde" audit "$@"
 }
 _host_wipe_enrollment() {
@@ -141,7 +141,7 @@ _host_wipe_enrollment() {
     done
 }
 console_pcr() { # <label> <idx>
-    grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2
+    grep -oE "alpine-fde-pcr sha256:$2=[0-9a-f]{64}" "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2
 }
 
 boot_and_wait() {
@@ -215,7 +215,7 @@ echo "# boot v1-baseline (token-less disk -> hook recovery loop, TCG, up to $QEM
 for _attempt in 1 2; do
     qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     qemu_wait "$RUN" "$QEMU_TIMEOUT"
     cp "$CONSOLE" "$RUN/console-v1-baseline.log"
@@ -252,7 +252,7 @@ _mkcertvar dbx dbx-cert-v1
 # shellcheck disable=SC1091
 source "$REPO/lib/firmware.sh"
 assert_contains "efivars fixture: SB on, SetupMode=0" \
-    "$(DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" fw_sb_state)" \
+    "$(ALPINE_FDE_EFIVARS_DIR="$EFIVARS" fw_sb_state)" \
     "secureboot=1 setup_mode=0"
 
 D7_ENROLLED=$(console_pcr "v1-baseline" 7)
@@ -280,7 +280,7 @@ assert_eq "combined .pcrsig entry pol == policy_digest(enrolled d7, enter-initrd
     "$(jq -r '.sha256[-1].pol' "$RUN/uki-6.2.0-combined.json")"
 # the payload drive of the enrolled boots carries the combined entry
 uki_pcrsig_disk "$RUN/pcrsig-combined.img" "$RUN/uki-6.2.0-combined.json" || exit 1
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 uki_host_enroll_finalized "$EFIVARS" "$RUN/uki-6.2.0-combined.json" \
     "$RUN/disk.img" "$RUN/keys" "$RUN/kf-slot0" "$RUN/rootfs" || {
@@ -317,7 +317,7 @@ echo "# simulating the dbx update: extra cert in dbx (firmware will measure a ne
 cp "$RUN/vars-enrolled.fd" "$RUN/vars-drifted.fd"
 assert_rc "virt-fw-vars: dbx += throwaway cert" 0 \
     virt-fw-vars -i "$RUN/vars-drifted.fd" -o "$RUN/vars-drifted.fd" \
-        --add-dbx-cert "$DEBIAN_FDE_TEST_GUID" "$RUN/keys/KEK.crt"
+        --add-dbx-cert "$ALPINE_FDE_TEST_GUID" "$RUN/keys/KEK.crt"
 
 # ONE boot: the hook refuses (stale d7) and its bounded loop reads 3 WRONG
 # answers fed prompt-synchronized, ending in the 3-strike fail-closed poweroff
@@ -327,7 +327,7 @@ echo "# boot drifted: dbx-updated vars, stale {7,11} seal (TCG, up to $QEMU_TIME
 qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-drifted.fd" "$RUN/tpm" "$RUN/pcrsig-combined.img"
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "debian-fde-drift-wrong-passphrase-$n"
+        feed_line "$RUN/serial.sock" "alpine-fde-drift-wrong-passphrase-$n"
     else
         _assert_result not-ok "[drift] hook awaiting recovery passphrase $n/3" \
             "no prompt $n in console"

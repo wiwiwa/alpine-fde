@@ -294,7 +294,7 @@ rule_proxy() {
 }
 
 # --- rule D: orphaned serial_feed_race processes (test shell + spinners) -----------
-# Forked subshells (the DEBIAN_FDE_FEEDRACE_LOAD spinners) keep the parent
+# Forked subshells (the ALPINE_FDE_FEEDRACE_LOAD spinners) keep the parent
 # cmdline, so one pattern covers both; only ORPHANS (dead parent) are killed.
 rule_orphans() {
     local pid ppid args
@@ -353,7 +353,7 @@ PRUNE_CAP_MB="${HARNESS_CLEANUP_PRUNE_CAP_MB:-8192}"       # (b) trigger: total 
 PRUNE_FLOOR_MB="${HARNESS_CLEANUP_PRUNE_FLOOR_MB:-6144}"   # (b) shrink until under this
 PRUNE_FRESH_MIN="${HARNESS_CLEANUP_PRUNE_FRESH_MIN:-10}"   # (c) in-flight window (minutes)
 # (d) STATE-PROVIDER EXEMPTION (2026-09-23): these prefixes are the state
-# every consumer scenario snapshots from (s00b-enroll-* is DEBIAN_FDE_E2E_STATE
+# every consumer scenario snapshots from (s00b-enroll-* is ALPINE_FDE_E2E_STATE
 # for the whole s0x ladder; s00-bootstrap-* feeds s00b). Losing their newest
 # dir to the total-cap shrink cascades into instant aborts across every
 # downstream scenario (observed live: s08-s17 abort cascade). Their size is
@@ -488,7 +488,7 @@ cmd_prune_runs() {
 # sweep (see header): remove only the TMPDIR this registry created. Guarded by
 # the dfde-e2e- basename so an inherited value can never widen the rm.
 cmd_registry_exit() {
-    local d="${DEBIAN_FDE_E2E_TMPDIR:-}"
+    local d="${ALPINE_FDE_E2E_TMPDIR:-}"
     [[ -n "$d" ]] || return 0
     if [[ "$(basename "$d")" != dfde-e2e-* ]]; then
         echo "harness-cleanup: refusing to remove odd TMPDIR '$d'" >&2

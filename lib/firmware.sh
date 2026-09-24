@@ -1,21 +1,21 @@
 #!/bin/sh
 # firmware.sh — efivarfs seam: read Secure Boot / SetupMode / PK state from an
-# INJECTABLE efivars directory (env DEBIAN_FDE_EFIVARS_DIR, default
+# INJECTABLE efivars directory (env ALPINE_FDE_EFIVARS_DIR, default
 # /sys/firmware/efi/efivars). EFI variable files are a 4-byte u32 attributes
 # header followed by the payload; payload byte 0 is the SecureBoot/SetupMode value.
 
-if [ -n "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_FIRMWARE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_FIRMWARE_LOADED=1
+ALPINE_FDE_FIRMWARE_LOADED=1
 
 # Self-load common.sh (info/die) — the §9.1 step-4 guest one-liner
 # `. /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll …` runs in a fresh
 # chroot shell where nothing is preloaded. Pattern: lib/install-state.sh.
-_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+_is_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
-    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
+    # shellcheck disable=SC1090  # resolved from ALPINE_FDE_CMD_DIR / install tree
     . "$_is_lib_dir/common.sh"
 fi
 
@@ -27,9 +27,9 @@ FW_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
 # no home here; PK/SecureBoot/SetupMode are EFI_GLOBAL_VARIABLE-only).
 FW_GUID_IMAGE_SECURITY='d719b2cb-3d3a-4596-a3bc-dad00e67656f'
 
-# fw_efivars_dir — effective efivars directory ($DEBIAN_FDE_EFIVARS_DIR overrides)
+# fw_efivars_dir — effective efivars directory ($ALPINE_FDE_EFIVARS_DIR overrides)
 fw_efivars_dir() {
-    printf '%s\n' "${DEBIAN_FDE_EFIVARS_DIR:-/sys/firmware/efi/efivars}"
+    printf '%s\n' "${ALPINE_FDE_EFIVARS_DIR:-/sys/firmware/efi/efivars}"
 }
 
 # fw_find_var DIR NAME — print the efivarfs file for NAME; rc 1 if none exists.

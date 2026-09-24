@@ -1,16 +1,16 @@
-# tests/ — Debian FDE test harness
+# tests/ — Alpine FDE test harness
 
 Everything in `docs/Architecture.md` §10 (failure matrix) becomes an automated
 scenario here (§12): QEMU/OVMF guests on a software TPM (swtpm), asserted via
 serial-console sentinels pinned in `tests/sentinels-257.13.txt`. This tree is
-the harness; `lib/` and `bin/` (repo root) hold the Debian FDE tooling itself.
+the harness; `lib/` and `bin/` (repo root) hold the Alpine FDE tooling itself.
 
 ## Running
 
 ```sh
 tests/env-check.sh          # exit 1 + MISSING list if a prereq is absent
 tests/run-unit.sh           # runs tests/unit/*.sh in parallel (default: nproc), TAP-ish output
-tests/run-unit.sh -j 2      # explicit concurrency (or DEBIAN_FDE_TEST_JOBS)
+tests/run-unit.sh -j 2      # explicit concurrency (or ALPINE_FDE_TEST_JOBS)
 tests/run-unit.sh 'pattern' # subset by filename glob, e.g. the swtpm smoke test
 tests/run-e2e.sh            # harness self-test, then every registered scenario
 tests/run-e2e.sh s01        # one scenario (runs the self-test first either way)
@@ -38,7 +38,7 @@ that observes no assertions at all (`1..0`) fails.
 Runner contract details:
 
 - **Accelerator (KVM autodetect)**: `tests/lib/qemu.sh` picks the QEMU
-  accelerator from `DEBIAN_FDE_ACCEL` (`kvm` | `tcg` | `auto`, default
+  accelerator from `ALPINE_FDE_ACCEL` (`kvm` | `tcg` | `auto`, default
   `auto`). `auto` uses KVM when `/dev/kvm` exists, is writable, AND a probe
   guest (`qemu-system-x86_64 -accel kvm -machine none -display none`) starts;
   otherwise TCG exactly as before (TCG argv is byte-identical — the
@@ -47,10 +47,10 @@ Runner contract details:
   per scenario) will differ between the two. The choice is logged once per
   run with the greppable marker `qemu-accel: using <kvm|tcg> (...)` — the
   runner logs it before any scenario boots and lands it in the results JSON
-  (`"accel"`); an explicit `DEBIAN_FDE_ACCEL=kvm` that cannot be honored is a
+  (`"accel"`); an explicit `ALPINE_FDE_ACCEL=kvm` that cannot be honored is a
   loud failure (env-class), never a silent TCG downgrade.
 - **Parallel matrix (`-j N`)**: `-j N` / `-jN` / `--jobs=N` (or env
-  `DEBIAN_FDE_E2E_JOBS`, default 1 = sequential) runs up to N scenarios
+  `ALPINE_FDE_E2E_JOBS`, default 1 = sequential) runs up to N scenarios
   concurrently. Dependency phases: the state chain `s00 -> s00b` always runs
   FIRST and always sequentially, whatever the requested order; the remaining
   scenarios are independent state consumers (each snapshots its inputs into
@@ -60,7 +60,7 @@ Runner contract details:
   sequential mode.
 - **Prune safety under `-j`**: with jobs > 1 the runner feeds EVERY existing
   `.runs` dir to the prune filter scenarios already honor
-  (`DEBIAN_FDE_PROTECT_DIRS`) — re-collected before each worker fork, so
+  (`ALPINE_FDE_PROTECT_DIRS`) — re-collected before each worker fork, so
   later workers also protect dirs earlier peers created. Peer run dirs are
   therefore never pruned mid-run without any scenario-side flag. (Dirs
   created after a peer's last fork are still safe: each scenario keeps its
@@ -76,7 +76,7 @@ Runner contract details:
   runner prints each scenario's output + completion line as workers finish
   (completion order), so lines never interleave.
 - **Per-scenario budget**: every scenario runs under a wall-clock `timeout`
-  (`DEBIAN_FDE_SCENARIO_BUDGET`, default 7200 s). A killed scenario is
+  (`ALPINE_FDE_SCENARIO_BUDGET`, default 7200 s). A killed scenario is
   recorded with the distinct status `timeout`, never as a plain failure.
   rc 124 is reported generically ("timeout-class status") — the runner never
   asserts the outer budget was exceeded, because a scenario's own internal
@@ -91,7 +91,7 @@ Runner contract details:
 - **Vacuous guard**: a scenario that exits 0 without emitting at least one
   `ok` assertion line is recorded as `fail` (same silent-rot rule as
   `run-unit.sh`).
-- **Protected run dirs**: run-e2e exports `DEBIAN_FDE_PROTECT_DIRS` (colon-
+- **Protected run dirs**: run-e2e exports `ALPINE_FDE_PROTECT_DIRS` (colon-
   separated, the s00/s00b state dirs this invocation chains on — and, under
   `-j`, every existing `.runs` dir, see the parallel bullet above); every
   scenario's `.runs` prune filters those dirs out. The end-of-run G-T11b
@@ -103,8 +103,8 @@ Runner contract details:
 Fixture artifacts are SHA256-pinned in the harness; the harness, not the docs,
 is the pin of record. The OVMF Secure Boot firmware is pinned in
 `lib/qemu.sh` (checked by `env-check.sh` and again at every `qemu_run`):
-CI building its own artifacts overrides with `DEBIAN_FDE_OVMF_CODE_SHA256` /
-`DEBIAN_FDE_OVMF_VARS_SHA256` (path overrides: `OVMF_CODE` /
+CI building its own artifacts overrides with `ALPINE_FDE_OVMF_CODE_SHA256` /
+`ALPINE_FDE_OVMF_VARS_SHA256` (path overrides: `OVMF_CODE` /
 `OVMF_VARS_STOCK`). A local file matching neither pin is a loud failure naming
 the mismatch.
 
@@ -242,7 +242,7 @@ recorded in the table header. Regenerate by re-running the extraction
 `sentinels-<version>.txt`. The "reference the table, never inline" rule
 scopes to UPSTREAM-drifting strings — anything printed by systemd,
 cryptsetup, dracut or the OVMF firmware, whose wording changes between
-releases. Harness-owned markers (`debian-fde: UNSEALED`, `awaiting console
+releases. Harness-owned markers (`alpine-fde: UNSEALED`, `awaiting console
 line`, `passphrase attempt 1/3`, …) are versioned by this harness itself and
 stay inline by design.
 

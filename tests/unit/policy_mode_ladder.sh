@@ -72,21 +72,21 @@ jq -n --arg d7 "$(jq -r .pcr7_digest "$REPO/fixtures/policy-digest/golden.json")
     '{expected_pcr7: $d7, status: "finalized"}' >"$ROOT/etc/alpine-fde/baseline.json"
 printf 'pre-existing-uki' >"$ESP/EFI/Linux/alpine-fde-6.1.0-1-amd64.efi"
 
-debian-fde() {
-    DEBIAN_FDE_BIN_TEST=1 \
-        DEBIAN_FDE_ROOT="$ROOT" \
-        DEBIAN_FDE_ESP="$ESP" \
-        DEBIAN_FDE_KEYDIR="$KEYDIR" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+alpine-fde() {
+    ALPINE_FDE_BIN_TEST=1 \
+        ALPINE_FDE_ROOT="$ROOT" \
+        ALPINE_FDE_ESP="$ESP" \
+        ALPINE_FDE_KEYDIR="$KEYDIR" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
         RETENTION=2 \
-        "$REPO/bin/debian-fde" "$@"
+        "$REPO/bin/alpine-fde" "$@"
 }
 
 ESP_BEFORE=$(find "$ESP" -type f -exec sha256sum {} + | sort)
 for m in a ap; do
-    out=$(POLICY_MODE=$m debian-fde ukictl build "$KVER" 2>&1)
+    out=$(POLICY_MODE=$m alpine-fde ukictl build "$KVER" 2>&1)
     rc=$?
     assert_rc "build: POLICY_MODE=$m exits 64" 64 $rc
     assert_contains "build: $m message cites ADR-19 (normalize boundary)" "$out" "ADR-19"
@@ -97,7 +97,7 @@ for m in a ap; do
 done
 
 for m in a ap; do
-    out=$(POLICY_MODE=$m debian-fde enroll-tpm 2>&1)
+    out=$(POLICY_MODE=$m alpine-fde enroll-tpm 2>&1)
     rc=$?
     assert_rc "enroll-tpm: POLICY_MODE=$m exits 64" 64 $rc
     assert_contains "enroll-tpm: $m message cites ADR-19" "$out" "ADR-19"
@@ -108,7 +108,7 @@ done
 # on to its next precondition (absent baseline -> the "no baseline" failure, NOT
 # a policy_mode rejection).
 rm -f "$ROOT/etc/alpine-fde/baseline.json"
-out=$(POLICY_MODE=b debian-fde enroll-tpm 2>&1)
+out=$(POLICY_MODE=b alpine-fde enroll-tpm 2>&1)
 rc=$?
 assert_rc "enroll-tpm: POLICY_MODE=b passes the mode gate (fails later on baseline)" 64 $rc
 assert_not_contains "enroll-tpm: b rejection is not a mode rejection" "$out" "policy_mode"

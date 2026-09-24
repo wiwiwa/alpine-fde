@@ -70,7 +70,7 @@
 #     volume passphrase under the {7,11} policy and adds token + keyslot with
 #     no old enrollment to retire — exactly the "first finalization" shape.
 #   * UNLOCK PATH PIN (documented, not silent): the feeding UKI pins
-#     `debian-fde-unlock=oracle`. The §8.2 hook is the shipped unlock of
+#     `alpine-fde-unlock=oracle`. The §8.2 hook is the shipped unlock of
 #     record, but this scenario's fed sessions are built on the oracle's
 #     console-fallback seam ("awaiting console line" -> fed line -> DEBUG
 #     SHELL) and its stand-in-enrollment suppressor contract; the shipped
@@ -79,7 +79,7 @@
 #     The oracle is the harness-documented opt-in for exactly this
 #     (uki-build.sh: "opt-in, for scenarios that explicitly document it").
 #   * The Stage-1 credential ceremony stand-in (§9.1 step 4): the fixture's
-#     well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*debian-fde*),
+#     well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*alpine-fde*),
 #     so BOTH members are rekeyed in-guest (cryptsetup luksChangeKey
 #     --key-slot 0) to the scenario's floored recovery passphrase — the
 #     amended contract's at-rest shape (operator recovery at keyslot 0
@@ -115,20 +115,21 @@ ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
 MEMBER_MIB=1024
 
-# §13-floor-OK credentials for the in-guest finalize (the *debian-fde*
-# substring is blocklisted by the entropy floor; >=16 chars passes). The
+# §13-floor-OK credentials for the in-guest finalize (the *alpine-fde*
+# substring is blocklisted by the entropy floor, so these avoid it; >=16
+# chars passes). The
 # recovery passphrase is REKEYED into keyslot 0 of BOTH members in-guest
 # (the Stage-1 credential-ceremony stand-in); the key passphrase encrypts
 # release.pem at finalize STEP 2 (ADR-18).
-S20_RECOVERY='alpine-fde-s20-recovery-6c31a9'
-S20_KEYPASS='alpine-fde-s20-release-pbkdf2-j2'
+S20_RECOVERY='fde-s20-recovery-6c31a9'
+S20_KEYPASS='fde-s20-release-pbkdf2-j2'
 
-export QEMU_TIMEOUT="${DEBIAN_FDE_S20_TIMEOUT:-900}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S20_TIMEOUT:-900}"
 
 # recalibrated 2026-09-23: run-e2e's outer SCENARIO_BUDGET is now 1500 s —
 # the internal budget must fire FIRST (loud exit 125 + stage name) instead of
 # letting the outer rc-124 kill win silently.
-OVERALL_BUDGET="${DEBIAN_FDE_S20_BUDGET:-1440}"
+OVERALL_BUDGET="${ALPINE_FDE_S20_BUDGET:-1440}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
 SWTPM_DIRS=()
@@ -225,7 +226,7 @@ REFRESHER=$!
 
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's20-raid1-member-loss-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 
@@ -323,7 +324,7 @@ _boot_fed() {
     _qemu_alive "$bdir"
     _rearm_trap
     wait_console "$bdir" "awaiting console line" "$QEMU_TIMEOUT"
-    feed_line "$bdir/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+    feed_line "$bdir/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     wait_console "$bdir" "DEBUG SHELL on console" 300
 }
 
@@ -338,10 +339,10 @@ UUID1=$(timeout 60 cryptsetup luksUUID "$RUN/disk-root1.img") || exit 1
 UUID2=$(timeout 60 cryptsetup luksUUID "$RUN/disk-root2.img") || exit 1
 [[ -n "$UUID1" && -n "$UUID2" && "$UUID1" != "$UUID2" ]] || { echo "s20: bad member uuids"; exit 1; }
 
-DEBIAN_FDE_DEBUG_SHELL=1 DEBIAN_FDE_ROOTFS_SHA= DEBIAN_FDE_ROOTFS_BYTES= \
+ALPINE_FDE_DEBUG_SHELL=1 ALPINE_FDE_ROOTFS_SHA= ALPINE_FDE_ROOTFS_BYTES= \
     run_stage uki_build-feed 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness-feed.efi" \
-        "debian-fde-console-fallback debian-fde-unlock=oracle"
+        "alpine-fde-console-fallback alpine-fde-unlock=oracle"
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness-feed.efi") + 1048575) / 1048576 ))
 run_stage esp_make 300 esp_make "$RUN/esp.img" \
     $(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB )) "$RUN/harness-feed.efi"
@@ -385,13 +386,13 @@ run_stage qemu_run-bootstrap 60 qemu_run "$RUN/bootstrap" "$RUN/bootstrap/esp.im
 _qemu_alive "$RUN/bootstrap"
 _rearm_trap
 wait_console "$RUN/bootstrap" "awaiting console line" "$QEMU_TIMEOUT"
-feed_line "$RUN/bootstrap/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+feed_line "$RUN/bootstrap/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 wait_console "$RUN/bootstrap" "DEBUG SHELL on console" 300
 # unlock member 2, lay the pool, create @ + canary, print every uuid
 # (bootstrap passes NO pcrsig drive -> the extra member lands on /dev/vdc;
 # later phases add the pcrsig drive, shifting member 2 to /dev/vdd)
 feed_line "$RUN/bootstrap/serial.sock" \
-    "printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" | cryptsetup open --type luks --key-file - /dev/vdc root2 && echo B2-\$((40+2))-OPEN"
+    "printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | cryptsetup open --type luks --key-file - /dev/vdc root2 && echo B2-\$((40+2))-OPEN"
 # TCG serial corruption guard: re-derive the sentinel from live guest state
 # (mapper existence) — never a blind replay — then wait hard
 wait_console_soft "$RUN/bootstrap" "B2-42-OPEN" 60 || \
@@ -499,7 +500,7 @@ printf 'root1 UUID=%s none luks,tpm2-device=auto,password-cache=yes,discard\nroo
     "$UUID1" "$UUID2" >"$TOOLING/etc/crypttab"
 run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine-fde/keys/release.pub"
 # release.pem = the PLAINTEXT release key (the fixture db.key): finalize STEP 2
-# encrypts it in place (ADR-18) under DEBIAN_FDE_KEY_PASSPHRASE
+# encrypts it in place (ADR-18) under ALPINE_FDE_KEY_PASSPHRASE
 run_stage tooling-release-pem 60 cp "$RUN/keys/db.key" "$TOOLING/etc/alpine-fde/keys/release.pem"
 
 # the FINAL baseline via the REAL CLI (audit --init), PCRs stamped from the
@@ -548,19 +549,19 @@ cat >"$RUN/rootfs-etc/etc/alpine-fde/baseline.json" <<'JSON'
 }
 JSON
 _ensure_tpm "$RUN/tpm"
-if AUDIT_OUT=$(DEBIAN_FDE_ROOT="$RUN/rootfs-etc" \
-    DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-    DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-    DEBIAN_FDE_EVENTLOG="$RUN/rootfs-etc/eventlog-absent" \
-    DEBIAN_FDE_NO_INSTALL=1 \
+if AUDIT_OUT=$(ALPINE_FDE_ROOT="$RUN/rootfs-etc" \
+    ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+    ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+    ALPINE_FDE_EVENTLOG="$RUN/rootfs-etc/eventlog-absent" \
+    ALPINE_FDE_NO_INSTALL=1 \
     timeout 300 "$REPO/bin/alpine-fde" audit --init 2>&1); then
     _assert_result ok "S-20: audit --init finalized the baseline (real CLI, rc 0)" ""
 else
     _assert_result not-ok "S-20: audit --init finalized the baseline (real CLI, rc 0)" \
         "output: $(tail -2 <<<"$AUDIT_OUT")"
 fi
-PCR7_B=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)
-sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)\",|" \
+PCR7_B=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)
+sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)\",|" \
     "$RUN/rootfs-etc/etc/alpine-fde/baseline.json"
 if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs-etc/etc/alpine-fde/baseline.json" \
     || [[ -z "$PCR7_B" ]]; then
@@ -587,7 +588,7 @@ mkdir -p "$RUN/relkey"
 run_stage relkey-pem 60 cp "$RUN/keys/db.key" "$RUN/relkey/release.pem"
 run_stage relkey-crt 60 cp "$RUN/keys/db.crt" "$RUN/relkey/release.crt"
 run_stage relkey-pub 60 cp "$RUN/keys/release.pub" "$RUN/relkey/release.pub"
-DEBIAN_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-711 600 \
+ALPINE_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-711 600 \
     "$REPO/bin/alpine-fde" pcrsign \
     --linux "$RUN/guest-tree/vmlinuz" --initrd "$RUN/initrd.cpio" \
     --cmdline "$RUN/cmdline.txt" --os-release "$RUN/os-release.txt" \
@@ -604,7 +605,7 @@ assert_file_exists "S-20: payload drive (pcrsig + crypttab/baseline/keys tail)" 
 
 # _feed_env <boot-dir> — the CLI seams for the fed sessions (amended §9.1:
 # the recovery passphrase + keydir + key passphrase + {7,11} .pcrsig; the old
-# DEBIAN_FDE_CRYPTENROLL / _LUKS_KEYFILE seams are retired by Mechanism B).
+# ALPINE_FDE_CRYPTENROLL / _LUKS_KEYFILE seams are retired by Mechanism B).
 # SPLIT into three short feeds with per-line markers + ONE retry each (repro
 # 2026-09-24): a single ~470-char line loses whole sentences to the 16550
 # byte-duplication/drop artifact under kernel-printk load — the guest echoed
@@ -629,7 +630,7 @@ _feed_env() {
         "mkdir -p /run/bu /tmp && ln -sf /dev/vdb /run/bu/$UUID1 && ln -sf /dev/vdd /run/bu/$UUID2 && echo P5-40-OK" \
         "P5-40-OK" 'P5-4{1,2}0-OK' "P5-40-OK (by-uuid seams)"
     _feed_line_retry "$bdir" \
-        "export DEBIAN_FDE_NO_INSTALL=1 DEBIAN_FDE_TCTI=device:/dev/tpmrm0 DEBIAN_FDE_BY_UUID_DIR=/run/bu DEBIAN_FDE_RECOVERY_PASSPHRASE=$S20_RECOVERY DEBIAN_FDE_KEYDIR=/etc/alpine-fde/keys DEBIAN_FDE_KEY_PASSPHRASE=$S20_KEYPASS DEBIAN_FDE_TMPDIR=/tmp DEBIAN_FDE_PCRSIG=/pcrsig.json DEBIAN_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-41-OK" \
+        "export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_RECOVERY_PASSPHRASE=$S20_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S20_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-41-OK" \
         "P5-41-OK" 'P5-4{1,2}1-OK' "P5-41-OK (CLI env)"
     _feed_line_retry "$bdir" 'echo P5-43-OK' "P5-43-OK" 'P5-4{1,2}3-OK' "P5-43-OK (env ready)"
 }
@@ -652,11 +653,11 @@ CURRENT_QEMU_DIR=""
 
 LOG_P1=$(cat "$P1/console.log" 2>/dev/null || true)
 P1_RC=$(grep -oE 'P1PLAIN=[0-9]+' "$P1/console.log" | head -1 | cut -d= -f2)
-assert_contains "[phase 1] init ran" "$LOG_P1" "debian-fde-harness: init started"
+assert_contains "[phase 1] init ran" "$LOG_P1" "alpine-fde-harness: init started"
 assert_contains "[phase 1] stand-in OUT of the loop (dead suppressor token)" "$LOG_P1" \
-    "debian-fde-harness: systemd-tpm2 token present — skipping enrollment"
+    "alpine-fde-harness: systemd-tpm2 token present — skipping enrollment"
 assert_contains "[phase 1] fed unlock of the SURVIVING member root1 succeeded" "$LOG_P1" \
-    "debian-fde: UNSEALED"
+    "alpine-fde: UNSEALED"
 # THE FAIL-CLOSED HINGE: the login-stage plain mount of a missing-member
 # raid1 pool fails (btrfs requires an explicit `degraded`)
 assert_contains "[phase 1] login-stage mount command ran (byte-identical line)" "$LOG_P1" \
@@ -701,8 +702,8 @@ CURRENT_QEMU_DIR=""
 LOG_P2=$(cat "$P2/console.log" 2>/dev/null || true)
 P2_CANARY=$(grep -oE 'CANARY-SHA [0-9a-f]{64}' "$P2/console.log" | head -1 | awk '{print $2}')
 assert_contains "[phase 2] stand-in OUT of the loop" "$LOG_P2" \
-    "debian-fde-harness: systemd-tpm2 token present — skipping enrollment"
-assert_contains "[phase 2] fed unlock of the surviving member" "$LOG_P2" "debian-fde: UNSEALED"
+    "alpine-fde-harness: systemd-tpm2 token present — skipping enrollment"
+assert_contains "[phase 2] fed unlock of the surviving member" "$LOG_P2" "alpine-fde: UNSEALED"
 assert_contains "[phase 2] degraded mount SUCCEEDED (the explicit -o degraded runbook leg)" \
     "$LOG_P2" "P2MRC=0"
 assert_contains "[phase 2] the mount option degraded is IN EFFECT (/proc/mounts)" "$LOG_P2" \
@@ -741,7 +742,7 @@ feed_line "$P3A/serial.sock" 'cryptsetup token remove --token-id 9 /dev/vdb && e
 wait_console "$P3A" "T9-52-GONE" 120
 # unlock member 2 (fed passphrase — its token comes only from finalize below)
 feed_line "$P3A/serial.sock" \
-    "printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" | cryptsetup open --type luks --key-file - /dev/vdd root2 && echo B2-\$((40+2))-OPEN"
+    "printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | cryptsetup open --type luks --key-file - /dev/vdd root2 && echo B2-\$((40+2))-OPEN"
 # TCG serial corruption guard (same as the bootstrap unlock sentinel)
 wait_console_soft "$P3A" "B2-42-OPEN" 60 || \
     feed_line "$P3A/serial.sock" \
@@ -781,14 +782,14 @@ assert_contains "[phase 3a] baseline already final (audit skipped, §9.1 idempot
 assert_contains "[phase 3a] finalize: release.pem encrypted in place (ADR-18)" "$LOG_3A" \
     "release.pem encrypted (AES-256 PBKDF2, ADR-18)"
 assert_contains "[phase 3a] member 1 upgraded to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
-    "debian-fde: member $UUID1: token upgraded to Mechanism B {PCR 7, PCR 11}"
+    "alpine-fde: member $UUID1: token upgraded to Mechanism B {PCR 7, PCR 11}"
 assert_contains "[phase 3a] member 2 upgraded to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
-    "debian-fde: member $UUID2: token upgraded to Mechanism B {PCR 7, PCR 11}"
+    "alpine-fde: member $UUID2: token upgraded to Mechanism B {PCR 7, PCR 11}"
 assert_eq "[phase 3a] exactly TWO finalized seals (one per member)" "2" \
     "$(grep -cF "$(sentinel_of cli_seal_slot)" "$P3A/console.log")"
 assert_contains "[phase 3a] no ephemeral keyslot remained (crash-skip of the purge)" "$LOG_3A" \
     "no temporary ephemeral keyslot remains — skipping the purge"
-assert_contains "[phase 3a] install finalized marker" "$LOG_3A" "debian-fde: install finalized"
+assert_contains "[phase 3a] install finalized marker" "$LOG_3A" "alpine-fde: install finalized"
 assert_eq "[phase 3a] production finalize rc 0" "0" "$CLI_RC_3A"
 assert_not_contains "[phase 3a] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG_3A" \
     "$(sentinel_of cryptenroll_enrolled)"
@@ -822,7 +823,7 @@ assert_eq "[phase 3a] host: member 2 keyslots = recovery 0 + token 1 (I1 two-key
 # member 1 alongside the raw token; the production attach then validates,
 # authorizes over the live {7,11} PCR digest and unseals.
 if ! source "$REPO/lib/policy.sh" 2>/dev/null; then source "$TESTS/../lib/policy.sh"; fi
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"   # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"   # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../../lib/token.sh
 source "$REPO/lib/token.sh"
 # shellcheck source=../../lib/keys.sh
@@ -838,7 +839,7 @@ timeout 60 cryptsetup luksDump --dump-json-metadata "$RUN/disk-root1.img" \
 _ensure_tpm "$RUN/tpm"
 ORACLE_TOKEN="$RUN/standing-token.json" \
 ORACLE_PCRSIG="$RUN/pcrsign-711.json" \
-DEBIAN_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
+ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
     interop_oracle_project "$RUN/proj" "$RUN/relkey" || {
     echo "s20: upstream-257 token projection failed"; exit 1; }
 assert_eq "S-20 phase 3b: projected token carries tpm2-policy-hash (upstream schema)" "64" \
@@ -871,7 +872,7 @@ assert_eq "S-20 phase 3b: member 2 STANDING token carries tpm2-policy-hash (prod
     "$(jq -r '.["tpm2-policy-hash"]' "$RUN/standing-token2.json" | tr -d '\n' | wc -c)"
 ORACLE_TOKEN="$RUN/standing-token2.json" \
 ORACLE_PCRSIG="$RUN/pcrsign-711.json" \
-DEBIAN_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
+ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
     interop_oracle_project "$RUN/proj2" "$RUN/relkey" || {
     echo "s20: upstream-257 token projection (member 2) failed"; exit 1; }
 PROJ_TID2=$(token_next_id "$RUN/disk-root2.img")
@@ -895,7 +896,7 @@ _rearm_trap
 # ZERO console input: the standing token must unseal root1 unaided (the
 # fallback never arms on success — asserted below by marker absence)
 i=0
-until grep -q "debian-fde: UNSEALED" "$P3B/console.log" 2>/dev/null; do
+until grep -q "alpine-fde: UNSEALED" "$P3B/console.log" 2>/dev/null; do
     _qemu_alive_or_die "$P3B" "console-wait:UNSEALED"
     _budget_check "console-wait:UNSEALED"
     (( i < QEMU_TIMEOUT )) || _hang_fail CONSOLE-WAIT "UNSEALED" "zero-input token unlock never completed"
@@ -944,7 +945,7 @@ assert_contains "[phase 3b] the UKI's own .pcrsig consumed (signed policy)" "$LO
 assert_contains "[phase 3b] volume activated with a LUKS token (sentinel table)" "$LOG_3B" \
     "$(sentinel_of unlocked)"
 assert_contains "[phase 3b] ZERO-INPUT unlock of member 1 (UNSEALED)" "$LOG_3B" \
-    "debian-fde: UNSEALED"
+    "alpine-fde: UNSEALED"
 assert_not_contains "[phase 3b] console fallback NEVER armed (zero-input invariant)" "$LOG_3B" \
     "awaiting console line"
 assert_not_contains "[phase 3b] no interactive prompt ever appeared" "$LOG_3B" \

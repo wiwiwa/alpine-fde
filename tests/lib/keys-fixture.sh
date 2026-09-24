@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/lib/keys-fixture.sh — throwaway Secure Boot + release key ceremony for
-# the Debian FDE e2e harness (docs/Architecture.md §12, ADR-11).
+# the Alpine FDE e2e harness (docs/Architecture.md §12, ADR-11).
 #
 # Generates, per harness run (keys are throwaway, re-created per run):
 #   <dir>/PK.key/.crt        PK (platform key) — self-signed throwaway cert
@@ -17,13 +17,13 @@
 # The enrolled vars are applied OFFLINE to a copy of the host OVMF_VARS —
 # no firmware UI, fully deterministic.
 
-if [[ -n "${_DEBIAN_FDE_KEYS_FIXTURE_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_KEYS_FIXTURE_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_KEYS_FIXTURE_SOURCED=1
+_ALPINE_FDE_KEYS_FIXTURE_SOURCED=1
 
 # Throwaway owner GUID for the custom key entries (random-generated once).
-DEBIAN_FDE_TEST_GUID="{0fb75ec8-8c55-4c0c-9d6b-6c272f4ac4bb}"
+ALPINE_FDE_TEST_GUID="{0fb75ec8-8c55-4c0c-9d6b-6c272f4ac4bb}"
 
 # _cert_common <key> <crt> <CN> — self-signed RSA cert (throwaway, 2048 is fine)
 _keys_cert() {
@@ -39,10 +39,10 @@ keys_create() {
     mkdir -p "$dir"
     (
         umask 077
-        _keys_cert "$dir/PK.key" "$dir/PK.crt" "debian-fde-test-PK"
-        _keys_cert "$dir/KEK.key" "$dir/KEK.crt" "debian-fde-test-KEK"
+        _keys_cert "$dir/PK.key" "$dir/PK.crt" "alpine-fde-test-PK"
+        _keys_cert "$dir/KEK.key" "$dir/KEK.crt" "alpine-fde-test-KEK"
         # release/db key: one identity (ADR-11)
-        _keys_cert "$dir/db.key" "$dir/db.crt" "debian-fde-test-release"
+        _keys_cert "$dir/db.key" "$dir/db.crt" "alpine-fde-test-release"
         openssl x509 -in "$dir/db.crt" -pubkey -noout >"$dir/release.pub"
     )
 }
@@ -53,9 +53,9 @@ keys_vars_enrolled() {
     local kd="$1" out="$2" stock="${OVMF_VARS_STOCK:-/usr/share/ovmf/x64/OVMF_VARS.4m.fd}"
     cp "$stock" "$out"
     virt-fw-vars -i "$out" -o "$out" \
-        --set-pk "$DEBIAN_FDE_TEST_GUID" "$kd/PK.crt" \
-        --add-kek "$DEBIAN_FDE_TEST_GUID" "$kd/KEK.crt" \
-        --add-db "$DEBIAN_FDE_TEST_GUID" "$kd/db.crt" \
+        --set-pk "$ALPINE_FDE_TEST_GUID" "$kd/PK.crt" \
+        --add-kek "$ALPINE_FDE_TEST_GUID" "$kd/KEK.crt" \
+        --add-db "$ALPINE_FDE_TEST_GUID" "$kd/db.crt" \
         --sb >/dev/null || {
         echo "keys-fixture: virt-fw-vars enrollment failed" >&2
         return 1

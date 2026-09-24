@@ -29,30 +29,30 @@
 # line at Stage 3 step 4. Single source here so the two commands can never
 # drift apart.
 
-if [ -n "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_INSTALL_STATE_LOADED=1
+ALPINE_FDE_INSTALL_STATE_LOADED=1
 
 # Pull in common.sh (exit codes, logging) and baseline.sh (sp_etc_dir) the
 # same way the cmd files resolve their siblings. When this file lives at
 # <tree>/lib/install-state.sh, the cmd dir is <tree>/lib/cmd.
-_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+_is_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
-    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
+    # shellcheck disable=SC1090  # resolved from ALPINE_FDE_CMD_DIR / install tree
     . "$_is_lib_dir/common.sh"
 fi
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ] && [ -r "$_is_lib_dir/baseline.sh" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ] && [ -r "$_is_lib_dir/baseline.sh" ]; then
     # shellcheck disable=SC1090
     . "$_is_lib_dir/baseline.sh"
 fi
 
-# istate_file — $(sp_etc_dir)/install-state.json; DEBIAN_FDE_INSTALL_STATE
+# istate_file — $(sp_etc_dir)/install-state.json; ALPINE_FDE_INSTALL_STATE
 # overrides the path wholesale (tests).
 istate_file() {
-    if [ -n "${DEBIAN_FDE_INSTALL_STATE:-}" ]; then
-        printf '%s\n' "$DEBIAN_FDE_INSTALL_STATE"
+    if [ -n "${ALPINE_FDE_INSTALL_STATE:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_INSTALL_STATE"
         return 0
     fi
     printf '%s/install-state.json\n' "$(sp_etc_dir)"
@@ -148,11 +148,11 @@ istate_write() {
 # A separate best-effort file — the state document's vocabulary is never
 # widened by a transient failure.
 
-# istate_attempt_file — the marker path; DEBIAN_FDE_INSTALL_ATTEMPT overrides
+# istate_attempt_file — the marker path; ALPINE_FDE_INSTALL_ATTEMPT overrides
 # wholesale (tests).
 istate_attempt_file() {
-    if [ -n "${DEBIAN_FDE_INSTALL_ATTEMPT:-}" ]; then
-        printf '%s\n' "$DEBIAN_FDE_INSTALL_ATTEMPT"
+    if [ -n "${ALPINE_FDE_INSTALL_ATTEMPT:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_INSTALL_ATTEMPT"
         return 0
     fi
     printf '%s/finalize-attempt.txt\n' "$(sp_etc_dir)"
@@ -217,7 +217,7 @@ fde_motd_strip() {
     _fms_f=$1
     [ -n "$_fms_f" ] && [ -f "$_fms_f" ] || return 0
     _fms_dir=${_fms_f%/*}
-    _fms_tmp=$(mktemp "$_fms_dir/.debian-fde-motd.XXXXXX") || return 0
+    _fms_tmp=$(mktemp "$_fms_dir/.alpine-fde-motd.XXXXXX") || return 0
     grep -F -v -x -- "$(fde_motd_banner)" "$_fms_f" >"$_fms_tmp" 2>/dev/null
     mv -f "$_fms_tmp" "$_fms_f" 2>/dev/null || {
         rm -f "$_fms_tmp"

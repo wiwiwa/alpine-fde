@@ -1,5 +1,5 @@
 #!/bin/sh
-# audit.sh — `debian-fde audit`: compare live PCR 0..3+7, Secure Boot state and
+# audit.sh — `alpine-fde audit`: compare live PCR 0..3+7, Secure Boot state and
 # the TCG event log (v1 scope: existence + size + sha256, C-G10) against the
 # baseline (§8.4, §9.5).
 #
@@ -14,19 +14,19 @@
 #                   required before PCR 7 drift recovery) + last-audit.json
 #   audit --yes     non-interactive confirmation for --accept (CI)
 
-if [ -n "${DEBIAN_FDE_AUDIT_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_AUDIT_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_AUDIT_LOADED=1
+ALPINE_FDE_AUDIT_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 audit_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde audit [--init | --accept | --yes]
+Usage: alpine-fde audit [--init | --accept | --yes]
 
 Compare PCR 0..3 + 7, Secure Boot state and the TCG event log against
 /etc/alpine-fde/baseline.json. Exit 0 match / 1 drift / 64 error.
@@ -55,11 +55,11 @@ aud_pcr_report() {
         _apr_base=$(aud_baseline_pcr "$_apr_bl" "$_apr_i")
         _apr_live=''
         if ! _apr_live=$(tpm_pcr_read "$_apr_i") || [ -z "$_apr_live" ]; then
-            die "audit: cannot read live PCR $_apr_i (TCTI: ${DEBIAN_FDE_TCTI:-<default>})"
+            die "audit: cannot read live PCR $_apr_i (TCTI: ${ALPINE_FDE_TCTI:-<default>})"
         fi
         case $_apr_base in
             pending)
-                printf 'pcr%-2s live=%s baseline=pending   (finalize with: debian-fde audit --init)\n' "$_apr_i" "$_apr_live"
+                printf 'pcr%-2s live=%s baseline=pending   (finalize with: alpine-fde audit --init)\n' "$_apr_i" "$_apr_live"
                 ;;
             "$_apr_live")
                 printf 'pcr%-2s live=%s baseline=%s   match\n' "$_apr_i" "$_apr_live" "$_apr_base"
@@ -161,7 +161,7 @@ aud_eventlog_report() {
     if [ -z "$_aer_base_sha" ]; then
         # L-2: the §9.5 v1 tripwire is not armed on this machine — the eventlog
         # APPEARING after a finalize-without-log must be loud, never silent
-        warn "eventlog present at $(eventlog_path) but the baseline records none — §9.5 v1 tripwire NOT armed (finalize with: debian-fde audit --init)"
+        warn "eventlog present at $(eventlog_path) but the baseline records none — §9.5 v1 tripwire NOT armed (finalize with: alpine-fde audit --init)"
         printf 'eventlog sha256=%s size=%s   not recorded (finalize with --init)\n' "$_aer_live_sha" "$_aer_live_sz"
         return 0
     fi
@@ -190,8 +190,8 @@ aud_next_steps() {
     cat >&2 <<'EOF'
 PCR 7 drift recovery (§9.4): confirm the drift is benign (firmware/dbx update?
 or tampering?), then:
-  debian-fde audit --accept      # re-baseline (operator confirmation)
-  debian-fde enroll-tpm          # re-enroll — ONE cryptenroll covers all retained UKIs;
+  alpine-fde audit --accept      # re-baseline (operator confirmation)
+  alpine-fde enroll-tpm          # re-enroll — ONE cryptenroll covers all retained UKIs;
                                  # cryptenroll re-captures the new CURRENT PCR 7 into
                                  # the static policy (A″: no signing medium needed, the
                                  # UKIs' signatures stay untouched; §9.4)
@@ -253,22 +253,22 @@ cmd_audit_main() {
             --accept) _am_accept=1 ;;
             --yes)
                 _am_accept=1
-                DEBIAN_FDE_YES=1
+                ALPINE_FDE_YES=1
                 ;;
             -h | --help)
                 audit_usage
                 return 0
                 ;;
-            *) die -r "$DEBIAN_FDE_USAGE" "audit: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "audit: unknown argument: $1" ;;
         esac
         shift
     done
 
     require_pkgs tpm2:tpm2-tools
     _am_bl=$(sp_baseline_file)
-    [ -f "$_am_bl" ] || die "audit: no baseline at $_am_bl (run 'debian-fde provision stage1')"
+    [ -f "$_am_bl" ] || die "audit: no baseline at $_am_bl (run 'alpine-fde provision stage1')"
     baseline_validate "$_am_bl" || die "audit: baseline invalid: $_am_bl"
-    tpm_available || die "audit: no TPM reachable via TCTI '${DEBIAN_FDE_TCTI:-<default>}'"
+    tpm_available || die "audit: no TPM reachable via TCTI '${ALPINE_FDE_TCTI:-<default>}'"
 
     if [ "$_am_init" -eq 1 ]; then
         if baseline_is_final "$_am_bl"; then
@@ -277,7 +277,7 @@ cmd_audit_main() {
         info "finalizing pending baseline from live values (first boot in the final SB state)"
         baseline_finalize_from_live
         aud_write_last_audit "$(sp_last_audit_file)" "$_am_bl" ok no
-        printf 'debian-fde: baseline finalized: %s\n' "$_am_bl" >&2
+        printf 'alpine-fde: baseline finalized: %s\n' "$_am_bl" >&2
         return 0
     fi
 
@@ -292,8 +292,8 @@ cmd_audit_main() {
     fi
 
     if [ "$_am_accept" -eq 1 ]; then
-        if [ -z "${DEBIAN_FDE_YES:-}" ]; then
-            printf 'debian-fde: re-baseline (overwrite baseline.json with live values)? type ACCEPT: ' >&2
+        if [ -z "${ALPINE_FDE_YES:-}" ]; then
+            printf 'alpine-fde: re-baseline (overwrite baseline.json with live values)? type ACCEPT: ' >&2
             if [ -t 0 ]; then
                 read -r _am_conf </dev/tty 2>/dev/null || read -r _am_conf || _am_conf=''
             else
@@ -305,15 +305,15 @@ cmd_audit_main() {
         fi
         baseline_finalize_from_live
         aud_write_last_audit "$(sp_last_audit_file)" "$_am_bl" ok yes
-        printf 'debian-fde: baseline re-baselined from live values (accepted); %s updated\n' "$_am_bl" >&2
+        printf 'alpine-fde: baseline re-baselined from live values (accepted); %s updated\n' "$_am_bl" >&2
         return 0
     fi
 
     aud_write_last_audit "$(sp_last_audit_file)" "$_am_bl" \
         "$([ "$AUD_DRIFT" -eq 1 ] && printf drift || printf ok)" no
     if [ "$AUD_DRIFT" -eq 1 ]; then
-        return "$DEBIAN_FDE_DRIFT"
+        return "$ALPINE_FDE_DRIFT"
     fi
-    printf 'debian-fde: all checked values match the baseline\n' >&2
+    printf 'alpine-fde: all checked values match the baseline\n' >&2
     return 0
 }

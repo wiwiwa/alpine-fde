@@ -6,7 +6,7 @@
 #     intact — readers never observe partial content
 #   * fail-closed validation: unknown states are refused (die 64), never written
 #   * readers: empty + warn when the file is absent (pre-state-machine installs)
-#   * DEBIAN_FDE_ROOT scoping round-trip + DEBIAN_FDE_INSTALL_STATE override
+#   * ALPINE_FDE_ROOT scoping round-trip + ALPINE_FDE_INSTALL_STATE override
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -15,17 +15,17 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/install-state.sh
 source "$REPO/lib/install-state.sh"
 
-T=$(mktemp -d /tmp/debian-fde-istate.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-istate.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-export DEBIAN_FDE_ROOT=$T/root
+export ALPINE_FDE_ROOT=$T/root
 mkdir -p "$(sp_etc_dir)"
 
 run_write() { # STATE — istate_write in a subshell: its die must not kill the test
@@ -102,29 +102,29 @@ assert_eq "no temp litter after the failed write" "" \
     "$(find "$(sp_etc_dir)" -maxdepth 1 -name '.install-state.*' -print -quit)"
 export PATH="$OLD_PATH"
 
-# --- 6. DEBIAN_FDE_ROOT scoping round-trip --------------------------------------
+# --- 6. ALPINE_FDE_ROOT scoping round-trip --------------------------------------
 ROOT1=$T/root1
 ROOT2=$T/root2
-export DEBIAN_FDE_ROOT=$ROOT1
+export ALPINE_FDE_ROOT=$ROOT1
 mkdir -p "$(sp_etc_dir)"
 run_write installed
 assert_eq "root1: installed" "installed" "$(istate_state)"
-export DEBIAN_FDE_ROOT=$ROOT2
+export ALPINE_FDE_ROOT=$ROOT2
 mkdir -p "$(sp_etc_dir)"
 assert_eq "root2: no state (scoped, absent)" "" "$(istate_state 2>/dev/null)"
 run_write finalized
 assert_eq "root2: finalized" "finalized" "$(istate_state)"
-export DEBIAN_FDE_ROOT=$ROOT1
+export ALPINE_FDE_ROOT=$ROOT1
 assert_eq "root1 unaffected by the root2 write" "installed" "$(istate_state)"
 
-# --- 7. DEBIAN_FDE_INSTALL_STATE override round-trip (test seam) -----------------
+# --- 7. ALPINE_FDE_INSTALL_STATE override round-trip (test seam) -----------------
 OV=$T/custom-state.json
-export DEBIAN_FDE_INSTALL_STATE=$OV
+export ALPINE_FDE_INSTALL_STATE=$OV
 assert_eq "override: absent initially" "" "$(istate_state 2>/dev/null)"
 run_write finalized
-assert_file_exists "override: write landed at DEBIAN_FDE_INSTALL_STATE" "$OV"
+assert_file_exists "override: write landed at ALPINE_FDE_INSTALL_STATE" "$OV"
 assert_eq "override: read-back" "finalized" "$(istate_state)"
-unset DEBIAN_FDE_INSTALL_STATE
+unset ALPINE_FDE_INSTALL_STATE
 assert_eq "override removed: back to the root-scoped path" "installed" "$(istate_state)"
 
 # --- 8. optional FILE argument (consumed by enroll-tpm.sh's G-IL7 reader):
@@ -133,13 +133,13 @@ ARGA=$T/state-a.json
 ARGB=$T/state-b.json
 printf '{\n  "schema_version": 1,\n  "state": "finalized",\n  "updated_at": "x"\n}\n' >"$ARGA"
 printf '{\n  "schema_version": 1,\n  "state": "installed",\n  "updated_at": "x"\n}\n' >"$ARGB"
-export DEBIAN_FDE_INSTALL_STATE=$ARGA
+export ALPINE_FDE_INSTALL_STATE=$ARGA
 assert_eq "explicit FILE arg read as-is" "installed" "$(istate_state "$ARGB")"
 assert_eq "no-arg call still honors the env override" "finalized" "$(istate_state)"
-unset DEBIAN_FDE_INSTALL_STATE
+unset ALPINE_FDE_INSTALL_STATE
 
 # --- 9. unparseable document: empty + warn, never finalized ----------------------
-export DEBIAN_FDE_ROOT=$ROOT1
+export ALPINE_FDE_ROOT=$ROOT1
 printf 'not json at all' >"$(sp_etc_dir)/install-state.json"
 OUT=$(istate_state 2>"$T/err-garbage")
 assert_eq "garbage document: empty state" "" "$OUT"
@@ -196,14 +196,14 @@ run_clear
 assert_rc "attempt: clear is idempotent (absent file)" 0 istate_attempt_clear
 # re-arm root1's marker for the scoping leg below
 run_attempt_write "step-failed: token upgrade"
-# DEBIAN_FDE_ROOT scoping: the marker follows the same etc dir as the state
-export DEBIAN_FDE_ROOT=$ROOT2
+# ALPINE_FDE_ROOT scoping: the marker follows the same etc dir as the state
+export ALPINE_FDE_ROOT=$ROOT2
 mkdir -p "$(sp_etc_dir)"
 assert_rc "attempt: scoped root has no marker" 1 istate_attempt_present
 run_attempt_write "scoped-reason"
 assert_contains "attempt: scoped write lands in the scoped root" \
     "$(istate_attempt_read 2>/dev/null)" "scoped-reason"
-export DEBIAN_FDE_ROOT=$ROOT1
+export ALPINE_FDE_ROOT=$ROOT1
 assert_rc "attempt: root1 marker unaffected by root2 write" 0 istate_attempt_present
 assert_contains "attempt: root1 reason intact" "$(istate_attempt_read 2>/dev/null)" \
     "step-failed"

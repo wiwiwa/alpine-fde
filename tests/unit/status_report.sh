@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/status_report.sh — `debian-fde status` report row (G-R4, §8.1):
+# tests/unit/status_report.sh — `alpine-fde status` report row (G-R4, §8.1):
 #   * per-kernel manifest-vs-ESP diff: OK / MISSING / EXTRA, rc stays 0
 #   * systemd-tpm2 token display: pcrs + pubkey fingerprint (display-only, I3)
 #   * Secure Boot state line, build-failed marker visibility (ADR-8), last audit
@@ -13,24 +13,24 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/install-state.sh
 source "$REPO/lib/install-state.sh"
 
-T=$(mktemp -d /tmp/debian-fde-status.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-status.XXXXXX)
 FAKEBIN=$T/bin
 EFIVARS=$T/efivars
 ESP=$T/esp
 UUID=11112222-3333-4444-5555-666677778888
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_ESP=$ESP
-export DEBIAN_FDE_BY_UUID_DIR=$T/by-uuid
-export DEBIAN_FDE_KEYDIR=$T/keys
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_TCTI='device:/nonexistent-tpmrm0'   # PCRs print <unreadable>, fast
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_ESP=$ESP
+export ALPINE_FDE_BY_UUID_DIR=$T/by-uuid
+export ALPINE_FDE_KEYDIR=$T/keys
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_TCTI='device:/nonexistent-tpmrm0'   # PCRs print <unreadable>, fast
 export PATH="$FAKEBIN:$PATH"
 export SBV_LOG=$T/sbverify.log SBV_RC=$T/sbverify.rc
 
@@ -135,7 +135,7 @@ EOF
 printf 'ukictl build failed for kernel 6.1.0-3\nreason: signing key absent\n' >"$(sp_etc_dir)/build-failed"
 
 run_status() {
-    ST_OUT=$("$REPO/bin/debian-fde" status 2>&1)
+    ST_OUT=$("$REPO/bin/alpine-fde" status 2>&1)
     ST_RC=$?
 }
 
@@ -216,12 +216,12 @@ BL_PCR0=$(printf 'a%.0s' {1..64}) BL_PCR1=$(printf 'b%.0s' {1..64}) \
     baseline_write "$(sp_baseline_file)"
 unset BL_KEYS_RELEASE_CERT_PATH
 : >"$SBV_LOG"
-DEBIAN_FDE_KEYDIR= KEY_PATH= run_status
+ALPINE_FDE_KEYDIR= KEY_PATH= run_status
 assert_eq "M-1: status rc 0" "0" "$ST_RC"
 SBV_CALLS=$(sed -n 's/^CALL: //p' "$SBV_LOG")
 assert_contains "M-1: sbverify used the baseline-recorded release cert" "$SBV_CALLS" \
     "--cert $T/keys/base-release.crt"
-export DEBIAN_FDE_KEYDIR=$T/keys
+export ALPINE_FDE_KEYDIR=$T/keys
 
 # --- 4e. CR-02: the recorded path is the SIGNING MEDIUM (offline on the booted
 # target — I4), so a live baseline record resolves a dead path there. The §8.4
@@ -237,7 +237,7 @@ unset BL_KEYS_RELEASE_CERT_PATH
 mkdir -p "$(sp_etc_dir)/keys"
 printf 'TARGET-CERT' >"$(sp_etc_dir)/keys/release.crt"
 : >"$SBV_LOG"
-DEBIAN_FDE_KEYDIR= KEY_PATH= run_status
+ALPINE_FDE_KEYDIR= KEY_PATH= run_status
 assert_eq "CR-02: status rc 0" "0" "$ST_RC"
 SBV_CALLS=$(sed -n 's/^CALL: //p' "$SBV_LOG")
 assert_contains "CR-02: sbverify used the §8.4 target cert" "$SBV_CALLS" \
@@ -246,7 +246,7 @@ assert_not_contains "CR-02: dead baseline-recorded path never invoked" "$SBV_CAL
     "$T/keys/base-release.crt"
 assert_not_contains "CR-02: check not dormant (no no-cert skip)" "$ST_OUT" \
     "no release cert"
-export DEBIAN_FDE_KEYDIR=$T/keys
+export ALPINE_FDE_KEYDIR=$T/keys
 
 # --- 5. ESP absent -> reported skipped, rc stays 0 -----------------------------------
 mv "$ESP" "$ESP.bak"
@@ -328,10 +328,10 @@ assert_not_contains "absent again: section gone" "$ST_OUT" "== Install state"
 # token), finalize pending. status must flag the active provisional window
 # PROMINENTLY (token provisional PCR-11-only, recovery passphrase not yet set)
 # with the `alpine-fde finalize` resume hint — never fall through to the
-# unreadable-state branch. Exercised through the DEBIAN_FDE_INSTALL_STATE seam
+# unreadable-state branch. Exercised through the ALPINE_FDE_INSTALL_STATE seam
 # against the REAL cmd_status_main (same seam install-state.sh documents).
 ISTATE_FIX=$T/install-state-fixture.json
-export DEBIAN_FDE_INSTALL_STATE=$ISTATE_FIX
+export ALPINE_FDE_INSTALL_STATE=$ISTATE_FIX
 
 printf '{\n  "schema_version": 1,\n  "state": "provisional-booted",\n  "updated_at": "2026-09-21T00:00:00Z"\n}\n' \
     >"$ISTATE_FIX"
@@ -374,6 +374,6 @@ assert_contains "finalized (fixture seam): quiet line unchanged" "$ST_OUT" \
     "install state: finalized"
 assert_not_contains "finalized (fixture seam): no warning" "$ST_OUT" "WARNING"
 
-unset DEBIAN_FDE_INSTALL_STATE
+unset ALPINE_FDE_INSTALL_STATE
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

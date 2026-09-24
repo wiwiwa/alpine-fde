@@ -1,21 +1,21 @@
 #!/bin/sh
-# doctor.sh — `debian-fde doctor`: environment readiness report (§8.1, §13).
+# doctor.sh — `alpine-fde doctor`: environment readiness report (§8.1, §13).
 # Checks binaries/packages, TPM reachability, Secure Boot state, apk/apt config,
 # OVMF CI extras. READ-ONLY: never installs anything (no require_pkgs here,
 # no `apk add`/`apt-get install` anywhere) and never mutates state.
 # Exit 0 = ready, 1 = not ready (missing hard-required binaries or unreachable
 # TPM); degraded-but-usable items are warnings only.
 
-if [ -n "${DEBIAN_FDE_DOCTOR_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_DOCTOR_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_DOCTOR_LOADED=1
+ALPINE_FDE_DOCTOR_LOADED=1
 
 # Every bucket-C command file pulls the shared baseline/common/firmware layer
-# (baseline.sh lazy-loads common.sh + firmware.sh relative to DEBIAN_FDE_CMD_DIR).
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
-    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+# (baseline.sh lazy-loads common.sh + firmware.sh relative to ALPINE_FDE_CMD_DIR).
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
+    # shellcheck disable=SC1090  # resolved from ALPINE_FDE_CMD_DIR / install tree
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 # hard-required provisioning tools: binary:package — the Alpine set (§3.1/§13;
@@ -23,7 +23,7 @@ fi
 # systemd-cryptenroll, dracut and debootstrap are deliberately absent: none is
 # packaged on Alpine v3.24 (ADR-19/ADR-13) and none belongs in the Alpine boot
 # or unlock path.
-DEBIAN_FDE_DOCTOR_PKGS='
+ALPINE_FDE_DOCTOR_PKGS='
 tpm2:tpm2-tools
 cryptsetup:cryptsetup
 ukify:ukify
@@ -36,7 +36,7 @@ mkinitfs:mkinitfs
 # host-installer tools (§13): enforced by the `install` preflight before disk
 # mutation; doctor only surfaces them — missing entries are warnings and never
 # gate the verdict. make-bcache matters only for --bcache (§4.1).
-DEBIAN_FDE_DOCTOR_HOST_PKGS='
+ALPINE_FDE_DOCTOR_HOST_PKGS='
 sfdisk:util-linux
 lsblk:util-linux
 mkfs.vfat:dosfstools
@@ -45,7 +45,7 @@ make-bcache:bcache-tools
 '
 
 # CI/e2e extras: reported, never gate the verdict
-DEBIAN_FDE_DOCTOR_CI_PKGS='
+ALPINE_FDE_DOCTOR_CI_PKGS='
 swtpm:swtpm
 qemu-system-x86_64:qemu-system-x86
 virt-fw-vars:virt-firmware
@@ -54,7 +54,7 @@ jq:jq
 
 doctor_usage() {
     cat >&2 <<EOF
-Usage: debian-fde doctor
+Usage: alpine-fde doctor
 
 Environment readiness check (no changes): binaries/packages (auto-install
 happens only in other commands, ADR-15), TPM presence, Secure Boot state,
@@ -200,11 +200,11 @@ doctor_apk_report() {
 
 # doctor_ovmf_report — OVMF firmware (code + vars) presence for the CI/QEMU
 # path (§8.1 "OVMF/QEMU prereqs (CI)", §3.1 CI host). Non-gating: present and
-# absent are both informational. Env seam: DEBIAN_FDE_OVMF_DIR overrides the
-# search dir (same DEBIAN_FDE_* convention as DEBIAN_FDE_EFIVARS_DIR); unset,
+# absent are both informational. Env seam: ALPINE_FDE_OVMF_DIR overrides the
+# search dir (same ALPINE_FDE_* convention as ALPINE_FDE_EFIVARS_DIR); unset,
 # known install locations are tried.
 doctor_ovmf_report() {
-    _dov_dir=${DEBIAN_FDE_OVMF_DIR:-}
+    _dov_dir=${ALPINE_FDE_OVMF_DIR:-}
     if [ -z "$_dov_dir" ]; then
         for _dov_dir in /usr/share/OVMF /usr/share/ovmf/x64 /usr/share/ovmf /usr/share/qemu; do
             [ -d "$_dov_dir" ] && break
@@ -252,14 +252,14 @@ cmd_doctor_main() {
         return 0
     fi
     if [ "$#" -gt 0 ]; then
-        die -r "$DEBIAN_FDE_USAGE" "doctor: unexpected argument: $1"
+        die -r "$ALPINE_FDE_USAGE" "doctor: unexpected argument: $1"
     fi
 
     _dd_missing=0
-    printf 'debian-fde doctor — readiness report (no changes made)\n'
+    printf 'alpine-fde doctor — readiness report (no changes made)\n'
     printf '\nprovisioning tools (binary:package):\n'
     # shellcheck disable=SC2086  # deliberate word split over the list
-    for _dd_pair in $DEBIAN_FDE_DOCTOR_PKGS; do
+    for _dd_pair in $ALPINE_FDE_DOCTOR_PKGS; do
         doctor_binary_item "$_dd_pair" || _dd_missing=$((_dd_missing + 1))
     done
     # ADR-1 pin readout — informational/warning, never gates
@@ -267,13 +267,13 @@ cmd_doctor_main() {
 
     printf '\nhost-installer tools (install preflight enforces these; warnings only here, §13):\n'
     # shellcheck disable=SC2086  # deliberate word split over the list
-    for _dd_pair in $DEBIAN_FDE_DOCTOR_HOST_PKGS; do
+    for _dd_pair in $ALPINE_FDE_DOCTOR_HOST_PKGS; do
         doctor_optional_item "$_dd_pair" || true
     done
 
     printf '\nTPM:\n'
-    if [ -n "${DEBIAN_FDE_TCTI:-}" ]; then
-        printf '[info]    TCTI override: %s\n' "$DEBIAN_FDE_TCTI"
+    if [ -n "${ALPINE_FDE_TCTI:-}" ]; then
+        printf '[info]    TCTI override: %s\n' "$ALPINE_FDE_TCTI"
     fi
     if tpm_available; then
         printf '[ok]      TPM 2.0 reachable (tpm2 getcap properties-fixed)\n'
@@ -282,7 +282,7 @@ cmd_doctor_main() {
         # unreachable-TPM [fail] above; the warn-on-probe-error path returns 0.
         doctor_pcr_bank_report || _dd_missing=$((_dd_missing + 1))
     else
-        printf '[fail]    no TPM 2.0 answered (TCTI: %s)\n' "${DEBIAN_FDE_TCTI:-<default discovery>}"
+        printf '[fail]    no TPM 2.0 answered (TCTI: %s)\n' "${ALPINE_FDE_TCTI:-<default discovery>}"
         _dd_missing=$((_dd_missing + 1))
     fi
 
@@ -314,7 +314,7 @@ cmd_doctor_main() {
 
     printf '\nCI extras (informational, non-gating):\n'
     # shellcheck disable=SC2086
-    for _dd_pair in $DEBIAN_FDE_DOCTOR_CI_PKGS; do
+    for _dd_pair in $ALPINE_FDE_DOCTOR_CI_PKGS; do
         doctor_binary_item "$_dd_pair" || true
     done
     # OVMF prereqs for the CI/QEMU path — informational, never gates (§8.1)

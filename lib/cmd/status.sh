@@ -1,31 +1,31 @@
 #!/bin/sh
-# status.sh — `debian-fde status`: read-only snapshot (§8.1; C-G14): Secure Boot
+# status.sh — `alpine-fde status`: read-only snapshot (§8.1; C-G14): Secure Boot
 # state, PCR readings vs baseline, LUKS2 token summary, boot entries, manifest
 # freshness, last audit, last enrollment. Report only — always exits 0 unless
 # a runtime error occurs (die, fail-closed 64); drift is shown, not enforced
 # (that is `audit`'s job).
 
-if [ -n "${DEBIAN_FDE_STATUS_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_STATUS_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_STATUS_LOADED=1
+ALPINE_FDE_STATUS_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
-if [ -z "${DEBIAN_FDE_ESP_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_ESP_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../esp.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../esp.sh"
 fi
-if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
 fi
 
 status_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde status
+Usage: alpine-fde status
 
 Snapshot: Secure Boot state, PCRs vs baseline, LUKS2 systemd-tpm2 tokens,
 bootctl entries, digest manifest freshness, last enrollment, last audit.
@@ -97,7 +97,7 @@ cmd_status_main() {
         status_usage
         return 0
     fi
-    [ $# -eq 0 ] || die -r "$DEBIAN_FDE_USAGE" "status: unexpected arguments: $*"
+    [ $# -eq 0 ] || die -r "$ALPINE_FDE_USAGE" "status: unexpected arguments: $*"
 
     _st_bl=$(sp_baseline_file)
     # Install-state row (§8.1/§9.1, G-IL12): the lifecycle headline. SILENT for
@@ -155,17 +155,17 @@ cmd_status_main() {
 
     printf '\n== LUKS2 tokens\n'
     _st_uuid=$(baseline_get_in "$_st_bl" target luks_uuid 2>/dev/null) || _st_uuid=''
-    if [ -n "$_st_uuid" ] && [ -e "${DEBIAN_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_st_uuid" ] \
-        && command -v "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" >/dev/null 2>&1; then
-        _st_dev="${DEBIAN_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_st_uuid"
+    if [ -n "$_st_uuid" ] && [ -e "${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_st_uuid" ] \
+        && command -v "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" >/dev/null 2>&1; then
+        _st_dev="${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_st_uuid"
         # L-5: an unwritable TMPDIR must not abort the read-only report with
         # rc 1 (outside the 0/2/64 contract) — skip the section loudly instead.
-        if ! _st_json=$(mktemp "${TMPDIR:-/tmp}/debian-fde-status.XXXXXX"); then
+        if ! _st_json=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-status.XXXXXX"); then
             printf '    mktemp failed — LUKS2 token section skipped (TMPDIR: %s)\n' "${TMPDIR:-/tmp}"
             _st_json=''
         fi
         if [ -n "$_st_json" ]; then
-            if "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" luksDump --dump-json-metadata "$_st_dev" >"$_st_json" 2>/dev/null; then
+            if "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" luksDump --dump-json-metadata "$_st_dev" >"$_st_json" 2>/dev/null; then
                 printf '    luks uuid: %s\n' "$_st_uuid"
                 printf '    systemd-tpm2 tokens: %s\n' "$(luks_json_count_type "$_st_json" systemd-tpm2)"
                 _st_slot=$(luks_json_token_keyslot "$_st_json" systemd-tpm2)
@@ -195,8 +195,8 @@ cmd_status_main() {
     fi
 
     printf '\n== Boot entries\n'
-    if command -v "${DEBIAN_FDE_BOOTCTL:-bootctl}" >/dev/null 2>&1; then
-        "${DEBIAN_FDE_BOOTCTL:-bootctl}" list --no-legend 2>/dev/null | sed 's/^/    /' \
+    if command -v "${ALPINE_FDE_BOOTCTL:-bootctl}" >/dev/null 2>&1; then
+        "${ALPINE_FDE_BOOTCTL:-bootctl}" list --no-legend 2>/dev/null | sed 's/^/    /' \
             || printf '    bootctl list failed\n'
     else
         printf '    bootctl not found\n'
@@ -245,7 +245,7 @@ cmd_status_main() {
     if [ -f "$_st_bf" ]; then
         printf '    FAILED BUILD MARKER PRESENT (%s):\n' "$_st_bf"
         sed 's/^/      /' "$_st_bf"
-        printf '    attach the signing medium and re-run: debian-fde ukictl build (§9.2)\n'
+        printf '    attach the signing medium and re-run: alpine-fde ukictl build (§9.2)\n'
     else
         printf '    ok (no failure marker)\n'
     fi

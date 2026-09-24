@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/audit_drift_pcrextend.sh — `debian-fde audit` against a live swtpm:
+# tests/unit/audit_drift_pcrextend.sh — `alpine-fde audit` against a live swtpm:
 #   * --init finalizes a pending baseline (writes pcr0..3+7 + event log v1)
 #   * swtpm_pcrextend drift -> rc 1 (drift), §9.4 next steps printed
 #   * --accept --yes re-baselines (baseline.json + last-audit.json updated)
@@ -18,18 +18,18 @@ source "$HERE/../lib/assert.sh"
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 
-T=$(mktemp -d /tmp/debian-fde-audit.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-audit.XXXXXX)
 STATE=$T/swtpm
 EVENTLOG=$T/eventlog
 EFIVARS=$T/efivars
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EVENTLOG=$EVENTLOG
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_NO_INSTALL=1
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EVENTLOG=$EVENTLOG
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_NO_INSTALL=1
 
 cleanup() {
     swtpm_cleanup_all
@@ -55,7 +55,7 @@ sb_final() { # the final SB state the G-R1 guard requires, + key material for fi
 }
 
 run_audit() { # args...
-    AUD_OUT=$("$REPO/bin/debian-fde" audit "$@" 2>&1)
+    AUD_OUT=$("$REPO/bin/alpine-fde" audit "$@" 2>&1)
     AUD_RC=$?
 }
 
@@ -68,16 +68,16 @@ assert_eq "audit without baseline -> 64" "64" "$AUD_RC"
 
 # --- 2. TPM unreachable -> 64 (error, not drift) --------------------------------------
 BL_PCR0="$ZERO64" BL_PCR7="$ZERO64" baseline_write "$BL"
-export DEBIAN_FDE_TCTI='device:/nonexistent-tpmrm0'
+export ALPINE_FDE_TCTI='device:/nonexistent-tpmrm0'
 run_audit
 assert_eq "TPM unreachable -> 64" "64" "$AUD_RC"
 assert_contains "error message mentions TPM" "$AUD_OUT" "no TPM reachable"
 
 # --- 3. --init finalizes the pending baseline --------------------------------------------
-# (empty DEBIAN_FDE_TCTI = tctildr default discovery, which never probes swtpm —
+# (empty ALPINE_FDE_TCTI = tctildr default discovery, which never probes swtpm —
 # the fixture TCTI must be set explicitly, C-G1)
 assert_rc "swtpm fixture starts" 0 swtpm_start "$STATE"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 sb_final
 BL_PCR0='pending' BL_PCR7='pending' baseline_write "$BL"
 run_audit --init
@@ -137,7 +137,7 @@ assert_eq "drift -> rc 1" "1" "$AUD_RC"
 assert_contains "pcr2 line shows DRIFT" "$AUD_OUT" "pcr2"
 assert_contains "drift output prints §9.4 next steps (audit --accept)" "$AUD_OUT" "audit --accept"
 assert_contains "G-XC5: §9.4 A″ next steps point at enroll-tpm (re-enroll)" "$AUD_OUT" \
-    "debian-fde enroll-tpm"
+    "alpine-fde enroll-tpm"
 assert_not_contains "G-XC5: NO re-sign wording in the §9.4 A″ next steps" "$AUD_OUT" \
     "re-sign"
 assert_contains "L-1: next steps use the A″ single-enrollment wording" "$AUD_OUT" \
@@ -151,7 +151,7 @@ run_audit --accept --yes
 assert_eq "audit --accept rc 0" "0" "$AUD_RC"
 assert_eq "baseline pcr2 re-baselined" "$(swtpm_pcrread "$STATE" 2)" "$(baseline_get "$BL" pcr2)"
 assert_eq "last-audit accepted yes" "yes" "$(baseline_get "$(sp_last_audit_file)" accepted)"
-assert_rc "audit clean after accept" 0 "$REPO/bin/debian-fde" audit
+assert_rc "audit clean after accept" 0 "$REPO/bin/alpine-fde" audit
 
 # --- 11. event log drift (sha256 change) ------------------------------------------------------------------
 printf X >>"$EVENTLOG"
@@ -192,14 +192,14 @@ assert_eq "re-finalized for the sections below" "0" "$AUD_RC"
 
 # --- 13. --accept without --yes: confirmation refused (G-R7, audit §8.1) -------------
 BL_SHA_BEFORE=$(md5sum "$BL" | cut -d' ' -f1)
-AUD_OUT=$("$REPO/bin/debian-fde" audit --accept </dev/null 2>&1)
+AUD_OUT=$("$REPO/bin/alpine-fde" audit --accept </dev/null 2>&1)
 AUD_RC=$?
 assert_eq "unconfirmed --accept -> 64" "64" "$AUD_RC"
 assert_contains "refusal says not confirmed" "$AUD_OUT" "not confirmed"
 assert_eq "unconfirmed --accept leaves baseline untouched" "$BL_SHA_BEFORE" "$(md5sum "$BL" | cut -d' ' -f1)"
 
 # --- 13b. --accept with piped ACCEPT: confirmation accepted via non-tty stdin ------
-AUD_OUT=$(printf 'ACCEPT\n' | "$REPO/bin/debian-fde" audit --accept 2>&1)
+AUD_OUT=$(printf 'ACCEPT\n' | "$REPO/bin/alpine-fde" audit --accept 2>&1)
 AUD_RC=$?
 assert_eq "piped ACCEPT confirmation -> rc 0" "0" "$AUD_RC"
 assert_contains "piped ACCEPT updates baseline" "$AUD_OUT" "accepted"
@@ -211,35 +211,35 @@ assert_eq "unknown flag -> usage rc 2" "2" "$AUD_RC"
 # --- 15. §8.3 sbverify over the ESP boot binaries (G-R4) ----------------------------
 FAKEBIN=$T/bin
 ESP=$T/esp
-export DEBIAN_FDE_ESP=$ESP
-export DEBIAN_FDE_KEYDIR=$T/keys
-export DEBIAN_FDE_SBV_LOG=$T/sbverify.log DEBIAN_FDE_SBV_RC=$T/sbverify.rc
+export ALPINE_FDE_ESP=$ESP
+export ALPINE_FDE_KEYDIR=$T/keys
+export ALPINE_FDE_SBV_LOG=$T/sbverify.log ALPINE_FDE_SBV_RC=$T/sbverify.rc
 mkdir -p "$FAKEBIN" "$ESP/EFI/systemd" "$ESP/EFI/BOOT" "$T/keys"
 printf 'CERT' >"$T/keys/release.crt"
 : >"$ESP/EFI/systemd/systemd-bootx64.efi"
 : >"$ESP/EFI/BOOT/BOOTX64.EFI"
 cat >"$FAKEBIN/sbverify" <<'EOF'
 #!/bin/sh
-echo "CALL: $*" >>"$DEBIAN_FDE_SBV_LOG"
-exit "$(cat "$DEBIAN_FDE_SBV_RC" 2>/dev/null || echo 0)"
+echo "CALL: $*" >>"$ALPINE_FDE_SBV_LOG"
+exit "$(cat "$ALPINE_FDE_SBV_RC" 2>/dev/null || echo 0)"
 EOF
 chmod +x "$FAKEBIN/sbverify"
 export PATH="$FAKEBIN:$PATH"
 
-: >"$DEBIAN_FDE_SBV_LOG"
+: >"$ALPINE_FDE_SBV_LOG"
 run_audit
 assert_eq "sbverify pass -> audit stays clean (rc 0)" "0" "$AUD_RC"
 assert_contains "sbverify pass line for the boot manager" "$AUD_OUT" "systemd-bootx64.efi"
 assert_contains "sbverify pass line for the fallback loader" "$AUD_OUT" "BOOTX64.EFI"
-SBV_CALLS=$(sed -n 's/^CALL: //p' "$DEBIAN_FDE_SBV_LOG")
+SBV_CALLS=$(sed -n 's/^CALL: //p' "$ALPINE_FDE_SBV_LOG")
 assert_contains "sbverify invoked on the boot manager" "$SBV_CALLS" "$ESP/EFI/systemd/systemd-bootx64.efi"
 assert_contains "sbverify invoked on the fallback loader" "$SBV_CALLS" "$ESP/EFI/BOOT/BOOTX64.EFI"
 
-echo 1 >"$DEBIAN_FDE_SBV_RC"
+echo 1 >"$ALPINE_FDE_SBV_RC"
 run_audit
 assert_eq "sbverify FAIL on a present binary -> drift (rc 1)" "1" "$AUD_RC"
 assert_contains "sbverify FAIL line reported" "$AUD_OUT" "FAIL"
-echo 0 >"$DEBIAN_FDE_SBV_RC"
+echo 0 >"$ALPINE_FDE_SBV_RC"
 
 # --- 16. §9.5 firmware identity (vendor/version) is INFORMATIONAL ---------------
 # The baseline records fw.vendor/fw.version (baseline_finalize_from_live), but
@@ -254,7 +254,7 @@ DMI=$T/dmi
 mkdir -p "$DMI"
 printf 'Acme Corp' >"$DMI/sys_vendor"
 printf '1.2.3' >"$DMI/bios_version"
-export DEBIAN_FDE_DMI_DIR=$DMI
+export ALPINE_FDE_DMI_DIR=$DMI
 run_audit
 assert_eq "changed firmware identity stays rc 0 (informational, not drift)" "0" "$AUD_RC"
 assert_contains "changed fw vendor reported as an info line" "$AUD_OUT" \

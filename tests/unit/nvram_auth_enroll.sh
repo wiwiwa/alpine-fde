@@ -26,7 +26,7 @@ source "$REPO/lib/cmd/provision.sh"
 # shellcheck source=../../lib/firmware.sh
 source "$REPO/lib/firmware.sh"
 
-T=$(mktemp -d /tmp/debian-fde-nvram-auth.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-nvram-auth.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
@@ -135,7 +135,7 @@ RT=$T/roundtrip
 mkdir -p "$RT"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RT/signer.key" 2>/dev/null
 openssl req -new -x509 -key "$RT/signer.key" -out "$RT/signer.pem" -days 30 -sha256 \
-    -subj "/O=Debian FDE/CN=Roundtrip Signer" 2>/dev/null
+    -subj "/O=Alpine FDE/CN=Roundtrip Signer" 2>/dev/null
 printf 'ESL-PAYLOAD' >"$RT/payload.bin"
 auth_packet_build "$RT/signer.key" "$RT/signer.pem" db "$GUID_DBASE" "$PROV_EFI_ATTRS" \
     "$RT/payload.bin" '2026-09-20T00:00:00Z' "$RT/db.auth"

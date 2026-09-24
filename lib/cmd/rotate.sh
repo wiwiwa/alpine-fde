@@ -1,5 +1,5 @@
 #!/bin/sh
-# rotate.sh — `debian-fde rotate`: change the keyslot-0 (recovery) passphrase via
+# rotate.sh — `alpine-fde rotate`: change the keyslot-0 (recovery) passphrase via
 # `cryptsetup luksChangeKey` (§8.1, §9.4). The volume key is untouched — no
 # re-encryption; TPM seals are untouched — no re-seal needed.
 #
@@ -12,19 +12,19 @@
 #   >= 12 chars with >= 3 character classes, or >= 16 chars (any classes);
 #   small common-password blocklist (case-insensitive substring match).
 
-if [ -n "${DEBIAN_FDE_ROTATE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_ROTATE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_ROTATE_LOADED=1
+ALPINE_FDE_ROTATE_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 # passphrase_floor_ok PASSPHRASE — rc 0 iff it meets the §13 entropy floor
 # Control characters are rejected first: the interactive TTY prompt can never
-# produce them, but DEBIAN_FDE_NEW_PASSPHRASE (documented CI/scripting path)
+# produce them, but ALPINE_FDE_NEW_PASSPHRASE (documented CI/scripting path)
 # can — and a passphrase containing e.g. a newline is untypeable at the §10
 # boot prompt (the documented data-loss row, silently armed).
 passphrase_floor_ok() {
@@ -58,7 +58,7 @@ passphrase_floor_ok() {
         *password* | *passwort* | *123456* | *654321* | *qwerty* | *letmein* | \
             *welcome* | *admin* | *login* | *master* | *monkey* | *dragon* | \
             *iloveyou* | *sunshine* | *trustno1* | *superman* | *batman* | \
-            *shadow* | *michael* | *jennifer* | *changeme* | *debian-fde* | \
+            *shadow* | *michael* | *jennifer* | *changeme* | *alpine-fde* | \
             *correcthorse* | *asdfgh* | *zxcvbn* | *abcdef* | *qazwsx* | \
             *1q2w3e* | *abc123* | *hunter2*)
             return 1
@@ -71,14 +71,14 @@ passphrase_floor_ok() {
 
 rotate_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde rotate [--reseat-tpm] [--dry-run]
+Usage: alpine-fde rotate [--reseat-tpm] [--dry-run]
 
 Change the keyslot-0 (recovery) passphrase: cryptsetup luksChangeKey on the
 baseline's LUKS device, Argon2id KDF pins preserved. The volume key and all
 TPM seals are untouched (no re-encryption, no re-seal, §9.4).
   --reseat-tpm   additionally wipe+re-enroll the TPM seal in ONE Mechanism B
                  sealing run (enroll-tpm preconditions apply; ADR-19)
-Passphrases: DEBIAN_FDE_OLD_PASSPHRASE / DEBIAN_FDE_NEW_PASSPHRASE env or
+Passphrases: ALPINE_FDE_OLD_PASSPHRASE / ALPINE_FDE_NEW_PASSPHRASE env or
 interactive prompt. New passphrase must meet the §13 floor (>=12 chars/3
 classes or >=16 chars, no common-password blocklist hits).
 EOF
@@ -91,7 +91,7 @@ rot_device() {
     baseline_validate "$_rd_bl" || die "rotate: baseline invalid"
     _rd_uuid=$(baseline_get_in "$_rd_bl" target luks_uuid)
     [ -n "$_rd_uuid" ] || die "rotate: baseline target.luks_uuid empty (set by install)"
-    _rd_dev="${DEBIAN_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_rd_uuid"
+    _rd_dev="${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_rd_uuid"
     [ -e "$_rd_dev" ] || die "rotate: LUKS device not resolvable: $_rd_dev"
     printf '%s\n' "$_rd_dev"
 }
@@ -116,7 +116,7 @@ rot_prompt() {
 # rot_luksdump DEV OUTFILE — luksDump JSON via the cryptsetup seam
 rot_luksdump() {
     _rl_dev=$1 _rl_out=$2
-    "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" luksDump --dump-json-metadata "$_rl_dev" >"$_rl_out" 2>/dev/null
+    "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" luksDump --dump-json-metadata "$_rl_dev" >"$_rl_out" 2>/dev/null
 }
 
 cmd_rotate_main() {
@@ -124,12 +124,12 @@ cmd_rotate_main() {
     while [ $# -gt 0 ]; do
         case $1 in
             --reseat-tpm) _rm_reseat=1 ;;
-            --dry-run) DEBIAN_FDE_DRY_RUN=1 ;;  # consumed by enroll-tpm on --reseat-tpm
+            --dry-run) ALPINE_FDE_DRY_RUN=1 ;;  # consumed by enroll-tpm on --reseat-tpm
             -h | --help)
                 rotate_usage
                 return 0
                 ;;
-            *) die -r "$DEBIAN_FDE_USAGE" "rotate: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "rotate: unknown argument: $1" ;;
         esac
         shift
     done
@@ -137,7 +137,7 @@ cmd_rotate_main() {
     require_pkgs cryptsetup:cryptsetup jq:jq
     _rm_dev=$(rot_device)
 
-    if [ -n "${DEBIAN_FDE_DRY_RUN:-}" ]; then
+    if [ -n "${ALPINE_FDE_DRY_RUN:-}" ]; then
         info "dry-run: would run: cryptsetup luksChangeKey --key-slot 0 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-file <old> $_rm_dev <new>"
         if [ "$_rm_reseat" -eq 1 ]; then
             info "dry-run: would then re-seat the TPM seal (enroll-tpm --reseat)"
@@ -146,8 +146,8 @@ cmd_rotate_main() {
     fi
 
     # Passphrase acquisition (env for CI, prompt otherwise)
-    _rm_old=${DEBIAN_FDE_OLD_PASSPHRASE:-}
-    _rm_new=${DEBIAN_FDE_NEW_PASSPHRASE:-}
+    _rm_old=${ALPINE_FDE_OLD_PASSPHRASE:-}
+    _rm_new=${ALPINE_FDE_NEW_PASSPHRASE:-}
     if [ -z "$_rm_new" ]; then
         rot_prompt _rm_new "new keyslot-0 passphrase"
     fi
@@ -162,19 +162,19 @@ cmd_rotate_main() {
     # except 0 (and all tokens) must be byte-identical; slot 0 must change.
     # Temp files holding the passphrases MUST live on tmpfs (§11 I1: neither
     # secret is ever plaintext on disk) — default /dev/shm, overridable via
-    # DEBIAN_FDE_TMPDIR (tests / exotic setups); never ${TMPDIR:-/tmp}.
-    _rm_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-    _rm_pre=$(mktemp "$_rm_tmpdir/debian-fde-rot-pre.XXXXXX") ||
+    # ALPINE_FDE_TMPDIR (tests / exotic setups); never ${TMPDIR:-/tmp}.
+    _rm_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+    _rm_pre=$(mktemp "$_rm_tmpdir/alpine-fde-rot-pre.XXXXXX") ||
         die "rotate: cannot create temp file in $_rm_tmpdir"
-    _rm_post=$(mktemp "$_rm_tmpdir/debian-fde-rot-post.XXXXXX") || {
+    _rm_post=$(mktemp "$_rm_tmpdir/alpine-fde-rot-post.XXXXXX") || {
         rm -f "$_rm_pre"
         die "rotate: cannot create temp file in $_rm_tmpdir"
     }
-    _rm_oldf=$(mktemp "$_rm_tmpdir/debian-fde-rot-old.XXXXXX") || {
+    _rm_oldf=$(mktemp "$_rm_tmpdir/alpine-fde-rot-old.XXXXXX") || {
         rm -f "$_rm_pre" "$_rm_post"
         die "rotate: cannot create temp file in $_rm_tmpdir"
     }
-    _rm_newf=$(mktemp "$_rm_tmpdir/debian-fde-rot-new.XXXXXX") || {
+    _rm_newf=$(mktemp "$_rm_tmpdir/alpine-fde-rot-new.XXXXXX") || {
         rm -f "$_rm_pre" "$_rm_post" "$_rm_oldf"
         die "rotate: cannot create temp file in $_rm_tmpdir"
     }
@@ -197,7 +197,7 @@ cmd_rotate_main() {
     printf '%s' "$_rm_new" >"$_rm_newf"
     chmod 600 "$_rm_oldf" "$_rm_newf"
     _rm_rc=0
-    if ! "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" luksChangeKey \
+    if ! "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" luksChangeKey \
         --key-slot 0 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 \
         --key-file "$_rm_oldf" "$_rm_dev" "$_rm_newf"; then
         err "rotate: luksChangeKey failed (wrong current passphrase?)"
@@ -251,7 +251,7 @@ cmd_rotate_main() {
     fi
     [ "$_rm_rc" -eq 0 ] || die "rotate: post-assertions failed"
 
-    printf 'debian-fde: keyslot-0 passphrase changed (volume key and TPM seals untouched)\n' >&2
+    printf 'alpine-fde: keyslot-0 passphrase changed (volume key and TPM seals untouched)\n' >&2
 
     if [ "$_rm_reseat" -eq 1 ]; then
         info "re-seating the TPM seal (single wipe+enroll Mechanism B run, ADR-19)"

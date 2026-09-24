@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/pcrsign_cli.sh — G-B4: `debian-fde pcrsign` (§6.1.1 signer contract)
+# tests/unit/pcrsign_cli.sh — G-B4: `alpine-fde pcrsign` (§6.1.1 signer contract)
 # end-to-end through the REAL dispatcher with fixture keys, fixture baseline and
 # a stubbed ukify (canned enter-initrd measure JSON). Asserts OBSERVED effects:
 # the sign-format JSON artifact, pcrs [7,11], and an openssl-verifiable release
@@ -71,13 +71,13 @@ ukify build \
 
 # pcrsign — the REAL dispatcher with stubbed measure + fixture env
 pcrsign() {
-    env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR -u DEBIAN_FDE_ESP -u DEBIAN_FDE_DISK \
+    env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR -u ALPINE_FDE_ESP -u ALPINE_FDE_DISK \
         PATH="$STUBBIN:$PATH" \
-        DEBIAN_FDE_ROOT="$ROOT" \
-        DEBIAN_FDE_KEYDIR="$KEYDIR" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/absent.conf" \
-        "$REPO/bin/debian-fde" pcrsign "$@"
+        ALPINE_FDE_ROOT="$ROOT" \
+        ALPINE_FDE_KEYDIR="$KEYDIR" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/absent.conf" \
+        "$REPO/bin/alpine-fde" pcrsign "$@"
 }
 
 # verify_sig <json> — decode .sha256[0].sig and openssl-verify it over the
@@ -146,13 +146,13 @@ assert_eq "fallback env: ukify genuinely absent" "missing" \
     "$(env PATH="$FB" sh -c 'command -v ukify >/dev/null 2>&1 && echo found || echo missing')"
 : >"$SDM_LOG"
 OUT3="$TMP/pcrsig-fallback.json"
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR -u DEBIAN_FDE_ESP -u DEBIAN_FDE_DISK \
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR -u ALPINE_FDE_ESP -u ALPINE_FDE_DISK \
     PATH="$FB" \
-    DEBIAN_FDE_ROOT="$ROOT" \
-    DEBIAN_FDE_KEYDIR="$KEYDIR" \
-    DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --linux "$REPO/fixtures/uki/vmlinuz" \
+    ALPINE_FDE_ROOT="$ROOT" \
+    ALPINE_FDE_KEYDIR="$KEYDIR" \
+    ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --linux "$REPO/fixtures/uki/vmlinuz" \
         --initrd "$REPO/fixtures/uki/initrd.img" \
         --cmdline "$REPO/fixtures/uki/cmdline.txt" \
         --os-release "$REPO/fixtures/uki/os-release" \
@@ -171,10 +171,10 @@ mkdir -p "$ROOT_PEND/etc/alpine-fde"
 jq -n '{schema_version: "1", expected_pcr7: "pending", status: "pending"}' \
     >"$ROOT_PEND/etc/alpine-fde/baseline.json"
 rc=0
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
-    DEBIAN_FDE_ROOT="$ROOT_PEND" DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --uki "$UKI" --out "$TMP/nope.json" 2>&1) || rc=$?
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
+    ALPINE_FDE_ROOT="$ROOT_PEND" ALPINE_FDE_KEYDIR="$KEYDIR" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --uki "$UKI" --out "$TMP/nope.json" 2>&1) || rc=$?
 assert_rc "pending baseline -> exit 64 (fail-closed)" 64 $rc
 assert_contains "pending baseline message names the audit --init cure" "$out" "audit --init"
 [ ! -e "$TMP/nope.json" ]
@@ -184,19 +184,19 @@ assert_rc "pending baseline: no artifact written" 0 $?
 ROOT_NOBL="$TMP/root-nobaseline"
 mkdir -p "$ROOT_NOBL/etc/alpine-fde"
 rc=0
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
-    DEBIAN_FDE_ROOT="$ROOT_NOBL" DEBIAN_FDE_KEYDIR="$KEYDIR" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
+    ALPINE_FDE_ROOT="$ROOT_NOBL" ALPINE_FDE_KEYDIR="$KEYDIR" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
 assert_rc "missing baseline -> exit 64" 64 $rc
 assert_contains "missing baseline message names the file" "$out" "baseline.json"
 
 # --- fail-closed: missing release key material ------------------------------------------
 rc=0
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
-    DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_KEYDIR="$TMP/absent-keys" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
+    ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_KEYDIR="$TMP/absent-keys" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
 assert_rc "missing key material -> exit 64 (loud, I4/ADR-8)" 64 $rc
 assert_contains "missing key message explains the keydir" "$out" "release key"
 
@@ -269,10 +269,10 @@ cp "$KEYDIR/release.pem" "$CORRUPT/release.pem"
 cp "$KEYDIR/release.crt" "$CORRUPT/release.crt"
 printf 'deliberately not a key' >"$CORRUPT/release.pub"
 rc=0
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
-    DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_KEYDIR="$CORRUPT" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --uki "$UKI" --out "$TMP/nope-m4.json" 2>&1) || rc=$?
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
+    ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_KEYDIR="$CORRUPT" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --uki "$UKI" --out "$TMP/nope-m4.json" 2>&1) || rc=$?
 assert_rc "corrupt release.pub -> exit 64 (fail-closed, S-M4)" 64 $rc
 assert_contains "S-M4 message names the unusable public key" "$out" "release.pub"
 [ ! -e "$TMP/nope-m4.json" ]
@@ -289,14 +289,14 @@ head -c 120 "$KEYDIR/release.pem" >"$TRUNC/release.pem"
 PSTEMP="$TMP/pstemp"
 mkdir -p "$PSTEMP"
 rc=0
-out=$(env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
+out=$(env -u ALPINE_FDE_TCTI -u ALPINE_FDE_CMD_DIR PATH="$STUBBIN:$PATH" \
     TMPDIR="$PSTEMP" \
-    DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_KEYDIR="$TRUNC" DEBIAN_FDE_NO_INSTALL=1 \
-    DEBIAN_FDE_CONF="$TMP/absent.conf" \
-    "$REPO/bin/debian-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
+    ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_KEYDIR="$TRUNC" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/absent.conf" \
+    "$REPO/bin/alpine-fde" pcrsign --uki "$UKI" 2>&1 >/dev/null) || rc=$?
 assert_rc "truncated release.pem -> exit 64 (fail-closed)" 64 $rc
 assert_eq "S-L1: no pcrsign temp leak on the policy_sign_json die path" "0" \
-    "$(find "$PSTEMP" -name 'debian-fde-pcrsig*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    "$(find "$PSTEMP" -name 'alpine-fde-pcrsig*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 
 # --- usage errors: exit 2 (CLI-shape), never silently proceeded ---------------------------
 rc=0

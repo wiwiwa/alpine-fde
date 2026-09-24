@@ -7,9 +7,9 @@
 # cmd_pcrsign dispatcher with a stubbed ukify (canned enter-initrd measure
 # JSON, tests/unit/pcrsign_cli.sh idiom):
 #   * ENCRYPTED release.pem (produced by the REAL keys_encrypt_release) +
-#     correct DEBIAN_FDE_KEY_PASSPHRASE (and the canonical ALPINE_FDE_KEY_
-#     PASSPHRASE spelling, §8.1) -> rc 0, openssl-verifiable signature over the
-#     combined policyDigest, the unlock staging file (debian-fde-unlock.*) is
+#     correct ALPINE_FDE_KEY_PASSPHRASE (the only spelling, §8.1) -> rc 0,
+#     openssl-verifiable signature over the
+#     combined policyDigest, the unlock staging file (alpine-fde-unlock.*) is
 #     SCRUBBED afterwards, and the keydir key stays encrypted on disk
 #   * missing passphrase (no env, no tty)  -> rc 64, loud message, NO artifact,
 #     ADR-8 failure marker persisted
@@ -24,7 +24,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/lib.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/keys.sh
 source "$REPO/lib/keys.sh"
 # shellcheck source=../../lib/policy.sh
@@ -73,7 +73,7 @@ chmod +x "$STUBBIN/ukify"
 ENC_KEYS="$TMP/enc-keys"
 mkdir -p "$ENC_KEYS"
 cp "$KEYDIR_SRC/release.pem" "$KEYDIR_SRC/release.crt" "$KEYDIR_SRC/release.pub" "$ENC_KEYS/"
-DEBIAN_FDE_KEY_PASSPHRASE=$PASS DEBIAN_FDE_TMPDIR="$SHM" keys_encrypt_release "$ENC_KEYS" ||
+ALPINE_FDE_KEY_PASSPHRASE=$PASS ALPINE_FDE_TMPDIR="$SHM" keys_encrypt_release "$ENC_KEYS" ||
     { echo "FAIL: fixture: keys_encrypt_release failed" >&2; exit 1; }
 enc_rc() { (keys_is_encrypted "$1") >/dev/null 2>&1; echo $?; }
 assert_eq "fixture: release.pem is now the ADR-18 encrypted form" "0" "$(enc_rc "$ENC_KEYS/release.pem")"
@@ -92,13 +92,13 @@ jq -n --arg d7 "$D7" '{schema_version: "1", expected_pcr7: $d7, status: "finaliz
 pcrsign() {
     _kd=$1
     shift
-    env -u DEBIAN_FDE_TCTI PATH="$STUBBIN:$PATH" \
-        DEBIAN_FDE_ROOT="$ROOT" \
-        DEBIAN_FDE_KEYDIR="$_kd" \
-        DEBIAN_FDE_TMPDIR="$SHM" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/absent.conf" \
-        "$REPO/bin/debian-fde" pcrsign --linux "$REPO/fixtures/uki/vmlinuz" \
+    env -u ALPINE_FDE_TCTI PATH="$STUBBIN:$PATH" \
+        ALPINE_FDE_ROOT="$ROOT" \
+        ALPINE_FDE_KEYDIR="$_kd" \
+        ALPINE_FDE_TMPDIR="$SHM" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/absent.conf" \
+        "$REPO/bin/alpine-fde" pcrsign --linux "$REPO/fixtures/uki/vmlinuz" \
         --initrd "$REPO/fixtures/uki/initrd.img" \
         --cmdline "$REPO/fixtures/uki/cmdline.txt" \
         --os-release "$REPO/fixtures/uki/os-release" "$@" </dev/null
@@ -106,7 +106,7 @@ pcrsign() {
 
 # unlock_leaks — count of leftover keys_unlock staging files (must be 0: I4
 # hygiene — no decrypted key material survives the run, success OR failure)
-unlock_leaks() { find "$SHM" -name 'debian-fde-unlock.*' 2>/dev/null | wc -l | tr -d '[:space:]'; }
+unlock_leaks() { find "$SHM" -name 'alpine-fde-unlock.*' 2>/dev/null | wc -l | tr -d '[:space:]'; }
 
 # verify_sig <json> — decode .sha256[0].sig and openssl-verify it over the
 # policyDigest recomputed from the golden d7/d11 (independent of policy_verify)
@@ -122,7 +122,7 @@ verify_sig() {
 # =============================================================================
 OUT="$TMP/pcrsig-enc.json"
 rc=0
-out=$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS pcrsign "$ENC_KEYS" --out "$OUT" 2>&1) || rc=$?
+out=$(ALPINE_FDE_KEY_PASSPHRASE=$PASS pcrsign "$ENC_KEYS" --out "$OUT" 2>&1) || rc=$?
 assert_rc "encrypted key + correct passphrase: pcrsign exits 0" 0 $rc
 assert_file_exists "encrypted key: artifact written" "$OUT"
 assert_eq "encrypted key: pcrs are [7,11]" "true" "$(jq '.sha256[0].pcrs == [7, 11]' "$OUT" 2>/dev/null)"
@@ -163,7 +163,7 @@ assert_eq "missing passphrase: unlock staging scrubbed" "0" "$(unlock_leaks)"
 OUT_W="$TMP/nope-wrong.json"
 rm -f "$ROOT/etc/alpine-fde/pcrsign-failed"
 rc=0
-out=$(DEBIAN_FDE_KEY_PASSPHRASE=definitely-not-the-passphrase pcrsign "$ENC_KEYS" --out "$OUT_W" 2>&1) || rc=$?
+out=$(ALPINE_FDE_KEY_PASSPHRASE=definitely-not-the-passphrase pcrsign "$ENC_KEYS" --out "$OUT_W" 2>&1) || rc=$?
 assert_rc "wrong passphrase -> exit 64 (fail-closed)" 64 $rc
 assert_contains "wrong passphrase: DISTINCT message says decryption failed" "$out" "wrong passphrase"
 [ ! -e "$OUT_W" ]

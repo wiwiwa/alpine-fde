@@ -7,7 +7,7 @@
 # Part 1 (guest): extend PCR 0 and PCR 2 of the boot TPM host-side (the
 #   swtpm equivalent of a firmware update), then boot the ENROLLED harness:
 #   the hook's PolicyPCR({7,11}) session binds PCR 7 statically + signed
-#   PCR 11 only, so the guest must STILL reach `debian-fde: UNSEALED` via
+#   PCR 11 only, so the guest must STILL reach `alpine-fde: UNSEALED` via
 #   the hook's zero-input token path (unseal_unlocked) and print the drifted
 #   PCR 0. Two boots:
 #     boot 1  baseline (token-less disk) — the hook's BOUNDED recovery loop
@@ -23,11 +23,11 @@
 #             never bound PCR 0/2; audit covers them instead).
 # Part 2 (host, real audit code path): run lib/cmd/audit.sh's
 #   cmd_audit_main against a swtpm whose live PCR state is under host
-#   control, via audit's documented seam env vars (DEBIAN_FDE_ROOT /
-#   DEBIAN_FDE_TCTI / DEBIAN_FDE_EVENTLOG / DEBIAN_FDE_EFIVARS_DIR):
+#   control, via audit's documented seam env vars (ALPINE_FDE_ROOT /
+#   ALPINE_FDE_TCTI / ALPINE_FDE_EVENTLOG / ALPINE_FDE_EFIVARS_DIR):
 #     a) baseline captured from the LIVE (drifted) values -> rc 0 (match);
 #     b) stale baseline (pcr0 rewritten) + mutated eventlog -> rc 1
-#        (DEBIAN_FDE_DRIFT), DRIFT lines for pcr0 and the eventlog,
+#        (ALPINE_FDE_DRIFT), DRIFT lines for pcr0 and the eventlog,
 #        last-audit.json records result=drift.
 #
 # EMPIRICAL (verified 2026-09-14): when QEMU exits after the boot, the
@@ -86,10 +86,10 @@ RUN="$TESTS/e2e/.runs/s08-firmware-$(date +%s)"
 SNAPDIR="${TMPDIR:-/tmp}/secpc-e2e-s08-$(date +%s)"
 mkdir -p "$RUN" "$SNAPDIR"
 # prefix housekeeping — never the invocation's chained state dirs
-# (CR-02/MD-03: DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (CR-02/MD-03: ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's08-firmware-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 ENROLL="$RUN/enroll-boot"   # baseline boot + enrollment artifacts (tpm state reused for the audit)
@@ -104,12 +104,12 @@ _ensure_run() { mkdir -p "$RUN" "$ENROLL" 2>/dev/null || true; }
 AUDIT_ROOT="$RUN/host-audit"
 audit_run() {   # audit_run <out-file>  -> rc of cmd_audit_main
     (
-        export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
-        export DEBIAN_FDE_ROOT="$AUDIT_ROOT"
-        export DEBIAN_FDE_TCTI="swtpm:path=$ENROLL/tpm/sock"
-        export DEBIAN_FDE_EVENTLOG="$RUN/eventlog.fixture"
-        export DEBIAN_FDE_EFIVARS_DIR="$AUDIT_ROOT/empty-efivars"   # no efivarfs on the host: SB section inert
-        export DEBIAN_FDE_NO_INSTALL=1
+        export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+        export ALPINE_FDE_ROOT="$AUDIT_ROOT"
+        export ALPINE_FDE_TCTI="swtpm:path=$ENROLL/tpm/sock"
+        export ALPINE_FDE_EVENTLOG="$RUN/eventlog.fixture"
+        export ALPINE_FDE_EFIVARS_DIR="$AUDIT_ROOT/empty-efivars"   # no efivarfs on the host: SB section inert
+        export ALPINE_FDE_NO_INSTALL=1
         # shellcheck source=../../lib/cmd/audit.sh
         . "$REPO/lib/cmd/audit.sh"
         cmd_audit_main
@@ -144,17 +144,17 @@ for _attempt in 1 2; do
     qemu_run "$ENROLL" "$ENROLL/esp.img" "$ENROLL/disk.img" \
         "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$ENROLL"; then
-        feed_line "$ENROLL/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$ENROLL/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     qemu_wait "$ENROLL" "$QEMU_TIMEOUT"
-    grep -q "debian-fde: UNSEALED" "$ENROLL/console.log" && break
+    grep -q "alpine-fde: UNSEALED" "$ENROLL/console.log" && break
     echo "# baseline boot attempt $_attempt did not reach UNSEALED (infra anomaly) — retrying"
     if ((_attempt < 2)); then
         swtpm_reset "$ENROLL/tpm" && swtpm_start "$ENROLL/tpm" || exit 1
         rm -f "$ENROLL/console.log"
     fi
 done
-grep -q "debian-fde: UNSEALED" "$ENROLL/console.log" || {
+grep -q "alpine-fde: UNSEALED" "$ENROLL/console.log" || {
     echo "s08: baseline boot did not reach UNSEALED — state unusable"; exit 1; }
 LOG_B1=$(cat "$ENROLL/console.log" 2>/dev/null || true)
 assert_contains "boot 1: init ran" "$LOG_B1" "$(sentinel_of harness_init_started)"
@@ -171,7 +171,7 @@ assert_contains "boot 1: volume UNSEALED" "$LOG_B1" "$(sentinel_of harness_unsea
 D11=$(cat "$ENROLL/pcr11-enter-initrd.txt" 2>/dev/null)
 [[ -n "$D11" ]] || { echo "s08: no enter-initrd d11 prediction from the build"; exit 1; }
 swtpm_ensure "$ENROLL/tpm" || { echo "s08: swtpm restart (enroll) failed"; exit 1; }
-PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$ENROLL/console.log" | head -1 | cut -d= -f2)
+PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$ENROLL/console.log" | head -1 | cut -d= -f2)
 [[ -n "$PCR7_ENROLLED" ]] || { echo "s08: no PCR 7 in the baseline console"; exit 1; }
 # digest-anchored enroll (Option A): no reseeding and no live-read assertion —
 # the CLI compares the entry's recorded d7/d11 against the baseline (pure
@@ -185,11 +185,11 @@ assert_eq "combined .pcrsig entry pol == policy_digest(booted d7, enter-initrd d
 # pcrsig is refused by the hook's I3 gate)
 uki_pcrsig_disk "$ENROLL/pcrsig.img" "$ENROLL/uki-pcrsig-combined.json" || exit 1
 # enroll precondition (CLI, enrl_preconditions #2): a FINALIZED baseline at
-# $DEBIAN_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
+# $ALPINE_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
 # scenario-local cli-state root — the same seam s06/s09/s12/s13 use; without
 # it enroll-tpm dies "no baseline at /etc/alpine-fde/baseline.json".
 uki_baseline_stamp "$ENROLL/cli-state" "$PCR7_ENROLLED"
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 uki_host_enroll_finalized "$EFIVARS" "$ENROLL/uki-pcrsig-combined.json" \
     "$ENROLL/disk.img" "$RUN/keys" "$RUN/kf-slot0" "$ENROLL/cli-state" || {
@@ -213,8 +213,8 @@ swtpm_stop "$ENROLL/tpm" || true
 rm -f "$ENROLL/tpm/tpm2-00.volatilestate"
 swtpm_start "$ENROLL/tpm" || { echo "s08: swtpm restart (drift) failed"; exit 1; }
 PCR0_PRE=$(swtpm_pcrread "$ENROLL/tpm" 0)
-DRIFT0=$(printf 'debian-fde-e2e-s08-firmware-update-pcr0' | sha256sum | cut -d' ' -f1)
-DRIFT2=$(printf 'debian-fde-e2e-s08-firmware-update-pcr2' | sha256sum | cut -d' ' -f1)
+DRIFT0=$(printf 'alpine-fde-e2e-s08-firmware-update-pcr0' | sha256sum | cut -d' ' -f1)
+DRIFT2=$(printf 'alpine-fde-e2e-s08-firmware-update-pcr2' | sha256sum | cut -d' ' -f1)
 swtpm_pcrextend "$ENROLL/tpm" 0 "$DRIFT0"
 swtpm_pcrextend "$ENROLL/tpm" 2 "$DRIFT2"
 PCR0_DRIFTED=$(swtpm_pcrread "$ENROLL/tpm" 0)
@@ -256,7 +256,7 @@ for _att in 1 2 3; do
     _snap_poller=$!
     qemu_wait "$ENROLL" "$QEMU_TIMEOUT"
     wait "$_snap_poller"
-    if grep -q "debian-fde: UNSEALED" "$SNAPDIR/console-boot.snap" 2>/dev/null; then
+    if grep -q "alpine-fde: UNSEALED" "$SNAPDIR/console-boot.snap" 2>/dev/null; then
         BOOT_OK=1
         break
     fi
@@ -295,7 +295,7 @@ CONSOLE="$SNAPDIR/console-boot.snap"
 assert_pcr11_prediction "S-08"
 CONSOLE="$_CONSOLE_SAVE"
 
-GUEST_PCR0=$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$SNAPDIR/console-boot.snap" 2>/dev/null | head -1 | cut -d= -f2)
+GUEST_PCR0=$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$SNAPDIR/console-boot.snap" 2>/dev/null | head -1 | cut -d= -f2)
 if [ -n "$GUEST_PCR0" ] && [ "$GUEST_PCR0" != "$ZERO64" ] && [ "$GUEST_PCR0" != "$PCR0_DRIFTED" ]; then
     _assert_result ok "guest observed PCR 0 drifted further (firmware extended on top of the update)" "pcr0=$GUEST_PCR0"
 else
@@ -391,9 +391,9 @@ printf 'tampered\n' >>"$RUN/eventlog.fixture"
 AUDIT_RC=0
 audit_run "$RUN/audit-drift.log" || AUDIT_RC=$?
 if [ "$AUDIT_RC" -eq 1 ]; then
-    _assert_result ok "audit: stale pcr0 + mutated eventlog -> rc 1 (DEBIAN_FDE_DRIFT)" ""
+    _assert_result ok "audit: stale pcr0 + mutated eventlog -> rc 1 (ALPINE_FDE_DRIFT)" ""
 else
-    _assert_result not-ok "audit: stale pcr0 + mutated eventlog -> rc 1 (DEBIAN_FDE_DRIFT)" \
+    _assert_result not-ok "audit: stale pcr0 + mutated eventlog -> rc 1 (ALPINE_FDE_DRIFT)" \
         "rc=$AUDIT_RC (expected 1) log: $(tail -3 "$RUN/audit-drift.log" | tr '\n' ' ')"
 fi
 assert_contains "audit: pcr0 DRIFT line" "$(cat "$RUN/audit-drift.log")" "pcr0"

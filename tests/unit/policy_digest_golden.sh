@@ -186,7 +186,7 @@ rc=0
   policy_sign 'zz-not-hex' "$D11" "$KEYDIR/release.pem" "$LEAK/out.sig" ) >/dev/null 2>&1 || rc=$?
 assert_rc "policy_sign: invalid hex digest -> die 64" 64 $rc
 assert_eq "policy_sign: no temp leak on the invalid-hex die path (S-L1)" "0" \
-    "$(find "$LEAK" -name 'debian-fde-policy.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    "$(find "$LEAK" -name 'alpine-fde-policy.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 rm -rf "$LEAK"
 
 finish

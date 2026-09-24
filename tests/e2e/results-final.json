@@ -138,7 +138,7 @@
       "seconds": 912,
       "asserts": 54,
       "observed": "20260919T202313Z",
-      "note": "baseline stub staged at <root>/etc/debian-fde (sp_etc_dir); \u00a78.4 install-state=installed staged or finalize is a loud no-op (state gate); both members enter finalize with ZERO standing tokens (\u00a78.3 ensure-once counts any single token as standing \u2014 wipe+reseat is \u00a79.4 enroll-tpm recovery, out of scope)"
+      "note": "baseline stub staged at <root>/etc/alpine-fde (sp_etc_dir); \u00a78.4 install-state=installed staged or finalize is a loud no-op (state gate); both members enter finalize with ZERO standing tokens (\u00a78.3 ensure-once counts any single token as standing \u2014 wipe+reseat is \u00a79.4 enroll-tpm recovery, out of scope)"
     },
     {
       "id": "s21",

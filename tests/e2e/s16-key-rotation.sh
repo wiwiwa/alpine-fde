@@ -71,9 +71,9 @@ CONSOLE="$RUN/console.log"
 T0=$SECONDS
 
 # CR-02/MD-03: prunes must spare the invocation's chained state dirs
-# (DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 while IFS= read -r _d; do
-    case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
+    case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
     rm -rf "$_d"
 done < <(find "$TESTS/e2e/.runs" -mindepth 1 -maxdepth 1 -type d -printf "%T@\t%p\n" 2>/dev/null | sort -rn | tail -n +3 | cut -f2-)
 
@@ -88,10 +88,10 @@ _ensure_tpm() { swtpm_ensure "$RUN/tpm"; }
 # shellcheck disable=SC2120  # bare calls (plain audit) are intentional
 _audit_cli() {
     _ensure_tpm || { echo "s16: swtpm not serving (audit)"; return 64; }
-    DEBIAN_FDE_ROOT="$RUN/rootfs" \
-        DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-        DEBIAN_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
-        DEBIAN_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
+    ALPINE_FDE_ROOT="$RUN/rootfs" \
+        ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+        ALPINE_FDE_EFIVARS_DIR="$RUN/rootfs/efivars-sb-on" \
+        ALPINE_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
         "$REPO/bin/alpine-fde" audit "$@"
 }
 # shellcheck disable=SC2317  # invoked via assert_rc's "$@" (see tests/lib/assert.sh)
@@ -125,12 +125,12 @@ _vuki_build() {
     ln -sfn usr/bin "$st/bin"
     ln -sfn usr/sbin "$st/sbin"
     uki_initrd_write_init "$st"
-    printf '# debian-fde variant: %s\n' "$mk" >>"$st/init"
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
+    printf '# alpine-fde variant: %s\n' "$mk" >>"$st/init"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
     chmod 600 "$st/kf0"
     cp "$relpub" "$st/rel.pub"
     uki_initrd_pack "$st" "$st.cpio" || return 1
-    printf 'ID=debian-fde-harness\nVERSION_ID=%s\nNAME=Debian FDE harness UKI\n' "$un" >"$st/os-release.txt"
+    printf 'ID=alpine-fde-harness\nVERSION_ID=%s\nNAME=Alpine FDE harness UKI\n' "$un" >"$st/os-release.txt"
     printf '%s\n' "$UKI_KERNEL_CMDLINE" >"$st/cmdline.txt"
     # the enter-initrd PCR 11 prediction for THIS exact build (ukify --measure):
     # the finalized {7,11} re-seal composes over the MEASURED PCR 11 of the
@@ -247,8 +247,8 @@ boot_and_wait() {
     cp "$CONSOLE" "$RUN/console-$label.log"
 }
 log_of() { cat "$RUN/console-$1.log" 2>/dev/null || true; }
-console_pcr7() { grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2; }
-console_pcr0() { grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2; }
+console_pcr7() { grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2; }
+console_pcr0() { grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/console-$1.log" 2>/dev/null | head -1 | cut -d= -f2; }
 
 # --- fixtures: K1 ceremony + fresh K2 ("offline medium") ------------------------
 swtpm_start "$RUN/tpm" || { echo "s16: swtpm failed"; exit 1; }
@@ -259,7 +259,7 @@ mkdir -p "$RUN/keys2"
 # ADR-16 floor applies to ANY key the seal path signs with — K2 is generated
 # at 3072 directly (the CLI's keys_rsa3072_guard refuses anything smaller).
 openssl req -x509 -newkey rsa:3072 -keyout "$RUN/keys2/db.key" -out "$RUN/keys2/db.crt" \
-    -days 30 -nodes -subj "/CN=debian-fde-test-release-v2" 2>/dev/null
+    -days 30 -nodes -subj "/CN=alpine-fde-test-release-v2" 2>/dev/null
 openssl x509 -in "$RUN/keys2/db.crt" -pubkey -noout >"$RUN/keys2/release.pub"
 assert_file_exists "K2 keypair generated (offline-medium stand-in)" "$RUN/keys2/db.key"
 
@@ -280,7 +280,7 @@ _mkcertvar dbx dbx-cert-v1
 # shellcheck disable=SC1091
 source "$REPO/lib/firmware.sh"
 assert_contains "efivars fixture: SB on, SetupMode=0" \
-    "$(DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" fw_sb_state)" \
+    "$(ALPINE_FDE_EFIVARS_DIR="$EFIVARS" fw_sb_state)" \
     "secureboot=1 setup_mode=0"
 
 mkdir -p "$RUN/rootfs/etc/alpine-fde"
@@ -326,7 +326,7 @@ cp "$RUN/pcr11-enter-initrd.txt" "$RUN/uki-6.2.0-k1.efi.pcr11.txt"
 UKI_MIB=$(( ($(stat -c%s "$RUN/uki-6.2.0-k1.efi") + 1048575) / 1048576 ))
 esp_make "$RUN/esp.img" $(( UKI_MIB * 3 + 12 )) "$RUN/uki-6.2.0-k1.efi" || exit 1
 disk_make_luks "$RUN/disk.img" 128 || exit 1
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 
 # --- boot 1: baseline (token-less) + enroll under K1 -----------------------------
@@ -335,7 +335,7 @@ echo "# boot k1-baseline (token-less disk -> hook recovery loop, TCG, up to $QEM
 for _attempt in 1 2; do
     qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     qemu_wait "$RUN" "$QEMU_TIMEOUT"
     cp "$CONSOLE" "$RUN/console-k1-baseline.log"
@@ -417,8 +417,8 @@ assert_eq "PCR 7 unchanged after the dual-sign reboot (console evidence)" "$D7_P
 cp "$RUN/vars-enrolled.fd" "$RUN/vars-rotated.fd"
 assert_rc "virt-fw-vars: db += K2, dbx += K1 (one step)" 0 \
     virt-fw-vars -i "$RUN/vars-rotated.fd" -o "$RUN/vars-rotated.fd" \
-        --add-db "$DEBIAN_FDE_TEST_GUID" "$RUN/keys2/db.crt" \
-        --add-dbx-cert "$DEBIAN_FDE_TEST_GUID" "$RUN/keys/db.crt"
+        --add-db "$ALPINE_FDE_TEST_GUID" "$RUN/keys2/db.crt" \
+        --add-dbx-cert "$ALPINE_FDE_TEST_GUID" "$RUN/keys/db.crt"
 VARSDBG=$(virt-fw-vars -i "$RUN/vars-rotated.fd" -p 2>/dev/null | grep -cE '^(db|dbx)[[:space:]]*:')
 assert_eq "rotated vars carry db and dbx blobs" "2" "$VARSDBG"
 
@@ -517,10 +517,10 @@ for _att in 1 2; do
         echo "s16: qemu_run FAILED for k2-recovery (rc=$?)" >&2
         exit 1; }
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _wedge_wait "$RUN" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
-    grep -q "debian-fde: UNSEALED" "$CONSOLE" && { K2REC_OK=1; break; }
+    grep -q "alpine-fde: UNSEALED" "$CONSOLE" && { K2REC_OK=1; break; }
     echo "# k2-recovery attempt $_att did not reach UNSEALED (infra anomaly) — retrying"
 done
 if ((K2REC_OK == 1)); then

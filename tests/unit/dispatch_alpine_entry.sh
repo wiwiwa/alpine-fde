@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # tests/unit/dispatch_alpine_entry.sh — bin/alpine-fde entry-point contract (§8.1):
-#   * bin/alpine-fde is executable and dispatches identically to bin/debian-fde
-#     (same rc, equivalent stdout) on a stub cmd dir via DEBIAN_FDE_CMD_DIR
-#   * usage/--version/error banners reflect the INVOKED name (alpine-fde vs
-#     debian-fde) — POSIX ash has no `exec -a`, so bin/alpine-fde signals its
-#     name via an env var the dispatcher reads for PROG
+#   * bin/alpine-fde is THE product entrance (executable; the retired
+#     bin/debian-fde alias is dropped, no compat shim) and dispatches on a
+#     stub cmd dir via ALPINE_FDE_CMD_DIR
+#   * usage/--version/error banners say "alpine-fde"
 #   * the install help line describes the minimal Alpine rootfs (apk), not
 #     Debian (G-A3, Debian→Alpine pivot rev C)
 
@@ -14,59 +13,54 @@ REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$HERE/../lib/assert.sh"
 ALPINE="$REPO/bin/alpine-fde"
-DEBIAN="$REPO/bin/debian-fde"
 
-T=$(mktemp -d /tmp/debian-fde-aentry.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-aentry.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 CMD=$T/cmd
 mkdir -p "$CMD"
 
 # stub: echo the forwarded args, nothing else
-cat >"$CMD/status.sh" <<'EOF'
+cat >"$CMD/status.sh" <<'STUBEOF'
 cmd_status_main() {
     printf 'STUB|ARGS=%s\n' "$*"
 }
-EOF
+STUBEOF
 
 sp() {
-    env -u DEBIAN_FDE_PROG -u DEBIAN_FDE_ROOT \
-        DEBIAN_FDE_CONF="$T/absent.conf" \
-        DEBIAN_FDE_CMD_DIR="$CMD" \
+    env -u ALPINE_FDE_PROG -u ALPINE_FDE_ROOT \
+        ALPINE_FDE_CONF="$T/absent.conf" \
+        ALPINE_FDE_CMD_DIR="$CMD" \
         "$@"
 }
 
 # --- entry point is executable ----------------------------------------------------
 assert_eq "bin/alpine-fde is executable" "yes" "$([ -x "$ALPINE" ] && echo yes || echo no)"
 
-# --- dispatch equivalence with bin/debian-fde --------------------------------------
-out_a=$(sp "$ALPINE" --root /tmp/fake-root status a b)
-rc_a=$?
-out_d=$(sp "$DEBIAN" --root /tmp/fake-root status a b)
-rc_d=$?
-assert_contains "alpine-fde dispatch reaches the stub cmd" "$out_a" "STUB|ARGS=a b"
-assert_eq "alpine-fde dispatch rc matches debian-fde" "$rc_d" "$rc_a"
-assert_eq "alpine-fde stdout equivalent to debian-fde" "$out_d" "$out_a"
+# --- the retired debian-fde entrance is gone (alias dropped, §8.1) ------------------
+assert_eq "bin/debian-fde no longer exists (no compat shim)" "yes" \
+    "$([ -e "$REPO/bin/debian-fde" ] && echo no || echo yes)"
 
-# --- banners reflect the INVOKED name ----------------------------------------------
+# --- dispatch reaches the stub cmd --------------------------------------------------
+out=$(sp "$ALPINE" --root /tmp/fake-root status a b)
+rc=$?
+assert_contains "alpine-fde dispatch reaches the stub cmd" "$out" "STUB|ARGS=a b"
+assert_eq "alpine-fde dispatch rc 0" "0" "$rc"
+
+# --- banners say alpine-fde ---------------------------------------------------------
 out=$(sp "$ALPINE" --version)
-assert_eq "--version prints the invoked name (alpine-fde)" "alpine-fde 0.1.0" "$out"
-out=$(sp "$DEBIAN" --version)
-assert_eq "--version prints the invoked name (debian-fde)" "debian-fde 0.1.0" "$out"
+assert_eq "--version prints alpine-fde" "alpine-fde 0.1.0" "$out"
 
 out=$(sp "$ALPINE" --help 2>&1)
-assert_contains "usage header uses the invoked name" "$out" "Usage: alpine-fde"
-assert_not_contains "alpine usage never claims to be debian-fde" "$out" "Usage: debian-fde"
-out=$(sp "$DEBIAN" --help 2>&1)
-assert_contains "debian usage keeps its own name" "$out" "Usage: debian-fde"
+assert_contains "usage header says alpine-fde" "$out" "Usage: alpine-fde"
+assert_not_contains "usage never claims the retired debian-fde name" "$out" "debian-fde"
 
 rc=0
 out=$(sp "$ALPINE" __no_such_cmd__ 2>&1 >/dev/null) || rc=$?
 assert_eq "unknown subcommand -> usage rc 2" "2" "$rc"
-assert_contains "error banner uses the invoked name" \
+assert_contains "error banner says alpine-fde" \
     "$out" "alpine-fde: error: unknown subcommand: __no_such_cmd__"
 
 # --- install help line describes the Alpine rootfs (G-A3) ---------------------------
-out=$(sp "$ALPINE" --help 2>&1)
 assert_contains "install help line says minimal Alpine rootfs (apk)" "$out" "minimal Alpine rootfs (apk)"
 assert_not_contains "install help line no longer says Debian" "$out" "minimal Debian rootfs"
 

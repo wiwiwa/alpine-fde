@@ -10,11 +10,11 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 
-T=$(mktemp -d /tmp/debian-fde-baseline-schema.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-baseline-schema.XXXXXX)
 F=$T/baseline.json
 HEX_A=$(printf 'a%.0s' {1..64})
 HEX_B=$(printf 'b%.0s' {1..64})

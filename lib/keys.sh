@@ -2,7 +2,7 @@
 # keys.sh — release-key handling (docs/Architecture.md I4/ADR-11, gap B-G7).
 #
 # The release keypair lives on the offline signing medium; only its directory
-# path is configured (DEBIAN_FDE_KEYDIR flag / KEY_PATH config key). Conventional
+# path is configured (ALPINE_FDE_KEYDIR flag / KEY_PATH config key). Conventional
 # file names inside the key directory:
 #   release.pem — RSA private key (PEM)  — sbsign + policy signatures
 #   release.crt — X.509 certificate      — sbsign + sbverify
@@ -47,27 +47,27 @@
 # tpm2-tools via the tpm() TCTI wrapper (keys_keyname, keys_keyname_verifying).
 # ADR-18 custody (keys_is_encrypted / keys_encrypt_release / keys_unlock):
 # openssl only; the §13 passphrase floor is reused from lib/cmd/rotate.sh
-# (sourced lazily via $DEBIAN_FDE_CMD_DIR when keys_encrypt_release needs it).
+# (sourced lazily via $ALPINE_FDE_CMD_DIR when keys_encrypt_release needs it).
 
-if [ -n "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_KEYS_LOADED=1
+ALPINE_FDE_KEYS_LOADED=1
 
 # Self-load common.sh (die/info/require helpers) so guest-side one-liners like
 # `. /opt/alpine-fde/lib/keys.sh && keys_encrypt_release <keydir>` (§9.1 step
 # 6, fresh chroot shell — functions do not cross the chroot boundary) work
 # standalone. Pattern: lib/install-state.sh.
-_is_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+_is_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
-    # shellcheck disable=SC1090  # resolved from DEBIAN_FDE_CMD_DIR / install tree
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then
+    # shellcheck disable=SC1090  # resolved from ALPINE_FDE_CMD_DIR / install tree
     . "$_is_lib_dir/common.sh"
 fi
 
-# keys_dir — effective release-key directory ($DEBIAN_FDE_KEYDIR overrides $KEY_PATH)
+# keys_dir — effective release-key directory ($ALPINE_FDE_KEYDIR overrides $KEY_PATH)
 keys_dir() {
-    printf '%s\n' "${DEBIAN_FDE_KEYDIR:-${KEY_PATH:-}}"
+    printf '%s\n' "${ALPINE_FDE_KEYDIR:-${KEY_PATH:-}}"
 }
 
 # keys_check [dir] — rc 0 iff the directory exists and holds all three files;
@@ -78,7 +78,7 @@ keys_dir() {
 keys_check() {
     _keys_d=${1:-$(keys_dir)}
     if [ -z "$_keys_d" ]; then
-        printf '%s\n' "release key directory not configured (set --keydir / KEY_PATH / DEBIAN_FDE_KEYDIR)"
+        printf '%s\n' "release key directory not configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
         return 1
     fi
     if [ ! -d "$_keys_d" ]; then
@@ -137,13 +137,13 @@ keys_rsa3072_guard() {
     _keys_gd=${1:-$(keys_dir)}
     _keys_gpub="$_keys_gd/release.pub"
     [ -n "$_keys_gd" ] ||
-        die -r "$DEBIAN_FDE_USAGE" "release key: no key directory configured — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS release-key floor"
+        die -r "$ALPINE_FDE_USAGE" "release key: no key directory configured — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS release-key floor"
     [ -f "$_keys_gpub" ] ||
-        die -r "$DEBIAN_FDE_USAGE" "release key: release public key not found: $_keys_gpub — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS floor"
+        die -r "$ALPINE_FDE_USAGE" "release key: release public key not found: $_keys_gpub — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS floor"
     _keys_gbits=$(keys_rsa_bits "$_keys_gpub") ||
-        die -r "$DEBIAN_FDE_USAGE" "release key: cannot read an RSA modulus from $_keys_gpub (not a valid RSA public key?) — ADR-16 requires RSA >= $KEYS_MIN_RSA_BITS for the release key"
+        die -r "$ALPINE_FDE_USAGE" "release key: cannot read an RSA modulus from $_keys_gpub (not a valid RSA public key?) — ADR-16 requires RSA >= $KEYS_MIN_RSA_BITS for the release key"
     if [ "$_keys_gbits" -lt "$KEYS_MIN_RSA_BITS" ]; then
-        die -r "$DEBIAN_FDE_USAGE" \
+        die -r "$ALPINE_FDE_USAGE" \
             "release key is RSA-$_keys_gbits ($_keys_gpub) — ADR-16 requires an RSA-$KEYS_MIN_RSA_BITS (or larger) release key (db/UKI/PCR-policy identity): refusing to enroll. Generate a >= $KEYS_MIN_RSA_BITS-bit release key, re-sign the artifacts, and re-run"
     fi
     return 0
@@ -264,7 +264,7 @@ keys_is_encrypted() {
 # (release.priv.pem duplicate + tmp staging — zeroize + rm). The §13 entropy
 # floor (passphrase_floor_ok from lib/cmd/rotate.sh) is enforced BEFORE any
 # ciphertext exists; floor violations are usage-class rc 2.
-# Passphrase credential mechanism (RESOLVED-4): DEBIAN_FDE_KEY_PASSPHRASE env
+# Passphrase credential mechanism (RESOLVED-4): ALPINE_FDE_KEY_PASSPHRASE env
 # -> interactive double no-echo TTY prompt -> loud die 64. The variable is
 # unset on completion (the passphrase never lingers in the environment).
 # Idempotent: an already-encrypted release.pem is left untouched (crash-resume
@@ -278,29 +278,29 @@ keys_encrypt_release() {
         warn "keys_encrypt_release: $_ker_src is already encrypted (ADR-18) — leaving it as-is"
         return 0
     fi
-    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+    if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
         if [ -t 0 ]; then
             _ker_p1=$(_keys_read_passphrase 'Set release-key encryption passphrase (§13: >=12 chars with 3 character classes, or >=16 chars): ')
             _ker_p2=$(_keys_read_passphrase 'Repeat passphrase: ')
             if [ -z "$_ker_p1" ] || [ "$_ker_p1" != "$_ker_p2" ]; then
-                die -r "$DEBIAN_FDE_USAGE" "keys_encrypt_release: passphrases empty or do not match"
+                die -r "$ALPINE_FDE_USAGE" "keys_encrypt_release: passphrases empty or do not match"
             fi
-            DEBIAN_FDE_KEY_PASSPHRASE=$_ker_p1
+            ALPINE_FDE_KEY_PASSPHRASE=$_ker_p1
         else
-            die "keys_encrypt_release: release.pem is not encrypted and no passphrase is available — provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+            die "keys_encrypt_release: release.pem is not encrypted and no passphrase is available — provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
         fi
     fi
     unset _ker_p1 _ker_p2 2>/dev/null || :
     if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
         # resolution order (first readable rotate.sh wins):
-        #   1. the cmd-dir seam (CLI context: DEBIAN_FDE_CMD_DIR always set)
+        #   1. the cmd-dir seam (CLI context: ALPINE_FDE_CMD_DIR always set)
         #   2. the cmd/ sibling of THIS file (any self-contained tree)
         #   3. the documented tooling-copy destination (§8.1/§9.1: the guest
         #      one-liner runs from /opt/alpine-fde with no cmd-dir env)
         #   4. the installed-tree default
         _ker_cands=""
-        if [ -n "${DEBIAN_FDE_CMD_DIR:-}" ]; then
-            _ker_cands="$DEBIAN_FDE_CMD_DIR"
+        if [ -n "${ALPINE_FDE_CMD_DIR:-}" ]; then
+            _ker_cands="$ALPINE_FDE_CMD_DIR"
         fi
         if [ -n "${_is_lib_dir:-}" ]; then
             _ker_cands="$_ker_cands $_is_lib_dir/cmd"
@@ -316,51 +316,51 @@ keys_encrypt_release() {
         unset _ker_self _ker_cmd_dir _ker_cands 2>/dev/null || :
     fi
     command -v passphrase_floor_ok >/dev/null 2>&1 \
-        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/rotate.sh not found via DEBIAN_FDE_CMD_DIR, the lib sibling, /opt/alpine-fde, or the installed tree)"
-    if ! passphrase_floor_ok "$DEBIAN_FDE_KEY_PASSPHRASE"; then
-        die -r "$DEBIAN_FDE_USAGE" "keys_encrypt_release: release-key passphrase below entropy floor (§13: ≥12 chars/3 classes or ≥16; not a common pattern) — refusing before any ciphertext is written (ADR-18)"
+        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/rotate.sh not found via ALPINE_FDE_CMD_DIR, the lib sibling, /opt/alpine-fde, or the installed tree)"
+    if ! passphrase_floor_ok "$ALPINE_FDE_KEY_PASSPHRASE"; then
+        die -r "$ALPINE_FDE_USAGE" "keys_encrypt_release: release-key passphrase below entropy floor (§13: ≥12 chars/3 classes or ≥16; not a common pattern) — refusing before any ciphertext is written (ADR-18)"
     fi
-    _ker_tmp=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-enc.XXXXXX") \
-        || die "keys_encrypt_release: mktemp failed (${DEBIAN_FDE_TMPDIR:-/dev/shm} usable?)"
+    _ker_tmp=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enc.XXXXXX") \
+        || die "keys_encrypt_release: mktemp failed (${ALPINE_FDE_TMPDIR:-/dev/shm} usable?)"
     chmod 600 "$_ker_tmp" 2>/dev/null || :
-    if ! DEBIAN_FDE_KEY_PASSPHRASE="$DEBIAN_FDE_KEY_PASSPHRASE" \
+    if ! ALPINE_FDE_KEY_PASSPHRASE="$ALPINE_FDE_KEY_PASSPHRASE" \
         openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 \
         -iter "$KEYS_PBKDF2_ITER" -in "$_ker_src" \
-        -passout env:DEBIAN_FDE_KEY_PASSPHRASE -out "$_ker_tmp"; then
+        -passout env:ALPINE_FDE_KEY_PASSPHRASE -out "$_ker_tmp"; then
         keys_scrub "$_ker_tmp"
         die "keys_encrypt_release: openssl pkcs8 encryption failed for $_ker_src"
     fi
     # round-trip guard: the staged ciphertext must decrypt with the SAME
     # passphrase before it replaces the plaintext (wrong-passphrase = loud 64)
-    if ! DEBIAN_FDE_KEY_PASSPHRASE="$DEBIAN_FDE_KEY_PASSPHRASE" \
-        openssl pkcs8 -in "$_ker_tmp" -passin env:DEBIAN_FDE_KEY_PASSPHRASE -out /dev/null 2>/dev/null; then
+    if ! ALPINE_FDE_KEY_PASSPHRASE="$ALPINE_FDE_KEY_PASSPHRASE" \
+        openssl pkcs8 -in "$_ker_tmp" -passin env:ALPINE_FDE_KEY_PASSPHRASE -out /dev/null 2>/dev/null; then
         keys_scrub "$_ker_tmp"
-        unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+        unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
         die "keys_encrypt_release: staged ciphertext failed round-trip verification (wrong passphrase?) — no changes made"
     fi
     if ! keys_is_encrypted "$_ker_tmp"; then
         keys_scrub "$_ker_tmp"
-        unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+        unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
         die "keys_encrypt_release: post-assert failed — staged output is not ADR-18-conformant PKCS#8 (PBES2/hmacWithSHA256/aes-256-cbc/iter>=$KEYS_PBKDF2_ITER)"
     fi
     if ! mv -f "$_ker_tmp" "$_ker_src"; then
         keys_scrub "$_ker_tmp"
-        unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+        unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
         die "keys_encrypt_release: cannot replace $_ker_src with the encrypted form"
     fi
     chmod 600 "$_ker_src" 2>/dev/null || :
     # scrub ALL plaintext copies: the stage1 duplicate + (best effort) staging
     keys_scrub "$_ker_d/release.priv.pem" "$_ker_tmp"
-    unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
     return 0
 }
 
 # keys_unlock KEYDIR — print a USABLE release.pem path for signing operations
 # (ADR-18/§9.2): if $KEYDIR/release.pem is the ADR-18 encrypted form, decrypt
-# it ONCE to tmpfs (${DEBIAN_FDE_TMPDIR:-/dev/shm}, mode 600, scrubbed by the
+# it ONCE to tmpfs (${ALPINE_FDE_TMPDIR:-/dev/shm}, mode 600, scrubbed by the
 # CALLER's cleanup net) and print the decrypted path; if it is plaintext
 # (offline medium / legacy), print the input path unchanged. Passphrase
-# credential mechanism (RESOLVED-4): DEBIAN_FDE_KEY_PASSPHRASE env -> no-echo
+# credential mechanism (RESOLVED-4): ALPINE_FDE_KEY_PASSPHRASE env -> no-echo
 # TTY prompt ([ -t 0 ]) -> loud die 64. A wrong passphrase is a distinct loud
 # die 64 with the tmp staging scrubbed.
 keys_unlock() {
@@ -372,26 +372,26 @@ keys_unlock() {
         printf '%s\n' "$_ku_src"
         return 0
     fi
-    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
+    if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
         if [ -t 0 ]; then
-            DEBIAN_FDE_KEY_PASSPHRASE=$(_keys_read_passphrase 'release.pem is encrypted — enter the release-key passphrase: ')
-            if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
-                die "keys_unlock: passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+            ALPINE_FDE_KEY_PASSPHRASE=$(_keys_read_passphrase 'release.pem is encrypted — enter the release-key passphrase: ')
+            if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+                die "keys_unlock: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
             fi
         else
-            die "keys_unlock: release.pem is encrypted: passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+            die "keys_unlock: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
         fi
     fi
-    _ku_out=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-unlock.XXXXXX") \
-        || die "keys_unlock: mktemp failed (${DEBIAN_FDE_TMPDIR:-/dev/shm} usable?)"
+    _ku_out=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-unlock.XXXXXX") \
+        || die "keys_unlock: mktemp failed (${ALPINE_FDE_TMPDIR:-/dev/shm} usable?)"
     chmod 600 "$_ku_out" 2>/dev/null || :
-    if ! DEBIAN_FDE_KEY_PASSPHRASE="$DEBIAN_FDE_KEY_PASSPHRASE" \
-        openssl pkcs8 -in "$_ku_src" -passin env:DEBIAN_FDE_KEY_PASSPHRASE -out "$_ku_out" 2>/dev/null; then
+    if ! ALPINE_FDE_KEY_PASSPHRASE="$ALPINE_FDE_KEY_PASSPHRASE" \
+        openssl pkcs8 -in "$_ku_src" -passin env:ALPINE_FDE_KEY_PASSPHRASE -out "$_ku_out" 2>/dev/null; then
         keys_scrub "$_ku_out"
-        unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+        unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
         die "keys_unlock: wrong passphrase for $_ku_src (decryption failed) — release key stays locked (ADR-18)"
     fi
-    unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
     printf '%s\n' "$_ku_out"
 }
 
@@ -420,7 +420,7 @@ keys_unlock() {
 # so an empty under-root keydir is refused even before the root itself exists.
 keys_offline_guard() {
     _kg_d=$1
-    _kg_root=${2:-${DEBIAN_FDE_ROOT:-}}
+    _kg_root=${2:-${ALPINE_FDE_ROOT:-}}
     [ -n "$_kg_d" ] || return 0
     # _kg_norm PATH — canonical spelling of the longest EXISTING prefix (S-H1)
     _kg_norm() {
@@ -528,7 +528,7 @@ keys_build_tpmt_public() {
 # Requires TPM access (swtpm in tests; the real TPM on the enrolled machine).
 keys_keyname() {
     [ $# -eq 2 ] || die "keys_keyname: usage: keys_keyname <pubkey.pem> <out.name>"
-    _keys_tmp=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-keyname.XXXXXX") || die "keys: mktemp failed"
+    _keys_tmp=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-keyname.XXXXXX") || die "keys: mktemp failed"
     # subshell: a die inside keys_tpmt_public (unparseable key) must not
     # strand _keys_tmp (S-L1)
     if ! (keys_tpmt_public "$1" "$_keys_tmp/pub.tpm2b"); then
@@ -537,7 +537,7 @@ keys_keyname() {
     fi
     if ! tpm loadexternal -C n -u "$_keys_tmp/pub.tpm2b" -c "$_keys_tmp/pub.ctx" -n "$2" >/dev/null 2>&1; then
         rm -rf "$_keys_tmp"
-        die "keys_keyname: tpm2_loadexternal failed (TCTI: ${DEBIAN_FDE_TCTI:-default})"
+        die "keys_keyname: tpm2_loadexternal failed (TCTI: ${ALPINE_FDE_TCTI:-default})"
     fi
     tpm flushcontext "$_keys_tmp/pub.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
     rm -rf "$_keys_tmp"
@@ -556,12 +556,12 @@ keys_keyname() {
 keys_keyname_verifying() {
     [ $# -eq 2 ] || die "keys_keyname_verifying: usage: keys_keyname_verifying <pub.pem> <out.name>"
     [ -n "$1" ] && [ -f "$1" ] || die "keys_keyname_verifying: public key PEM not found: ${1:-<none>}"
-    _keys_v_tmp=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-keyname-verifying.XXXXXX") \
+    _keys_v_tmp=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-keyname-verifying.XXXXXX") \
         || die "keys: mktemp failed"
     if ! tpm loadexternal -C n -G rsa -u "$1" -c "$_keys_v_tmp/pub.ctx" \
         -n "$_keys_v_tmp/pub.name" >/dev/null 2>&1; then
         rm -rf "$_keys_v_tmp"
-        die "keys_keyname_verifying: tpm2_loadexternal failed for $1 (TCTI: ${DEBIAN_FDE_TCTI:-default})"
+        die "keys_keyname_verifying: tpm2_loadexternal failed for $1 (TCTI: ${ALPINE_FDE_TCTI:-default})"
     fi
     tpm flushcontext "$_keys_v_tmp/pub.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
     _keys_v_hex=$(od -An -v -tx1 "$_keys_v_tmp/pub.name" | tr -d ' \n')

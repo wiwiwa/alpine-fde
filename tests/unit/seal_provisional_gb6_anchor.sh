@@ -29,7 +29,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
@@ -48,14 +48,14 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-prov-gb6.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-prov-gb6.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp" "$TMP/efivars"
-DEBIAN_FDE_TMPDIR=$TMP/tmp
+ALPINE_FDE_TMPDIR=$TMP/tmp
 
 # ADR-16 floor: the seal path refuses release keys < RSA-3072
 KD=$TMP/keys
@@ -63,7 +63,7 @@ mkdir -p "$KD"
 openssl genrsa -out "$KD/release.pem" 3072 2>/dev/null
 openssl pkey -in "$KD/release.pem" -pubout -out "$KD/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KD/release.pem" -out "$KD/db.crt" -days 30 \
-    -subj "/CN=debian-fde-prov-gb6" 2>/dev/null
+    -subj "/CN=alpine-fde-prov-gb6" 2>/dev/null
 cp "$KD/release.pem" "$KD/db.key"
 [ -s "$KD/db.key" ] && [ -s "$KD/release.pub" ] || {
     echo "FAIL: cannot generate the RSA-3072 keydir" >&2
@@ -74,7 +74,7 @@ cp "$KD/release.pem" "$KD/db.key"
 # consult it (the live oracle against this register is exactly what failed).
 TPMDIR=$TMP/swtpm
 swtpm_start "$TPMDIR" || { echo "FAIL: swtpm did not start" >&2; exit 1; }
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 ZERO64=$(printf '0%.0s' {1..64})
 LIVE11=$(tpm pcrread -Q -o "$TMP/p11.bin" sha256:11 >/dev/null 2>&1; od -An -v -tx1 "$TMP/p11.bin" | tr -d ' \n')
 assert_eq "fixture: live PCR 11 is zero (the oracle path would refuse)" "$ZERO64" "$LIVE11"
@@ -98,9 +98,9 @@ prov_entry() {
     if [ "$tamper" = "1" ]; then
         pol=$(printf '%s' "$pol" | sed 's/^a/b/; s/^b/a/; s/^c/d/; s/^d/c/' | head -c 64)
     fi
-    bin=$(mktemp "$TMP/debian-fde-pol.XXXXXX") || return 1
+    bin=$(mktemp "$TMP/alpine-fde-pol.XXXXXX") || return 1
     printf '%s' "$pol" | policy_hex_to_bin >"$bin" || { rm -f "$bin"; return 1; }
-    sig=$(mktemp "$TMP/debian-fde-sig.XXXXXX") || { rm -f "$bin"; return 1; }
+    sig=$(mktemp "$TMP/alpine-fde-sig.XXXXXX") || { rm -f "$bin"; return 1; }
     openssl dgst -sha256 -sign "$KD/db.key" -out "$sig" "$bin" 2>/dev/null ||
         { rm -f "$bin" "$sig"; return 1; }
     sig=$(openssl base64 -A -in "$sig") || { rm -f "$bin" "$sig"; return 1; }
@@ -121,7 +121,7 @@ run_prov() { # PCRSIG OUT.TOKEN — seal_provisional against the zeroed fixture.
     # turns that into a capturable rc (and no staged secrets cross out).
     (
         SEAL_PASS_FILE='' SEAL_SLOT='' SEAL_POL='' SEAL_MODE='' \
-            DEBIAN_FDE_SEAL_STAGE="$TMP/tmp" \
+            ALPINE_FDE_SEAL_STAGE="$TMP/tmp" \
             seal_provisional "$KD" "$LUKS" "$1" "$2"
     ) 2>"$TMP/prov.err"
 }
@@ -135,8 +135,8 @@ if [ "$PROV_ANCHORED_RC" -eq 0 ]; then
     assert_eq "anchored seal: token binds PCR 11 only" "[11]" \
         "$(jq -c '.["tpm2-pcrs"]' "$TMP/token-anchored.json")"
     assert_eq "anchored seal: exactly one staged volume passphrase (caller choreography)" "1" \
-        "$(find "$TMP/tmp" -name 'debian-fde-seal-pass.*' | wc -l)"
-    find "$TMP/tmp" -name 'debian-fde-seal-pass.*' -exec dd if=/dev/zero of={} bs=1k count=1 status=none \; -delete
+        "$(find "$TMP/tmp" -name 'alpine-fde-seal-pass.*' | wc -l)"
+    find "$TMP/tmp" -name 'alpine-fde-seal-pass.*' -exec dd if=/dev/zero of={} bs=1k count=1 status=none \; -delete
 else
     echo "--- anchored provisional stderr:" >&2
     cat "$TMP/prov.err" >&2

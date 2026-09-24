@@ -24,8 +24,8 @@
 # passphrase when prompted); unattended, provide ALPINE_FDE_KEY_PASSPHRASE
 # via your credential agent, then `apk fix` (ADR-18).
 #
-# Env: ALPINE_FDE_ROOT (marker root, default /) — DEBIAN_FDE_* compat
-# spellings accepted; canonical wins (§8.1).
+# Env: ALPINE_FDE_ROOT (marker root, default /). The env namespace is
+# ALPINE_FDE_* only (§8.1).
 
 set -u
 
@@ -36,14 +36,10 @@ case ${1:-} in
         ;;
 esac
 
-ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-${DEBIAN_FDE_BIN:-alpine-fde}}
-ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-${DEBIAN_FDE_ROOT:-}}
-if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
-    ALPINE_FDE_KEY_PASSPHRASE=$DEBIAN_FDE_KEY_PASSPHRASE
-fi
+ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-alpine-fde}
+ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-}
 if [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
-    DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
-    export DEBIAN_FDE_KEY_PASSPHRASE
+    export ALPINE_FDE_KEY_PASSPHRASE
 fi
 
 FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"

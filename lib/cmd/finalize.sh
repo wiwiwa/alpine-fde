@@ -1,5 +1,5 @@
 #!/bin/sh
-# finalize.sh — `debian-fde finalize` (Stage 3: guided / crash-resume) AND
+# finalize.sh — `alpine-fde finalize` (Stage 3: guided / crash-resume) AND
 # fin_service_main (Stage 2: the NON-INTERACTIVE first-boot auto-finalizer the
 # OpenRC oneshot hooks/openrc/alpine-fde-finalize runs), per the AMENDED
 # ADR-20 lifecycle (§8.1 finalize row; §9.1 Stage 2/3; §7.2 keyslot table).
@@ -14,7 +14,7 @@
 # ephemeral-keyfile seam is RETIRED):
 #   * Stage 3 (guided) is authorized by the OPERATOR'S RECOVERY PASSPHRASE —
 #     verified against keyslot 0 (no-echo prompt or the documented
-#     DEBIAN_FDE_RECOVERY_PASSPHRASE seam); a wrong passphrase is a BOUNDED
+#     ALPINE_FDE_RECOVERY_PASSPHRASE seam); a wrong passphrase is a BOUNDED
 #     retry (3 attempts) then die 64 + the ADR-8 attempt marker.
 #   * Stage 2 (service) is authorized by RE-UNSEALING the standing provisional
 #     token in USERSPACE (lib/seal.sh seal_unseal over the live PCRs with the
@@ -35,9 +35,9 @@
 #   next boot / invocation).
 #
 # Credential seams (scripting/CI; interactive fallbacks are the guided path):
-#   DEBIAN_FDE_RECOVERY_PASSPHRASE  the keyslot-0 recovery passphrase for the
+#   ALPINE_FDE_RECOVERY_PASSPHRASE  the keyslot-0 recovery passphrase for the
 #                                   guided Stage 3 (else double no-echo prompt)
-#   DEBIAN_FDE_PCRSIG               a release-key-signed {7,11} .pcrsig for
+#   ALPINE_FDE_PCRSIG               a release-key-signed {7,11} .pcrsig for
 #                                   the token upgrade (else the policy is
 #                                   re-signed in-process from the keydir's
 #                                   release.pem over the live PCRs, §9.4 —
@@ -48,45 +48,45 @@
 # Tool dependencies resolve through the audit/seal internals with loud
 # failures (ADR-8); finalize adds no package-manager step of its own.
 
-if [ -n "${DEBIAN_FDE_FINALIZE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_FINALIZE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_FINALIZE_LOADED=1
+ALPINE_FDE_FINALIZE_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
-if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
 fi
-if [ -z "${DEBIAN_FDE_AUDIT_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_AUDIT_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/audit.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/audit.sh"
 fi
-if [ -z "${DEBIAN_FDE_ENROLL_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_ENROLL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/enroll-tpm.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/enroll-tpm.sh"
 fi
-if [ -z "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
 fi
-if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
 fi
 if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
     # the §13 entropy floor (§9.1) lives in lib/cmd/rotate.sh (shared with
     # `rotate` and keys_encrypt_release)
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/rotate.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/rotate.sh"
 fi
 
 finalize_usage() {
     cat >&2 <<'EOF'
-Usage: debian-fde finalize
+Usage: alpine-fde finalize
 
 Trust finalization (§8.1 finalize row; §9.1 Stage 3; ADR-20 amended). Requires
 install state `installed` or `provisional-booted` and Secure Boot ON with the
@@ -111,13 +111,13 @@ Interrupted runs converge on the next invocation (crash idempotency, §9.1).
 EOF
 }
 
-# fin_crypttab_file — <root>/etc/crypttab (DEBIAN_FDE_CRYPTTAB overrides; tests)
+# fin_crypttab_file — <root>/etc/crypttab (ALPINE_FDE_CRYPTTAB overrides; tests)
 fin_crypttab_file() {
-    if [ -n "${DEBIAN_FDE_CRYPTTAB:-}" ]; then
-        printf '%s\n' "$DEBIAN_FDE_CRYPTTAB"
+    if [ -n "${ALPINE_FDE_CRYPTTAB:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_CRYPTTAB"
         return 0
     fi
-    printf '%s/etc/crypttab\n' "${DEBIAN_FDE_ROOT:-}"
+    printf '%s/etc/crypttab\n' "${ALPINE_FDE_ROOT:-}"
 }
 
 # fin_crypttab_uuids FILE — every LUKS member UUID, one per line, first-seen
@@ -139,7 +139,7 @@ fin_crypttab_uuids() {
 }
 
 # fin_cryptsetup — the cryptsetup seam (same override enroll-tpm/token.sh use)
-fin_cryptsetup() { "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
+fin_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
 
 # fin_member_devs — every crypttab LUKS member as a resolvable
 # /dev/disk/by-uuid path, one per line. ANY unresolvable member is a loud die:
@@ -204,14 +204,14 @@ fin_token_pcrs() {
 }
 
 # fin_read_recovery_passphrase VAR — the keyslot-0 recovery passphrase into
-# VAR: DEBIAN_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo
+# VAR: ALPINE_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo
 # prompt. Enforces the §13 entropy floor (passphrase_floor_ok) BEFORE anything
 # else can happen (fail-closed 64; the floor is the same one `rotate`
 # enforces).
 fin_read_recovery_passphrase() {
     _frr_var=$1
-    if [ -n "${DEBIAN_FDE_RECOVERY_PASSPHRASE:-}" ]; then
-        _frr_val=$DEBIAN_FDE_RECOVERY_PASSPHRASE
+    if [ -n "${ALPINE_FDE_RECOVERY_PASSPHRASE:-}" ]; then
+        _frr_val=$ALPINE_FDE_RECOVERY_PASSPHRASE
     elif [ -t 0 ]; then
         _frr_p1=
         _frr_p2=
@@ -235,12 +235,12 @@ fin_read_recovery_passphrase() {
         fi
         printf '\n' >&2
         if [ -z "$_frr_p1" ] || [ "$_frr_p1" != "$_frr_p2" ]; then
-            die -r "$DEBIAN_FDE_USAGE" "finalize: recovery passphrases empty or do not match"
+            die -r "$ALPINE_FDE_USAGE" "finalize: recovery passphrases empty or do not match"
         fi
         _frr_val=$_frr_p1
         unset _frr_p1 _frr_p2
     else
-        die "finalize: no recovery passphrase available — provide DEBIAN_FDE_RECOVERY_PASSPHRASE or run interactively (§9.1 Stage 3)"
+        die "finalize: no recovery passphrase available — provide ALPINE_FDE_RECOVERY_PASSPHRASE or run interactively (§9.1 Stage 3)"
     fi
     if ! passphrase_floor_ok "$_frr_val"; then
         die "finalize: recovery passphrase rejected by the §13 entropy floor (>=12 chars/3 classes or >=16 chars, no common-password hits, no control characters) — refusing (T2b)"
@@ -256,7 +256,7 @@ fin_uki_pcrsig() {
     _fup_stage=$1
     _fup_out=$2
     command -v objcopy >/dev/null 2>&1 || return 1
-    _fup_esp=${DEBIAN_FDE_ESP:-}
+    _fup_esp=${ALPINE_FDE_ESP:-}
     if [ -z "$_fup_esp" ] && command -v esp_dir >/dev/null 2>&1; then
         _fup_esp=$(esp_dir 2>/dev/null || true)
     fi
@@ -348,24 +348,24 @@ fin_completion_steps() {
     # --- token upgrade to Mechanism B {PCR 7, PCR 11}, per member --------------
     _fcs_keydir=$(keys_dir)
     [ -n "$_fcs_keydir" ] ||
-        die "finalize: no release key directory configured (set --keydir / KEY_PATH / DEBIAN_FDE_KEYDIR)"
+        die "finalize: no release key directory configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
     [ -d "$_fcs_keydir" ] || die "finalize: release key directory not found: $_fcs_keydir"
     [ -f "$_fcs_keydir/release.pub" ] ||
         die "finalize: release public key not found: $_fcs_keydir/release.pub"
-    _fcs_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-    _fcs_stage=$(mktemp -d "$_fcs_tmpdir/debian-fde-fin.XXXXXX") ||
+    _fcs_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+    _fcs_stage=$(mktemp -d "$_fcs_tmpdir/alpine-fde-fin.XXXXXX") ||
         die "finalize: cannot create the staging directory in $_fcs_tmpdir"
     chmod 700 "$_fcs_stage"
-    if [ -n "${DEBIAN_FDE_PCRSIG:-}" ]; then
-        _fcs_pcrsig=$DEBIAN_FDE_PCRSIG
+    if [ -n "${ALPINE_FDE_PCRSIG:-}" ]; then
+        _fcs_pcrsig=$ALPINE_FDE_PCRSIG
     else
         # in-process re-sign fallback (§9.4): needs an UNLOCKED release.pem —
         # in the amended lifecycle release.pem is already encrypted by the
-        # Stage-1 ceremony, so without DEBIAN_FDE_KEY_PASSPHRASE (or a
-        # provided DEBIAN_FDE_PCRSIG) this fails CLOSED (the service maps the
+        # Stage-1 ceremony, so without ALPINE_FDE_KEY_PASSPHRASE (or a
+        # provided ALPINE_FDE_PCRSIG) this fails CLOSED (the service maps the
         # failure to advisory + retry next boot)
         _fcs_pcrsig=$(enrl_sign_pcrsig "$_fcs_stage" "$_fcs_keydir") ||
-            die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — DEBIAN_FDE_PCRSIG or an unlockable release.pem is required (§9.1)"
+            die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — ALPINE_FDE_PCRSIG or an unlockable release.pem is required (§9.1)"
     fi
     # --- per-member keyslot mutations (§9.1 Stage 2 steps 3-4) -----------------
     # ORDER CONSTRAINT — authorization liveness of the NON-INTERACTIVE service:
@@ -380,7 +380,7 @@ fin_completion_steps() {
         # (i) purge the temporary ephemeral keyslot (§9.1 Stage 2 step 4) —
         # keyslot 2 is the temporary install key; the kill is authorized by
         # AUTHFILE (a DIFFERENT keyslot — cryptsetup requires it).
-        _fcs_meta=$(mktemp "$_fcs_tmpdir/debian-fde-fin-meta.XXXXXX") ||
+        _fcs_meta=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-meta.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_meta"
         _fcs_eph=$(fin_ephemeral_slots "$_fcs_dev" "$_fcs_meta")
@@ -400,7 +400,7 @@ fin_completion_steps() {
         esac
 
         # (ii) token upgrade to Mechanism B {PCR 7, PCR 11} (§9.1 Stage 2 step 3)
-        _fcs_cur=$(mktemp "$_fcs_tmpdir/debian-fde-fin-cur.XXXXXX") ||
+        _fcs_cur=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-cur.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_cur"
         _fcs_pcrs=$(fin_token_pcrs "$_fcs_cur")
@@ -414,12 +414,12 @@ fin_completion_steps() {
                 "$_fcs_stage/token-$(basename "$_fcs_dev").json" "$_fcs_auth"); then
                 die "finalize: token upgrade failed for $(basename "$_fcs_dev") — install state stays unfinalized; the standing seal remains; fix the cause and retry (§9.1 crash idempotency)"
             fi
-            printf 'debian-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \
+            printf 'alpine-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \
                 "$(basename "$_fcs_dev")" >&2
         fi
 
         # (iii) exactly the recovery keyslot 0 remains beyond the sealed token
-        _fcs_meta=$(mktemp "$_fcs_tmpdir/debian-fde-fin-meta.XXXXXX") ||
+        _fcs_meta=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-meta.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_meta"
         if ! fin_recovery_slot_ok "$_fcs_meta"; then
@@ -429,10 +429,10 @@ fin_completion_steps() {
         rm -f "$_fcs_meta"
     done
     rm -rf "$_fcs_stage"
-    unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
 
     # --- clear the unfinalized MOTD/issue banner (§9.1 Stage 2/3) --------------
-    _fcs_root=${DEBIAN_FDE_ROOT:-}
+    _fcs_root=${ALPINE_FDE_ROOT:-}
     fde_motd_strip "${_fcs_root}/etc/motd"
     fde_motd_strip "${_fcs_root}/etc/issue"
     info "finalize: unfinalized MOTD/issue banner cleared"
@@ -462,8 +462,8 @@ fin_service_main() {
         installed | provisional-booted) : ;;
         *) return 0 ;;
     esac
-    _fsv_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-    _fsv_stage=$(mktemp -d "$_fsv_tmpdir/debian-fde-svc.XXXXXX") || {
+    _fsv_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+    _fsv_stage=$(mktemp -d "$_fsv_tmpdir/alpine-fde-svc.XXXXXX") || {
         istate_attempt_write "service: no staging directory in $_fsv_tmpdir"
         return 1
     }
@@ -503,7 +503,7 @@ cmd_finalize_main() {
                 return 0
                 ;;
             *)
-                die -r "$DEBIAN_FDE_USAGE" "finalize: unknown argument: $1"
+                die -r "$ALPINE_FDE_USAGE" "finalize: unknown argument: $1"
                 ;;
         esac
     done
@@ -546,8 +546,8 @@ cmd_finalize_main() {
         return 0
     }
     trap _fin_cleanup EXIT
-    _fm_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-    _fm_passfile=$(mktemp "$_fm_tmpdir/debian-fde-fin-pass.XXXXXX") ||
+    _fm_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+    _fm_passfile=$(mktemp "$_fm_tmpdir/alpine-fde-fin-pass.XXXXXX") ||
         die "finalize: cannot stage the recovery passphrase in $_fm_tmpdir"
     chmod 600 "$_fm_passfile"
     _fm_try=0
@@ -571,12 +571,12 @@ cmd_finalize_main() {
     # --- STEP 2: ensure release.pem is encrypted (ADR-18; local operation) -----
     # The Stage-1 credential ceremony (§9.1 step 4, 3/3) already encrypted it:
     # normally a crash-skip. Kept for pre-amendment installs.
-    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
-        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
+    if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        ALPINE_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
     fi
-    _fm_keypass=${DEBIAN_FDE_KEY_PASSPHRASE:-}
+    _fm_keypass=${ALPINE_FDE_KEY_PASSPHRASE:-}
     _fm_keydir=$(keys_dir)
-    [ -n "$_fm_keydir" ] || die "finalize: no release key directory configured (set --keydir / KEY_PATH / DEBIAN_FDE_KEYDIR)"
+    [ -n "$_fm_keydir" ] || die "finalize: no release key directory configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
     [ -d "$_fm_keydir" ] || die "finalize: release key directory not found: $_fm_keydir"
     [ -f "$_fm_keydir/release.pem" ] || die "finalize: release.pem not found in $_fm_keydir (ADR-18)"
     if keys_is_encrypted "$_fm_keydir/release.pem"; then
@@ -593,24 +593,24 @@ cmd_finalize_main() {
     # ephemeral keyslot purge per member -> banner clear -> state finalized.
     # The in-process re-sign fallback (§9.4) re-uses the release-key
     # passphrase staged above (same process, no new exposure).
-    if [ -n "$_fm_keypass" ] && [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
-        DEBIAN_FDE_KEY_PASSPHRASE=$_fm_keypass
+    if [ -n "$_fm_keypass" ] && [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        ALPINE_FDE_KEY_PASSPHRASE=$_fm_keypass
     fi
-    _fm_stage=$(mktemp -d "$_fm_tmpdir/debian-fde-fin.XXXXXX") ||
+    _fm_stage=$(mktemp -d "$_fm_tmpdir/alpine-fde-fin.XXXXXX") ||
         die "finalize: cannot create the staging directory in $_fm_tmpdir"
     chmod 700 "$_fm_stage"
     fin_completion_steps "$_fm_passfile"
 
     # --- audit summary + §9.1 off-machine backup prompt (guided only) ----------
     _fm_bl=$(sp_baseline_file)
-    printf 'debian-fde: audit summary: baseline %s: expected_pcr7=%s secureboot=%s setup_mode=%s\n' \
+    printf 'alpine-fde: audit summary: baseline %s: expected_pcr7=%s secureboot=%s setup_mode=%s\n' \
         "$_fm_bl" \
         "$(baseline_get "$_fm_bl" expected_pcr7)" \
         "$(baseline_get_in "$_fm_bl" sb_state secure_boot)" \
         "$(baseline_get_in "$_fm_bl" sb_state setup_mode)" >&2
     cat >&2 <<EOF
-debian-fde: install finalized — back up the key material off-machine now (§9.1):
-  scp -r $(sp_etc_dir)/keys/ admin@backup-host:/secure/storage/debian-fde-backup/
+alpine-fde: install finalized — back up the key material off-machine now (§9.1):
+  scp -r $(sp_etc_dir)/keys/ admin@backup-host:/secure/storage/alpine-fde-backup/
 EOF
     keys_scrub "$_fm_passfile"
     return 0

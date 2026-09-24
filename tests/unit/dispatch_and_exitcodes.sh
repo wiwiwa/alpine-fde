@@ -1,11 +1,11 @@
 #!/bin/sh
-# dispatch_and_exitcodes.sh — unit tests for bin/debian-fde dispatcher wiring and the
-# exit-code contract end-to-end, using an injected DEBIAN_FDE_CMD_DIR with stub
+# dispatch_and_exitcodes.sh — unit tests for bin/alpine-fde dispatcher wiring and the
+# exit-code contract end-to-end, using an injected ALPINE_FDE_CMD_DIR with stub
 # command files. No TPM, no real command implementations involved.
 
 TEST_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$TEST_DIR/../.." && pwd)
-SP="$REPO_ROOT/bin/debian-fde"
+SP="$REPO_ROOT/bin/alpine-fde"
 
 # shellcheck disable=SC1091
 . "$REPO_ROOT/tests/unit/lib.sh"
@@ -20,8 +20,8 @@ cat >"$CMD/status.sh" <<'EOF'
 # stub: report which env vars the dispatcher forwarded
 cmd_status_main() {
     printf 'STUB status|ROOT=%s|TCTI=%s|YES=%s|DRY=%s|ESP=%s|DISK=%s|KEYDIR=%s|ARGS=%s\n' \
-        "${DEBIAN_FDE_ROOT-}" "${DEBIAN_FDE_TCTI-}" "${DEBIAN_FDE_YES-}" "${DEBIAN_FDE_DRY_RUN-}" \
-        "${DEBIAN_FDE_ESP-}" "${DEBIAN_FDE_DISK-}" "${DEBIAN_FDE_KEYDIR-}" "$*"
+        "${ALPINE_FDE_ROOT-}" "${ALPINE_FDE_TCTI-}" "${ALPINE_FDE_YES-}" "${ALPINE_FDE_DRY_RUN-}" \
+        "${ALPINE_FDE_ESP-}" "${ALPINE_FDE_DISK-}" "${ALPINE_FDE_KEYDIR-}" "$*"
 }
 EOF
 
@@ -42,10 +42,10 @@ EOF
 
 # sp — run the dispatcher with a scrubbed environment and injected cmd dir
 sp() {
-    env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_ROOT -u DEBIAN_FDE_ESP -u DEBIAN_FDE_DISK \
-        -u DEBIAN_FDE_KEYDIR -u DEBIAN_FDE_YES -u DEBIAN_FDE_DRY_RUN \
-        DEBIAN_FDE_CONF="$tmp/absent.conf" \
-        DEBIAN_FDE_CMD_DIR="$CMD" \
+    env -u ALPINE_FDE_TCTI -u ALPINE_FDE_ROOT -u ALPINE_FDE_ESP -u ALPINE_FDE_DISK \
+        -u ALPINE_FDE_KEYDIR -u ALPINE_FDE_YES -u ALPINE_FDE_DRY_RUN \
+        ALPINE_FDE_CONF="$tmp/absent.conf" \
+        ALPINE_FDE_CMD_DIR="$CMD" \
         "$SP" "$@"
 }
 
@@ -53,10 +53,10 @@ sp() {
 spc() {
     _conf=$1
     shift
-    env -u DEBIAN_FDE_TCTI -u DEBIAN_FDE_ROOT -u DEBIAN_FDE_ESP -u DEBIAN_FDE_DISK \
-        -u DEBIAN_FDE_KEYDIR -u DEBIAN_FDE_YES -u DEBIAN_FDE_DRY_RUN \
-        DEBIAN_FDE_CONF="$_conf" \
-        DEBIAN_FDE_CMD_DIR="$CMD" \
+    env -u ALPINE_FDE_TCTI -u ALPINE_FDE_ROOT -u ALPINE_FDE_ESP -u ALPINE_FDE_DISK \
+        -u ALPINE_FDE_KEYDIR -u ALPINE_FDE_YES -u ALPINE_FDE_DRY_RUN \
+        ALPINE_FDE_CONF="$_conf" \
+        ALPINE_FDE_CMD_DIR="$CMD" \
         "$SP" "$@"
 }
 
@@ -64,7 +64,7 @@ spc() {
 rc=0
 out=$(sp --version 2>/dev/null) || rc=$?
 assert_rc "--version exits 0" "0" "$rc"
-assert_contains "--version prints name and version" "$out" "debian-fde 0.1.0"
+assert_contains "--version prints name and version" "$out" "alpine-fde 0.1.0"
 
 rc=0
 out=$(sp --help 2>/dev/null) || rc=$?
@@ -152,8 +152,8 @@ assert_rc "pcrsign is registered (no stub cmd file -> exit 3, not 2)" "3" "$rc"
 assert_contains "pcrsign missing cmd file says not implemented" "$out" "not implemented"
 
 # --- config file feeds the subcommand environment; CLI flags beat the file ---
-conf="$tmp/debian-fde.conf"
-printf 'DEBIAN_FDE_ROOT=/fromconf\n# comment\n' >"$conf"
+conf="$tmp/alpine-fde.conf"
+printf 'ALPINE_FDE_ROOT=/fromconf\n# comment\n' >"$conf"
 out=$(spc "$conf" status)
 assert_contains "config file value reaches cmd env" "$out" "ROOT=/fromconf"
 

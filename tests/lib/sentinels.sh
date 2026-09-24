@@ -17,10 +17,10 @@
 # matches any haystack), which is exactly the silent-rot the harness contract
 # forbids.
 
-if [[ -n "${_DEBIAN_FDE_SENTINELS_SH_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_SENTINELS_SH_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_SENTINELS_SH_SOURCED=1
+_ALPINE_FDE_SENTINELS_SH_SOURCED=1
 
 SENTINELS_VER="${SENTINELS_VER:-260.2}"
 SENTINELS="${SENTINELS_FILE:-${SENTINELS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/sentinels-${SENTINELS_VER}.txt}}"

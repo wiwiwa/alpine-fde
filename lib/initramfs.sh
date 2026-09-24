@@ -22,10 +22,10 @@
 # Determinism contract (B-G9 seam): CI builds MUST use a fixed input set so
 # pcr11_digest is reproducible across runs.
 
-if [ -n "${DEBIAN_FDE_INITRAMFS_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_INITRAMFS_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_INITRAMFS_LOADED=1
+ALPINE_FDE_INITRAMFS_LOADED=1
 
 # --- persisted topology conf (§4.1/§8.2; G-ST4/G-ST5) -----------------------------
 # The installer persists the provisioned topology in

@@ -52,7 +52,7 @@
 # unchanged vs the enrolled boot (the forgery lives on the payload drive /
 # token JSON, not in the firmware measurement).
 #
-# Reuses s00b's enrolled artifacts via DEBIAN_FDE_E2E_STATE (run-e2e.sh sets
+# Reuses s00b's enrolled artifacts via ALPINE_FDE_E2E_STATE (run-e2e.sh sets
 # it); otherwise builds + boots them itself (bootstrap boot + 5 control boots).
 
 set -u
@@ -158,7 +158,7 @@ _reanchor_tpm() {
 }
 
 # --- enrolled state: reuse s00b's or bootstrap it (bootstrap boot) -------------
-STATE="${DEBIAN_FDE_E2E_STATE:-}"
+STATE="${ALPINE_FDE_E2E_STATE:-}"
 if [[ -n "$STATE" && -f "$STATE/disk.img" && -d "$STATE/tpm" && -f "$STATE/harness.efi" \
     && -f "$STATE/pcrsig.img" && -d "$STATE/keys" && -f "$STATE/vars-enrolled.fd" ]]; then
     echo "# reusing enrolled state from $STATE"
@@ -208,7 +208,7 @@ else
         # read has no timeout — the feed stays prompt-synchronized); a late
         # prompt is a slow boot, never a missing one.
         if uki_wait_hook_prompt 1 900 "$RUN_ENROLLED"; then
-            feed_line "$RUN_ENROLLED/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+            feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
         # faithfulness: UNSEALED reached, no measurement-loss warnings, and
@@ -216,9 +216,9 @@ else
         # (G-T13 — a mismatch means the register this state is enrolled
         # against would NOT be the register a faithful boot reproduces, and
         # the enroll's own G-B6 gate would refuse it later).
-        _d11_boot=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' \
+        _d11_boot=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' \
             "$RUN_ENROLLED/console.log" 2>/dev/null | head -1 | cut -d= -f2)
-        if grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" \
+        if grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" \
             && ! grep -q "EFI stub: WARNING: Failed to measure data for event" \
                 "$RUN_ENROLLED/console.log" 2>/dev/null \
             && [[ -n "$_d11_boot" && "$_d11_boot" == "$D11" ]]; then
@@ -231,14 +231,14 @@ else
             rm -f "$RUN_ENROLLED/console.log"
         fi
     done
-    grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
+    grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
         echo "s18: bootstrap boot did not reach UNSEALED — state unusable"; exit 1; }
     grep -q "EFI stub: WARNING: Failed to measure data for event" "$RUN_ENROLLED/console.log" && {
         echo "s18: bootstrap boot degraded after 3 attempts — state unusable"; exit 1; }
     # host-side finalized enrollment (the production CLI;
     # digest-anchored enroll (Option A — no between-boot reseeding — the CLI compares the entry's recorded d7/d11 against the baseline (pure data): the combined {7,11} entry the hook extracts.
     swtpm_ensure "$RUN_ENROLLED/tpm" || { echo "s18: swtpm restart failed"; exit 1; }
-    PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
+    PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
     [[ -n "$PCR7_ENROLLED" ]] || { echo "s18: no PCR 7 in the bootstrap console"; exit 1; }
 # digest-anchored enroll (Option A): no reseeding — the CLI compares the
 # entry's recorded d7/d11 against the baseline (pure data, no live TPM read).
@@ -246,7 +246,7 @@ else
     uki_pcrsig_append_combined "$RUN_ENROLLED/uki-pcrsig.json" "$RUN_ENROLLED/uki-pcrsig-combined.json" \
         "$PCR7_ENROLLED" "$D11" "$RUN_ENROLLED/keys" || exit 1
     uki_pcrsig_disk "$RUN_ENROLLED/pcrsig.img" "$RUN_ENROLLED/uki-pcrsig-combined.json" || exit 1
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"
     chmod 600 "$RUN_ENROLLED/kf-slot0"
     EFIVARS="$RUN_ENROLLED/efivars-sb-on"
     mkdir -p "$EFIVARS"
@@ -521,7 +521,7 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
     _forge_recipe "$VARIANT" "$FOR_JSON"
     # pcr_of <console.log> <pcr> — the harness PCR-print parser (forensics
     # below AND the degraded-boot detector share it)
-    pcr_of() { grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
+    pcr_of() { grep -oE "alpine-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
     PCR0_ENROLLED=$(pcr_of "$STATE/console.log" 0)
     # _boot_degraded <dir> — TRUE when this boot's firmware measurement is not
     # FAITHFUL: PCR 0 differs from the enrolled boot (TPM command timeouts
@@ -593,7 +593,7 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
         for n in 1 2 3; do
             if uki_wait_hook_prompt "$n" 900 "$B"; then
                 _FED[$((n - 1))]=1
-                feed_line "$B/serial.sock" "debian-fde-$VARIANT-wrong-passphrase-$n"
+                feed_line "$B/serial.sock" "alpine-fde-$VARIANT-wrong-passphrase-$n"
             else
                 break
             fi

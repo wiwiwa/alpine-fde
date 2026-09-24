@@ -12,7 +12,7 @@
 #   3. populate the minimal rootfs (§3.3) from the SHA256-pinned Alpine
 #      artifact + configure OpenRC networking/getty + apk repositories
 #   4. §3.3 SIZE BUDGET: installed-rootfs size ≤ budget (the harness var
-#      DEBIAN_FDE_ROOTFS_BUDGET_MIB is the pin of record; default = the 1.4 GB
+#      ALPINE_FDE_ROOTFS_BUDGET_MIB is the pin of record; default = the 1.4 GB
 #      planning target) + package count tracked
 #   5. G-T11b disk-side scans: no private key material (PEM headers, .pem/.key)
 #      anywhere on the LUKS payload; ESP scanned host-side
@@ -69,7 +69,7 @@ source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown
 # Debian-era 1434 MiB). CI overrides it via the environment. The measured
 # Alpine payload (pinned minirootfs + tooling + stubs) sits far under the
 # ceiling; the assert below records the measured value every run.
-DEBIAN_FDE_ROOTFS_BUDGET_MIB="${DEBIAN_FDE_ROOTFS_BUDGET_MIB:-250}"
+ALPINE_FDE_ROOTFS_BUDGET_MIB="${ALPINE_FDE_ROOTFS_BUDGET_MIB:-250}"
 # §13/§9.3 ESP sizing: measured UKI × retention (current + 2 old) + headroom.
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
@@ -77,7 +77,7 @@ ESP_HEADROOM_MIB=8
 # G-T11b tree scan under TCG — the scan wall time varies ~±40% between runs
 # (900 s was exceeded once, 2026-09-19 run s00-bootstrap-1789763382: killed
 # mid-scan), so the hard timeout carries headroom
-export QEMU_TIMEOUT="${DEBIAN_FDE_S00_TIMEOUT:-1200}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S00_TIMEOUT:-1200}"
 
 RUN="$TESTS/e2e/.runs/s00-bootstrap-$(date +%s)"
 mkdir -p "$RUN"
@@ -116,8 +116,8 @@ assert_file_exists "S-00: rootfs payload drive built" "$RUN/rootfs-payload.img"
 echo "# artifact pin: $ROOTFS_SHA ($ROOTFS_BYTES bytes)"
 
 echo "# building installer UKI (guest tree + initramfs + ukify + sbsign; stage=install) ..."
-DEBIAN_FDE_ROOTFS_SHA="$ROOTFS_SHA" DEBIAN_FDE_ROOTFS_BYTES="$ROOTFS_BYTES" \
-    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "debian-fde-stage=install" || {
+ALPINE_FDE_ROOTFS_SHA="$ROOTFS_SHA" ALPINE_FDE_ROOTFS_BYTES="$ROOTFS_BYTES" \
+    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "alpine-fde-stage=install" || {
     echo "s00: uki_build failed"; exit 1; }
 assert_file_exists "S-00: installer UKI built" "$RUN/harness.efi"
 assert_rc "S-00: installer UKI is SB-valid (release-cert signature)" 0 \
@@ -159,16 +159,16 @@ fi
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
 
 # --- stage assertions ------------------------------------------------------------
-assert_contains "init ran" "$LOG" "debian-fde-harness: init started"
+assert_contains "init ran" "$LOG" "alpine-fde-harness: init started"
 assert_contains "TPM char device appeared" "$LOG" "/dev/tpmrm0 present"
 for pcr in 0 7 11; do
-    if grep -qE "debian-fde-pcr sha256:$pcr=[0-9a-f]{64}" "$CONSOLE" 2>/dev/null; then
+    if grep -qE "alpine-fde-pcr sha256:$pcr=[0-9a-f]{64}" "$CONSOLE" 2>/dev/null; then
         _assert_result ok "PCR $pcr printed (sha256 hex)" ""
     else
-        _assert_result not-ok "PCR $pcr printed (sha256 hex)" "no debian-fde-pcr line in console.log"
+        _assert_result not-ok "PCR $pcr printed (sha256 hex)" "no alpine-fde-pcr line in console.log"
     fi
 done
-PCR7=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$CONSOLE" 2>/dev/null | head -1 | cut -d= -f2)
+PCR7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$CONSOLE" 2>/dev/null | head -1 | cut -d= -f2)
 ZERO7=$(printf '0%.0s' {1..64})
 if [[ -n "$PCR7" && "$PCR7" != "$ZERO7" ]]; then
     _assert_result ok "PCR 7 non-zero (enrolled SB state measured)" ""
@@ -178,27 +178,27 @@ fi
 
 # stage 2: the one-time documented passphrase unlock
 assert_contains "passphrase unlock (one-time, documented; zero console input)" "$LOG" \
-    "debian-fde-install: root volume unlocked via passphrase"
+    "alpine-fde-install: root volume unlocked via passphrase"
 assert_not_contains "no fallback prompt on the install path" "$LOG" "awaiting console line"
 assert_not_contains "no ask-password prompt on the install path (sentinel table)" "$LOG" \
     "$(sentinel_of prompt_re)"
 # stage 3: rootfs populate from the pinned artifact
 assert_contains "rootfs payload hash-verified in-guest" "$LOG" \
-    "debian-fde-install: rootfs payload verified"
+    "alpine-fde-install: rootfs payload verified"
 assert_contains "rootfs populated (§3.3)" "$LOG" \
-    "debian-fde-install: populating rootfs from the pinned Alpine artifact"
+    "alpine-fde-install: populating rootfs from the pinned Alpine artifact"
 assert_contains "getty/openrc configured (§3.3)" "$LOG" \
-    "debian-fde-install: getty/openrc configured"
+    "alpine-fde-install: getty/openrc configured"
 # stage 3b: §9.1 Btrfs default (G-HW5) — mkfs.btrfs + @/@home/@snapshots
 # subvolumes + subvol=@ mount + the fstab subvolume forms, all proven on the
 # console (harness-owned markers; `btrfs subvolume list` output is the
 # on-disk evidence, the /etc/fstab lines are echoed verbatim)
 assert_contains "§9.1 btrfs rootfs created on the LUKS volume" "$LOG" \
-    "debian-fde-install: btrfs rootfs created (uuid="
+    "alpine-fde-install: btrfs rootfs created (uuid="
 assert_contains "§9.1 subvolumes created (@ @home @snapshots)" "$LOG" \
-    "debian-fde-install: subvolumes created (@ @home @snapshots)"
+    "alpine-fde-install: subvolumes created (@ @home @snapshots)"
 assert_contains "root mounted rw with subvol=@" "$LOG" \
-    "debian-fde-install: root mounted (btrfs subvol=@)"
+    "alpine-fde-install: root mounted (btrfs subvol=@)"
 for sv in '@' '@home' '@snapshots'; do
     # NB: no bare $ end-anchor — the serial chardev log carries a trailing CR
     # on every line (same trap as the kib= parse below); [[:space:]] eats it
@@ -209,23 +209,23 @@ for sv in '@' '@home' '@snapshots'; do
             "no 'path ${sv}' line in console"
     fi
 done
-if grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} / btrfs subvol=@,defaults 0 1[[:space:]]*$' "$CONSOLE" 2>/dev/null \
-    && grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /home btrfs subvol=@home,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null \
-    && grep -qE '^debian-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /.snapshots btrfs subvol=@snapshots,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null; then
+if grep -qE '^alpine-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} / btrfs subvol=@,defaults 0 1[[:space:]]*$' "$CONSOLE" 2>/dev/null \
+    && grep -qE '^alpine-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /home btrfs subvol=@home,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null \
+    && grep -qE '^alpine-fde-btrfs: fstab\| UUID=[0-9a-f-]{36} /.snapshots btrfs subvol=@snapshots,defaults 0 2[[:space:]]*$' "$CONSOLE" 2>/dev/null; then
     _assert_result ok "§9.1 fstab subvolume forms written (/ /home /.snapshots)" ""
 else
     _assert_result not-ok "§9.1 fstab subvolume forms written (/ /home /.snapshots)" \
-        "no debian-fde-btrfs: fstab| lines in console"
+        "no alpine-fde-btrfs: fstab| lines in console"
 fi
-assert_not_contains "install stage never failed" "$LOG" "debian-fde: INSTALL-FAILED"
+assert_not_contains "install stage never failed" "$LOG" "alpine-fde: INSTALL-FAILED"
 
 # stage 4: §3.3/ADR-12 size budget + package count (parsed from the console
 # print; the package marker is the apk world/db — /lib/apk/db/installed, one
 # leading `P:` line per installed package — re-pinned from the dpkg status
 # marker with the same marker SHAPE, G-E1d)
-ROOTFS_KIB=$(sed -n 's/^debian-fde-rootfs: kib=\([0-9]\{1,\}\) packages=.*/\1/p' "$CONSOLE" | head -1)
+ROOTFS_KIB=$(sed -n 's/^alpine-fde-rootfs: kib=\([0-9]\{1,\}\) packages=.*/\1/p' "$CONSOLE" | head -1)
 # NB: no end-anchor — the serial chardev log carries a trailing CR on the line
-ROOTFS_PKGS=$(sed -n 's/^debian-fde-rootfs: kib=[0-9]\{1,\} packages=\([0-9]\{1,\}\).*/\1/p' "$CONSOLE" | head -1)
+ROOTFS_PKGS=$(sed -n 's/^alpine-fde-rootfs: kib=[0-9]\{1,\} packages=\([0-9]\{1,\}\).*/\1/p' "$CONSOLE" | head -1)
 # MD-01: compute the budget comparison ONLY from a real measurement — an empty
 # ROOTFS_KIB used to evaluate to 0 and bank a passing "0MiB <= budget" assert
 # in the very run where "size measured" correctly recorded not-ok.
@@ -234,13 +234,13 @@ if [[ -n "$ROOTFS_KIB" ]]; then
     _assert_result ok "installed-rootfs size measured (${ROOTFS_MIB}MiB, $ROOTFS_PKGS apk packages)" ""
 else
     ROOTFS_MIB=""
-    _assert_result not-ok "installed-rootfs size measured" "no debian-fde-rootfs line in console"
+    _assert_result not-ok "installed-rootfs size measured" "no alpine-fde-rootfs line in console"
 fi
-if [[ -n "$ROOTFS_KIB" ]] && (( ROOTFS_MIB <= DEBIAN_FDE_ROOTFS_BUDGET_MIB )); then
-    _assert_result ok "§3.3 size budget (ADR-12): ${ROOTFS_MIB}MiB <= budget ${DEBIAN_FDE_ROOTFS_BUDGET_MIB}MiB (pin of record: harness var)" ""
+if [[ -n "$ROOTFS_KIB" ]] && (( ROOTFS_MIB <= ALPINE_FDE_ROOTFS_BUDGET_MIB )); then
+    _assert_result ok "§3.3 size budget (ADR-12): ${ROOTFS_MIB}MiB <= budget ${ALPINE_FDE_ROOTFS_BUDGET_MIB}MiB (pin of record: harness var)" ""
 else
     _assert_result not-ok "§3.3 size budget (pin of record: harness var)" \
-        "${ROOTFS_MIB:-unmeasured}MiB vs budget ${DEBIAN_FDE_ROOTFS_BUDGET_MIB}MiB"
+        "${ROOTFS_MIB:-unmeasured}MiB vs budget ${ALPINE_FDE_ROOTFS_BUDGET_MIB}MiB"
 fi
 if [[ -n "$ROOTFS_PKGS" ]] && (( ROOTFS_PKGS > 0 )); then
     _assert_result ok "apk package count tracked (world/db): $ROOTFS_PKGS" ""
@@ -249,16 +249,16 @@ else
 fi
 
 # stage 5: G-T11b disk-side scans (LUKS payload in-guest; ESP host-side)
-SCAN_LINE=$(grep -oE 'debian-fde-scan: keyfiles=[0-9]+ pem=[0-9]+' "$CONSOLE" | head -1)
+SCAN_LINE=$(grep -oE 'alpine-fde-scan: keyfiles=[0-9]+ pem=[0-9]+' "$CONSOLE" | head -1)
 assert_eq "G-T11b: no .pem/.key files on the LUKS payload" \
-    "debian-fde-scan: keyfiles=0 pem=0" "$SCAN_LINE"
+    "alpine-fde-scan: keyfiles=0 pem=0" "$SCAN_LINE"
 PEM_HITS=$(grep -al '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$RUN/harness.efi" 2>/dev/null || true)
 assert_eq "G-T11b: installer UKI carries no private-key PEM block" "" "$PEM_HITS"
 KEYNAMES=$(mdir -i "$RUN/esp.img" -/ :: 2>/dev/null | grep -Ei '\.(pem|key)' || true)   # MD-09: recursive listing
 assert_eq "G-T11b: ESP lists no .pem/.key files" "" "$KEYNAMES"
 
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "clean poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
+assert_contains "clean poweroff sentinel" "$LOG" "alpine-fde: POWEROFF"
 
 # stage 7: G-T13 prediction check (tests/lib/prediction.sh) — ukify's
 # predicted PCR 11 (enter-initrd entry) == the {11}-selection PolicyPCR
@@ -271,7 +271,7 @@ assert_pcr11_prediction "G-T13"
 # SecureBoot=1 SetupMode=0 — the fixture efivars dir presents the final SB
 # state (mkvar pattern from tests/unit/baseline_finalize_guard.sh).
 EFIVARS="$RUN/rootfs/efivars-sb-on"
-# the real CLI's sp_etc_dir resolves $DEBIAN_FDE_ROOT/etc/alpine-fde (the
+# the real CLI's sp_etc_dir resolves $ALPINE_FDE_ROOT/etc/alpine-fde (the
 # Alpine-contract rename) — stage the baseline where audit --init looks
 mkdir -p "$EFIVARS" "$RUN/rootfs/etc/alpine-fde"
 _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
@@ -321,19 +321,19 @@ JSON
 if ! swtpm_ensure "$RUN/tpm"; then   # IN-03: the single promoted restart path
     echo "s00: swtpm restart failed"; exit 1
 fi
-AUDIT_OUT=$(DEBIAN_FDE_ROOT="$RUN/rootfs" \
-    DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-    DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-    DEBIAN_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
-    DEBIAN_FDE_NO_INSTALL=1 \
-    "$REPO/bin/debian-fde" audit --init 2>&1)
+AUDIT_OUT=$(ALPINE_FDE_ROOT="$RUN/rootfs" \
+    ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+    ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+    ALPINE_FDE_EVENTLOG="$RUN/rootfs/eventlog-absent" \
+    ALPINE_FDE_NO_INSTALL=1 \
+    "$REPO/bin/alpine-fde" audit --init 2>&1)
 AUDIT_RC=$?
 assert_eq "audit --init finalizes the baseline (real CLI, rc 0)" "0" "$AUDIT_RC"
 assert_contains "finalized baseline records secure_boot=1" \
     "$(cat "$RUN/rootfs/etc/alpine-fde/baseline.json")" '"secure_boot": "1"'
 # stamp the finalized PCR 0/7 from the boot console evidence (the installed
 # machine's trust root is the BOOTED state, not the restarted fixture)
-sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$CONSOLE" | head -1 | cut -d= -f2)\",|" \
+sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$CONSOLE" | head -1 | cut -d= -f2)\",|" \
     "$RUN/rootfs/etc/alpine-fde/baseline.json"
 assert_eq "baseline expected_pcr7 == the booted machine's PCR 7" "$PCR7" \
     "$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/alpine-fde/baseline.json")"

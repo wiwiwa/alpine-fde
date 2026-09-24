@@ -35,10 +35,10 @@
 # thin wrappers around tests/lib/serial.py and now talk to the BRIDGE socket
 # ($RUN/serial.sock — unchanged path for every caller).
 
-if [[ -n "${_DEBIAN_FDE_SERIAL_SH_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_SERIAL_SH_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_SERIAL_SH_SOURCED=1
+_ALPINE_FDE_SERIAL_SH_SOURCED=1
 
 _serial_py() {
     printf '%s\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/serial.py"
@@ -287,12 +287,12 @@ serial_bridge_stop() {
 # file must keep working unchanged): there the hold is the only mitigation.
 # For the bridge path the hold is superfluous. The connect retries briefly
 # (the bridge binds before qemu starts, but never say never).
-# DEBIAN_FDE_SERIAL_DEBUG=1 logs the feed boundary (bytes, latency) to stderr.
+# ALPINE_FDE_SERIAL_DEBUG=1 logs the feed boundary (bytes, latency) to stderr.
 feed_line() {
     python3 - "$1" "$2" <<'PYEOF'
 import os, socket, sys, time
 sock, text = sys.argv[1], sys.argv[2]
-dbg = os.environ.get("DEBIAN_FDE_SERIAL_DEBUG")
+dbg = os.environ.get("ALPINE_FDE_SERIAL_DEBUG")
 payload = (text + "\n").encode()
 t0 = time.monotonic()
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

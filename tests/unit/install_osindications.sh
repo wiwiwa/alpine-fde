@@ -7,7 +7,7 @@
 # explicit ephemeral-key scrub (I1 — G-C23), and a PLAIN direct reboot to
 # disk. Order pinned across topologies and both lanes:
 #   state `installed` -> teardown -> scrub -> reboot (suppressed by the
-#   DEBIAN_FDE_INSTALL_NO_REBOOT=1 / --no-reboot CI seam).
+#   ALPINE_FDE_INSTALL_NO_REBOOT=1 / --no-reboot CI seam).
 # Variable-file mechanics live in nvram_auth_enroll.sh; chroot execution in
 # install_chroot_plan.sh — this file pins the PLAN level: lanes (host/guest),
 # order, and the topology invariance of the retired trip.
@@ -19,18 +19,18 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
-T=$(mktemp -d /tmp/debian-fde-install-osind.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-install-osind.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
 
 DISK=$T/disk.img
 : >"$DISK"
@@ -40,7 +40,7 @@ line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 # =============================================================================
 # Single-disk dry-run: NO OsIndications; state -> teardown -> scrub -> reboot
 # =============================================================================
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1)
 RC=$?
 assert_eq "dry-run rc 0" "0" "$RC"
 assert_eq "G-C26: ZERO OsIndications records (single)" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
@@ -64,12 +64,12 @@ assert_contains "teardown umounts the efivars bind" "$OUT" \
 # =============================================================================
 # NO_REBOOT seams (env + flag): the reboot record is suppressed, the scrub isn't
 # =============================================================================
-OUT=$(DEBIAN_FDE_INSTALL_NO_REBOOT=1 "$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+OUT=$(ALPINE_FDE_INSTALL_NO_REBOOT=1 "$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1)
 assert_eq "NO_REBOOT=1: rc 0" "0" "$?"
 assert_eq "NO_REBOOT=1: no reboot record" "0" "$(grep -c 'reboot #' <<<"$OUT")"
 assert_eq "NO_REBOOT=1: ephemeral-key scrub still present (harness reboots itself)" "1" \
     "$(grep -c 'rm -f <ephemeral-keyfile>' <<<"$OUT")"
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --no-reboot 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --no-reboot 2>&1)
 assert_eq "--no-reboot: rc 0" "0" "$?"
 assert_eq "--no-reboot: no reboot record" "0" "$(grep -c 'reboot #' <<<"$OUT")"
 
@@ -78,7 +78,7 @@ assert_eq "--no-reboot: no reboot record" "0" "$(grep -c 'reboot #' <<<"$OUT")"
 # =============================================================================
 DISK2=$T/disk2.img
 : >"$DISK2"
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --disk "$DISK2" 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISK2" 2>&1)
 assert_eq "raid1 dry-run rc 0" "0" "$?"
 assert_eq "raid1: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
@@ -89,7 +89,7 @@ assert_eq "raid1: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > 
 
 CACHE=$T/cache.img
 : >"$CACHE"
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --bcache "$CACHE" 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --bcache "$CACHE" 2>&1)
 assert_eq "bcache dry-run rc 0" "0" "$?"
 assert_eq "bcache: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
@@ -100,7 +100,7 @@ assert_eq "bcache: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB >
 
 DISKB=$T/diskb.img
 : >"$DISKB"
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --disk "$DISKB" --bcache "$CACHE" 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISKB" --bcache "$CACHE" 2>&1)
 assert_eq "bcache-multi dry-run rc 0" "0" "$?"
 assert_eq "bcache-multi: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
@@ -115,14 +115,14 @@ assert_contains "bcache-multi: teardown closes every member container" "$OUT" \
 # qemu lane: the scrub is a HOST comment; no OsIndications anywhere in the
 # emitted script (neither lane carries the retired firmware trip)
 # =============================================================================
-export DEBIAN_FDE_INSTALL_RUNNER=qemu
-export DEBIAN_FDE_YES=1
-export DEBIAN_FDE_INSTALL_MNT=$T/mnt
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_TMPDIR=$T
-export DEBIAN_FDE_INSTALL_SCRIPT=$T/guest.sh
-export DEBIAN_FDE_INSTALL_NO_REBOOT=1
-export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
+export ALPINE_FDE_INSTALL_MNT=$T/mnt
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_TMPDIR=$T
+export ALPINE_FDE_INSTALL_SCRIPT=$T/guest.sh
+export ALPINE_FDE_INSTALL_NO_REBOOT=1
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 mkdir -p "$T/stub" "$T/hooks" "$T/efivars" "$T/root"
 make_stub() {
     printf '#!/bin/sh\nexit 0\n' >"$T/stub/$1"
@@ -137,23 +137,23 @@ chmod +x "$T/stub/openssl"
 printf '#!/bin/sh\nprintf "0\\n"\n' >"$T/stub/id"
 chmod +x "$T/stub/id"
 export PATH="$T/stub:$PATH"
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc"
+mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
-    printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
-    chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
+    printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
+    chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
 done
 printf '\007\000\000\000\001' >"$T/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1)
 assert_eq "qemu emit rc 0" "0" "$?"
-SCRIPT=$DEBIAN_FDE_INSTALL_SCRIPT
+SCRIPT=$ALPINE_FDE_INSTALL_SCRIPT
 assert_eq "qemu: ZERO OsIndications records (both lanes)" "0" \
     "$(grep -c 'fw_osindications_set' "$SCRIPT")"
 assert_eq "qemu: ephemeral-key scrub is a host comment" "1" \
-    "$(grep -c '^# HOST: rm -f .*debian-fde-ephkey' "$SCRIPT")"
+    "$(grep -c '^# HOST: rm -f .*alpine-fde-ephkey' "$SCRIPT")"
 assert_eq "qemu: no reboot record (CI seam)" "0" "$(grep -c '^# HOST: reboot' "$SCRIPT")"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

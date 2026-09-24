@@ -20,13 +20,13 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/enroll-tpm.sh
 source "$REPO/lib/cmd/enroll-tpm.sh"
 
-T=$(mktemp -d /tmp/debian-fde-luks-json-parsers.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-luks-json-parsers.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 

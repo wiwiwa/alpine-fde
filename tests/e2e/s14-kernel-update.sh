@@ -86,9 +86,9 @@ CONSOLE="$RUN/console.log"
 T0=$SECONDS
 
 # CR-02/MD-03: prunes must spare the invocation's chained state dirs
-# (DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 while IFS= read -r _d; do
-    case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
+    case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
     rm -rf "$_d"
 done < <(find "$TESTS/e2e/.runs" -mindepth 1 -maxdepth 1 -type d -printf "%T@\t%p\n" 2>/dev/null | sort -rn | tail -n +3 | cut -f2-)
 
@@ -136,12 +136,12 @@ _vuki_build() { # <stage-dir> <v1-tree> <keys-dir> <uname> <marker> <out.efi>
     ln -sfn usr/bin "$st/bin"
     ln -sfn usr/sbin "$st/sbin"
     uki_initrd_write_init "$st"
-    printf '# debian-fde variant: %s\n' "$mk" >>"$st/init"
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
+    printf '# alpine-fde variant: %s\n' "$mk" >>"$st/init"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
     chmod 600 "$st/kf0"
     cp "$kd/release.pub" "$st/rel.pub"
     uki_initrd_pack "$st" "$st.cpio" || return 1
-    printf 'ID=debian-fde-harness\nVERSION_ID=%s\nNAME=Debian FDE harness UKI\n' "$un" >"$st/os-release.txt"
+    printf 'ID=alpine-fde-harness\nVERSION_ID=%s\nNAME=Alpine FDE harness UKI\n' "$un" >"$st/os-release.txt"
     printf '%s\n' "$UKI_KERNEL_CMDLINE" >"$st/cmdline.txt"
     # the enter-initrd PCR 11 prediction for THIS exact build (ukify --measure,
     # the same inputs the .pcrsig pol entries derive from) — consumed by the
@@ -216,7 +216,7 @@ cp "$RUN/pcrsig.img" "$RUN/uki-6.2.0.efi.pcrsig.img"
 UKI_MIB=$(( ($(stat -c%s "$RUN/uki-6.2.0.efi") + 1048575) / 1048576 ))
 ESP_MIB=$(( UKI_MIB * 3 + 12 ))
 esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/uki-6.2.0.efi" || exit 1
-_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.2.0.efi" debian-fde-6.2.0.efi || exit 1
+_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.2.0.efi" alpine-fde-6.2.0.efi || exit 1
 disk_make_luks "$RUN/disk.img" 128 || exit 1
 
 # --- §8.3 Alpine kernel-update delivery contract (apk trigger + kernel-hooks.d) --
@@ -269,7 +269,7 @@ echo "# boot v1-baseline (token-less disk -> hook recovery loop, TCG, up to $QEM
 for _attempt in 1 2; do
     qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     elif ! _qemu_alive "$RUN"; then
         _qemu_died "v1-baseline"   # the prompt can never appear; qemu_wait reaps immediately
     fi
@@ -296,7 +296,7 @@ assert_pcr11_prediction "S-14 v1-baseline"
 D11_62=$(cat "$RUN/uki-6.2.0.efi.pcr11.txt" 2>/dev/null)
 [[ -n "$D11_62" ]] || { echo "s14: no enter-initrd d11 prediction from the 6.2.0 build"; exit 1; }
 swtpm_ensure "$RUN/tpm" || { echo "s14: swtpm restart (enroll) failed"; exit 1; }
-PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
+PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
 [[ -n "$PCR7_ENROLLED" ]] || { echo "s14: no PCR 7 in the baseline console"; exit 1; }
 # digest-anchored enroll (Option A): no reseeding and no live-read assertion —
 # the CLI compares the entry's recorded d7/d11 against the baseline (pure
@@ -346,7 +346,7 @@ assert_eq "combined .pcrsig entry pol == policy_digest(booted d7, 6.2.0 enter-in
     "$(jq -r '.sha256[-1].pol' "$RUN/uki-6.2.0-combined.json")"
 # the payload drive of the 6.2.0 boots carries the combined entry
 uki_pcrsig_disk "$RUN/pcrsig-62.img" "$RUN/uki-6.2.0-combined.json" || exit 1
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 uki_host_enroll_finalized "$EFIVARS" "$RUN/uki-6.2.0-combined.json" \
     "$RUN/disk.img" "$RUN/keys" "$RUN/kf-slot0" "$RUN/rootfs" || {
@@ -416,11 +416,11 @@ assert_rc "uki 6.4.0: sbverify clean" 0 sbverify --cert "$RUN/keys/db.crt" "$RUN
 POLS64=$(jq -r '.sha256[].pol' "$RUN/uki-6.4.0.efi.pcrsig.json" | sort)
 POLS62=$(jq -r '.sha256[].pol' "$RUN/uki-6.2.0.efi.pcrsig.json" | sort)
 assert_ne "new kernel -> new signed pols (distinct PCR 11 prediction)" "$POLS62" "$POLS64"
-_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.4.0.efi" debian-fde-6.4.0.efi || exit 1
+_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.4.0.efi" alpine-fde-6.4.0.efi || exit 1
 _esp_set_default "$RUN/esp.img" "$RUN/uki-6.4.0.efi" || exit 1
 ESPLS=$(mdir -i "$RUN/esp.img" ::/EFI/BOOT ::/EFI/Linux 2>/dev/null)
-assert_contains "ESP retains 6.2.0 (old kernel kept for rollback)" "$ESPLS" "debian-fde-6.2.0.efi"
-assert_contains "ESP has 6.4.0 as new default" "$ESPLS" "debian-fde-6.4.0.efi"
+assert_contains "ESP retains 6.2.0 (old kernel kept for rollback)" "$ESPLS" "alpine-fde-6.2.0.efi"
+assert_contains "ESP has 6.4.0 as new default" "$ESPLS" "alpine-fde-6.4.0.efi"
 # the 6.4.0 boots' payload drive pairs the STANDING combined entry with the
 # §8.3 tooling tail (inert for the hook: /init reads only the first 64 KiB)
 cat "$RUN/pcrsig-62.img" "$RUN/tooling.tar.gz" >"$RUN/pcrsig-tooling.img"
@@ -437,7 +437,7 @@ _ensure_tpm || { echo "s14: swtpm not serving (v2-stale)"; exit 1; }
 qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/pcrsig-tooling.img"
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "debian-fde-stale-wrong-passphrase-$n"
+        feed_line "$RUN/serial.sock" "alpine-fde-stale-wrong-passphrase-$n"
     else
         if ! _qemu_alive "$RUN"; then _qemu_died "v2-stale (awaiting prompt $n/3)"; fi
         _assert_result not-ok "[6.4.0-stale] hook awaiting recovery passphrase $n/3" \
@@ -479,10 +479,10 @@ assert_not_contains "[6.4.0-stale] never UNSEALED" "$LOG" "$(sentinel_of harness
 assert_not_contains "[6.4.0-stale] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 # tamper scoping: the refusal is the PCR 11 movement, not a firmware drift —
 # PCR 7 is unchanged, PCR 11 moved
-PCR7_B1=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
-PCR7_STALE=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v2-stale.log" | head -1 | cut -d= -f2)
-PCR11_B1=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
-PCR11_STALE=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-v2-stale.log" | head -1 | cut -d= -f2)
+PCR7_B1=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
+PCR7_STALE=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-v2-stale.log" | head -1 | cut -d= -f2)
+PCR11_B1=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-v1-baseline.log" | head -1 | cut -d= -f2)
+PCR11_STALE=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-v2-stale.log" | head -1 | cut -d= -f2)
 assert_eq "[6.4.0-stale] PCR 7 unchanged (the static seal term still matches)" "$PCR7_B1" "$PCR7_STALE"
 assert_ne "[6.4.0-stale] PCR 11 MOVED (the new kernel's stub measurement — the refusal's cause)" \
     "$PCR11_B1" "$PCR11_STALE"
@@ -515,13 +515,13 @@ assert_eq "re-sealed combined entry pol == policy_digest(same d7, 6.4.0 enter-in
 uki_pcrsig_disk "$RUN/pcrsig-64.img" "$RUN/uki-6.4.0-combined.json" || exit 1
 cat "$RUN/pcrsig-64.img" "$RUN/tooling.tar.gz" >"$RUN/pcrsig64-tooling.img"
 RETIRE_LOG=$(mktemp)
-if DEBIAN_FDE_ROOT="$RUN/rootfs" \
-    DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-    DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-    DEBIAN_FDE_KEYDIR="$RUN/keys" \
-    DEBIAN_FDE_LUKS_KEYFILE="$RUN/kf-slot0" \
-    DEBIAN_FDE_NO_INSTALL=1 \
-    "$REPO/bin/debian-fde" enroll-tpm --uuid "$RUN/disk.img" --pcrsig "$RUN/uki-6.4.0-combined.json" \
+if ALPINE_FDE_ROOT="$RUN/rootfs" \
+    ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+    ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+    ALPINE_FDE_KEYDIR="$RUN/keys" \
+    ALPINE_FDE_LUKS_KEYFILE="$RUN/kf-slot0" \
+    ALPINE_FDE_NO_INSTALL=1 \
+    "$REPO/bin/alpine-fde" enroll-tpm --uuid "$RUN/disk.img" --pcrsig "$RUN/uki-6.4.0-combined.json" \
     >"$RETIRE_LOG" 2>&1; then
     _assert_result ok "re-seal: enroll-tpm rc 0 (stale retired + fresh seal stood, one run)" ""
 else

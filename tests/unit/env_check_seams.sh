@@ -3,8 +3,8 @@
 #   G-A13: sbctl (Arch-native, absent from the §3.1 CI additions and from
 #          Alpine v3.24) is NOT a required command — its absence never gates.
 #   G-A14: OVMF code/vars resolution via the ALPINE_FDE_OVMF_DIR directory
-#          seam (DEBIAN_FDE_OVMF_DIR is the backwards-compatible alias;
-#          ALPINE wins when both are set). An explicit override REPLACES the
+#          seam (the only spelling — the retired DEBIAN_FDE_OVMF_DIR alias is
+#          no longer honored). An explicit override REPLACES the
 #          known-locations scan (Debian + Alpine edk2-ovmf layouts): an
 #          override without a code/vars pair is a loud missing, never a
 #          silent system fallback; the gate fails only when NO candidate
@@ -12,7 +12,7 @@
 #   G-A15: the header names bash as a CI-host requirement (R3 resolution:
 #          env-check stays bash; the §3.1 doc record must match).
 #   G-E7:  advisory /dev/kvm probe — WARNING-class, non-gating, names the
-#          DEBIAN_FDE_ACCEL=tcg opt-out, and never sources lib/qemu.sh.
+#          ALPINE_FDE_ACCEL=tcg opt-out, and never sources lib/qemu.sh.
 #
 # The gate runs in a fixture PATH: a stub dir holding a dummy executable for
 # every required command (EXCEPT sbctl — deliberately absent to prove it is
@@ -90,28 +90,28 @@ mkdir -p "$empty_dir"
 
 # --- G-A13: sbctl absent from PATH -> gate stays green -------------------------
 run_env_check ALPINE_FDE_OVMF_DIR="$alpine_dir" \
-    DEBIAN_FDE_OVMF_CODE_SHA256="$ALPINE_CODE_SHA" \
-    DEBIAN_FDE_OVMF_VARS_SHA256="$ALPINE_VARS_SHA"
+    ALPINE_FDE_OVMF_CODE_SHA256="$ALPINE_CODE_SHA" \
+    ALPINE_FDE_OVMF_VARS_SHA256="$ALPINE_VARS_SHA"
 assert_rc "G-A13: sbctl absent -> env-check rc 0" 0 "$RC"
 assert_lacks "G-A13: output never names sbctl" "$OUT" "sbctl"
 
 # --- G-A14: backwards-compatible alias dir (Debian 4m names) -------------------
-run_env_check DEBIAN_FDE_OVMF_DIR="$alias_dir" \
-    DEBIAN_FDE_OVMF_CODE_SHA256="$ALIAS_CODE_SHA" \
-    DEBIAN_FDE_OVMF_VARS_SHA256="$ALIAS_VARS_SHA"
-assert_rc "G-A14: DEBIAN_FDE_OVMF_DIR alias honored -> rc 0" 0 "$RC"
+run_env_check ALPINE_FDE_OVMF_DIR="$alias_dir" \
+    ALPINE_FDE_OVMF_CODE_SHA256="$ALIAS_CODE_SHA" \
+    ALPINE_FDE_OVMF_VARS_SHA256="$ALIAS_VARS_SHA"
+assert_rc "G-A14: ALPINE_FDE_OVMF_DIR alias honored -> rc 0" 0 "$RC"
 assert_contains "G-A14: alias pair found -> gate green" "$OUT" \
     "all prerequisites present"
 
-# --- G-A14: ALPINE_FDE_OVMF_DIR wins when both seams are set -------------------
-# Pins match ONLY the alpine dir's files: if resolution picked the alias dir
-# instead, the pin check hashes the wrong pair and fails loudly.
-run_env_check ALPINE_FDE_OVMF_DIR="$alpine_dir" DEBIAN_FDE_OVMF_DIR="$alias_dir" \
-    DEBIAN_FDE_OVMF_CODE_SHA256="$ALPINE_CODE_SHA" \
-    DEBIAN_FDE_OVMF_VARS_SHA256="$ALPINE_VARS_SHA"
-assert_rc "G-A14: ALPINE_FDE_OVMF_DIR wins over alias -> rc 0" 0 "$RC"
-assert_lacks "G-A14: losing alias dir never hashed (no pin mismatch)" "$OUT" \
-    "ovmf-pin"
+# --- G-A14: the RETIRED DEBIAN_FDE_OVMF_DIR spelling is NOT honored ------------
+# Only the retired dir spelling is set; the canonical pin spellings hold the
+# alias pair's hashes — so any green gate here would mean the retired dir
+# spelling was honored (host-firmware fallback would pin-mismatch instead).
+run_env_check DEBIAN_FDE_OVMF_DIR="$alias_dir" \
+    ALPINE_FDE_OVMF_CODE_SHA256="$ALIAS_CODE_SHA" \
+    ALPINE_FDE_OVMF_VARS_SHA256="$ALIAS_VARS_SHA"
+assert_lacks "G-A14: retired DEBIAN_FDE_OVMF_DIR alias never resolves green" "$OUT" \
+    "all prerequisites present"
 
 # --- G-A14: override dir WITHOUT a pair -> loud missing, never silent fallback --
 run_env_check ALPINE_FDE_OVMF_DIR="$empty_dir"
@@ -120,15 +120,15 @@ assert_contains "G-A14: loud ovmf missing line" "$OUT" "ovmf:"
 
 # --- G-E7: advisory KVM probe (host here has no usable /dev/kvm) ---------------
 run_env_check ALPINE_FDE_OVMF_DIR="$alpine_dir" \
-    DEBIAN_FDE_OVMF_CODE_SHA256="$ALPINE_CODE_SHA" \
-    DEBIAN_FDE_OVMF_VARS_SHA256="$ALPINE_VARS_SHA"
+    ALPINE_FDE_OVMF_CODE_SHA256="$ALPINE_CODE_SHA" \
+    ALPINE_FDE_OVMF_VARS_SHA256="$ALPINE_VARS_SHA"
 assert_rc "G-E7: kvm state never changes env-check rc" 0 "$RC"
 if [[ -e /dev/kvm && -w /dev/kvm ]]; then
     assert_lacks "G-E7: kvm usable -> no warning" "$OUT" "WARNING"
 else
     assert_contains "G-E7: advisory names /dev/kvm" "$OUT" "/dev/kvm"
     assert_contains "G-E7: advisory names tcg opt-out" "$OUT" \
-        "DEBIAN_FDE_ACCEL=tcg"
+        "ALPINE_FDE_ACCEL=tcg"
 fi
 
 # --- G-A15: header names bash as a CI-host requirement --------------------------

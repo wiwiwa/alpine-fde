@@ -14,11 +14,11 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # --- exit-code contract constants ---
-assert_eq "DEBIAN_FDE_OK is 0" "0" "$DEBIAN_FDE_OK"
-assert_eq "DEBIAN_FDE_DRIFT is 1" "1" "$DEBIAN_FDE_DRIFT"
-assert_eq "DEBIAN_FDE_USAGE is 2" "2" "$DEBIAN_FDE_USAGE"
-assert_eq "DEBIAN_FDE_NOT_IMPLEMENTED is 3" "3" "$DEBIAN_FDE_NOT_IMPLEMENTED"
-assert_eq "DEBIAN_FDE_FAIL_CLOSED is 64" "64" "$DEBIAN_FDE_FAIL_CLOSED"
+assert_eq "ALPINE_FDE_OK is 0" "0" "$ALPINE_FDE_OK"
+assert_eq "ALPINE_FDE_DRIFT is 1" "1" "$ALPINE_FDE_DRIFT"
+assert_eq "ALPINE_FDE_USAGE is 2" "2" "$ALPINE_FDE_USAGE"
+assert_eq "ALPINE_FDE_NOT_IMPLEMENTED is 3" "3" "$ALPINE_FDE_NOT_IMPLEMENTED"
+assert_eq "ALPINE_FDE_FAIL_CLOSED is 64" "64" "$ALPINE_FDE_FAIL_CLOSED"
 
 # --- sourcing the library is side-effect-free ---
 assert_eq "sourcing common.sh does not enable strict mode" \
@@ -26,9 +26,9 @@ assert_eq "sourcing common.sh does not enable strict mode" \
 
 # --- logging: stderr only, prefixed ---
 assert_eq "info stays off stdout" "" "$(info hi 2>/dev/null)"
-assert_contains "info goes to stderr with prefix" "$(info hi 2>&1 >/dev/null)" "debian-fde: info: hi"
-assert_contains "warn goes to stderr with prefix" "$(warn careful 2>&1 >/dev/null)" "debian-fde: warn: careful"
-assert_contains "err goes to stderr with prefix" "$(err bad 2>&1 >/dev/null)" "debian-fde: error: bad"
+assert_contains "info goes to stderr with prefix" "$(info hi 2>&1 >/dev/null)" "alpine-fde: info: hi"
+assert_contains "warn goes to stderr with prefix" "$(warn careful 2>&1 >/dev/null)" "alpine-fde: warn: careful"
+assert_contains "err goes to stderr with prefix" "$(err bad 2>&1 >/dev/null)" "alpine-fde: error: bad"
 
 # --- die ---
 rc=0
@@ -67,34 +67,34 @@ assert_contains "require_cmds names the missing command" "$msg" "__no_such_binar
 
 # --- config_path ---
 # §8.4: clean rename to the Alpine conf path — no legacy /etc/debian-fde fallback
-assert_eq "config_path default" "/etc/alpine-fde/alpine-fde.conf" "$(DEBIAN_FDE_CONF='' config_path)"
-assert_eq "config_path DEBIAN_FDE_CONF override" "/x/y.conf" "$(DEBIAN_FDE_CONF=/x/y.conf config_path)"
+assert_eq "config_path default" "/etc/alpine-fde/alpine-fde.conf" "$(ALPINE_FDE_CONF='' config_path)"
+assert_eq "config_path ALPINE_FDE_CONF override" "/x/y.conf" "$(ALPINE_FDE_CONF=/x/y.conf config_path)"
 
 # --- load_config: missing file ---
 rc=0
-DEBIAN_FDE_CONF="$tmp/does-not-exist.conf" load_config || rc=$?
+ALPINE_FDE_CONF="$tmp/does-not-exist.conf" load_config || rc=$?
 assert_rc "load_config missing file is a no-op success" "0" "$rc"
 
 # --- load_config: parsing ---
-conf="$tmp/debian-fde.conf"
+conf="$tmp/alpine-fde.conf"
 {
     printf '# full-line comment\n'
     printf '\n'
-    printf 'DEBIAN_FDE_TEST_A=hello\n'
-    printf 'DEBIAN_FDE_TEST_B="quoted value"\n'
-    printf "DEBIAN_FDE_TEST_C='single quoted'\n"
-    printf 'DEBIAN_FDE_TEST_D=trailing ws stripped   \n'
-    printf '   DEBIAN_FDE_TEST_E = spaced   \n'
-    printf 'DEBIAN_FDE_TEST_F=has=equals\n'
+    printf 'ALPINE_FDE_TEST_A=hello\n'
+    printf 'ALPINE_FDE_TEST_B="quoted value"\n'
+    printf "ALPINE_FDE_TEST_C='single quoted'\n"
+    printf 'ALPINE_FDE_TEST_D=trailing ws stripped   \n'
+    printf '   ALPINE_FDE_TEST_E = spaced   \n'
+    printf 'ALPINE_FDE_TEST_F=has=equals\n'
     printf 'BAD-KEY=nope\n'
     printf '1BADKEY=nope\n'
     printf 'NOEQUALS\n'
 } >"$conf"
 
 errfile="$tmp/load.err"
-out=$(DEBIAN_FDE_CONF="$conf" load_config >/dev/null 2>"$errfile"; printf '%s|%s|%s|%s|%s|%s' \
-    "${DEBIAN_FDE_TEST_A-}" "${DEBIAN_FDE_TEST_B-}" "${DEBIAN_FDE_TEST_C-}" \
-    "${DEBIAN_FDE_TEST_D-}" "${DEBIAN_FDE_TEST_E-}" "${DEBIAN_FDE_TEST_F-}")
+out=$(ALPINE_FDE_CONF="$conf" load_config >/dev/null 2>"$errfile"; printf '%s|%s|%s|%s|%s|%s' \
+    "${ALPINE_FDE_TEST_A-}" "${ALPINE_FDE_TEST_B-}" "${ALPINE_FDE_TEST_C-}" \
+    "${ALPINE_FDE_TEST_D-}" "${ALPINE_FDE_TEST_E-}" "${ALPINE_FDE_TEST_F-}")
 assert_eq "load_config parses values, quotes, comments, spacing" \
     "hello|quoted value|single quoted|trailing ws stripped|spaced|has=equals" "$out"
 assert_contains "load_config warns on invalid key (BAD-KEY)" "$(cat "$errfile")" "BAD-KEY"
@@ -103,7 +103,7 @@ assert_contains "load_config warns on line without '='" "$(cat "$errfile")" "NOE
 
 # --- load_config: environment wins over file ---
 # explicit export: prefix-assignment persistence after a function call is not portable
-out=$(export DEBIAN_FDE_CONF="$conf" DEBIAN_FDE_TEST_A=envwins; load_config; printf '%s' "${DEBIAN_FDE_TEST_A-}") 2>/dev/null
+out=$(export ALPINE_FDE_CONF="$conf" ALPINE_FDE_TEST_A=envwins; load_config; printf '%s' "${ALPINE_FDE_TEST_A-}") 2>/dev/null
 assert_eq "environment variable wins over config file" "envwins" "$out"
 
 

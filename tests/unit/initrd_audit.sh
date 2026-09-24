@@ -42,11 +42,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 # deterministic topology: absent conf ⇒ btrfs default (per-call conf legs
 # below override this for ROOT_FS=ext4 / BCACHE=1)
-export DEBIAN_FDE_CONF="$TMP/conf-default-absent"
+export ALPINE_FDE_CONF="$TMP/conf-default-absent"
 
 FAKE="$REPO/fixtures/initramfs/cpio-lister-fake.sh"
 IMG="$TMP/whatever.img"
-AUDIT_CONF='' # optional per-call DEBIAN_FDE_CONF override (topology legs)
+AUDIT_CONF='' # optional per-call ALPINE_FDE_CONF override (topology legs)
 
 # run_audit <inventory-file | V:variant> — drive the audit in THIS shell with
 # literal var-prefix assignments (they export to the lister child). rc lands
@@ -57,10 +57,10 @@ run_audit() {
     local spec=$1
     if [ -n "$AUDIT_CONF" ]; then
         if [ "${spec#V:}" != "$spec" ]; then
-            DEBIAN_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+            ALPINE_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
                 LISTER_FAKE_VARIANT="${spec#V:}" initrd_audit "$IMG" 2>/dev/null
         else
-            DEBIAN_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+            ALPINE_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
                 LISTER_FAKE_INV="$spec" initrd_audit "$IMG" 2>/dev/null
         fi
     else
@@ -238,12 +238,12 @@ printf '%s\n' "root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-dev
 
 build() { # <variant>
     env INITRD_LISTER_CMD="$FAKE" LISTER_FAKE_VARIANT="$1" \
-        DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-        DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+        ALPINE_FDE_BIN_TEST=1 ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_ESP="$ESP" \
+        ALPINE_FDE_KEYDIR="$REPO/fixtures/keys" ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 }
 
 # 6a: non-compliant inventory (missing hook) -> rc 64 + marker, ESP untouched

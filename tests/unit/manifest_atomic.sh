@@ -23,7 +23,7 @@ manifest_new "6.12.8-1-amd64" "fp" | manifest_atomic_write "$M"
 manifest_upsert "$M" "6.12.8-1-amd64" "11" "22" "33"
 jq -e '.version == 1 and (.digests | length == 1)' "$M" >/dev/null
 assert_rc "document valid after upsert (complete rename, not in-place edit)" 0 $?
-leftovers=$(find "$TMP" -maxdepth 1 -name '.debian-fde-manifest.*' | wc -l | tr -d '[:space:]')
+leftovers=$(find "$TMP" -maxdepth 1 -name '.alpine-fde-manifest.*' | wc -l | tr -d '[:space:]')
 assert_eq "no temp files left in the manifest directory" 0 "$leftovers"
 
 # --- failed transform leaves the previous document byte-identical -----------------

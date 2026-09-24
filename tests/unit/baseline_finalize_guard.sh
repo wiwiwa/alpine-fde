@@ -15,18 +15,18 @@ source "$HERE/../lib/assert.sh"
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 
-T=$(mktemp -d /tmp/debian-fde-blfinal.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-blfinal.XXXXXX)
 STATE=$T/swtpm
 EFIVARS=$T/efivars
 EVENTLOG=$T/eventlog
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_EVENTLOG=$EVENTLOG
-export DEBIAN_FDE_NO_INSTALL=1
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_EVENTLOG=$EVENTLOG
+export ALPINE_FDE_NO_INSTALL=1
 
 cleanup() {
     swtpm_cleanup_all
@@ -52,7 +52,7 @@ sb_state() { # SECUREBOOT SETUPMODE — set the full PK/KEK/db/dbx tree too
 }
 
 run_audit() { # args...
-    AUD_OUT=$("$REPO/bin/debian-fde" audit "$@" 2>&1)
+    AUD_OUT=$("$REPO/bin/alpine-fde" audit "$@" 2>&1)
     AUD_RC=$?
 }
 
@@ -60,7 +60,7 @@ BL=$(sp_baseline_file)
 pending_baseline() { BL_PCR0='pending' BL_PCR7='pending' baseline_write "$BL"; }
 
 assert_rc "swtpm fixture starts" 0 swtpm_start "$STATE"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 
 # --- 1. SB off -> --init refuses 64, baseline stays pending, no last-audit ------
 sb_state 0 0
@@ -160,7 +160,7 @@ assert_eq "PCR 1 unreadable mid-finalize -> 64" "64" "$AUD_RC"
 assert_contains "CR-01: failed finalize prints the real diagnostic" "$AUD_OUT" \
     "cannot read PCR 1"
 assert_not_contains "CR-01: stderr not swallowed by the lock release" "$AUD_OUT" \
-    "debian-fde: error: debian-fde: error:"
+    "alpine-fde: error: alpine-fde: error:"
 assert_rc "baseline still pending (no torn finalize, M-3)" 0 baseline_is_pending "$BL"
 assert_eq "pcr0 not partially written into the live baseline" "pending" "$(baseline_get "$BL" pcr0)"
 assert_eq "no .tmp litter next to the baseline" "" \
@@ -210,7 +210,7 @@ LOCK=$(sp_etc_dir)/.baseline.lock
 flock "$LOCK" -c 'sleep 5' &
 HOLD=$!
 sleep 0.3
-timeout 2 "$REPO/bin/debian-fde" audit --init >/dev/null 2>&1
+timeout 2 "$REPO/bin/alpine-fde" audit --init >/dev/null 2>&1
 TMO_RC=$?
 assert_eq "finalize blocked while another ceremony holds the lock (timeout 124)" "124" "$TMO_RC"
 assert_rc "baseline still pending after the blocked attempt" 0 baseline_is_pending "$BL"

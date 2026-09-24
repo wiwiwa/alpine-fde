@@ -4,7 +4,7 @@
 #   * keys_encrypt_release KEYDIR — encrypts release.pem in place to standard
 #     OpenSSL PKCS#8 interoperability form: PBES2 / PBKDF2-hmacWithSHA256 /
 #     aes-256-cbc / iter >= 600000 (pinned argv + asn1parse structure)
-#   * passphrase credential mechanism (RESOLVED-4): DEBIAN_FDE_KEY_PASSPHRASE
+#   * passphrase credential mechanism (RESOLVED-4): ALPINE_FDE_KEY_PASSPHRASE
 #     env seam -> interactive no-echo TTY prompt -> loud 64; §13 entropy floor
 #     enforced (rc 2) BEFORE any ciphertext is written
 #   * ALL plaintext copies scrubbed after success (release.priv.pem, tmp
@@ -22,16 +22,16 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
-export DEBIAN_FDE_NO_INSTALL=1
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_NO_INSTALL=1
 # shellcheck source=../../lib/keys.sh
 source "$REPO/lib/keys.sh"
 
-T=$(mktemp -d /tmp/debian-fde-keys-enc.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-keys-enc.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
-export DEBIAN_FDE_TMPDIR="$T/shm"
-mkdir -p "$DEBIAN_FDE_TMPDIR"
+export ALPINE_FDE_TMPDIR="$T/shm"
+mkdir -p "$ALPINE_FDE_TMPDIR"
 
 PASS_OK='ci-release-passphrase-600000-x'   # §13 floor OK (>=16 chars)
 PASS_SHORT='short'                          # floor violation
@@ -39,10 +39,10 @@ PASS_SHORT='short'                          # floor violation
 # call_rc ARGS... — run in an inner subshell (die exits THAT subshell)
 call_rc() { ( "$@" ) >/dev/null 2>&1; echo $?; }
 
-# call_rc_notty KEYDIR — same, with DEBIAN_FDE_KEY_PASSPHRASE unset and stdin
+# call_rc_notty KEYDIR — same, with ALPINE_FDE_KEY_PASSPHRASE unset and stdin
 # detached from any tty (the loud no-credential leg)
 call_rc_notty() {
-    ( unset DEBIAN_FDE_KEY_PASSPHRASE; keys_encrypt_release "$1" ) >/dev/null 2>&1 </dev/null
+    ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_encrypt_release "$1" ) >/dev/null 2>&1 </dev/null
     echo $?
 }
 
@@ -83,11 +83,11 @@ assert_eq "is_encrypted: empty file -> 1" "1" \
 # =============================================================================
 # keys_encrypt_release: loud usage errors
 # =============================================================================
-assert_eq "encrypt: no argv -> 64" "64" "$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release)"
+assert_eq "encrypt: no argv -> 64" "64" "$(ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release)"
 assert_eq "encrypt: two argv -> 64" "64" \
-    "$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release "$KP" extra)"
+    "$(ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release "$KP" extra)"
 assert_eq "encrypt: missing keydir -> 64" "64" \
-    "$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release "$T/nokeys")"
+    "$(ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK call_rc keys_encrypt_release "$T/nokeys")"
 
 # =============================================================================
 # floor violation: rc 2 BEFORE any ciphertext is written
@@ -95,11 +95,11 @@ assert_eq "encrypt: missing keydir -> 64" "64" \
 KF=$T/keys-floor
 new_plaintext_keydir "$KF"
 assert_eq "encrypt: floor-violating passphrase -> rc 2" "2" \
-    "$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS_SHORT call_rc keys_encrypt_release "$KF")"
+    "$(ALPINE_FDE_KEY_PASSPHRASE=$PASS_SHORT call_rc keys_encrypt_release "$KF")"
 assert_eq "encrypt: floor violation wrote NO ciphertext (release.pem still plaintext)" "1" \
     "$(call_rc keys_is_encrypted "$KF/release.pem")"
 assert_eq "encrypt: floor violation left no staging ciphertext in tmpfs" "" \
-    "$(find "$DEBIAN_FDE_TMPDIR" -maxdepth 1 -name 'debian-fde-enc.*' -print 2>/dev/null)"
+    "$(find "$ALPINE_FDE_TMPDIR" -maxdepth 1 -name 'alpine-fde-enc.*' -print 2>/dev/null)"
 
 # no passphrase available (no env, no tty) -> loud 64
 KN=$T/keys-noenv
@@ -113,7 +113,7 @@ KE=$T/keys-enc
 new_plaintext_keydir "$KE"
 ARGVLOG=$T/openssl-argv.log
 wrap_openssl "$ARGVLOG"
-OUT=$(PATH="$T/wrapbin:$PATH" DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$KE" 2>&1)
+OUT=$(PATH="$T/wrapbin:$PATH" ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$KE" 2>&1)
 assert_eq "encrypt: env passphrase -> rc 0" "0" "$?"
 ARGVLOG_CONTENT=$(cat "$ARGVLOG" 2>/dev/null)
 assert_contains "encrypt: pinned argv (-topk8)" "$ARGVLOG_CONTENT" "-topk8"
@@ -152,14 +152,14 @@ assert_ne "decrypt: WRONG passphrase fails loudly (rc != 0)" "0" "$?"
 # plaintext remnants scrubbed: release.priv.pem + tmp staging gone
 assert_eq "scrub: release.priv.pem zeroized+removed" "0" "$([ -e "$KE/release.priv.pem" ] && echo 1 || echo 0)"
 assert_eq "scrub: no staging ciphertext left in tmpfs" "" \
-    "$(find "$DEBIAN_FDE_TMPDIR" -maxdepth 1 -name 'debian-fde-enc.*' -print 2>/dev/null)"
+    "$(find "$ALPINE_FDE_TMPDIR" -maxdepth 1 -name 'alpine-fde-enc.*' -print 2>/dev/null)"
 assert_eq "scrub: public material kept (release.crt)" "1" "$([ -f "$KE/release.crt" ] && echo 1 || echo 0)"
 assert_eq "scrub: public material kept (release.pub)" "1" "$([ -f "$KE/release.pub" ] && echo 1 || echo 0)"
 PERM=$(stat -c %a "$KE/release.pem")
 assert_eq "encrypted release.pem mode 600" "600" "$PERM"
 
 # idempotency (crash-resume): re-encrypting an already-encrypted key is a no-op
-OUT2=$(DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$KE" 2>&1)
+OUT2=$(ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$KE" 2>&1)
 assert_eq "encrypt: already-encrypted keydir -> rc 0 (idempotent no-op)" "0" "$?"
 assert_eq "idempotent: still decryptable with the ORIGINAL passphrase" "0" \
     "$(openssl pkcs8 -in "$KE/release.pem" -passin pass:"$PASS_OK" -out /dev/null 2>/dev/null; echo $?)"
@@ -190,15 +190,15 @@ _clean_shell_rc() { # <keydir> — env-clean subshell mirroring install.sh's
     # keys.sh (a fresh chroot shell preloads nothing — die/info and the §13
     # floor's rotate.sh must all resolve from the payload tree)
     (
-        unset DEBIAN_FDE_KEYS_LOADED DEBIAN_FDE_COMMON_LOADED
-        unset DEBIAN_FDE_KEY_PASSPHRASE DEBIAN_FDE_CMD_DIR
+        unset ALPINE_FDE_KEYS_LOADED ALPINE_FDE_COMMON_LOADED
+        unset ALPINE_FDE_KEY_PASSPHRASE ALPINE_FDE_CMD_DIR
         mkdir -p "$T/opt/alpine-fde/lib/cmd"
         cp "$REPO/lib/common.sh" "$REPO/lib/keys.sh" "$T/opt/alpine-fde/lib/"
         cp "$REPO/lib/cmd/rotate.sh" "$T/opt/alpine-fde/lib/cmd/"
-        export DEBIAN_FDE_CMD_DIR="$T/opt/alpine-fde/lib/cmd"
+        export ALPINE_FDE_CMD_DIR="$T/opt/alpine-fde/lib/cmd"
         . "$T/opt/alpine-fde/lib/common.sh"
         . "$T/opt/alpine-fde/lib/keys.sh"
-        DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$1" >/dev/null 2>&1
+        ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$1" >/dev/null 2>&1
         echo $?
     )
 }
@@ -214,6 +214,6 @@ assert_eq "fresh-shell: artifact is encrypted (standalone keys.sh)" "0" \
     "$( keys_is_encrypted "$_kp_fresh/release.pem"; echo $? )"
 # no-argv usage: die exits the ( subshell ) — capture its rc from outside
 assert_eq "fresh-shell: no-argv usage still dies 64" "64" \
-    "$( ( . "$REPO/lib/keys.sh" >/dev/null 2>&1; DEBIAN_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release >/dev/null 2>&1 ); echo $? )"
+    "$( ( . "$REPO/lib/keys.sh" >/dev/null 2>&1; ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release >/dev/null 2>&1 ); echo $? )"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

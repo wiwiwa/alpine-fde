@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmd/ukictl-remove.sh — `debian-fde ukictl remove <kver>` (gap B-G6 wire):
+# cmd/ukictl-remove.sh — `alpine-fde ukictl remove <kver>` (gap B-G6 wire):
 # remove one kernel's UKI from the ESP and its entry from the digest manifest.
 # Wire: hooks/kernel-hooks.d/alpine-fde-remove.hook (invoked by the Alpine
 # kernel hook on remove; the APK trigger at hooks/apk/triggers/alpine-fde.trigger
@@ -16,11 +16,11 @@ cmd_ukictl_remove_main() {
 
     _ukrm_kver=${1:-}
     if [ -z "$_ukrm_kver" ] || [ $# -gt 1 ]; then
-        err "ukictl remove: usage: debian-fde ukictl remove <kver>"
-        exit "$DEBIAN_FDE_USAGE"
+        err "ukictl remove: usage: alpine-fde ukictl remove <kver>"
+        exit "$ALPINE_FDE_USAGE"
     fi
 
-    _ukrm_lib_dir=$DEBIAN_FDE_CMD_DIR/../
+    _ukrm_lib_dir=$ALPINE_FDE_CMD_DIR/../
     # shellcheck disable=SC1090  # resolved next to the command directory
     . "$_ukrm_lib_dir/common.sh"
     # shellcheck disable=SC1090
@@ -34,10 +34,10 @@ cmd_ukictl_remove_main() {
     # shell/JSON metacharacters never reach path composition)
     if ! esp_validate_kver "$_ukrm_kver"; then
         err "ukictl remove: invalid kernel version: '$_ukrm_kver' (alphanumerics, '.', '_', '-' only)"
-        exit "$DEBIAN_FDE_USAGE"
+        exit "$ALPINE_FDE_USAGE"
     fi
 
-    _ukrm_etc="${DEBIAN_FDE_ROOT:-}/etc/alpine-fde"
+    _ukrm_etc="${ALPINE_FDE_ROOT:-}/etc/alpine-fde"
     _ukrm_manifest="$_ukrm_etc/digests.json"
 
     _ukrm_path=$(esp_uki_path "$_ukrm_kver")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/env-check.sh — verify every prerequisite of the Debian FDE test
+# tests/env-check.sh — verify every prerequisite of the Alpine FDE test
 # harness (docs/Architecture.md §12 sandbox). CI host requirement: bash
 # (the whole test suite is bash-based — §3.1; R3 keeps this gate in bash).
 # Prints MISSING items and exits 1 if anything is absent; prints nothing
@@ -40,18 +40,16 @@ check_cmd truncate
 check_cmd tpm2
 
 # OVMF Secure Boot firmware (§3.1 CI `edk2-ovmf`). Resolution (G-A14):
-#   1. ALPINE_FDE_OVMF_DIR (canonical; DEBIAN_FDE_OVMF_DIR is the backwards-
-#      compatible alias — ALPINE wins when both are set). An explicit override
+#   1. ALPINE_FDE_OVMF_DIR — the only directory seam (the retired
+#      DEBIAN_FDE_OVMF_DIR spelling is no longer honored). An explicit override
 #      REPLACES the known-locations scan: an override dir without a code/vars
 #      pair is a loud missing, never a silent fallback to system firmware.
 #   2. Known locations covering the Debian AND Alpine edk2-ovmf layouts.
 # The gate fails only when NO candidate ships a secboot code + vars pair.
 ovmf_candidates() {
     local d
-    if [[ -n "${ALPINE_FDE_OVMF_DIR:-}${DEBIAN_FDE_OVMF_DIR:-}" ]]; then
-        for d in "${ALPINE_FDE_OVMF_DIR:-}" "${DEBIAN_FDE_OVMF_DIR:-}"; do
-            [[ -n "$d" ]] && printf '%s\n' "$d"
-        done
+    if [[ -n "${ALPINE_FDE_OVMF_DIR:-}" ]]; then
+        printf '%s\n' "$ALPINE_FDE_OVMF_DIR"
         return 0
     fi
     for d in /usr/share/ovmf/x64 /usr/share/OVMF /usr/share/OVMF/x64 \
@@ -88,8 +86,8 @@ else
 fi
 
 # OVMF fixture SHA256 pins (§3.1: the harness, not the doc, is the pin of
-# record). CI pinning its own artifacts overrides via DEBIAN_FDE_OVMF_CODE_SHA256
-# / DEBIAN_FDE_OVMF_VARS_SHA256 (see tests/lib/qemu.sh); a local file that
+# record). CI pinning its own artifacts overrides via ALPINE_FDE_OVMF_CODE_SHA256
+# / ALPINE_FDE_OVMF_VARS_SHA256 (see tests/lib/qemu.sh); a local file that
 # matches neither is a loud failure naming the mismatch. The resolved files
 # are injected via qemu.sh's OVMF_CODE / OVMF_VARS_STOCK path-override seam.
 if [[ -n "$OVMF_CODE_R" ]]; then
@@ -111,11 +109,11 @@ fi
 # semantics as lib/qemu.sh's _qemu_kvm_ok, minus the qemu probe guest: this
 # gate stays cheap and side-effect-free (qemu.sh re-probes for real at
 # qemu_run time). WARNING-class: never gates unit-only workflows — e2e fails
-# closed on its own via _qemu_accel_choose unless DEBIAN_FDE_ACCEL=tcg.
+# closed on its own via _qemu_accel_choose unless ALPINE_FDE_ACCEL=tcg.
 if [[ -e /dev/kvm && -w /dev/kvm ]]; then
     echo "env-check: KVM: /dev/kvm present+usable" >&2
 else
-    echo "env-check: WARNING: /dev/kvm missing or not writable — e2e will fail closed (DEBIAN_FDE_ACCEL=tcg to opt out)" >&2
+    echo "env-check: WARNING: /dev/kvm missing or not writable — e2e will fail closed (ALPINE_FDE_ACCEL=tcg to opt out)" >&2
 fi
 
 if (( ${#MISSING[@]} > 0 )); then

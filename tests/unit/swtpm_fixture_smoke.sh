@@ -12,7 +12,7 @@ source "$HERE/../lib/assert.sh"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 
-STATE_DIR=$(mktemp -d /tmp/debian-fde-swtpm-smoke.XXXXXX)
+STATE_DIR=$(mktemp -d /tmp/alpine-fde-swtpm-smoke.XXXXXX)
 ZERO64=$(printf '0%.0s' {1..64})
 EXTEND64=$(printf 'ab%.0s' {1..32})
 

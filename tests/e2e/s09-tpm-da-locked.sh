@@ -63,7 +63,7 @@
 # PCR 11 reading; the PCR 11 unchanged-equality vs the enrolled boot's console
 # is the equivalent tamper-scoping evidence (the drift is PCR 7 only).
 #
-# Reuses s00 state when DEBIAN_FDE_E2E_STATE points at the s00 run dir
+# Reuses s00 state when ALPINE_FDE_E2E_STATE points at the s00 run dir
 # (run-e2e.sh sets it); otherwise builds + boots them itself (2 boots).
 
 set -u
@@ -115,7 +115,7 @@ trap 'kill "$REFRESHER" 2>/dev/null; swtpm_cleanup_all 2>/dev/null' EXIT INT TER
 _ensure_tpm() { swtpm_ensure "$1"; }
 
 # --- enrolled state: reuse s00's or bootstrap it (boot 1) -----------------------
-STATE="${DEBIAN_FDE_E2E_STATE:-}"
+STATE="${ALPINE_FDE_E2E_STATE:-}"
 if [[ -n "$STATE" && -f "$STATE/disk.img" && -d "$STATE/tpm" && -f "$STATE/harness.efi" \
     && -f "$STATE/pcrsig.img" && -f "$STATE/console.log" && -d "$STATE/keys" ]]; then
     echo "# reusing enrolled state from $STATE"
@@ -140,21 +140,21 @@ else
         qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
-            feed_line "$RUN_ENROLLED/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+            feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
-        grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
+        grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s09: baseline boot attempt $_attempt failed"
         ((_attempt < 2)) && { swtpm_reset "$RUN_ENROLLED/tpm" && swtpm_start "$RUN_ENROLLED/tpm" || exit 1; }
         rm -f "$RUN_ENROLLED/console.log"
     done
-    grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
+    grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
         echo "s09: baseline boot did not reach UNSEALED — state unusable"; exit 1; }
     # ---- host-side finalized enrollment (the production CLI;
     # digest-anchored enroll (Option A — no between-boot reseeding — the CLI compares the entry's recorded d7/d11 against the baseline (pure data): the
     # combined {7,11} entry is what the hook extracts for the finalized token.
     swtpm_ensure "$RUN_ENROLLED/tpm" || { echo "s09: swtpm restart failed"; exit 1; }
-    PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
+    PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
     [[ -n "$PCR7_ENROLLED" ]] || { echo "s09: no PCR 7 in the baseline console"; exit 1; }
     D11=$(cat "$RUN_ENROLLED/pcr11-enter-initrd.txt" 2>/dev/null)
     [[ -n "$D11" ]] || { echo "s09: no enter-initrd d11 prediction from the build"; exit 1; }
@@ -163,7 +163,7 @@ else
     uki_pcrsig_append_combined "$RUN_ENROLLED/uki-pcrsig.json" "$RUN_ENROLLED/uki-pcrsig-combined.json" \
         "$PCR7_ENROLLED" "$D11" "$RUN_ENROLLED/keys" || exit 1
     uki_pcrsig_disk "$RUN_ENROLLED/pcrsig.img" "$RUN_ENROLLED/uki-pcrsig-combined.json" || exit 1
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
     chmod 600 "$RUN_ENROLLED/kf-slot0"
     EFIVARS="$RUN_ENROLLED/efivars-sb-on"
     mkdir -p "$EFIVARS"
@@ -171,7 +171,7 @@ else
     _mkvar SecureBoot 1
     _mkvar SetupMode 0
     # enroll precondition (CLI, enrl_preconditions #2): a FINALIZED baseline at
-    # $DEBIAN_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
+    # $ALPINE_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
     # scenario-local cli-state root — the same seam s06/s12/s13 use; without it
     # enroll-tpm dies "no baseline at /etc/alpine-fde/baseline.json".
     uki_baseline_stamp "$RUN_ENROLLED/cli-state" "$PCR7_ENROLLED"
@@ -235,7 +235,7 @@ qemu_run "$B" "$B/esp.img" "$B/disk.img" "$RUN/vars-unenrolled.fd" "$STATE/tpm" 
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$B"; then
         _assert_result ok "hook awaiting recovery passphrase $n/3 (bounded loop armed after the refusal)" ""
-        feed_line "$B/serial.sock" "debian-fde-da-wrong-passphrase-$n"
+        feed_line "$B/serial.sock" "alpine-fde-da-wrong-passphrase-$n"
     else
         _assert_result not-ok "hook awaiting recovery passphrase $n/3" \
             "no prompt $n in console"
@@ -250,11 +250,11 @@ assert_contains "init ran (boot reached the UKI despite the locked TPM — the r
     "$(sentinel_of harness_init_started)"
 assert_contains "TPM char device appeared (locked TPM still serves auth-less ops)" "$LOG" \
     "$(sentinel_of harness_tpm_present)"
-if grep -qE "debian-fde-pcr sha256:7=[0-9a-f]{64}" "$B/console.log" 2>/dev/null; then
+if grep -qE "alpine-fde-pcr sha256:7=[0-9a-f]{64}" "$B/console.log" 2>/dev/null; then
     _assert_result ok "PCR 7 printed while locked (auth-less ops unaffected)" ""
 else
     _assert_result not-ok "PCR 7 printed while locked (auth-less ops unaffected)" \
-        "no debian-fde-pcr line in console.log"
+        "no alpine-fde-pcr line in console.log"
 fi
 assert_contains "hook ran the enter-initrd extend" "$LOG" \
     "$(sentinel_of unseal_pcrextend_ok)"
@@ -283,7 +283,7 @@ assert_not_contains "never UNSEALED" "$LOG" "$(sentinel_of harness_unsealed)"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 # TERMINAL-SENTINEL SCOPE (2026-09-23 registry fix): a refusal boot powers off
 # from INSIDE the hook (_fdh_poweroff -> `poweroff -f` in the initrd), so the
-# harness's own "debian-fde: POWEROFF" line (harness_poweroff — printed by
+# harness's own "alpine-fde: POWEROFF" line (harness_poweroff — printed by
 # /init only on the post-UNSEALED path) can NEVER appear here; asserting it
 # turned a green fail-closed boot into a false fail. The terminal console
 # evidence for this row is the hook's fail-closed poweroff within the final
@@ -297,8 +297,8 @@ fi
 
 # tamper scoping: the hook extended PCR 11 exactly as at enroll (same UKI, same
 # stub measurement) — the refusal is purely the PCR 7 drift
-PCR11_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
-PCR11_B=$(grep -oE 'debian-fde-pcr sha256:11=[0-9a-f]{64}' "$B/console.log" | head -1 | cut -d= -f2)
+PCR11_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
+PCR11_B=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$B/console.log" | head -1 | cut -d= -f2)
 assert_eq "PCR 11 unchanged vs the enrolled boot (drift is PCR 7 only)" \
     "$PCR11_ENROLLED" "$PCR11_B"
 # IN-08: honest in both directions (missing pid file is not a clean exit)

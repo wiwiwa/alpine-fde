@@ -49,7 +49,7 @@
 # lib/token.sh + pcrsign (out of this file's bucket).
 #
 # Usage (source, then):
-#   interop_oracle_gate_ok        -> rc 0 iff DEBIAN_FDE_INTEROP_ORACLE=1
+#   interop_oracle_gate_ok        -> rc 0 iff ALPINE_FDE_INTEROP_ORACLE=1
 #   interop_oracle_assert_ready   -> fail-closed rc 64 without the gate env
 #                                    or without bwrap on PATH
 #   interop_oracle_rootfs <dest>  -> assemble the fixture rootfs from the
@@ -72,10 +72,10 @@
 #                                    under <tree> (default: this repo) carry
 #                                    bwrap/Debian-runtime references
 
-if [[ -n "${_DEBIAN_FDE_INTEROP_ORACLE_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_INTEROP_ORACLE_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_INTEROP_ORACLE_SOURCED=1
+_ALPINE_FDE_INTEROP_ORACLE_SOURCED=1
 
 _INTEROP_HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 _INTEROP_REPO=$(cd "$_INTEROP_HERE/../.." && pwd)
@@ -85,7 +85,7 @@ source "$_INTEROP_HERE/rootfs-fixture.sh"
 # interop_oracle_gate_ok — the explicit opt-in gate. ANY other value ( unset,
 # 0, yes, …) means the oracle does not run.
 interop_oracle_gate_ok() {
-    [[ "${DEBIAN_FDE_INTEROP_ORACLE:-}" == "1" ]]
+    [[ "${ALPINE_FDE_INTEROP_ORACLE:-}" == "1" ]]
 }
 
 # interop_oracle_assert_ready — fail-closed preconditions: gate env AND bwrap.
@@ -93,7 +93,7 @@ interop_oracle_gate_ok() {
 # reason on stderr — the oracle must never degrade into "best effort".
 interop_oracle_assert_ready() {
     if ! interop_oracle_gate_ok; then
-        echo "interop-oracle: gate DEBIAN_FDE_INTEROP_ORACLE=1 not set — oracle does not run (ADR-19 scope guard)" >&2
+        echo "interop-oracle: gate ALPINE_FDE_INTEROP_ORACLE=1 not set — oracle does not run (ADR-19 scope guard)" >&2
         return 64
     fi
     if ! command -v bwrap >/dev/null 2>&1; then
@@ -169,8 +169,8 @@ interop_scope_check() {
 _interop_product_libs_sourced=0
 _interop_source_product_libs() {
     ((_interop_product_libs_sourced == 1)) && return 0
-    # seal.sh resolves its siblings (token.sh) through DEBIAN_FDE_CMD_DIR
-    export DEBIAN_FDE_CMD_DIR="${DEBIAN_FDE_CMD_DIR:-$_INTEROP_REPO/lib/cmd}"
+    # seal.sh resolves its siblings (token.sh) through ALPINE_FDE_CMD_DIR
+    export ALPINE_FDE_CMD_DIR="${ALPINE_FDE_CMD_DIR:-$_INTEROP_REPO/lib/cmd}"
     # shellcheck source=../lib/common.sh disable=SC1091
     source "$_INTEROP_REPO/lib/common.sh"
     # shellcheck source=../lib/policy.sh disable=SC1091
@@ -233,7 +233,7 @@ interop_oracle_bootstrap() {
 #   ORACLE_TOKEN       our §7.2 token JSON
 #   ORACLE_PASS_FILE   the staged random volume passphrase (tmpfs; caller scrubs)
 #   ORACLE_PCRSIG      the {7,11} .pcrsig JSON the seal was driven by
-# Also exports DEBIAN_FDE_TCTI for the caller. rc != 0 on any failure.
+# Also exports ALPINE_FDE_TCTI for the caller. rc != 0 on any failure.
 interop_oracle_seal() {
     local dir="$1" keydir="$2" d7 d11 pol fp sig_b64
     interop_oracle_assert_ready || return $?
@@ -247,8 +247,8 @@ interop_oracle_seal() {
     local tpmdir="$dir/swtpm"
     swtpm_stop "$tpmdir" 2>/dev/null
     swtpm_start "$tpmdir" || return 1
-    DEBIAN_FDE_TCTI=$SWTPM_TCTI
-    export DEBIAN_FDE_TCTI
+    ALPINE_FDE_TCTI=$SWTPM_TCTI
+    export ALPINE_FDE_TCTI
     # deterministic PCR state (§6.1: fixed extends, sha256)
     swtpm_pcrextend "$tpmdir" 7 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef || return 1
     swtpm_pcrextend "$tpmdir" 11 fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedc || return 1
@@ -280,7 +280,7 @@ interop_oracle_seal() {
     chmod 600 "$dir/k0"
     cryptsetup luksFormat -q --type luks2 --key-slot 0 --key-file "$dir/k0" "$dir/luks.img" 2>/dev/null || return 1
     mkdir -p "$dir/tmp"
-    DEBIAN_FDE_TMPDIR=$dir/tmp
+    ALPINE_FDE_TMPDIR=$dir/tmp
     SEAL_PASS_FILE='' SEAL_SLOT='' SEAL_POL='' SEAL_MODE=''
     seal_finalized "$keydir" "$dir/luks.img" "$dir/pcrsig711.json" "$dir/token.json" || return 1
     ORACLE_SLOT=$(token_free_slot "$dir/luks.img") || return 1

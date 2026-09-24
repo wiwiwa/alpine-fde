@@ -17,7 +17,7 @@
 #     lands there (e2e, real handler; offline mode is the default)
 #   * `install` preflight: keys_require + keys_offline_guard against the mount
 #
-# NOTE: with DEBIAN_FDE_ROOT unset the guard has no custody target and passes —
+# NOTE: with ALPINE_FDE_ROOT unset the guard has no custody target and passes —
 # presence is keys_check's job (the old literal-/etc/alpine-fde/keys pin is
 # subsumed by the root-relative classification).
 
@@ -28,18 +28,18 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/keys.sh
 source "$REPO/lib/keys.sh"
 
-T=$(mktemp -d /tmp/debian-fde-keys-guard.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-keys-guard.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_ROOT=$T/root
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_ROOT=$T/root
 mkdir -p "$T/root/etc/alpine-fde/keys" "$T/root/notkeys" "$T/usb/keys"
 
 GUARD_PASS='ci-custody-passphrase-600000'
@@ -76,7 +76,7 @@ assert_eq "guard: empty keydir arg -> 0 (caller checks presence)" "0" "$(guard_r
 # refused; the encrypted release.pem end state passes
 # =============================================================================
 assert_eq "guard: keydir IS target /etc/alpine-fde/keys (empty) -> 64" "64" \
-    "$(guard_rc "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys")"
+    "$(guard_rc "$ALPINE_FDE_ROOT/etc/alpine-fde/keys")"
 assert_eq "guard: keydir under target root (empty) -> 64" "64" \
     "$(guard_rc "$T/root/notkeys")"
 assert_eq "guard: keydir == target root itself -> 64" "64" \
@@ -88,26 +88,26 @@ assert_eq "guard: PLAINTEXT release.pem inside root -> 64" "64" "$(guard_rc "$T/
 assert_contains "guard: plaintext message names the violation (PLAINTEXT + ADR-18)" "$G_OUT" "PLAINTEXT"
 assert_contains "guard: plaintext message cites ADR-18" "$G_OUT" "ADR-18"
 
-cp "$REPO/fixtures/keys/release.pem" "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.priv.pem"
+cp "$REPO/fixtures/keys/release.pem" "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.priv.pem"
 assert_eq "guard: stale plaintext release.priv.pem inside root -> 64" "64" \
-    "$(guard_rc "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys")"
+    "$(guard_rc "$ALPINE_FDE_ROOT/etc/alpine-fde/keys")"
 cp "$REPO/fixtures/keys/release.pem" "$T/root/notkeys/pk.priv.pem"
 assert_eq "guard: stale plaintext pk.priv.pem inside root -> 64" "64" \
     "$(guard_rc "$T/root/notkeys")"
-rm -f "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.priv.pem" "$T/root/notkeys/pk.priv.pem"
+rm -f "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.priv.pem" "$T/root/notkeys/pk.priv.pem"
 
-cp "$ENC_PEM" "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.pem"
-cp "$REPO/fixtures/keys/release.crt" "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.crt"
-cp "$REPO/fixtures/keys/release.pub" "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.pub"
+cp "$ENC_PEM" "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.pem"
+cp "$REPO/fixtures/keys/release.crt" "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.crt"
+cp "$REPO/fixtures/keys/release.pub" "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.pub"
 assert_eq "guard: ENCRYPTED release.pem inside root (ADR-18 end state) -> 0" "0" \
-    "$(guard_rc "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys")"
-cp "$REPO/fixtures/keys/release.pem" "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/pk.priv.pem"
+    "$(guard_rc "$ALPINE_FDE_ROOT/etc/alpine-fde/keys")"
+cp "$REPO/fixtures/keys/release.pem" "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/pk.priv.pem"
 assert_eq "guard: encrypted release.pem + STALE plaintext pk.priv.pem -> 64" "64" \
-    "$(guard_rc "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys")"
-rm -f "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/pk.priv.pem"
-rm -f "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.pem" \
-    "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.crt" \
-    "$DEBIAN_FDE_ROOT/etc/alpine-fde/keys/release.pub"
+    "$(guard_rc "$ALPINE_FDE_ROOT/etc/alpine-fde/keys")"
+rm -f "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/pk.priv.pem"
+rm -f "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.pem" \
+    "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.crt" \
+    "$ALPINE_FDE_ROOT/etc/alpine-fde/keys/release.pub"
 
 cp "$ENC_PEM" "$T/usb/keys/release.pem"
 assert_eq "guard: offline medium, ENCRYPTED release.pem, -> 0 (any state ok offline)" "0" \
@@ -126,13 +126,13 @@ assert_eq "guard: lookalike sibling dir (empty, under root) -> 64 (under-root ru
 # A not-yet-existing keydir under the root holds no encrypted release.pem —
 # refused (offline stage1 must not generate there).
 # =============================================================================
-ln -s "$DEBIAN_FDE_ROOT" "$T/rootlink"
+ln -s "$ALPINE_FDE_ROOT" "$T/rootlink"
 assert_eq "guard S-H1: symlinked root, keydir not yet existing -> 64" "64" \
     "$(guard_rc "$T/rootlink/newdir/keys")"
 assert_eq "guard S-H1: symlinked root, /etc/alpine-fde/keys not yet existing -> 64" "64" \
     "$(guard_rc "$T/rootlink/etc/alpine-fde/keys")"
 assert_eq "guard S-H1: canonical spelling, keydir not yet existing -> 64" "64" \
-    "$(guard_rc "$DEBIAN_FDE_ROOT/newdir2/keys")"
+    "$(guard_rc "$ALPINE_FDE_ROOT/newdir2/keys")"
 assert_eq "guard S-H1: symlinked root, existing keydir under it -> 64" "64" \
     "$(guard_rc "$T/rootlink/notkeys")"
 assert_eq "guard S-H1: relative keydir spelled through the symlink -> 64" "64" \
@@ -146,7 +146,7 @@ assert_eq "guard S-H1: offline medium through a symlink spelling -> 0" "0" \
 # root fails 64, no key material lands there; the offline medium still works
 # and keeps the plaintext release.pem (offline semantics unchanged, ADR-18)
 # =============================================================================
-G_RC=$("$REPO/bin/debian-fde" provision stage1 --keydir "$T/root/etc/alpine-fde/keys" 2>&1; echo "RC=$?")
+G_RC=$("$REPO/bin/alpine-fde" provision stage1 --keydir "$T/root/etc/alpine-fde/keys" 2>&1; echo "RC=$?")
 assert_eq "stage1: keydir under target root -> 64" "64" "$(printf '%s' "$G_RC" | sed -n 's/^RC=//p')"
 assert_eq "stage1: no release.pem landed under root" "0" \
     "$([ -e "$T/root/etc/alpine-fde/keys/release.pem" ] && echo 1 || echo 0)"
@@ -154,7 +154,7 @@ assert_eq "stage1: no release.priv.pem landed under root" "0" \
     "$([ -e "$T/root/etc/alpine-fde/keys/release.priv.pem" ] && echo 1 || echo 0)"
 
 assert_rc "stage1: keydir on the offline medium -> 0" 0 \
-    "$REPO/bin/debian-fde" provision stage1 --keydir "$T/usb/keys"
+    "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/usb/keys"
 assert_eq "stage1: release.pem landed on the medium" "1" \
     "$([ -f "$T/usb/keys/release.pem" ] && echo 1 || echo 0)"
 assert_eq "stage1 offline: release.pem stays PLAINTEXT on the medium (default mode unchanged)" "1" \

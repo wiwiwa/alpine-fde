@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# tests/unit/pre_upgrade_ext4_skip.sh — `debian-fde pre-upgrade` (§8.1, ADR-13):
+# tests/unit/pre_upgrade_ext4_skip.sh — `alpine-fde pre-upgrade` (§8.1, ADR-13):
 # Btrfs is the DEFAULT root (ADR-13, §4), so a btrfs root must produce a real
 # READ-ONLY snapshot — `btrfs subvolume snapshot -r /@ /.snapshots/<UTC-ts>`
 # (source per the mounted subvol layout; target under the @snapshots mount,
 # §9.1) — rc 0, naming the created snapshot. A missing /.snapshots is a loud
 # 64 with the layout hint (not a silent rc 3). ext4 and unknown roots keep the
 # graceful rc-0 skip (message unchanged).
-# Seams: DEBIAN_FDE_ROOT_FSTYPE overrides `stat -f` detection for tests;
+# Seams: ALPINE_FDE_ROOT_FSTYPE overrides `stat -f` detection for tests;
 # `btrfs` is a PATH stub recording argv and materializing the snapshot dir.
 
 set -u
@@ -16,7 +16,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 
 run_pu() { # FSTYPE — drive the real handler with the fstype seam
-    PU_OUT=$(DEBIAN_FDE_ROOT_FSTYPE="$1" "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+    PU_OUT=$(ALPINE_FDE_ROOT_FSTYPE="$1" "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
     PU_RC=$?
 }
 
@@ -48,8 +48,8 @@ exit 0
 EOF
 chmod +x "$FAKEBIN/btrfs"
 
-PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs.argv" DEBIAN_FDE_ROOT="$ROOT" \
-    DEBIAN_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs.argv" ALPINE_FDE_ROOT="$ROOT" \
+    ALPINE_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
 PU_RC=$?
 assert_eq "btrfs root -> rc 0 (snapshot created)" "0" "$PU_RC"
 assert_eq "btrfs invoked exactly once" "1" "$(wc -l <"$TMP/btrfs.argv")"
@@ -70,14 +70,14 @@ assert_file_exists "snapshot materialized under /.snapshots/<ts>" "$ROOT/.snapsh
 # degrade the fstype to `unknown` and SILENTLY SKIP every btrfs snapshot. The
 # mountinfo entry of the root mount is already parsed in this file for the
 # subvol — derive the fstype from it first, loud info line either way. Seam:
-# DEBIAN_FDE_MOUNTINFO overrides the mountinfo path for tests.
+# ALPINE_FDE_MOUNTINFO overrides the mountinfo path for tests.
 # Leg 1: mountinfo says btrfs while the fixture dir is an ORDINARY directory
 # (stat would answer tmpfs/ext2 — never btrfs). The snapshot must happen: this
 # proves mountinfo takes precedence over the stat fallback.
 MI=$TMP/mountinfo.btrfs
 printf '42 41 0:42 / %s rw,relatime - btrfs /dev/sda1 rw,ssd,subvol=/@\n' "$ROOT" >"$MI"
-PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs-mi.argv" DEBIAN_FDE_ROOT="$ROOT" \
-    DEBIAN_FDE_MOUNTINFO="$MI" "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs-mi.argv" ALPINE_FDE_ROOT="$ROOT" \
+    ALPINE_FDE_MOUNTINFO="$MI" "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
 PU_RC=$?
 assert_eq "mountinfo btrfs -> rc 0 (snapshot, no stat needed)" "0" "$PU_RC"
 assert_contains "info line cites the mountinfo source" "$PU_OUT" "(mountinfo)"
@@ -87,28 +87,28 @@ assert_eq "btrfs invoked exactly once (mountinfo leg)" "1" "$(wc -l <"$TMP/btrfs
 # naming BOTH the fstype (ext4 can only have come from the fixture) and source.
 MI2=$TMP/mountinfo.ext4
 printf '43 41 0:43 / %s rw,relatime - ext4 /dev/sdb2 rw\n' "$ROOT" >"$MI2"
-PU_OUT=$(DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_MOUNTINFO="$MI2" \
-    "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_OUT=$(ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_MOUNTINFO="$MI2" \
+    "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
 PU_RC=$?
 assert_eq "mountinfo ext4 -> rc 0 (skip)" "0" "$PU_RC"
 assert_contains "skip message names the mountinfo-detected fstype" "$PU_OUT" \
     "skipped (ext4 root; snapshots need btrfs, ADR-13)"
 assert_contains "ext4 info line cites the mountinfo source" "$PU_OUT" \
     "(mountinfo)"
-unset DEBIAN_FDE_MOUNTINFO
+unset ALPINE_FDE_MOUNTINFO
 
 # --- 4. btrfs with /.snapshots missing -> loud 64 with the §9.1 layout hint ----------
 ROOT2="$TMP/root2"
 mkdir -p "$ROOT2"
-PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs2.argv" DEBIAN_FDE_ROOT="$ROOT2" \
-    DEBIAN_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/debian-fde" pre-upgrade 2>&1)
+PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs2.argv" ALPINE_FDE_ROOT="$ROOT2" \
+    ALPINE_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
 PU_RC=$?
 assert_eq "missing /.snapshots -> loud 64 (not rc 3)" "64" "$PU_RC"
 assert_contains "64 message cites the §9.1 layout (@snapshots at /.snapshots)" "$PU_OUT" "@snapshots"
 assert_eq "missing /.snapshots: btrfs never invoked" "" "$(cat "$TMP/btrfs2.argv" 2>/dev/null)"
 
 # --- 5. help text: purpose, snapshot path, retention note ----------------------------
-PU_OUT=$("$REPO/bin/debian-fde" pre-upgrade --help 2>&1)
+PU_OUT=$("$REPO/bin/alpine-fde" pre-upgrade --help 2>&1)
 PU_RC=$?
 assert_eq "--help -> rc 0" "0" "$PU_RC"
 assert_contains "help names the snapshot path" "$PU_OUT" "/.snapshots/<"

@@ -18,7 +18,7 @@
 # manager on the ESP (verify-first, from the retired Debian upgrade hook).
 #
 # The test drives the REAL hook scripts with a recording `alpine-fde` stub
-# (ALPINE_FDE_BIN / DEBIAN_FDE_BIN seam) plus sbsign/sbverify stubs.
+# (ALPINE_FDE_BIN / ALPINE_FDE_BIN seam) plus sbsign/sbverify stubs.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -76,7 +76,7 @@ printf 'unsigned-fallback' >"$T/esp/EFI/BOOT/BOOTX64.EFI"
 
 : >"$T/calls.log"
 export ALPINE_FDE_BIN=$FAKE
-export DEBIAN_FDE_BIN=$FAKE
+export ALPINE_FDE_BIN=$FAKE
 export ALPINE_FDE_ROOT=$T/root
 export ALPINE_FDE_ESP=$T/esp
 export ALPINE_FDE_KEYDIR=$REPO/fixtures/keys

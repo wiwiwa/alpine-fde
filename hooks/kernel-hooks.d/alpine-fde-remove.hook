@@ -18,9 +18,9 @@
 # `alpine-fde ukictl remove <kver>`, or `apk fix` if the package state is
 # inconsistent.
 #
-# Env: ALPINE_FDE_ROOT (target root for the marker, default /) — the
-# DEBIAN_FDE_ROOT compat spelling is accepted; the binary seam is
-# ALPINE_FDE_BIN / DEBIAN_FDE_BIN (default `alpine-fde`).
+# Env: ALPINE_FDE_ROOT (target root for the marker, default /); the binary
+# seam is ALPINE_FDE_BIN (default `alpine-fde`). The env namespace is
+# ALPINE_FDE_* only (§8.1).
 
 set -u
 
@@ -38,8 +38,8 @@ case $event in
         ;;
 esac
 
-ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-${DEBIAN_FDE_BIN:-alpine-fde}}
-ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-${DEBIAN_FDE_ROOT:-}}
+ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-alpine-fde}
+ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-}
 FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
 marker="$FDE_ETC/build-failed"
 

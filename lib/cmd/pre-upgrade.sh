@@ -1,18 +1,18 @@
 #!/bin/sh
-# pre-upgrade.sh — `debian-fde pre-upgrade`: optional root-filesystem snapshot
+# pre-upgrade.sh — `alpine-fde pre-upgrade`: optional root-filesystem snapshot
 # before upgrades (§8.1; C-G16). Btrfs is the default root (ADR-13, §4): take
 # a READ-ONLY snapshot of the root subvolume into /.snapshots/<UTC-timestamp>
 # (the @snapshots mount, §9.1 layout; UserGuide §4 rollback flow). ext4 roots
 # (available via --fs ext4) skip gracefully — rc 0.
 
-if [ -n "${DEBIAN_FDE_PREUPGRADE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_PREUPGRADE_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_PREUPGRADE_LOADED=1
+ALPINE_FDE_PREUPGRADE_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 cmd_pre_upgrade_main() {
@@ -21,7 +21,7 @@ cmd_pre_upgrade_main() {
     case ${1:-} in
         -h | --help)
             cat >&2 <<'EOF'
-Usage: debian-fde pre-upgrade
+Usage: alpine-fde pre-upgrade
 
 Snapshot the root filesystem before upgrades (§8.1). On a btrfs root this
 creates a read-only snapshot of the root subvolume under
@@ -33,21 +33,21 @@ EOF
             return 0
             ;;
     esac
-    [ $# -eq 0 ] || die -r "$DEBIAN_FDE_USAGE" "pre-upgrade: unexpected arguments: $*"
-    # Root fstype detection (DEBIAN_FDE_ROOT_FSTYPE overrides, for tests).
+    [ $# -eq 0 ] || die -r "$ALPINE_FDE_USAGE" "pre-upgrade: unexpected arguments: $*"
+    # Root fstype detection (ALPINE_FDE_ROOT_FSTYPE overrides, for tests).
     # G-D9: derive the fstype from /proc/self/mountinfo FIRST — busybox stat
     # (the §3.1 Alpine host toolchain) has no `-f -c %T`, so a stat-first probe
     # degrades to `unknown` and silently skips every btrfs snapshot. `stat -f`
     # is only the FALLBACK (non-Linux mounts absent from mountinfo); the result
     # and its source are announced loudly either way.
-    # IN-03: like every other command, honor --root/DEBIAN_FDE_ROOT — detect the
+    # IN-03: like every other command, honor --root/ALPINE_FDE_ROOT — detect the
     # TARGET root, not unconditionally the live /.
-    _pu_mif=${DEBIAN_FDE_MOUNTINFO:-/proc/self/mountinfo}
-    if [ -n "${DEBIAN_FDE_ROOT_FSTYPE:-}" ]; then
-        _pu_fstype=$DEBIAN_FDE_ROOT_FSTYPE
+    _pu_mif=${ALPINE_FDE_MOUNTINFO:-/proc/self/mountinfo}
+    if [ -n "${ALPINE_FDE_ROOT_FSTYPE:-}" ]; then
+        _pu_fstype=$ALPINE_FDE_ROOT_FSTYPE
         _pu_fssrc=override
     else
-        _pu_root=${DEBIAN_FDE_ROOT:-}
+        _pu_root=${ALPINE_FDE_ROOT:-}
         # mountinfo mount points carry no trailing slash (except the root "/")
         _pu_mp=${_pu_root%/}
         [ -n "$_pu_mp" ] || _pu_mp=/
@@ -75,18 +75,18 @@ EOF
 
     # btrfs root: read-only snapshot of the root subvolume into /.snapshots.
     require_cmds btrfs
-    _pu_snapdir=${DEBIAN_FDE_ROOT:-}/.snapshots
+    _pu_snapdir=${ALPINE_FDE_ROOT:-}/.snapshots
     if [ ! -d "$_pu_snapdir" ]; then
         err "pre-upgrade: $_pu_snapdir missing — expected the §9.1 layout with the @snapshots subvolume mounted at /.snapshots"
-        return "$DEBIAN_FDE_FAIL_CLOSED"
+        return "$ALPINE_FDE_FAIL_CLOSED"
     fi
     # Source subvolume path: the live mounted layout wins (/proc/self/mountinfo
     # fs-root of the root mount, e.g. /@); fall back to the fstab subvol=
-    # option; default /@ (the §4 standard layout). The DEBIAN_FDE_ROOT_FSTYPE
+    # option; default /@ (the §4 standard layout). The ALPINE_FDE_ROOT_FSTYPE
     # test seam pins the default so stub tests assert a deterministic argv.
     _pu_src=/@
-    if [ -z "${DEBIAN_FDE_ROOT_FSTYPE:-}" ]; then
-        _pu_mi=$(awk -v mp="${DEBIAN_FDE_ROOT:-}/" '{
+    if [ -z "${ALPINE_FDE_ROOT_FSTYPE:-}" ]; then
+        _pu_mi=$(awk -v mp="${ALPINE_FDE_ROOT:-}/" '{
             fs = ""
             for (i = 7; i <= NF; i++) if ($i == "-") { fs = $(i + 1); break }
             if ($5 == mp && fs == "btrfs") { print $4; exit }
@@ -105,7 +105,7 @@ EOF
                         exit
                     }
                 }
-            }' "${DEBIAN_FDE_ROOT:-}/etc/fstab" 2>/dev/null) || _pu_sv=""
+            }' "${ALPINE_FDE_ROOT:-}/etc/fstab" 2>/dev/null) || _pu_sv=""
             if [ -n "$_pu_sv" ]; then
                 _pu_src=$_pu_sv
             fi
@@ -115,7 +115,7 @@ EOF
     _pu_snap="$_pu_snapdir/$_pu_ts"
     if ! btrfs subvolume snapshot -r "$_pu_src" "$_pu_snap"; then
         err "pre-upgrade: btrfs snapshot failed ($_pu_src -> $_pu_snap)"
-        return "$DEBIAN_FDE_FAIL_CLOSED"
+        return "$ALPINE_FDE_FAIL_CLOSED"
     fi
     printf '%s\n' "$_pu_snap"
     info "pre-upgrade: read-only snapshot created: $_pu_snap"

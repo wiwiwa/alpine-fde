@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/unit/install_qemu_emit.sh — `debian-fde install` qemu-runner contract
-# (docs/Architecture.md §8.1, §9.1; ADR-20): DEBIAN_FDE_INSTALL_RUNNER=qemu
-# with DEBIAN_FDE_INSTALL_SCRIPT=<tmpfile> emits the guest-side plan as a
+# tests/unit/install_qemu_emit.sh — `alpine-fde install` qemu-runner contract
+# (docs/Architecture.md §8.1, §9.1; ADR-20): ALPINE_FDE_INSTALL_RUNNER=qemu
+# with ALPINE_FDE_INSTALL_SCRIPT=<tmpfile> emits the guest-side plan as a
 # script without executing anything:
 #   * `set -eu` (repo standard guard) + shebang header
 #   * guest config writes as single-quote-escaped printf lines — crypttab and
@@ -27,38 +27,38 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
-T=$(mktemp -d /tmp/debian-fde-install-qemu.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-install-qemu.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_INSTALL_RUNNER=qemu
-export DEBIAN_FDE_YES=1
-export DEBIAN_FDE_INSTALL_MNT=$T/mnt
-export DEBIAN_FDE_HOOKS_DIR=$T/hooks
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_TEST_LOG=$T/cmd.log   # PATH stubs append one line per command
-export DEBIAN_FDE_INSTALL_SCRIPT=$T/guest-install.sh
-export DEBIAN_FDE_INSTALL_NO_REBOOT=1   # CI seam: the harness reboots itself
-export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
+export ALPINE_FDE_INSTALL_MNT=$T/mnt
+export ALPINE_FDE_HOOKS_DIR=$T/hooks
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_TEST_LOG=$T/cmd.log   # PATH stubs append one line per command
+export ALPINE_FDE_INSTALL_SCRIPT=$T/guest-install.sh
+export ALPINE_FDE_INSTALL_NO_REBOOT=1   # CI seam: the harness reboots itself
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 
 GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
 DISK=$T/disk.img
 : >"$DISK"
-: >"$DEBIAN_FDE_TEST_LOG"
+: >"$ALPINE_FDE_TEST_LOG"
 
 # --- stub collaborators: present for preflight, logging for the no-exec assert
 mkdir -p "$T/stub"
 make_stub() { # NAME — log argv, exit 0
     cat >"$T/stub/$1" <<EOF
 #!/bin/sh
-printf '%s %s\n' "$1" "\$*" >>"\$DEBIAN_FDE_TEST_LOG"
+printf '%s %s\n' "$1" "\$*" >>"\$ALPINE_FDE_TEST_LOG"
 exit 0
 EOF
     chmod +x "$T/stub/$1"
@@ -84,21 +84,21 @@ chmod +x "$T/stub/id"
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc" "$DEBIAN_FDE_EFIVARS_DIR"
+mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_EFIVARS_DIR"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
-    printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
-    chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
+    printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
+    chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
 done
 # §9.1 preflight: firmware in Setup Mode
-printf '\007\000\000\000\001' >"$DEBIAN_FDE_EFIVARS_DIR/SetupMode-$GUID_GLOBAL"
+printf '\007\000\000\000\001' >"$ALPINE_FDE_EFIVARS_DIR/SetupMode-$GUID_GLOBAL"
 
 # --- run: emit the guest script (UNATTENDED: stdin closed) -----------------------
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 </dev/null)
 RC=$?
-SCRIPT=$DEBIAN_FDE_INSTALL_SCRIPT
+SCRIPT=$ALPINE_FDE_INSTALL_SCRIPT
 
 assert_eq "qemu emit rc 0 (unattended)" "0" "$RC"
 assert_file_exists "guest script written" "$SCRIPT"
@@ -148,12 +148,12 @@ assert_eq "host step emitted as comment: pending baseline on target (§9.1 step 
 assert_eq "host step emitted as comment: state write (§9.1 step 9)" "1" \
     "$(grep -c '^# HOST: inst_state_write installed' "$SCRIPT")"
 assert_eq "host step emitted as comment: ephemeral-key scrub (G-C26, I1)" "1" \
-    "$(grep -c '^# HOST: rm -f /dev/shm/debian-fde-ephkey' "$SCRIPT")"
+    "$(grep -c '^# HOST: rm -f /dev/shm/alpine-fde-ephkey' "$SCRIPT")"
 assert_eq "host teardown emitted as comment" "1" \
     "$(grep -c '^# HOST: .*cryptsetup close root-crypt' "$SCRIPT")"
 assert_eq "no host step left executable" "0" \
     "$(grep -c '^apk add --root' "$SCRIPT")"
-assert_eq "no reboot record (DEBIAN_FDE_INSTALL_NO_REBOOT=1 CI seam)" "0" \
+assert_eq "no reboot record (ALPINE_FDE_INSTALL_NO_REBOOT=1 CI seam)" "0" \
     "$(grep -c '^# HOST: reboot' "$SCRIPT")"
 assert_eq "G-C26: NO OsIndications record in either lane" "0" \
     "$(grep -c 'fw_osindications_set' "$SCRIPT")"
@@ -174,14 +174,14 @@ assert_not_contains "G-C7: NO /opt/debian-fde anywhere in the emitted qemu scrip
 assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir)" "1" \
     "$(grep -cx '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
+    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: bootctl install (ESP layout)" "1" \
     "$(grep -cx 'bootctl install --esp-path=/efi --boot-path=/efi' "$SCRIPT")"
 assert_eq "guest: ukictl build (§9.1 step 5)" "1" \
     "$(grep -cx '/opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
-    "$(grep -c 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
+    "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
 assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRIPT")" \
     "only-section=.pcrsig"
 assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \
@@ -209,8 +209,8 @@ assert_eq "emitted order: banner BEFORE the state write (G-C28)" "1" \
 
 # --- emitted script is sound but NEVER executed -----------------------------------
 assert_rc "emitted script parses (escape loop sound)" 0 sh -n "$SCRIPT"
-assert_eq "nothing was executed (stub log empty)" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
-assert_eq "target root untouched (no host step ran)" "0" "$([ -e "$DEBIAN_FDE_INSTALL_MNT" ] && echo 1 || echo 0)"
+assert_eq "nothing was executed (stub log empty)" "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
+assert_eq "target root untouched (no host step ran)" "0" "$([ -e "$ALPINE_FDE_INSTALL_MNT" ] && echo 1 || echo 0)"
 
 # --- H-02 binds emitted in the right lane ------------------------------------------
 assert_eq "host step emitted as comment: /proc bind (H-02)" "1" \
@@ -218,7 +218,7 @@ assert_eq "host step emitted as comment: /proc bind (H-02)" "1" \
 assert_eq "host step emitted as comment: efivars bind (§9.1)" "1" \
     "$(grep -c '^# HOST: .*mount --bind /sys/firmware/efi/efivars' "$SCRIPT")"
 assert_eq "host step emitted as comment: bind teardown (H-02)" "1" \
-    "$(grep -cF "# HOST: umount $DEBIAN_FDE_INSTALL_MNT/dev $DEBIAN_FDE_INSTALL_MNT/sys $DEBIAN_FDE_INSTALL_MNT/proc" "$SCRIPT")"
+    "$(grep -cF "# HOST: umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc" "$SCRIPT")"
 
 # --- conf drop (§4 topology + CR-01) -------------------------------------------------
 assert_contains "conf drop emitted: ROOT_FS=btrfs (§4)" "$(cat "$SCRIPT")" "ROOT_FS=btrfs"

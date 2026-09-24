@@ -119,13 +119,13 @@ ESP_HEADROOM_MIB=8
 DISK_MIB=1600
 declare -A S22_RETRIES   # per-boot-dir degraded-boot re-run counter (bounded)
 
-export QEMU_TIMEOUT="${DEBIAN_FDE_S22_TIMEOUT:-1200}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S22_TIMEOUT:-1200}"
 
 # §13-floor-OK recovery passphrase for the completion leg (the fixture's
 # well-known slot-0 passphrase is floor-BLOCKLISTED; the completion's
 # authorization rekeys keyslot 0 host-side first — the Stage-1 stand-in)
-S22_RECOVERY='alpine-fde-s22-recovery-7c5d31'
-S22_KEYPASS='alpine-fde-s22-release-pbkdf2-n9'
+S22_RECOVERY='fde-s22-recovery-7c5d31'
+S22_KEYPASS='fde-s22-release-pbkdf2-n9'
 
 # --- hardening: bounded stages, loud failures, overall budget --------------------
 # Calibrated 2026-09-24: the registry's outer SCENARIO_BUDGET is 1500 s (MD-05b)
@@ -134,7 +134,7 @@ S22_KEYPASS='alpine-fde-s22-release-pbkdf2-n9'
 # STAGE-TIMEOUT-OR-HANG. A full s22 pass builds 2 UKIs + boots 3 guests +
 # runs the host-side provisional seal and finalize: ~500-800 s observed;
 # 1350 s keeps ~1.7x margin inside the outer budget.
-OVERALL_BUDGET="${DEBIAN_FDE_S22_BUDGET:-1350}"
+OVERALL_BUDGET="${ALPINE_FDE_S22_BUDGET:-1350}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
 SWTPM_DIRS=()
@@ -215,7 +215,7 @@ REFRESHER=$!
 
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's22-handoff-immunity-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 
@@ -381,8 +381,8 @@ _ensure_tpm() {
 # Prints the seeded d11 (empty if the console carried no PCR prints).
 _reseed_from_console() {
     local log="$1" d7 d11
-    d7=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
-    d11=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
+    d7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
+    d11=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
     [[ -n "$d7" && -n "$d11" ]] || return 1
     swtpm_seed_pcrs "$RUN/tpm" "$d7" "$d11" || return 1
     printf '%s' "$d11"
@@ -390,7 +390,7 @@ _reseed_from_console() {
 
 # pcr_of <console.log> <pcr> — the harness PCR-print parser (the early
 # degradation gate in _boot_hook reads the hook's pre-token PCR line with it)
-pcr_of() { grep -oE "debian-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
+pcr_of() { grep -oE "alpine-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
 
 # _pcrread <dir> <pcr> — local PCR reader for the seal-time G-B6 gates. The
 # fixture's swtpm_pcrread anchors on the single-digit rendering ("0 : 0x…");
@@ -424,7 +424,7 @@ assert_eq "S-22 from-install shape: keyslot 0 is argon2id (recovery, §7.2)" "ar
     "$(jq -r '.keyslots["0"].kdf.type' <<<"$META0")"
 assert_eq "S-22 from-install shape: ZERO tokens before Stage-1 step 6" "{}" \
     "$(disk_token_json "$RUN/disk.img")"
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0
 chmod 600 "$RUN/kf-slot0"
 
 # --- the harness UKI (boot 1's AND boot 2's standing signed UKI) ---------------
@@ -438,7 +438,7 @@ run_stage esp_make 300 esp_make "$RUN/esp.img" \
 # the tampered variant (boot 3): ONE extra cmdline word -> a different stub
 # measurement -> a different pre-unlock PCR 11 (the s07 attacker primitive)
 run_stage uki_build-tampered 1200 \
-    uki_build "$RUN" "$RUN/keys" "$RUN/harness-tampered.efi" "debian-fde-tampered"
+    uki_build "$RUN" "$RUN/keys" "$RUN/harness-tampered.efi" "alpine-fde-tampered"
 run_stage esp_make-tampered 300 esp_make "$RUN/esp-tampered.img" \
     $(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB )) "$RUN/harness-tampered.efi"
 
@@ -459,7 +459,7 @@ PROMPT_OK=0
 # unaffected.
 if uki_wait_hook_prompt 1 900 "$RUN/boot1"; then
     PROMPT_OK=1
-    feed_line "$RUN/boot1/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+    feed_line "$RUN/boot1/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 fi
 assert_eq "boot 1: the hook arms the recovery loop (token-less disk)" "1" "$PROMPT_OK"
 # Feed the CORRECT passphrase at EVERY prompt (repro 2026-09-24: a feed line
@@ -470,7 +470,7 @@ assert_eq "boot 1: the hook arms the recovery loop (token-less disk)" "1" "$PROM
 for n in 2 3; do
     _i=0
     while (( _i < 45 )); do
-        grep -q "debian-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
+        grep -q "alpine-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
         grep -cE "$(sentinel_of unseal_prompt_re)" "$RUN/boot1/console.log" 2>/dev/null \
             | grep -q "^$n$" && break
         _qpid=$(cat "$RUN/boot1/qemu.pid" 2>/dev/null || true)
@@ -478,22 +478,22 @@ for n in 2 3; do
         sleep 1
         _i=$((_i + 1))
     done
-    grep -q "debian-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
-    feed_line "$RUN/boot1/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+    grep -q "alpine-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
+    feed_line "$RUN/boot1/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 done
-wait_console "$RUN/boot1" "debian-fde: UNSEALED" 300
+wait_console "$RUN/boot1" "alpine-fde: UNSEALED" 300
 run_stage qemu_wait-boot1 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot1" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
 
 LOG_B1=$(cat "$RUN/boot1/console.log" 2>/dev/null || true)
-assert_contains "[boot 1] init ran" "$LOG_B1" "debian-fde-harness: init started"
+assert_contains "[boot 1] init ran" "$LOG_B1" "alpine-fde-harness: init started"
 assert_contains "[boot 1] hook ran the enter-initrd extend" "$LOG_B1" \
     "$(sentinel_of unseal_pcrextend_ok)"
 assert_contains "[boot 1] hook found NO token (pre-step-6 shape)" "$LOG_B1" \
     "$(sentinel_of unseal_token_missing)"
 assert_contains "[boot 1] keyslot-0 recovery passphrase unsealed the volume (from-install way out)" \
     "$LOG_B1" "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[boot 1] UNSEALED" "$LOG_B1" "debian-fde: UNSEALED"
+assert_contains "[boot 1] UNSEALED" "$LOG_B1" "alpine-fde: UNSEALED"
 assert_not_contains "[boot 1] never unlocked via a token" "$LOG_B1" \
     "$(sentinel_of unseal_unlocked)"
 assert_not_contains "[boot 1] no interactive prompt ever appeared" "$LOG_B1" \
@@ -502,7 +502,7 @@ assert_not_contains "[boot 1] no emergency shell" "$LOG_B1" "$(sentinel_of emerg
 
 # the postphase PCR 11 == the build's enter-initrd prediction (G-T13) — the
 # value the provisional seal will bind
-D11_BOOT1=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot1/console.log" \
+D11_BOOT1=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot1/console.log" \
     | head -1 | cut -d= -f2)
 assert_eq "boot 1: postphase PCR 11 == the ukify enter-initrd prediction (G-T13)" "$D11_PRED" "$D11_BOOT1"
 
@@ -563,9 +563,9 @@ SEAL_PASS_FILE='' SEAL_SLOT='' SEAL_POL='' SEAL_MODE=''
 # NB: SWTPM_TCTI is NOT inherited — swtpm_start ran inside run_stage subshells,
 # so its export never reached this shell (registry 2026-09-23:
 # "SWTPM_TCTI: unbound variable" at the seal-provisional stage). Derive it.
-DEBIAN_FDE_TMPDIR="$RUN/tmp" \
-DEBIAN_FDE_SEAL_STAGE="$RUN/tmp" \
-DEBIAN_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
+ALPINE_FDE_TMPDIR="$RUN/tmp" \
+ALPINE_FDE_SEAL_STAGE="$RUN/tmp" \
+ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
     seal_provisional "$RUN/keys" "$RUN/disk.img" "$RUN/pcrsig-11.json" "$_PROV_TOK" \
     || { echo "s22: seal_provisional failed"; exit 1; }
 [[ -s "$_PROV_TOK" && -n "${SEAL_PASS_FILE:-}" && -f "$SEAL_PASS_FILE" && -n "${SEAL_SLOT:-}" ]] || {
@@ -601,7 +601,7 @@ echo "# boot 2: the standing provisional token unseals with ZERO console input"
 _boot_hook "$RUN/boot2" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
     "$RUN/pcrsig-11.img"
 i=0
-until grep -q "debian-fde: UNSEALED" "$RUN/boot2/console.log" 2>/dev/null; do
+until grep -q "alpine-fde: UNSEALED" "$RUN/boot2/console.log" 2>/dev/null; do
     _qemu_alive_or_die "$RUN/boot2" "console-wait:boot2-UNSEALED"
     _budget_check "console-wait:boot2-UNSEALED"
     (( i < QEMU_TIMEOUT )) || _hang_fail CONSOLE-WAIT "boot2 UNSEALED" \
@@ -609,21 +609,21 @@ until grep -q "debian-fde: UNSEALED" "$RUN/boot2/console.log" 2>/dev/null; do
     sleep 1
     i=$((i + 1))
 done
-wait_console "$RUN/boot2" "debian-fde: POWEROFF" "$QEMU_TIMEOUT"
+wait_console "$RUN/boot2" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT"
 run_stage qemu_wait-boot2 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot2" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
 
 LOG_B2=$(cat "$RUN/boot2/console.log" 2>/dev/null || true)
-assert_contains "[boot 2] init ran" "$LOG_B2" "debian-fde-harness: init started"
+assert_contains "[boot 2] init ran" "$LOG_B2" "alpine-fde-harness: init started"
 assert_contains "[boot 2] hook discovered the provisional token" "$LOG_B2" \
     "$(sentinel_of unseal_token_info)11]"
 assert_contains "[boot 2] the standing signed UKI auto-unsealed via the TPM token" "$LOG_B2" \
     "$(sentinel_of unseal_unlocked)"
-assert_contains "[boot 2] UNSEALED with ZERO console input" "$LOG_B2" "debian-fde: UNSEALED"
+assert_contains "[boot 2] UNSEALED with ZERO console input" "$LOG_B2" "alpine-fde: UNSEALED"
 assert_eq "[boot 2] the recovery loop NEVER armed (zero-input invariant)" "0" \
     "$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_B2" || true)"
 assert_not_contains "[boot 2] the tampered-word UKI is not what booted" "$LOG_B2" \
-    "debian-fde-tampered"
+    "alpine-fde-tampered"
 assert_not_contains "[boot 2] no interactive prompt ever appeared" "$LOG_B2" \
     "$(sentinel_of prompt_re)"
 assert_not_contains "[boot 2] no emergency shell" "$LOG_B2" "$(sentinel_of emergency_forbidden)"
@@ -642,8 +642,8 @@ fi
 # the upgrade's G-B6 gate must read exactly the boot-2 register.
 # ============================================================================
 echo "# completion: the guided finalize drives audit --init + the {7,11} upgrade host-side"
-D7_BOOT2=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
-D11_BOOT2=$(grep -oE 'debian-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
+D7_BOOT2=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
+D11_BOOT2=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
 [[ -n "$D7_BOOT2" && -n "$D11_BOOT2" ]] || { echo "s22: boot 2 console missing PCR prints"; exit 1; }
 # boot 2's clean exit killed the fixture swtpm; re-extend the booted register
 # before audit --init finalizes the baseline from the live PCRs. Readback pins
@@ -741,17 +741,17 @@ timeout 120 "$CRYPTSETUP_BIN" luksChangeKey --key-slot 0 "$RUN/disk.img" \
     || { echo "s22: host-side keyslot-0 rekey failed"; exit 1; }
 # THE COMPLETION (guided Stage 3 host-side; the DISK mutates through by-uuid)
 # (derive the TCTI — SWTPM_TCTI was never exported into this shell, see above)
-DEBIAN_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
-DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-DEBIAN_FDE_EVENTLOG="$RUN/cli-state/eventlog-absent" \
-DEBIAN_FDE_ROOT="$RUN/cli-state" \
-DEBIAN_FDE_KEYDIR="$RUN/keys" \
-DEBIAN_FDE_KEY_PASSPHRASE="$S22_KEYPASS" \
-DEBIAN_FDE_RECOVERY_PASSPHRASE="$S22_RECOVERY" \
-DEBIAN_FDE_PCRSIG="$RUN/uki-pcrsig-711.json" \
-DEBIAN_FDE_BY_UUID_DIR="$RUN/by-uuid" \
-DEBIAN_FDE_TMPDIR="$RUN/tmp" \
-DEBIAN_FDE_NO_INSTALL=1 \
+ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
+ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+ALPINE_FDE_EVENTLOG="$RUN/cli-state/eventlog-absent" \
+ALPINE_FDE_ROOT="$RUN/cli-state" \
+ALPINE_FDE_KEYDIR="$RUN/keys" \
+ALPINE_FDE_KEY_PASSPHRASE="$S22_KEYPASS" \
+ALPINE_FDE_RECOVERY_PASSPHRASE="$S22_RECOVERY" \
+ALPINE_FDE_PCRSIG="$RUN/uki-pcrsig-711.json" \
+ALPINE_FDE_BY_UUID_DIR="$RUN/by-uuid" \
+ALPINE_FDE_TMPDIR="$RUN/tmp" \
+ALPINE_FDE_NO_INSTALL=1 \
     timeout 600 "$REPO/bin/alpine-fde" finalize >"$RUN/completion.out" 2>&1
 COMPLETION_RC=$?
 assert_eq "completion: production finalize rc 0" "0" "$COMPLETION_RC"
@@ -767,7 +767,7 @@ grep -q "token upgraded to Mechanism B {PCR 7, PCR 11}" "$RUN/completion.out" \
     && _assert_result ok "completion: the provisional token upgraded to Mechanism B {PCR 7, PCR 11}" "" \
     || _assert_result not-ok "completion: the provisional token upgraded to Mechanism B" \
         "no upgrade marker in completion.out"
-grep -q "debian-fde: install finalized" "$RUN/completion.out" \
+grep -q "alpine-fde: install finalized" "$RUN/completion.out" \
     && _assert_result ok "completion: install finalized (state written LAST)" "" \
     || _assert_result not-ok "completion: install finalized (state written LAST)" \
         "no finalized marker in completion.out"
@@ -814,7 +814,7 @@ for n in 1 2 3; do
     # (live-seen 2026-09-22 — prompts past the 300 s mark); the hook's read
     # has no timeout, so prompt-synchronized feeding is unaffected.
     if uki_wait_hook_prompt "$n" 600 "$RUN/boot3"; then
-        feed_line "$RUN/boot3/serial.sock" "debian-fde-wrong-passphrase-$n"
+        feed_line "$RUN/boot3/serial.sock" "alpine-fde-wrong-passphrase-$n"
     else
         _hang_fail CONSOLE-WAIT "tampered recovery prompt $n" "never appeared"
     fi
@@ -825,9 +825,9 @@ CURRENT_QEMU_DIR=""
 
 LOG_B3=$(cat "$RUN/boot3/console.log" 2>/dev/null || true)
 assert_contains "[boot 3] init ran (the tampered UKI boots — SB-on firmware trusts our key)" \
-    "$LOG_B3" "debian-fde-harness: init started"
+    "$LOG_B3" "alpine-fde-harness: init started"
 assert_contains "[boot 3] the tampered cmdline word reached the kernel (the primitive is real)" \
-    "$LOG_B3" "debian-fde-tampered"
+    "$LOG_B3" "alpine-fde-tampered"
 assert_contains "[boot 3] hook discovered the standing token" "$LOG_B3" \
     "$(sentinel_of unseal_token_info)7,11]"
 assert_contains "[boot 3] the TPM refused the sealed blob under the tampered PCR state" "$LOG_B3" \
@@ -842,7 +842,7 @@ assert_not_contains "[boot 3] NEVER unlocked via the token" "$LOG_B3" \
     "$(sentinel_of unseal_unlocked)"
 assert_not_contains "[boot 3] NEVER unlocked via the recovery passphrase" "$LOG_B3" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_not_contains "[boot 3] never UNSEALED" "$LOG_B3" "debian-fde: UNSEALED"
+assert_not_contains "[boot 3] never UNSEALED" "$LOG_B3" "alpine-fde: UNSEALED"
 assert_not_contains "[boot 3] no emergency shell" "$LOG_B3" "$(sentinel_of emergency_forbidden)"
 if [[ -f "$RUN/boot3/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot3/qemu.pid" 2>/dev/null)"; then
     _assert_result ok "[boot 3] guest exited (hook 3-strike poweroff, not timeout-kill)" ""

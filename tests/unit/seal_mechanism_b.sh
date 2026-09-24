@@ -25,9 +25,9 @@ REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 # the lib self-load seam (house style: enroll_precondition_matrix.sh) — seal.sh
-# resolves its siblings (token.sh) through DEBIAN_FDE_CMD_DIR; must be exported
+# resolves its siblings (token.sh) through ALPINE_FDE_CMD_DIR; must be exported
 # BEFORE seal.sh is sourced
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 # shellcheck source=../../lib/common.sh
@@ -44,14 +44,14 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-seal-b.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-seal-b.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 mkdir -p "$TMP/tmp"
-DEBIAN_FDE_TMPDIR=$TMP/tmp # I1: passphrase staging must land HERE, mode 600
+ALPINE_FDE_TMPDIR=$TMP/tmp # I1: passphrase staging must land HERE, mode 600
 KEYDIR=$REPO/fixtures/keys
 KEY2=$TMP/key2 # foreign release key (G-B6)
 mkdir -p "$KEY2"
@@ -61,8 +61,8 @@ swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 flushall() { tpm flushcontext -t >/dev/null 2>&1 || true; }
 flushall
 
@@ -171,7 +171,7 @@ assert_no_token() { # DESC PATH
     if [ -e "$2" ]; then assert_eq "$1 (no token written)" "absent" "present"; else assert_eq "$1 (no token written)" "absent" "absent"; fi
 }
 assert_no_pass() { # DESC
-    assert_eq "$1 (no passphrase staged)" "" "$(find "$TMP/tmp" -name 'debian-fde-seal-pass.*' -print -quit)"
+    assert_eq "$1 (no passphrase staged)" "" "$(find "$TMP/tmp" -name 'alpine-fde-seal-pass.*' -print -quit)"
 }
 
 # --- 1. preconditions (fail-closed 64, nothing staged) ---------------------------------
@@ -193,7 +193,7 @@ assert_no_token "keydir without release.pub" "$NKOUT"
 assert_rc "missing .pcrsig -> die 64" 64 $?
 assert_no_token "missing .pcrsig" "$NKOUT"
 
-( DEBIAN_FDE_TCTI=swtpm:path=$TMP/definitely-not-here/sock seal_provisional \
+( ALPINE_FDE_TCTI=swtpm:path=$TMP/definitely-not-here/sock seal_provisional \
     "$KEYDIR" "$LUKS" "$TMP/pcrsig-11.json" "$NKOUT" ) 2>/dev/null
 assert_rc "unusable TCTI -> die 64" 64 $?
 assert_no_token "unusable TCTI" "$NKOUT"
@@ -226,7 +226,7 @@ assert_eq "token pubkey is the b64 DER of release.pub" "$DER" "$(jq -r '.["tpm2-
 [ -n "$SEAL_PASS_FILE" ] && [ -f "$SEAL_PASS_FILE" ] &&
     assert_eq "passphrase staged" "present" "present" ||
     assert_eq "passphrase staged" "present" "absent"
-assert_eq "passphrase staged under DEBIAN_FDE_TMPDIR (I1)" "1" \
+assert_eq "passphrase staged under ALPINE_FDE_TMPDIR (I1)" "1" \
     "$(case $SEAL_PASS_FILE in "$TMP/tmp"/*) echo 1;; *) echo 0;; esac)"
 assert_eq "passphrase file mode 600" "600" "$(stat -c %a "$SEAL_PASS_FILE")"
 # FRAMING (ADR-19): the staged credential is base64(48 raw random bytes) —
@@ -277,7 +277,7 @@ assert_eq "finalized RAW unseal bytes == base64-decode of its staged passphrase"
 # --- 5. G-B6: enroll-side signature rejection — die 64, NOTHING written --------------------
 NW=$TMP/neg-token.json
 rm -f "$NW"
-PASS_BEFORE=$(find "$TMP/tmp" -name 'debian-fde-seal-pass.*' | sort)
+PASS_BEFORE=$(find "$TMP/tmp" -name 'alpine-fde-seal-pass.*' | sort)
 
 ( seal_provisional "$KEYDIR" "$LUKS" "$TMP/pcrsig-711.json" "$NW" ) 2>/dev/null
 assert_rc "provisional rejects a {7,11}-signed .pcrsig (wrong selection)" 64 $?
@@ -295,7 +295,7 @@ assert_no_token "bad pol" "$NW"
 assert_rc "foreign-key signature -> die 64" 64 $?
 assert_no_token "foreign-key signature" "$NW"
 assert_eq "G-B6 negatives staged NO passphrase" "$PASS_BEFORE" \
-    "$(find "$TMP/tmp" -name 'debian-fde-seal-pass.*' | sort)"
+    "$(find "$TMP/tmp" -name 'alpine-fde-seal-pass.*' | sort)"
 
 # --- 6. PCR-drift negatives (observed at the TPM) --------------------------------------------
 # (a) PCR 7 drift: the finalized construction refuses a missing-PCR7 state

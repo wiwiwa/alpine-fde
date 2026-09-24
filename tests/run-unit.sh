@@ -5,7 +5,7 @@
 # (vacuous pass), and a run that observes no assertions at all (1..0) fails.
 #
 # Usage: tests/run-unit.sh [-j <jobs>] [pattern]
-#   -j, --jobs: number of parallel jobs (default: nproc, or DEBIAN_FDE_TEST_JOBS)
+#   -j, --jobs: number of parallel jobs (default: nproc, or ALPINE_FDE_TEST_JOBS)
 #   pattern: optional glob matched against unit test filenames (default '*')
 
 set -u
@@ -13,7 +13,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 # shellcheck source=lib/assert.sh
 source "$HERE/lib/assert.sh"
 
-JOBS="${DEBIAN_FDE_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS="${ALPINE_FDE_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 PATTERN="*"
 
 while [[ $# -gt 0 ]]; do
@@ -51,7 +51,7 @@ if (( ${#TEST_FILES[@]} == 0 )); then
     exit 66   # EX_NOINPUT
 fi
 
-TMP_OUT=$(mktemp -d /tmp/debian-fde-run-unit.XXXXXX)
+TMP_OUT=$(mktemp -d /tmp/alpine-fde-run-unit.XXXXXX)
 cleanup() {
     local pids
     pids=$(jobs -p 2>/dev/null)

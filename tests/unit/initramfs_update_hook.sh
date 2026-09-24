@@ -3,7 +3,7 @@
 # the APK trigger replaces the retired Debian /etc/initramfs/post-update.d
 # template. hooks/apk/triggers/alpine-fde.trigger watches /lib/modules and
 # rebuilds the signed UKI for every installed kernel version through
-# `alpine-fde ukictl build <kver>` (ALPINE_FDE_BIN / DEBIAN_FDE_BIN seam);
+# `alpine-fde ukictl build <kver>` (ALPINE_FDE_BIN seam);
 # the child's exit code propagates (ADR-8 loud failure + persisted marker
 # under /etc/alpine-fde, recovery = `apk fix`).
 #

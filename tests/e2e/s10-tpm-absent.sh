@@ -69,10 +69,10 @@ RUN="$TESTS/e2e/.runs/s10-tpm-absent-$(date +%s)"
 SNAPDIR="${TMPDIR:-/tmp}/secpc-e2e-s10-$(date +%s)"
 mkdir -p "$RUN" "$SNAPDIR"
 # prefix housekeeping — never the invocation's chained state dirs
-# (CR-02/MD-03: DEBIAN_FDE_PROTECT_DIRS, exported by run-e2e.sh)
+# (CR-02/MD-03: ALPINE_FDE_PROTECT_DIRS, exported by run-e2e.sh)
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's10-tpm-absent-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 CONSOLE="$RUN/console.log"
@@ -83,14 +83,14 @@ mkdir -p "$ENROLL"
 _ensure_run() { mkdir -p "$RUN" "$ENROLL" 2>/dev/null || true; }
 
 # Boot 2 (the TPM-less machine) rides the SHARED qemu_run path: with
-# DEBIAN_FDE_QEMU_NO_TPM=1 qemu_argv omits the chardev/tpmdev/tpm-tis trio —
+# ALPINE_FDE_QEMU_NO_TPM=1 qemu_argv omits the chardev/tpmdev/tpm-tis trio —
 # the guest has NO TPM character device, everything else (OVMF pins,
 # accelerator choice, console bridge fronting <run>/serial.sock, console.log
 # tee, qemu.pid) is exactly the production wiring. The historical local
 # _qemu_run_no_tpm replication (direct chardev + direct feed) carried the
 # legacy UART-backpressure feed-loss risk the bridge exists to fix.
 _no_tpm_qemu_run() {
-    DEBIAN_FDE_QEMU_NO_TPM=1 qemu_run "$@"
+    ALPINE_FDE_QEMU_NO_TPM=1 qemu_run "$@"
 }
 
 # _swtpm_ensure DIR — make sure a swtpm is serving DIR, (re)starting it when a
@@ -123,13 +123,13 @@ for _att in 1 2 3; do
     echo "# boot 1/2: baseline (TCG, attempt $_att, up to $QEMU_TIMEOUT s) ..."
     qemu_run "$ENROLL" "$ENROLL/esp.img" "$ENROLL/disk.img" "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$ENROLL"; then
-        feed_line "$ENROLL/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$ENROLL/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _snap_while_running "$(cat "$ENROLL/qemu.pid")" "$ENROLL/console.log" "$SNAPDIR/console-enroll.snap" &
     _snap_poller1=$!
     qemu_wait "$ENROLL" "$QEMU_TIMEOUT"
     wait "$_snap_poller1"
-    if grep -q "debian-fde: UNSEALED" "$SNAPDIR/console-enroll.snap" 2>/dev/null; then
+    if grep -q "alpine-fde: UNSEALED" "$SNAPDIR/console-enroll.snap" 2>/dev/null; then
         BOOT_OK=1
         break
     fi
@@ -152,7 +152,7 @@ assert_contains "boot 1: volume UNSEALED" "$LOG_B1" "$(sentinel_of harness_unsea
 D11=$(cat "$ENROLL/pcr11-enter-initrd.txt" 2>/dev/null)
 [[ -n "$D11" ]] || { echo "s10: no enter-initrd d11 prediction from the build"; exit 1; }
 swtpm_ensure "$ENROLL/tpm" || { echo "s10: swtpm restart (enroll) failed"; exit 1; }
-PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$ENROLL/console.log" | head -1 | cut -d= -f2)
+PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$ENROLL/console.log" | head -1 | cut -d= -f2)
 [[ -n "$PCR7_ENROLLED" ]] || { echo "s10: no PCR 7 in the baseline console"; exit 1; }
 # digest-anchored enroll (Option A): no reseeding and no live-read assertion —
 # the CLI compares the entry's recorded d7/d11 against the baseline (pure
@@ -160,7 +160,7 @@ PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$ENROLL/console
 uki_pcrsig_append_combined "$ENROLL/uki-pcrsig.json" "$ENROLL/uki-pcrsig-combined.json" \
     "$PCR7_ENROLLED" "$D11" "$RUN/keys" || exit 1
 uki_pcrsig_disk "$ENROLL/pcrsig.img" "$ENROLL/uki-pcrsig-combined.json" || exit 1
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 EFIVARS="$RUN/efivars-sb-on"
 mkdir -p "$EFIVARS"
@@ -168,7 +168,7 @@ _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4d
 _mkvar SecureBoot 1
 _mkvar SetupMode 0
 # enroll precondition (CLI, enrl_preconditions #2): a FINALIZED baseline at
-# $DEBIAN_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
+# $ALPINE_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
 # scenario-local cli-state root — the same seam s06/s09/s12/s13 use; without
 # it enroll-tpm dies "no baseline at /etc/alpine-fde/baseline.json".
 uki_baseline_stamp "$ENROLL/cli-state" "$PCR7_ENROLLED"
@@ -196,7 +196,7 @@ for _att in 1 2 3; do
     _fed=0
     for n in 1 2 3; do
         if uki_wait_hook_prompt "$n" 300 "$RUN"; then
-            feed_line "$RUN/serial.sock" "debian-fde-tpm-absent-wrong-passphrase-$n"
+            feed_line "$RUN/serial.sock" "alpine-fde-tpm-absent-wrong-passphrase-$n"
             _fed=$n
         else
             break
@@ -206,7 +206,7 @@ for _att in 1 2 3; do
     wait "$_snap_poller2"
     # DECISIVE SENTINEL SCOPE (2026-09-23): a 3-strike refusal boot powers off
     # from INSIDE the hook (_fdh_poweroff -> `poweroff -f` in the initrd), so
-    # the harness's own "debian-fde: POWEROFF" line (printed by /init only on
+    # the harness's own "alpine-fde: POWEROFF" line (printed by /init only on
     # the post-UNSEALED path) can NEVER appear — gating on it made every green
     # TPM-absent boot burn all 3 attempts and report not-ok. The terminal
     # evidence is the hook's own 3-strike give-up + fail-closed poweroff pair.

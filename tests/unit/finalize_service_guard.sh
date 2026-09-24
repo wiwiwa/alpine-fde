@@ -5,10 +5,10 @@
 # swtpm-backed TPM (the Mechanism B seal ops are the production code path),
 # REAL file-backed LUKS2 containers (the keyslot/token choreography mutates
 # real metadata), the real audit --init, and the real ADR-18 release.pem
-# encryption. Only the seams are stubbed: DEBIAN_FDE_EFIVARS_DIR (firmware
+# encryption. Only the seams are stubbed: ALPINE_FDE_EFIVARS_DIR (firmware
 # state), the ESP UKI .pcrsig carrier for the Stage-2 userspace re-unseal, a
 # PATH systemd-cryptenroll TRIPWIRE (ADR-19: cryptenroll must never be invoked
-# anywhere), a DEBIAN_FDE_CRYPTSETUP logging/fail-injection wrapper around the
+# anywhere), a ALPINE_FDE_CRYPTSETUP logging/fail-injection wrapper around the
 # REAL cryptsetup, and — ONLY in the Stage-2 service legs — seal_unseal
 # (the fixture's provisional token is metadata-level, not a real TPM blob; the
 # stub records the userspace re-unseal and hands back the provisional
@@ -19,8 +19,8 @@
 #   keyslot 0 = the OPERATOR'S RECOVERY PASSPHRASE (Argon2id)
 #   keyslot 1 = the provisional token slot (Mechanism B, PCR 11 only)
 #   keyslot 2 = the TEMPORARY ephemeral install key — purged at completion
-# DEBIAN_FDE_LUKS_KEYFILE is RETIRED: NO leg sets it; the guided Stage 3 is
-# authorized by the recovery passphrase (DEBIAN_FDE_RECOVERY_PASSPHRASE seam
+# ALPINE_FDE_LUKS_KEYFILE is RETIRED: NO leg sets it; the guided Stage 3 is
+# authorized by the recovery passphrase (ALPINE_FDE_RECOVERY_PASSPHRASE seam
 # — the interactive no-echo prompt is the default path), the Stage-2 service
 # by re-unsealing the standing provisional token.
 #
@@ -56,7 +56,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/lib.sh"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
 # shellcheck source=../../lib/policy.sh
@@ -85,7 +85,7 @@ assert_not_contains() {
     esac
 }
 
-T=$(mktemp -d /tmp/debian-fde-final.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-final.XXXXXX)
 FAKEBIN=$T/bin
 EFIVARS=$T/efivars
 LUKS_DIR=$T/luks
@@ -101,20 +101,20 @@ KEY_PASS='R3lease-K3ypass-X7!qmz'
 EPH_SECRET='ephemeral-install-key-DO-NOT-PERSIST'
 PROV_SECRET='provisional-sealed-secret-0123456789'
 
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
-export DEBIAN_FDE_BY_UUID_DIR=$BYUUID
-export DEBIAN_FDE_KEYDIR=$KEYDIR
-export DEBIAN_FDE_TMPDIR=$SHM
-export DEBIAN_FDE_CRYPTSETUP=$FAKEBIN/cs-wrapper
-export DEBIAN_FDE_RECOVERY_PASSPHRASE=$RECOVERY_PASS
-export DEBIAN_FDE_KEY_PASSPHRASE=$KEY_PASS
-export DEBIAN_FDE_PCRSIG=$T/pcrsig-711.json
-export DEBIAN_FDE_CONF=$T/none.conf
-export DEBIAN_FDE_NO_INSTALL=1
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_BY_UUID_DIR=$BYUUID
+export ALPINE_FDE_KEYDIR=$KEYDIR
+export ALPINE_FDE_TMPDIR=$SHM
+export ALPINE_FDE_CRYPTSETUP=$FAKEBIN/cs-wrapper
+export ALPINE_FDE_RECOVERY_PASSPHRASE=$RECOVERY_PASS
+export ALPINE_FDE_KEY_PASSPHRASE=$KEY_PASS
+export ALPINE_FDE_PCRSIG=$T/pcrsig-711.json
+export ALPINE_FDE_CONF=$T/none.conf
+export ALPINE_FDE_NO_INSTALL=1
 export CE_LOG=$T/cryptenroll.log CS_LOG=$T/cs.log SVC_LOG=$T/svc.log
 export LUKS_DIR FAIL_ADD_MEMBER='' FAIL_KILL_MEMBER=''
-# DEBIAN_FDE_LUKS_KEYFILE is RETIRED (§9.1 Stage 3) — deliberately NOT set;
+# ALPINE_FDE_LUKS_KEYFILE is RETIRED (§9.1 Stage 3) — deliberately NOT set;
 # the static leg below pins it out of the implementation.
 
 cleanup() {
@@ -126,10 +126,10 @@ mkdir -p "$FAKEBIN" "$EFIVARS" "$LUKS_DIR" "$BYUUID" "$SHM" "$KEYDIR" \
     "$(sp_etc_dir)" "$T/root/etc" "$T/swtpm" "$ESP/EFI/Linux"
 
 # --- static contract: the ephemeral-key handoff seam is RETIRED ------------------
-assert_eq "static: DEBIAN_FDE_LUKS_KEYFILE retired from all CODE (comment-only mentions)" "0" \
-    "$(grep -c '^[^#]*DEBIAN_FDE_LUKS_KEYFILE' "$REPO/lib/cmd/finalize.sh")"
+assert_eq "static: ALPINE_FDE_LUKS_KEYFILE retired from all CODE (comment-only mentions)" "0" \
+    "$(grep -c '^[^#]*ALPINE_FDE_LUKS_KEYFILE' "$REPO/lib/cmd/finalize.sh")"
 assert_contains "static: guided usage documents the recovery-passphrase seam" \
-    "$(cat "$REPO/lib/cmd/finalize.sh")" "DEBIAN_FDE_RECOVERY_PASSPHRASE"
+    "$(cat "$REPO/lib/cmd/finalize.sh")" "ALPINE_FDE_RECOVERY_PASSPHRASE"
 assert_contains "static: Stage-2 service entry point exists" \
     "$(cat "$REPO/lib/cmd/finalize.sh")" "fin_service_main()"
 
@@ -173,7 +173,7 @@ swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 tpm flushcontext -t >/dev/null 2>&1 || true
 swtpm_pcrextend "$TPMDIR" 7 0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c
 swtpm_pcrextend "$TPMDIR" 11 9a8b7c6d9a8b7c6d9a8b7c6d9a8b7c6d9a8b7c6d9a8b7c6d9a8b7c6d9a8b7c6d
@@ -194,7 +194,7 @@ D11=$(pcr_hex 11)
 openssl genrsa -out "$KEYDIR/release.pem" 2048 2>/dev/null
 openssl pkey -in "$KEYDIR/release.pem" -pubout -out "$KEYDIR/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KEYDIR/release.pem" -out "$KEYDIR/release.crt" \
-    -subj /CN=debian-fde-finalize-ci 2>/dev/null
+    -subj /CN=alpine-fde-finalize-ci 2>/dev/null
 [ -s "$KEYDIR/release.pem" ] && [ -s "$KEYDIR/release.pub" ] || {
     echo "FAIL: hermetic release key generation failed" >&2
     exit 1
@@ -209,7 +209,7 @@ SIG711=$(openssl base64 -A -in "$T/pol711.sig")
 PKFP=$(policy_pubkey_fp "$KEYDIR/release.pub")
 jq -n --arg pol "$POL711" --arg sig "$SIG711" --arg pkfp "$PKFP" \
     '{"sha256": [{"pcrs": [7, 11], "pkfp": $pkfp, "pol": $pol, "sig": $sig}]}' \
-    >"$DEBIAN_FDE_PCRSIG"
+    >"$ALPINE_FDE_PCRSIG"
 
 # Option A digest-ANCHOR fixtures (same composition + the d7/d11 anchor fields
 # policy_sign_json now records). ANCH-FOREIGN is self-consistent
@@ -239,7 +239,7 @@ jq --arg ee "$(printf 'ee%.0s' {1..32})" '.sha256[0].d7 = $ee' \
     mv "$T/pcrsig-anch-broken2.json" "$T/pcrsig-anch-broken.json"
 
 # --- Stage-1 ceremony mirror: release.pem encrypted (ADR-18), ESP UKI .pcrsig ---
-DEBIAN_FDE_KEY_PASSPHRASE=$KEY_PASS keys_encrypt_release "$KEYDIR"
+ALPINE_FDE_KEY_PASSPHRASE=$KEY_PASS keys_encrypt_release "$KEYDIR"
 keys_is_encrypted "$KEYDIR/release.pem"
 assert_rc "stage-1 mirror: release.pem ADR-18-encrypted (ceremony 3/3 output)" 0 $?
 # the ESP UKI carrier: the .pcrsig section the Stage-2 userspace re-unseal
@@ -324,10 +324,10 @@ fresh_stage() { # — full amended first-boot state: members + pending baseline 
 # --- drivers ----------------------------------------------------------------------
 run_finalize() { # — the GUIDED Stage 3 (bin entrypoint; env supplies the
     # recovery passphrase — the interactive no-echo prompt is the tty default)
-    FIN_OUT=$("$REPO/bin/debian-fde" finalize "$@" 2>&1)
+    FIN_OUT=$("$REPO/bin/alpine-fde" finalize "$@" 2>&1)
     FIN_RC=$?
 }
-run_service() { # $1 — optional DEBIAN_FDE_ESP override (unseal-failure legs).
+run_service() { # $1 — optional ALPINE_FDE_ESP override (unseal-failure legs).
     # — the Stage-2 auto-finalizer (fin_service_main) with ONLY the
     # userspace re-unseal stubbed: the stub RECORDS the invocation (proof the
     # authorization is the standing provisional token, never a credential env)
@@ -335,9 +335,9 @@ run_service() { # $1 — optional DEBIAN_FDE_ESP override (unseal-failure legs).
     : >"$SVC_LOG"
     SVC_OUT=$(
         exec 2>&1
-        unset DEBIAN_FDE_RECOVERY_PASSPHRASE DEBIAN_FDE_LUKS_KEYFILE
-        unset DEBIAN_FDE_KEY_PASSPHRASE
-        export DEBIAN_FDE_ESP=${1:-$ESP}
+        unset ALPINE_FDE_RECOVERY_PASSPHRASE ALPINE_FDE_LUKS_KEYFILE
+        unset ALPINE_FDE_KEY_PASSPHRASE
+        export ALPINE_FDE_ESP=${1:-$ESP}
         (
             # shellcheck source=../../lib/cmd/finalize.sh
             . "$REPO/lib/cmd/finalize.sh"
@@ -433,10 +433,10 @@ assert_contains "garbage state: message names the state" "$FIN_OUT" "unexpected 
 # --- 1b. CLI surface: help + unknown arg -------------------------------------------
 run_finalize --help
 assert_eq "finalize --help: rc 0" "0" "$FIN_RC"
-assert_contains "finalize --help: usage" "$FIN_OUT" "Usage: debian-fde finalize"
+assert_contains "finalize --help: usage" "$FIN_OUT" "Usage: alpine-fde finalize"
 assert_contains "finalize --help: names the recovery-passphrase authorization" "$FIN_OUT" \
     "recovery passphrase"
-FIN_OUT=$("$REPO/bin/debian-fde" finalize --bogus 2>&1)
+FIN_OUT=$("$REPO/bin/alpine-fde" finalize --bogus 2>&1)
 FIN_RC=$?
 assert_eq "finalize --bogus: usage rc 2" "2" "$FIN_RC"
 assert_contains "finalize --bogus: named in the error" "$FIN_OUT" "unknown argument"
@@ -575,7 +575,7 @@ istate_write provisional-booted
 printf '%s' "$RECOVERY_PASS" >"$T/auth.bin"
 chmod 600 "$T/auth.bin"
 for _m in "$U1" "$U2"; do
-    seal_upgrade_token "$KEYDIR" "$LUKS_DIR/$_m.img" "$DEBIAN_FDE_PCRSIG" \
+    seal_upgrade_token "$KEYDIR" "$LUKS_DIR/$_m.img" "$ALPINE_FDE_PCRSIG" \
         "$T/token-crash-$_m.json" "$T/auth.bin" || {
         echo "FAIL: crash-B fixture upgrade failed for $_m" >&2
         exit 1
@@ -642,7 +642,7 @@ sb_state 1 0
 fresh_stage
 istate_write provisional-booted
 reset_logs
-DEBIAN_FDE_RECOVERY_PASSPHRASE='definitely-not-it-X9k2-!qmwjpz' run_finalize
+ALPINE_FDE_RECOVERY_PASSPHRASE='definitely-not-it-X9k2-!qmwjpz' run_finalize
 assert_eq "wrong passphrase: rc 64" "64" "$FIN_RC"
 assert_contains "wrong passphrase: loud message names keyslot 0" "$FIN_OUT" \
     "keyslot 0"
@@ -662,7 +662,7 @@ assert_eq "wrong passphrase: token still provisional" "[11]" \
 
 # --- 5b. §13 entropy floor enforced BEFORE any cryptsetup call --------------------
 reset_logs
-DEBIAN_FDE_RECOVERY_PASSPHRASE='short1!' run_finalize
+ALPINE_FDE_RECOVERY_PASSPHRASE='short1!' run_finalize
 assert_eq "weak passphrase: rc 64" "64" "$FIN_RC"
 assert_contains "weak passphrase: floor named" "$FIN_OUT" "entropy floor"
 assert_eq "weak passphrase: zero cryptsetup invocations" "0" "$(grep -c . "$CS_LOG")"

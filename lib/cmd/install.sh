@@ -35,7 +35,7 @@
 #               (§9.1 Stage 2 step 4). I1's two-keyslot at-rest state (0 + 1)
 #               is reached exactly there.
 #
-# RUNNER SEAM (DEBIAN_FDE_INSTALL_RUNNER):
+# RUNNER SEAM (ALPINE_FDE_INSTALL_RUNNER):
 #   dry-run (default)  print the complete action plan, execute nothing
 #   chroot             guided local install from the live ISO: host steps run
 #                      now, guest steps run via `chroot <mnt> sh -c`
@@ -45,23 +45,23 @@
 # Plan steps are tagged host|guest; file drops into the target root are done
 # host-side at $MNT (chroot) or emitted as guest printf lines (qemu).
 #
-# DEBIAN_FDE_INSTALL_NO_REBOOT=1 (or --no-reboot) suppresses the final reboot
+# ALPINE_FDE_INSTALL_NO_REBOOT=1 (or --no-reboot) suppresses the final reboot
 # record (CI seam): the plan ends after teardown + ephemeral-key scrub.
 
-if [ -n "${DEBIAN_FDE_INSTALL_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_INSTALL_LOADED:-}" ]; then
   return 0
 fi
-DEBIAN_FDE_INSTALL_LOADED=1
+ALPINE_FDE_INSTALL_LOADED=1
 
-if [ -z "${DEBIAN_FDE_BASELINE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
-  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
+  . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
 # The install ceremony state machine (§8.4 install-state.json) is owned by the
 # install-state module; consume its API when landed (istate_write), else the
 # additive documented schema is written in place (see inst_state_write).
-if [ -z "${DEBIAN_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
   _spci_state_lib=$(sp_cmd_dir)/install-state.sh
   [ -f "$_spci_state_lib" ] ||
     _spci_state_lib=$(sp_cmd_dir)/../install-state.sh
@@ -75,16 +75,16 @@ fi
 # firmware seam (fw_sb_state/fw_var_present/fw_efivars_dir — the §9.1
 # Setup Mode preflight gate; the OsIndications firmware trip is RETIRED,
 # ADR-20 Teardown & Direct Reboot)
-if [ -z "${DEBIAN_FDE_FIRMWARE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_FIRMWARE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
-  . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
+  . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
 
 SPC_INSTALL_RUNNERS='dry-run chroot qemu'
 
-inst_runner() { printf '%s\n' "${DEBIAN_FDE_INSTALL_RUNNER:-dry-run}"; }
-inst_mnt() { printf '%s\n' "${DEBIAN_FDE_INSTALL_MNT:-/mnt}"; }
-inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"; }
+inst_runner() { printf '%s\n' "${ALPINE_FDE_INSTALL_RUNNER:-dry-run}"; }
+inst_mnt() { printf '%s\n' "${ALPINE_FDE_INSTALL_MNT:-/mnt}"; }
+inst_mirror() { printf '%s\n' "${ALPINE_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"; }
 # --- resolved topology (§4.1): fs + bcache flags ------------------------------
 # ROOT_FS: btrfs (default) | ext4. BCACHE: 0 | 1. Recorded into the target's
 # /etc/alpine-fde/alpine-fde.conf; an ABSENT conf file (or absent keys) means
@@ -92,7 +92,7 @@ inst_mirror() { printf '%s\n' "${DEBIAN_FDE_MIRROR:-https://dl-cdn.alpinelinux.o
 # the file to exist.
 INST_ROOT_FS=${INST_ROOT_FS:-btrfs}
 INST_BCACHE=${INST_BCACHE:-0}
-# ESP mount point (§8.1 --esp flag; env DEBIAN_FDE_ESP; default /efi). A path
+# ESP mount point (§8.1 --esp flag; env ALPINE_FDE_ESP; default /efi). A path
 # UNDER the target root — the flag value flows into the fstab entry, the mount
 # plan, the persisted ESP_PATH (§8.4) and the UKI extraction path.
 INST_ESP_MNT=${INST_ESP_MNT:-}
@@ -106,9 +106,9 @@ INST_ESP_HEADROOM_BYTES=$((64 * 1024 * 1024))
 INST_ESP_DEFAULT=512M
 
 # inst_uki_size_probe — byte size of a measurable UKI artifact (CI harness /
-# re-install contexts set DEBIAN_FDE_UKI_FILE); empty output = unmeasurable.
+# re-install contexts set ALPINE_FDE_UKI_FILE); empty output = unmeasurable.
 inst_uki_size_probe() {
-  _ips_f=${DEBIAN_FDE_UKI_FILE:-}
+  _ips_f=${ALPINE_FDE_UKI_FILE:-}
   if [ -n "$_ips_f" ] && [ -f "$_ips_f" ]; then
     wc -c <"$_ips_f" | tr -d '[:space:]'
   fi
@@ -118,7 +118,7 @@ inst_uki_size_probe() {
 # inst_esp_size_compute MEASURED_BYTES RETENTION HEADROOM_BYTES — ESP size for
 # the sfdisk plan: measured UKI size x retention + headroom, rounded UP to
 # whole MiB. Unmeasurable (empty/non-numeric) or garbage inputs fall back to
-# the fixed default (§13: override via DEBIAN_FDE_ESP_SIZE wins regardless).
+# the fixed default (§13: override via ALPINE_FDE_ESP_SIZE wins regardless).
 inst_esp_size_compute() {
   _ies_m=$1
   _ies_r=$2
@@ -141,14 +141,14 @@ inst_esp_size_compute() {
 
 inst_esp_size() {
   # env override wins (§13)
-  if [ -n "${DEBIAN_FDE_ESP_SIZE:-}" ]; then
-    printf '%s\n' "$DEBIAN_FDE_ESP_SIZE"
+  if [ -n "${ALPINE_FDE_ESP_SIZE:-}" ]; then
+    printf '%s\n' "$ALPINE_FDE_ESP_SIZE"
     return 0
   fi
   _ies_m=$(inst_uki_size_probe)
   inst_esp_size_compute "$_ies_m" "$INST_ESP_RETENTION" "$INST_ESP_HEADROOM_BYTES"
 }
-inst_user() { printf '%s\n' "${DEBIAN_FDE_INSTALL_USER:-admin}"; }
+inst_user() { printf '%s\n' "${ALPINE_FDE_INSTALL_USER:-admin}"; }
 # ADR-18/§8.1 provision row: the offline-ceremony artifact set `install
 # --keydir` consumes from the signing medium — exactly what `provision
 # stage1` leaves there (certs + ESLs + .auth packets + the release key).
@@ -172,7 +172,7 @@ inst_shell_safe() {
   _iss_val=$2
   case $_iss_val in
   '' | *[!a-zA-Z0-9_./:=+~-]*)
-    die -r "$DEBIAN_FDE_USAGE" "install: $_iss_label contains characters that are not allowed: $_iss_val"
+    die -r "$ALPINE_FDE_USAGE" "install: $_iss_label contains characters that are not allowed: $_iss_val"
     ;;
   esac
   return 0
@@ -183,8 +183,8 @@ inst_tree() {
   _it_lib=$(sp_cmd_dir)
   printf '%s\n' "${_it_lib%/*/*}"
 }
-inst_hooks_dir() { printf '%s\n' "${DEBIAN_FDE_HOOKS_DIR:-$(inst_tree)/hooks}"; }
-sp_keydir() { printf '%s\n' "${DEBIAN_FDE_KEYDIR:-}"; }
+inst_hooks_dir() { printf '%s\n' "${ALPINE_FDE_HOOKS_DIR:-$(inst_tree)/hooks}"; }
+sp_keydir() { printf '%s\n' "${ALPINE_FDE_KEYDIR:-}"; }
 
 # inst_tooling_copy_cmd TREE MNT — the §8.1 self-contained tooling copy: ship
 # ONLY the product script tree (bin/ lib/ hooks/ docs/) into <mnt>/opt/alpine-fde.
@@ -201,8 +201,8 @@ inst_tooling_copy_cmd() {
     _itc_mkdir="$_itc_mkdir $_itc_mnt/opt/alpine-fde/$_itc_d"
     _itc_cps="$_itc_cps && cp -r $_itc_tree/$_itc_d/. $_itc_mnt/opt/alpine-fde/$_itc_d/"
   done
-  printf '%s%s && ln -sf /opt/alpine-fde/bin/alpine-fde %s/usr/local/bin/alpine-fde && ln -sf alpine-fde %s/usr/local/bin/debian-fde\n' \
-    "$_itc_mkdir" "$_itc_cps" "$_itc_mnt" "$_itc_mnt"
+  printf '%s%s && ln -sf /opt/alpine-fde/bin/alpine-fde %s/usr/local/bin/alpine-fde\n' \
+    "$_itc_mkdir" "$_itc_cps" "$_itc_mnt"
   return 0
 }
 
@@ -244,13 +244,13 @@ MULTIPLE --disk: shared cache set, one independent LUKS2 container per
 /dev/bcacheN, Btrfs RAID1 pool across the members, ESP only on the cache dev.
 --fs ext4 is single-disk only.
 
-Runner (DEBIAN_FDE_INSTALL_RUNNER): dry-run (default) prints the plan (the
+Runner (ALPINE_FDE_INSTALL_RUNNER): dry-run (default) prints the plan (the
 credential ceremony appears as plan records only — no prompt, no secret);
 chroot executes (root, live ISO, --yes required; the three ceremony prompts
 are asked in the execution path); qemu emits a guest script.
-Env: DEBIAN_FDE_ESP_SIZE (default 512M), DEBIAN_FDE_MIRROR,
-DEBIAN_FDE_INSTALL_MNT, DEBIAN_FDE_INSTALL_USER, DEBIAN_FDE_DISKS
-(dispatcher-provided disk list), DEBIAN_FDE_TMPDIR (ephemeral-key staging
+Env: ALPINE_FDE_ESP_SIZE (default 512M), ALPINE_FDE_MIRROR,
+ALPINE_FDE_INSTALL_MNT, ALPINE_FDE_INSTALL_USER, ALPINE_FDE_DISKS
+(dispatcher-provided disk list), ALPINE_FDE_TMPDIR (ephemeral-key staging
 seam, default /dev/shm).
 EOF
 }
@@ -329,7 +329,7 @@ inst_execute_plan() {
   chroot)
     # plan on fd3: executed commands keep the real stdin (tty) so
     # interactive prompts never eat plan lines
-    _ie_plan=$(mktemp "${DEBIAN_FDE_TMPDIR:-${TMPDIR:-/tmp}}/debian-fde-plan.XXXXXX")
+    _ie_plan=$(mktemp "${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}/alpine-fde-plan.XXXXXX")
     printf '%s' "$SPC_PLAN" >"$_ie_plan"
     # L-04a + WR-02: a die mid-plan must leave NOTHING behind — one
     # combined EXIT trap scrubs the plan file AND the staged ephemeral
@@ -356,7 +356,7 @@ inst_execute_plan() {
         # chroot(1) passes the parent environment to the guest (the
         # unattended flow stages no operator passphrase at all; the
         # strip stays as defense against stale operator environments)
-        chroot "$(inst_mnt)" /usr/bin/env -u DEBIAN_FDE_DISK_PASSPHRASE /bin/sh -c "$_ie_cmd" ||
+        chroot "$(inst_mnt)" /usr/bin/env -u ALPINE_FDE_DISK_PASSPHRASE /bin/sh -c "$_ie_cmd" ||
           die "install: guest step failed: $_ie_cmd"
       fi
     done 3<"$_ie_plan"
@@ -364,7 +364,7 @@ inst_execute_plan() {
     rm -f "$_ie_plan"
     ;;
   qemu)
-    _ie_out=${DEBIAN_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}
+    _ie_out=${ALPINE_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}
     {
       printf '#!/bin/sh\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eu\n'
       printf '%s' "$SPC_PLAN" | while IFS='	' read -r _ie_kind _ie_cmd; do
@@ -471,7 +471,7 @@ install_package_list() {
 # preflight check, BEFORE any disk mutation. Authenticated NVRAM writes
 # (db/KEK/PK) require SetupMode==1; a vendor PK still installed would make the
 # in-chroot enrollment fail (or worse, brick the boot entry) — fail closed 64
-# with the operator fix. Runs over the DEBIAN_FDE_EFIVARS_DIR seam.
+# with the operator fix. Runs over the ALPINE_FDE_EFIVARS_DIR seam.
 inst_setupmode_gate() {
   _isg_dir=$(fw_efivars_dir)
   [ -d "$_isg_dir" ] ||
@@ -527,7 +527,7 @@ inst_preflight() {
 
 # inst_stage_ephemeral_key — G-C23 (§9.1 Stage 1 LUKS2 creation, ADR-20):
 # generate the INTERNAL EPHEMERAL INSTALL KEY (openssl rand, 256-bit hex) and
-# stage it under the tmpfs seam (${DEBIAN_FDE_TMPDIR:-/dev/shm}), mode 0600.
+# stage it under the tmpfs seam (${ALPINE_FDE_TMPDIR:-/dev/shm}), mode 0600.
 # The key is the ONLY credential of the TEMPORARY keyslot 2 (§7.2: keyslot 0
 # is reserved for the §9.1 step 4 recovery ceremony) between luksFormat and
 # finalization: it drives luksFormat --key-slot 2, every `cryptsetup open`
@@ -546,8 +546,8 @@ inst_stage_ephemeral_key() {
   if [ "$(inst_runner)" = "dry-run" ]; then
     return 0
   fi
-  _ime_dir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-  _IME_KEYFILE=$(mktemp "$_ime_dir/debian-fde-ephkey.XXXXXX") ||
+  _ime_dir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+  _IME_KEYFILE=$(mktemp "$_ime_dir/alpine-fde-ephkey.XXXXXX") ||
     die "install: cannot stage the ephemeral install key ($_ime_dir usable?)"
   chmod 600 "$_IME_KEYFILE"
   if ! openssl rand -hex 32 | tr -d '\n' >"$_IME_KEYFILE"; then
@@ -619,7 +619,7 @@ inst_prompt_secret() {
 inst_ceremony_floor() {
   command -v passphrase_floor_ok >/dev/null 2>&1 ||
     # shellcheck disable=SC1090
-    . "${DEBIAN_FDE_CMD_DIR:-$(sp_cmd_dir)}/rotate.sh"
+    . "${ALPINE_FDE_CMD_DIR:-$(sp_cmd_dir)}/rotate.sh"
   passphrase_floor_ok "$1"
 }
 
@@ -628,7 +628,7 @@ inst_ceremony_floor() {
 inst_ceremony_keys_lib() {
   command -v keys_encrypt_release >/dev/null 2>&1 && return 0
   # shellcheck disable=SC1090
-  . "${DEBIAN_FDE_CMD_DIR:-$(sp_cmd_dir)}/../keys.sh"
+  . "${ALPINE_FDE_CMD_DIR:-$(sp_cmd_dir)}/../keys.sh"
   return 0
 }
 
@@ -678,8 +678,8 @@ inst_ceremony_recovery() {
     unset _icr_p1 _icr_p2
     warn "install: recovery passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_icr_attempt/3)"
   done
-  _icr_dir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
-  _icr_pf=$(mktemp "$_icr_dir/debian-fde-ceremony.XXXXXX") ||
+  _icr_dir=${ALPINE_FDE_TMPDIR:-/dev/shm}
+  _icr_pf=$(mktemp "$_icr_dir/alpine-fde-ceremony.XXXXXX") ||
     die "install: cannot stage the recovery passphrase ($_icr_dir usable?)"
   chmod 600 "$_icr_pf"
   printf '%s' "$_icr_p1" >"$_icr_pf"
@@ -729,11 +729,11 @@ inst_ceremony_release_key() {
     unset _ick_p1 _ick_p2
     warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_ick_attempt/3)"
   done
-  DEBIAN_FDE_KEY_PASSPHRASE=$_ick_p1
+  ALPINE_FDE_KEY_PASSPHRASE=$_ick_p1
   unset _ick_p1 _ick_p2
   keys_encrypt_release "$_ick_d" ||
     die "install: encrypting release.pem (keys_encrypt_release) failed"
-  unset DEBIAN_FDE_KEY_PASSPHRASE
+  unset ALPINE_FDE_KEY_PASSPHRASE
   chmod 0400 "$_ick_d/release.pem"
   info "install: credential ceremony (3/3): release.pem encrypted (AES-256 PBKDF2, ADR-18), mode 0400"
   return 0
@@ -769,10 +769,10 @@ inst_provisional_enroll_line() {
   # I1: the tail scrubs EVERYTHING the ceremony staged — the random volume
   # passphrase (keys_scrub: overwrite-then-unlink, the shared idiom) and the
   # seal work dir (seal.priv/seal.pub halves + primary.ctx under the
-  # ${DEBIAN_FDE_TMPDIR:-/tmp}-defaulted stage, seal.sh's mktemp pattern) —
+  # ${ALPINE_FDE_TMPDIR:-/tmp}-defaulted stage, seal.sh's mktemp pattern) —
   # not just /run/alpine-fde. The tpm2 argv contract is UNCHANGED (the
   # mkinitfs hook mirrors lib/seal.sh argv-for-argv).
-  printf '%s\n' "export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls $_pel_esp/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && keys_scrub \"\$SEAL_PASS_FILE\" && rm -rf /run/alpine-fde \${DEBIAN_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/debian-fde-seal.* # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1; I1 seal-secret scrub"
+  printf '%s\n' "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy -O binary --only-section=.pcrsig \"\$(ls $_pel_esp/EFI/Linux/alpine-fde-*.efi | head -n 1)\" /run/alpine-fde/pcrsig.json && for m in $_pel_ms; do seal_provisional /etc/alpine-fde/keys /dev/mapper/\$m /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\$m.json && token_add_keyslot /dev/mapper/\$m \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import /dev/mapper/\$m /run/alpine-fde/token-\$m.json \"\$(token_next_id /dev/mapper/\$m)\" || exit 1; done && keys_scrub \"\$SEAL_PASS_FILE\" && rm -rf /run/alpine-fde \${ALPINE_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/alpine-fde-seal.* # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1; I1 seal-secret scrub"
 }
 
 # inst_baseline_pending_write MNT — §9.1 Stage-1 step 2: write the initial
@@ -796,18 +796,18 @@ inst_baseline_pending_write() {
 # inst_state_write STATE — §9.1 Stage-1 step 9: record the ceremony state
 # machine (installed → provisional-booted → finalized) in
 # <mnt>/etc/alpine-fde/install-state.json. Consumes the install-state module's
-# istate_write STATE (target root via DEBIAN_FDE_ROOT, atomic write); if the
+# istate_write STATE (target root via ALPINE_FDE_ROOT, atomic write); if the
 # module is not landed, the additive documented schema is written in place.
 # NOTE (§9.1): install writes only `installed` — the `provisional-booted`
 # middle state is written by the first-boot finalize service (Stage 2).
 inst_state_write() {
   _isw_state=$1
   if command -v istate_write >/dev/null 2>&1; then
-    _isw_saved=${DEBIAN_FDE_ROOT:-}
-    DEBIAN_FDE_ROOT=$(inst_mnt)
+    _isw_saved=${ALPINE_FDE_ROOT:-}
+    ALPINE_FDE_ROOT=$(inst_mnt)
     istate_write "$_isw_state"
-    unset DEBIAN_FDE_ROOT
-    [ -n "$_isw_saved" ] && DEBIAN_FDE_ROOT=$_isw_saved
+    unset ALPINE_FDE_ROOT
+    [ -n "$_isw_saved" ] && ALPINE_FDE_ROOT=$_isw_saved
     info "install: install-state written: $_isw_state ($(inst_mnt)/etc/alpine-fde/install-state.json)"
     return 0
   fi
@@ -826,54 +826,54 @@ cmd_install_main() {
   _im_fs=''
   _im_no_reboot=0
   _im_esp_given=0
-  # §8.1: --disk is repeatable and ACCUMULATES. DEBIAN_FDE_DISKS (the
+  # §8.1: --disk is repeatable and ACCUMULATES. ALPINE_FDE_DISKS (the
   # dispatcher-provided list from repeated global --disk flags) is CONSUMED
-  # here, never re-parsed; the legacy single DEBIAN_FDE_DISK seeds the list.
-  _im_disks=${DEBIAN_FDE_DISKS:-}
-  if [ -z "$_im_disks" ] && [ -n "${DEBIAN_FDE_DISK:-}" ]; then
-    _im_disks=$DEBIAN_FDE_DISK
+  # here, never re-parsed; the legacy single ALPINE_FDE_DISK seeds the list.
+  _im_disks=${ALPINE_FDE_DISKS:-}
+  if [ -z "$_im_disks" ] && [ -n "${ALPINE_FDE_DISK:-}" ]; then
+    _im_disks=$ALPINE_FDE_DISK
   fi
   while [ $# -gt 0 ]; do
     case $1 in
     --disk)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --disk requires an argument"
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --disk requires an argument"
       _im_disks="$_im_disks $2"
       shift
       ;;
     --fs)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --fs requires an argument"
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --fs requires an argument"
       _im_fs=$2
       shift
       ;;
     --bcache)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --bcache requires an argument"
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --bcache requires an argument"
       _im_bcache=$2
       shift
       ;;
     --esp)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --esp requires an argument"
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --esp requires an argument"
       INST_ESP_MNT=$2
       _im_esp_given=1
       shift
       ;;
     --no-reboot) _im_no_reboot=1 ;;
     --keydir)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --keydir requires an argument"
-      DEBIAN_FDE_KEYDIR=$2
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --keydir requires an argument"
+      ALPINE_FDE_KEYDIR=$2
       shift
       ;;
     --user)
-      [ $# -ge 2 ] || die -r "$DEBIAN_FDE_USAGE" "install: --user requires an argument"
-      DEBIAN_FDE_INSTALL_USER=$2
+      [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --user requires an argument"
+      ALPINE_FDE_INSTALL_USER=$2
       shift
       ;;
     -y | --yes) _im_yes=1 ;;
-    --dry-run) DEBIAN_FDE_DRY_RUN=1 ;;
+    --dry-run) ALPINE_FDE_DRY_RUN=1 ;;
     -h | --help)
       install_usage
       return 0
       ;;
-    *) die -r "$DEBIAN_FDE_USAGE" "install: unknown argument: $1" ;;
+    *) die -r "$ALPINE_FDE_USAGE" "install: unknown argument: $1" ;;
     esac
     shift
   done
@@ -882,13 +882,13 @@ cmd_install_main() {
   case $(inst_runner) in
   dry-run | chroot | qemu) : ;;
   *)
-    die -r "$DEBIAN_FDE_USAGE" "install: unknown runner '$(inst_runner)' (want: $SPC_INSTALL_RUNNERS)"
+    die -r "$ALPINE_FDE_USAGE" "install: unknown runner '$(inst_runner)' (want: $SPC_INSTALL_RUNNERS)"
     ;;
   esac
-  if [ "$(inst_runner)" != "dry-run" ] && [ "$_im_yes" -eq 0 ] && [ "${DEBIAN_FDE_YES:-}" != "1" ]; then
+  if [ "$(inst_runner)" != "dry-run" ] && [ "$_im_yes" -eq 0 ] && [ "${ALPINE_FDE_YES:-}" != "1" ]; then
     # L-06: gate on the AFFIRMATIVE value — "0"/"no" are refusals, not
     # consent (aligns with prov_stage2's = "1" comparison)
-    die -r "$DEBIAN_FDE_USAGE" "install: destructive run (runner=$(inst_runner)) requires --yes"
+    die -r "$ALPINE_FDE_USAGE" "install: destructive run (runner=$(inst_runner)) requires --yes"
   fi
 
   # --- topology flags (§4.1) --------------------------------------------------
@@ -898,7 +898,7 @@ cmd_install_main() {
   btrfs) : ;;
   ext4) INST_ROOT_FS=ext4 ;;
   *)
-    die -r "$DEBIAN_FDE_USAGE" "install: --fs must be btrfs or ext4 (got: $_im_fs)"
+    die -r "$ALPINE_FDE_USAGE" "install: --fs must be btrfs or ext4 (got: $_im_fs)"
     ;;
   esac
   INST_BCACHE=0
@@ -910,25 +910,25 @@ cmd_install_main() {
   # everything below is interpolated into plan records (eval / sh -c) and
   # must be metacharacter-free BEFORE any record is built (and before
   # preflight, so a rejected value executes nothing)
-  [ -n "$_im_disks" ] || die -r "$DEBIAN_FDE_USAGE" "install: no target disk — pass --disk (repeatable for RAID1)"
-  # §8.1 flags contract: --esp (flag wins; env DEBIAN_FDE_ESP; default /efi)
+  [ -n "$_im_disks" ] || die -r "$ALPINE_FDE_USAGE" "install: no target disk — pass --disk (repeatable for RAID1)"
+  # §8.1 flags contract: --esp (flag wins; env ALPINE_FDE_ESP; default /efi)
   # names the ESP mount point UNDER the target root. Validated loudly (rc 2):
   # never '/', never empty, never a bare relative name, never shell-unsafe.
   if [ "$_im_esp_given" = "0" ]; then
-    INST_ESP_MNT=${DEBIAN_FDE_ESP:-/efi}
+    INST_ESP_MNT=${ALPINE_FDE_ESP:-/efi}
   fi
   # validate the RAW value (inst_esp_mnt defaults an empty INST_ESP_MNT —
   # an explicit --esp '' must die, never silently fall back to /efi)
   case ${INST_ESP_MNT-} in
   '' | / | [^/]*)
-    die -r "$DEBIAN_FDE_USAGE" "install: --esp must be a mount point under the target root (e.g. /efi or /boot/efi) — got: '${INST_ESP_MNT-}'"
+    die -r "$ALPINE_FDE_USAGE" "install: --esp must be a mount point under the target root (e.g. /efi or /boot/efi) — got: '${INST_ESP_MNT-}'"
     ;;
   esac
   inst_shell_safe 'ESP mount point' "${INST_ESP_MNT-}"
   if [ "$INST_BCACHE" = "1" ]; then
     inst_shell_safe '--bcache' "$_im_bcache"
     if [ -z "$_im_disks" ]; then
-      die -r "$DEBIAN_FDE_USAGE" "install: --bcache needs a backing disk — pass --disk BACKING"
+      die -r "$ALPINE_FDE_USAGE" "install: --bcache needs a backing disk — pass --disk BACKING"
     fi
   fi
   _im_n=0
@@ -937,29 +937,29 @@ cmd_install_main() {
     _im_n=$((_im_n + 1))
   done
   if [ "$INST_ROOT_FS" = "ext4" ] && [ "$_im_n" -gt 1 ]; then
-    die -r "$DEBIAN_FDE_USAGE" "install: --fs ext4 is single-disk only — multi-disk root requires Btrfs RAID1"
+    die -r "$ALPINE_FDE_USAGE" "install: --fs ext4 is single-disk only — multi-disk root requires Btrfs RAID1"
   fi
   case $(inst_user) in
   '' | [-]* | *[!a-zA-Z0-9_.-]*)
-    die -r "$DEBIAN_FDE_USAGE" "install: invalid --user '$(inst_user)' (allowed: letters, digits, '.', '_', '-')"
+    die -r "$ALPINE_FDE_USAGE" "install: invalid --user '$(inst_user)' (allowed: letters, digits, '.', '_', '-')"
     ;;
   esac
-  inst_shell_safe 'DEBIAN_FDE_INSTALL_MNT' "$(inst_mnt)"
-  inst_shell_safe 'DEBIAN_FDE_MIRROR' "$(inst_mirror)"
-  inst_shell_safe 'DEBIAN_FDE_ESP_SIZE' "$(inst_esp_size)"
-  inst_shell_safe 'DEBIAN_FDE_HOOKS_DIR' "$(inst_hooks_dir)"
+  inst_shell_safe 'ALPINE_FDE_INSTALL_MNT' "$(inst_mnt)"
+  inst_shell_safe 'ALPINE_FDE_MIRROR' "$(inst_mirror)"
+  inst_shell_safe 'ALPINE_FDE_ESP_SIZE' "$(inst_esp_size)"
+  inst_shell_safe 'ALPINE_FDE_HOOKS_DIR' "$(inst_hooks_dir)"
   # WR-01: --keydir rides into eval'd records — same boundary rule. CONSUMED
   # (not ignored): when given, the operator-supplied key material is staged
   # from the medium and the in-chroot keygen is skipped (§8.1 provision row,
   # ADR-18 — README "provision stage1 on USB -> install --keydir").
-  [ -n "$(sp_keydir)" ] && inst_shell_safe 'DEBIAN_FDE_KEYDIR' "$(sp_keydir)"
+  [ -n "$(sp_keydir)" ] && inst_shell_safe 'ALPINE_FDE_KEYDIR' "$(sp_keydir)"
   _im_kd=$(sp_keydir)
   if [ -n "$_im_kd" ]; then
     [ -d "$_im_kd" ] ||
-      die -r "$DEBIAN_FDE_USAGE" "install: --keydir directory not found: $_im_kd (ADR-18: the signing medium from 'provision stage1')"
+      die -r "$ALPINE_FDE_USAGE" "install: --keydir directory not found: $_im_kd (ADR-18: the signing medium from 'provision stage1')"
     for _im_kf in $INST_KEYDIR_ARTIFACTS; do
       [ -f "$_im_kd/$_im_kf" ] ||
-        die -r "$DEBIAN_FDE_USAGE" "install: --keydir missing key artifact: $_im_kd/$_im_kf (run 'provision stage1' on the medium first, ADR-18)"
+        die -r "$ALPINE_FDE_USAGE" "install: --keydir missing key artifact: $_im_kd/$_im_kf (run 'provision stage1' on the medium first, ADR-18)"
     done
     info "install: --keydir given — key material will be staged from the medium ($_im_kd); NO in-chroot keygen (§8.1/ADR-18)"
   fi
@@ -1247,7 +1247,7 @@ cmd_install_main() {
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
   # BCACHE=0 — consumers must not require the file to exist.
   inst_plan_write /etc/alpine-fde/alpine-fde.conf \
-    '# debian-fde runtime config (KEY=VALUE).' \
+    '# alpine-fde runtime config (KEY=VALUE).' \
     '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0.' \
     "ROOT_FS=$(inst_root_fs)" \
     "BCACHE=$(inst_bcache)" \
@@ -1312,7 +1312,7 @@ cmd_install_main() {
   inst_plan_run host "inst_ceremony_release_key $_im_keys # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18, own §13 entropy floor), mode 0400"
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight)
-  inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
+  inst_plan_run guest 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
   # ESP layout for the in-chroot build (systemd-boot binaries from the apk
   # transaction; ukictl build signs them, §9.1 step 5)
   inst_plan_run guest "bootctl install --esp-path=$_im_esp_mnt --boot-path=$_im_esp_mnt"
@@ -1374,10 +1374,10 @@ EOF
   inst_plan_run host "umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc $_im_mnt/sys/firmware/efi/efivars && umount -R $_im_mnt && $_im_close"
   inst_plan_run host "rm -f $_im_lukskey_disp # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
-  if [ "$_im_no_reboot" = "0" ] && [ "${DEBIAN_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
+  if [ "$_im_no_reboot" = "0" ] && [ "${ALPINE_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
     inst_plan_run host 'reboot # §9.1: direct reboot to disk (ADR-20)'
   else
-    info "install: reboot suppressed (DEBIAN_FDE_INSTALL_NO_REBOOT/--no-reboot) — CI seam"
+    info "install: reboot suppressed (ALPINE_FDE_INSTALL_NO_REBOOT/--no-reboot) — CI seam"
   fi
 
   if [ "$(inst_runner)" != "dry-run" ]; then
@@ -1386,7 +1386,7 @@ EOF
     rm -f "$_im_lukskey" 2>/dev/null
     printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
   else
-    printf 'alpine-fde: dry-run plan complete (%s) — execute with DEBIAN_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
+    printf 'alpine-fde: dry-run plan complete (%s) — execute with ALPINE_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
   fi
   return 0
 }

@@ -12,7 +12,7 @@
 # tpm2-device= is required on EVERY such entry; a multi-entry (RAID1) file
 # additionally requires password-cache=yes on every entry (single-disk entries
 # MAY carry it — allowed, not required); with BCACHE=1 persisted in
-# debian-fde.conf the file must be bcache-shaped (exactly ONE root entry).
+# alpine-fde.conf the file must be bcache-shaped (exactly ONE root entry).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -69,12 +69,12 @@ calls() {
 build() {
     # env -i style explicit pass-through: guard verdicts must not depend on
     # leaked shell state between scenarios
-    env DEBIAN_FDE_BIN_TEST=1 DEBIAN_FDE_ROOT="$ROOT" DEBIAN_FDE_ESP="$ESP" \
-        DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys" DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+    env ALPINE_FDE_BIN_TEST=1 ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_ESP="$ESP" \
+        ALPINE_FDE_KEYDIR="$REPO/fixtures/keys" ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REC {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/debian-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 }
 
 # --- 1. crypttab missing entirely --------------------------------------------------
@@ -166,7 +166,7 @@ assert_rc "crypttab 8: single-disk entry MAY carry password-cache=yes" 0 $?
 assert_eq "crypttab 8: initramfs builder invoked" "1" "$(calls)"
 
 # --- 9. conf BCACHE=1: bcache-shaped single-root crypttab passes ----------------------
-printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' >"$TMP/debian-fde.conf"
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' >"$TMP/alpine-fde.conf"
 printf '%s\n' \
     'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
     >"$ROOT/etc/crypttab"
@@ -186,6 +186,6 @@ assert_rc "crypttab 10: BCACHE=1 refuses a multi-entry (RAID1) crypttab (64)" 64
 assert_contains "crypttab 10: marker names the bcache single-entry requirement" \
     "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "bcache"
 assert_eq "crypttab 10: initramfs builder never invoked" "0" "$(calls)"
-rm -f "$TMP/debian-fde.conf" # restore the absent-conf default for later legs
+rm -f "$TMP/alpine-fde.conf" # restore the absent-conf default for later legs
 
 finish

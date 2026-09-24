@@ -46,7 +46,7 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TMP=$(mktemp -d /tmp/debian-fde-pa-accept.XXXXXX)
+TMP=$(mktemp -d /tmp/alpine-fde-pa-accept.XXXXXX)
 cleanup() {
     swtpm_cleanup_all
     rm -rf "$TMP"
@@ -59,8 +59,8 @@ swtpm_start "$TPMDIR" || {
     exit 1
 }
 # Route the repo-wide tpm() TCTI wrapper (lib/common.sh) at the fixture
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 flushall() { tpm flushcontext -t >/dev/null 2>&1 || true; }
 flushall
 

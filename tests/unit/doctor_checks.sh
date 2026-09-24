@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/doctor_checks.sh — `debian-fde doctor` readiness contract:
+# tests/unit/doctor_checks.sh — `alpine-fde doctor` readiness contract:
 # rc 0 when hard-required binaries + TPM are OK; rc 1 on missing binaries or
 # unreachable TPM; Secure Boot / apt problems are warnings, never fatal;
 # doctor performs NO state changes (never invokes apt-get install).
@@ -12,11 +12,11 @@ source "$HERE/../lib/assert.sh"
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$HERE/../lib/swtpm-fixture.sh"
 
-T=$(mktemp -d /tmp/debian-fde-doctor.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-doctor.XXXXXX)
 FAKEBIN=$T/bin
 EFIVARS=$T/efivars
 mkdir -p "$FAKEBIN" "$EFIVARS"
-export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
 
 cleanup() {
     swtpm_cleanup_all
@@ -67,7 +67,7 @@ cat >"$FAKEBIN/apt-get" <<'EOF'
 #!/bin/sh
 for a in "$@"; do
     case $a in
-        install) touch "${DEBIAN_FDE_DOCTOR_MARKER:-/nonexistent}" ;;
+        install) touch "${ALPINE_FDE_DOCTOR_MARKER:-/nonexistent}" ;;
     esac
 done
 exit 0
@@ -75,19 +75,19 @@ EOF
 chmod +x "$FAKEBIN/apt-get"
 export PATH="$FAKEBIN:$PATH"
 
-export DEBIAN_FDE_NO_INSTALL=1          # belt+braces: never touch apt even if logic changes
-export DEBIAN_FDE_DOCTOR_MARKER="$T/marker"
+export ALPINE_FDE_NO_INSTALL=1          # belt+braces: never touch apt even if logic changes
+export ALPINE_FDE_DOCTOR_MARKER="$T/marker"
 
 # run_doctor ARGS... — capture rc + combined output
 run_doctor() {
-    DOCTOR_OUT=$("$REPO/bin/debian-fde" doctor "$@" 2>&1)
+    DOCTOR_OUT=$("$REPO/bin/alpine-fde" doctor "$@" 2>&1)
     DOCTOR_RC=$?
 }
 
 # --- 1. all good: swtpm up, SB on, binaries present ---------------------------
 STATE=$T/swtpm
 assert_rc "swtpm fixture starts" 0 swtpm_start "$STATE"
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 mkvar SecureBoot 1
 mkvar SetupMode 0
 run_doctor
@@ -99,7 +99,7 @@ assert_contains "mkinitfs is a hard binary on Alpine (ADR-13)" "$DOCTOR_OUT" "[o
 assert_not_contains "no systemd-cryptenroll anywhere (ADR-19: absent on Alpine)" "$DOCTOR_OUT" "systemd-cryptenroll"
 assert_not_contains "no dracut anywhere (ADR-13: rejected)" "$DOCTOR_OUT" "dracut"
 assert_not_contains "no debootstrap anywhere (Alpine bootstraps via apk)" "$DOCTOR_OUT" "debootstrap"
-if [[ -e "$DEBIAN_FDE_DOCTOR_MARKER" ]]; then
+if [[ -e "$ALPINE_FDE_DOCTOR_MARKER" ]]; then
     assert_eq "doctor never installs (no apt-get install)" "absent" "present"
 else
     assert_eq "doctor never installs (no apt-get install)" "absent" "absent"
@@ -125,7 +125,7 @@ assert_eq "host-installer tools present: rc stays 0" "0" "$DOCTOR_RC"
 rm "$FAKEBIN/sfdisk"
 NOHOST_BIN=$T/bin-nohost
 mirror_path "$NOHOST_BIN" apt-get sfdisk
-DOCTOR_OUT=$(PATH="$NOHOST_BIN" "$REPO/bin/debian-fde" doctor 2>&1)
+DOCTOR_OUT=$(PATH="$NOHOST_BIN" "$REPO/bin/alpine-fde" doctor 2>&1)
 DOCTOR_RC=$?
 assert_contains "host-installer tool absent reported as warn (not [missing])" "$DOCTOR_OUT" "[warn]    sfdisk"
 assert_not_contains "host-installer absence never hard-fails" "$DOCTOR_OUT" "[missing] sfdisk"
@@ -140,7 +140,7 @@ cat >"$FAKEBIN/apk" <<'EOF'
 #!/bin/sh
 for a in "$@"; do
     case $a in
-        add) touch "${DEBIAN_FDE_DOCTOR_MARKER:-/nonexistent}" ;;
+        add) touch "${ALPINE_FDE_DOCTOR_MARKER:-/nonexistent}" ;;
     esac
 done
 exit 0
@@ -149,7 +149,7 @@ chmod +x "$FAKEBIN/apk"
 run_doctor
 assert_contains "apk index reachable reported (G-A9)" "$DOCTOR_OUT" "apk repository index reachable"
 assert_eq "doctor never installs via apk add (marker)" "absent" \
-    "$([ -e "$DEBIAN_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
+    "$([ -e "$ALPINE_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
 
 # G-A10: with apk the present manager, a missing binary's manual hint must be
 # apk-flavored, not the apt-get line (ADR-15 dual backend)
@@ -174,23 +174,23 @@ rm "$FAKEBIN/apk"
 # apk absent entirely (Debian-era host) → warn + verdict intact
 NOAPK_BIN=$T/bin-noapk
 mirror_path "$NOAPK_BIN" apk
-DOCTOR_OUT=$(PATH="$NOAPK_BIN" "$REPO/bin/debian-fde" doctor 2>&1)
+DOCTOR_OUT=$(PATH="$NOAPK_BIN" "$REPO/bin/alpine-fde" doctor 2>&1)
 DOCTOR_RC=$?
 assert_contains "apk absent warns (G-A9)" "$DOCTOR_OUT" "apk not found"
 assert_eq "apk absent: rc stays 0" "0" "$DOCTOR_RC"
 assert_contains "apk absent: verdict still prints" "$DOCTOR_OUT" "verdict:"
 assert_eq "apk absent: doctor still never installs" "absent" \
-    "$([ -e "$DEBIAN_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
+    "$([ -e "$ALPINE_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
 
 # --- 3. unreachable TPM → rc 1 --------------------------------------------------
-export DEBIAN_FDE_TCTI="device:/nonexistent-tpmrm0"
+export ALPINE_FDE_TCTI="device:/nonexistent-tpmrm0"
 run_doctor
 assert_eq "doctor rc 1 when TPM unreachable" "1" "$DOCTOR_RC"
 assert_contains "tpm failure reported" "$DOCTOR_OUT" "no TPM 2.0 answered"
 assert_contains "verdict NOT READY (tpm)" "$DOCTOR_OUT" "NOT READY"
 
 # --- 4. SB off / unreadable efivars → warning only, rc stays 0 ------------------
-export DEBIAN_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI=$SWTPM_TCTI
 rm -f "$EFIVARS"/SecureBoot-*
 mkvar SecureBoot 0
 run_doctor
@@ -229,7 +229,7 @@ if [ -e "$NOAPT_BIN/apt-get" ]; then
 else
     assert_eq "apt-less fixture: no apt-get visible" "absent" "absent"
 fi
-DOCTOR_OUT=$(PATH="$NOAPT_BIN" "$REPO/bin/debian-fde" doctor 2>&1)
+DOCTOR_OUT=$(PATH="$NOAPT_BIN" "$REPO/bin/alpine-fde" doctor 2>&1)
 DOCTOR_RC=$?
 assert_eq "apt-less host: doctor completes with the verdict (H-01)" "0" "$DOCTOR_RC"
 assert_contains "apt-less: apt warning present" "$DOCTOR_OUT" "apt-get not found"
@@ -237,23 +237,23 @@ assert_contains "apt-less: report NOT truncated — CI extras section prints" "$
 assert_contains "apt-less: report NOT truncated — verdict prints" "$DOCTOR_OUT" "verdict:"
 assert_contains "apt-less: verdict READY (apt is non-gating)" "$DOCTOR_OUT" "READY"
 assert_eq "apt-less: doctor still never installs" "absent" \
-    "$([ -e "$DEBIAN_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
+    "$([ -e "$ALPINE_FDE_DOCTOR_MARKER" ] && echo present || echo absent)"
 
 # --- 4c. OVMF code/vars report (G-A11): CI extras, non-gating ------------------
-# §8.1 "OVMF/QEMU prereqs (CI)": presence read from the DEBIAN_FDE_OVMF_DIR
-# env seam (same DEBIAN_FDE_* convention as DEBIAN_FDE_EFIVARS_DIR); present
+# §8.1 "OVMF/QEMU prereqs (CI)": presence read from the ALPINE_FDE_OVMF_DIR
+# env seam (same ALPINE_FDE_* convention as ALPINE_FDE_EFIVARS_DIR); present
 # AND absent are both non-gating.
-export DEBIAN_FDE_OVMF_DIR=$T/ovmf
-mkdir -p "$DEBIAN_FDE_OVMF_DIR"
+export ALPINE_FDE_OVMF_DIR=$T/ovmf
+mkdir -p "$ALPINE_FDE_OVMF_DIR"
 run_doctor
 assert_contains "OVMF absent warns (G-A11)" "$DOCTOR_OUT" "OVMF firmware not found"
 assert_eq "OVMF absence does not gate" "0" "$DOCTOR_RC"
-: >"$DEBIAN_FDE_OVMF_DIR/OVMF_CODE.fd"
-: >"$DEBIAN_FDE_OVMF_DIR/OVMF_VARS.fd"
+: >"$ALPINE_FDE_OVMF_DIR/OVMF_CODE.fd"
+: >"$ALPINE_FDE_OVMF_DIR/OVMF_VARS.fd"
 run_doctor
 assert_contains "OVMF code+vars reported ok (G-A11)" "$DOCTOR_OUT" "OVMF code + vars present"
 assert_eq "OVMF presence does not gate either" "0" "$DOCTOR_RC"
-unset DEBIAN_FDE_OVMF_DIR
+unset ALPINE_FDE_OVMF_DIR
 
 # --- 4d. systemd-boot version vs the ADR-1 pin (G-A12) -------------------------
 # ADR-1: Alpine ≥ 3.24 ships systemd-boot 260.2. Older → warning naming the

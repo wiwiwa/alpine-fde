@@ -66,7 +66,7 @@
 #     but not the bcache udev rules, so the rules-based auto-registration
 #     production path is out of scope for the harness initrd.
 #   * UNLOCK PATH PIN (documented, not silent): every UKI this scenario builds
-#     pins `debian-fde-unlock=oracle`. The §8.2 hook is the shipped unlock of
+#     pins `alpine-fde-unlock=oracle`. The §8.2 hook is the shipped unlock of
 #     record, but it cannot host this topology at all: /init's hook staging
 #     resolves the crypttab member from `cryptsetup luksUUID /dev/vdb`, and
 #     vdb is the RAW bcache backing member (the LUKS container lives on
@@ -130,12 +130,12 @@ ESP_HEADROOM_MIB=8
 CACHE_MIB=512
 BACKING_MIB=796
 
-export QEMU_TIMEOUT="${DEBIAN_FDE_S19_TIMEOUT:-900}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S19_TIMEOUT:-900}"
 
 # recalibrated 2026-09-23: run-e2e's outer SCENARIO_BUDGET is now 1500 s —
 # the internal budget must fire FIRST (loud exit 125 + stage name) instead of
 # letting the outer rc-124 kill win silently.
-OVERALL_BUDGET="${DEBIAN_FDE_S19_BUDGET:-1440}"
+OVERALL_BUDGET="${ALPINE_FDE_S19_BUDGET:-1440}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
 SWTPM_DIRS=()
@@ -221,13 +221,14 @@ wait_console_soft() {
 RUN="$TESTS/e2e/.runs/s19-bcache-crash-$(date +%s)"
 mkdir -p "$RUN"
 
-# §13-floor-OK credentials for the in-guest finalize (the *debian-fde*
-# substring is blocklisted by the entropy floor; >=16 chars passes). The
+# §13-floor-OK credentials for the in-guest finalize (the *alpine-fde*
+# substring is blocklisted by the entropy floor, so these avoid it; >=16
+# chars passes). The
 # recovery passphrase is REKEYED into keyslot 0 in-guest (the Stage-1
 # credential-ceremony stand-in); the key passphrase encrypts release.pem at
 # finalize STEP 2 (ADR-18).
-S19_RECOVERY='alpine-fde-s19-recovery-9f27c4'
-S19_KEYPASS='alpine-fde-s19-release-pbkdf2-k7'
+S19_RECOVERY='fde-s19-recovery-9f27c4'
+S19_KEYPASS='fde-s19-release-pbkdf2-k7'
 
 (
     while :; do
@@ -240,7 +241,7 @@ REFRESHER=$!
 
 find "$TESTS/e2e/.runs" -maxdepth 1 -type d -name 's19-bcache-crash-*' | sort -r |
     tail -n +3 | while IFS= read -r d; do
-        case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
+        case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$d:"*) continue ;; esac
         rm -rf "$d"
     done
 
@@ -293,9 +294,9 @@ _qemu_alive() {
 # ============================================================================
 keys_create "$RUN/keys" || { echo "s19: keys_create failed"; exit 1; }
 
-DEBIAN_FDE_DEBUG_SHELL=1 DEBIAN_FDE_ROOTFS_SHA= DEBIAN_FDE_ROOTFS_BYTES= \
+ALPINE_FDE_DEBUG_SHELL=1 ALPINE_FDE_ROOTFS_SHA= ALPINE_FDE_ROOTFS_BYTES= \
     run_stage uki_build 1200 \
-    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "debian-fde-unlock=oracle"
+    uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi" "alpine-fde-unlock=oracle"
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 ESP_MIB=$(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB ))
 
@@ -508,10 +509,10 @@ feed_line "$RUN/bootstrap/serial.sock" \
     'i=0; while [ ! -b /dev/bcache0 ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-OK || echo BC0-ABSENT-$((45+6)); grep -o "\[writethrough\]" /sys/block/bcache0/bcache/cache_mode && echo WT-$((45+7))-OK; echo "STATE $(cat /sys/block/bcache0/bcache/state)"'
 wait_console "$RUN/bootstrap" "BC0-51-OK" 120
 feed_line "$RUN/bootstrap/serial.sock" \
-    "printf %s $DEBIAN_FDE_SLOT0_PASSPHRASE | cryptsetup luksFormat --type luks2 --pbkdf=argon2id --pbkdf-memory=16000 --pbkdf-parallel=1 --pbkdf-force-iterations=4 --batch-mode /dev/bcache0 && echo LKF-$((45+8))-OK"
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup luksFormat --type luks2 --pbkdf=argon2id --pbkdf-memory=16000 --pbkdf-parallel=1 --pbkdf-force-iterations=4 --batch-mode /dev/bcache0 && echo LKF-$((45+8))-OK"
 wait_console "$RUN/bootstrap" "LKF-53-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
-    "printf %s $DEBIAN_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
 wait_console "$RUN/bootstrap" "LKO-54-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
     'mkfs.btrfs -f /dev/mapper/root >/tmp/mk.log 2>&1 && mkdir -p /btop && mount -t btrfs /dev/mapper/root /btop && btrfs subvolume create /btop/@ && printf "s19-canary bcache writethrough\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /btop && cryptsetup close root && echo BOOT-$((46+0))-DONE'
@@ -534,7 +535,7 @@ assert_contains "bootstrap: bcache state clean after attach" \
 printf 'root UUID=%s none luks,tpm2-device=auto,discard\n' "$LUKS_UUID" >"$TOOLING/etc/crypttab"
 run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine-fde/keys/release.pub"
 # release.pem: the release key in the ADR-18 PLAINTEXT staging form (finalize
-# step 2 encrypts it in-guest with DEBIAN_FDE_KEY_PASSPHRASE; the fixture's
+# step 2 encrypts it in-guest with ALPINE_FDE_KEY_PASSPHRASE; the fixture's
 # db/release identity is ONE key, ADR-11)
 run_stage tooling-release-pem 60 cp "$RUN/keys/db.key" "$TOOLING/etc/alpine-fde/keys/release.pem"
 EFIVARS="$RUN/efivars-sb-on"
@@ -581,19 +582,19 @@ cat >"$RUN/rootfs-etc/etc/alpine-fde/baseline.json" <<'JSON'
 }
 JSON
 _ensure_tpm "$RUN/tpm"
-if AUDIT_OUT=$(DEBIAN_FDE_ROOT="$RUN/rootfs-etc" \
-    DEBIAN_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
-    DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-    DEBIAN_FDE_EVENTLOG="$RUN/rootfs-etc/eventlog-absent" \
-    DEBIAN_FDE_NO_INSTALL=1 \
+if AUDIT_OUT=$(ALPINE_FDE_ROOT="$RUN/rootfs-etc" \
+    ALPINE_FDE_TCTI="swtpm:path=$RUN/tpm/sock" \
+    ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+    ALPINE_FDE_EVENTLOG="$RUN/rootfs-etc/eventlog-absent" \
+    ALPINE_FDE_NO_INSTALL=1 \
     timeout 300 "$REPO/bin/alpine-fde" audit --init 2>&1); then
     _assert_result ok "S-19: audit --init finalized the baseline (real CLI, rc 0)" ""
 else
     _assert_result not-ok "S-19: audit --init finalized the baseline (real CLI, rc 0)" \
         "output: $(tail -2 <<<"$AUDIT_OUT")"
 fi
-PCR7_B=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)
-sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)\",|" \
+PCR7_B=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)
+sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | cut -d= -f2)\",|" \
     "$RUN/rootfs-etc/etc/alpine-fde/baseline.json"
 if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs-etc/etc/alpine-fde/baseline.json" \
     || [[ -z "$PCR7_B" ]]; then
@@ -622,7 +623,7 @@ mkdir -p "$RUN/relkey"
 run_stage relkey-pem 60 cp "$RUN/keys/db.key" "$RUN/relkey/release.pem"
 run_stage relkey-crt 60 cp "$RUN/keys/db.crt" "$RUN/relkey/release.crt"
 run_stage relkey-pub 60 cp "$RUN/keys/release.pub" "$RUN/relkey/release.pub"
-DEBIAN_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-711 600 \
+ALPINE_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-711 600 \
     "$REPO/bin/alpine-fde" pcrsign \
     --linux "$RUN/guest-tree/vmlinuz" --initrd "$RUN/initrd.cpio" \
     --cmdline "$RUN/cmdline.txt" --os-release "$RUN/os-release.txt" \
@@ -637,7 +638,7 @@ assert_eq "S-19: pcrsign produced the {7,11} policy signature (§6.1.1)" '[[7,11
 # derives — a divergence here is a loud pre-boot failure with both artifacts
 # on disk, never an anonymous rc 64 three stages later.
 if ! source "$REPO/lib/policy.sh" 2>/dev/null; then source "$TESTS/../lib/policy.sh"; fi
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"   # BEFORE seal.sh (sibling resolution)
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"   # BEFORE seal.sh (sibling resolution)
 # shellcheck source=../../lib/token.sh  (token_import for the projection)
 source "$REPO/lib/token.sh"
 # shellcheck source=../../lib/keys.sh  (keys_dir/keys_unlock under the seal libs)
@@ -693,7 +694,7 @@ feed_line "$P1/serial.sock" \
 wait_console "$P1" "STP-53-OK" 60
 wait_console "$P1" "DM-52" 120
 feed_line "$P1/serial.sock" \
-    "printf %s $DEBIAN_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/mapper/rootraw root && echo LKO-$((45+9))-OK"
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/mapper/rootraw root && echo LKO-$((45+9))-OK"
 wait_console "$P1" "LKO-54-OK" 300
 feed_line "$P1/serial.sock" \
     'mkdir -p /mnt && mount -t btrfs -o ro,subvol=@ /dev/mapper/root /mnt && echo MNT-$((44+2))-OK && grep " /mnt btrfs" /proc/mounts | grep -qw ro && echo RO-$((44+3))-OK; echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)"; echo "LUKSUUID $(cryptsetup luksUUID /dev/mapper/rootraw)"; umount /mnt; cryptsetup close root; dmsetup remove rootraw; echo P1-$((44+6))-DONE'
@@ -764,13 +765,13 @@ feed_line "$P2/serial.sock" \
     'S=$(cat /sys/block/bcache0/bcache/state); echo "STATE $S"; echo STG-$((44+6))-DONE'
 wait_console_soft "$P2" "STG-50-DONE" 120 || true
 feed_line "$P2/serial.sock" \
-    "printf %s $DEBIAN_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
 wait_console "$P2" "LKO-54-OK" 300
 feed_line "$P2/serial.sock" \
     'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-OK && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /mnt && echo P2C-$((46+1))-DONE'
 wait_console "$P2" "P2C-47-DONE" 300
 # the Stage-1 credential ceremony stand-in (§9.1 step 4): the fixture's
-# well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*debian-fde*), so the
+# well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*alpine-fde*), so the
 # operator recovery passphrase is REKEYED into keyslot 0 in-guest — exactly the
 # amended contract's shape (recovery at keyslot 0 authorizes Stage 3)
 feed_line "$P2/serial.sock" \
@@ -779,7 +780,7 @@ wait_console "$P2" "RK-45-OK" 300
 # production finalize: crypttab + final baseline + {7,11} .pcrsig came on the
 # tooling tail; the credential seams are the documented CI envs (§9.1 Stage 3)
 feed_line "$P2/serial.sock" \
-    "mkdir -p /run/bu /tmp && ln -sf /dev/bcache0 /run/bu/$LUKS_UUID && export DEBIAN_FDE_NO_INSTALL=1 DEBIAN_FDE_TCTI=device:/dev/tpmrm0 DEBIAN_FDE_BY_UUID_DIR=/run/bu DEBIAN_FDE_RECOVERY_PASSPHRASE=$S19_RECOVERY DEBIAN_FDE_KEYDIR=/etc/alpine-fde/keys DEBIAN_FDE_KEY_PASSPHRASE=$S19_KEYPASS DEBIAN_FDE_TMPDIR=/tmp DEBIAN_FDE_PCRSIG=/pcrsig.json DEBIAN_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
+    "mkdir -p /run/bu /tmp && ln -sf /dev/bcache0 /run/bu/$LUKS_UUID && export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_RECOVERY_PASSPHRASE=$S19_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S19_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
 wait_console "$P2" "P5-43-OK" 120
 feed_line "$P2/serial.sock" 'timeout 300 /opt/alpine-fde/bin/alpine-fde finalize; echo P6-RC=$?'
 i=0
@@ -818,8 +819,8 @@ assert_contains "[phase 2] finalize: no ephemeral keyslot remains (crash-skip of
 assert_contains "[phase 2] finalize: release.pem encrypted in place (ADR-18)" "$LOG_P2" \
     "release.pem encrypted (AES-256 PBKDF2, ADR-18)"
 assert_contains "[phase 2] production CLI upgraded the token to Mechanism B {PCR 7, PCR 11}" "$LOG_P2" \
-    "debian-fde: member $LUKS_UUID: token upgraded to Mechanism B {PCR 7, PCR 11}"
-assert_contains "[phase 2] install finalized marker" "$LOG_P2" "debian-fde: install finalized"
+    "alpine-fde: member $LUKS_UUID: token upgraded to Mechanism B {PCR 7, PCR 11}"
+assert_contains "[phase 2] install finalized marker" "$LOG_P2" "alpine-fde: install finalized"
 assert_eq "[phase 2] production finalize rc 0" "0" "$CLI_RC_P2"
 assert_contains "[phase 2] post-finalize metadata: exactly ONE systemd-tpm2 token" "$LOG_P2" \
     "ENROLLTOK 1"
@@ -838,9 +839,9 @@ assert_not_contains "[phase 2] no emergency shell" "$LOG_P2" "$(sentinel_of emer
 P3="$RUN/phase3"
 run_stage mv-lost-cache-aside 60 mv "$RUN/cache.lost.img" "$RUN/cache-dead.img"
 echo "# phase 3: ESP rebuilt host-side (esp_make + uki_build, same release key) — production boot shape"
-DEBIAN_FDE_DEBUG_SHELL=1 DEBIAN_FDE_ROOTFS_SHA= DEBIAN_FDE_ROOTFS_BYTES= \
+ALPINE_FDE_DEBUG_SHELL=1 ALPINE_FDE_ROOTFS_SHA= ALPINE_FDE_ROOTFS_BYTES= \
     run_stage uki_build-rebuild 1200 \
-    uki_build "$RUN" "$RUN/keys" "$RUN/harness-rebuild.efi" "debian-fde-unlock=oracle"
+    uki_build "$RUN" "$RUN/keys" "$RUN/harness-rebuild.efi" "alpine-fde-unlock=oracle"
 run_stage esp-rebuild 300 esp_make "$RUN/esp-rebuilt.fat" "$ESP_MIB" "$RUN/harness-rebuild.efi"
 run_stage mkfs-cache3-img 60 truncate -s "$(( ESP_MIB + CACHE_MIB + 2 ))M" "$RUN/cache3.img"
 printf 'label: gpt\nname=ESP, size=%d, type=uefi\nname=CACHE, type=linux\n' \
@@ -854,7 +855,7 @@ run_stage esp-into-p1-rebuild 120 bash -c \
 # "7,11" policy entry over the REBUILT UKI's predicted PCR 11 — the runbook's
 # `pcrsign` re-sign leg (§6.1.1), host-side here against the rebuild's own
 # component inputs (the rebuild overwrote guest-tree/initrd.cpio/cmdline.txt).
-DEBIAN_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-rebuild 600 \
+ALPINE_FDE_KEYDIR="$RUN/relkey" run_stage pcrsign-rebuild 600 \
     "$REPO/bin/alpine-fde" pcrsign \
     --linux "$RUN/guest-tree/vmlinuz" --initrd "$RUN/initrd.cpio" \
     --cmdline "$RUN/cmdline.txt" --os-release "$RUN/os-release.txt" \
@@ -890,7 +891,7 @@ timeout 60 cryptsetup luksDump --dump-json-metadata "$RUN/luks-head.img" \
 _ensure_tpm "$RUN/tpm"
 ORACLE_TOKEN="$RUN/standing-token.json" \
 ORACLE_PCRSIG="$RUN/pcrsign-rebuild.json" \
-DEBIAN_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
+ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
     interop_oracle_project "$RUN/proj" "$RUN/relkey" || {
     echo "s19: upstream-257 token projection failed"; exit 1; }
 assert_eq "S-19 phase 3: projected token carries tpm2-policy-hash (upstream schema)" "64" \
@@ -953,7 +954,7 @@ LOG_P3=$(cat "$P3/console.log" 2>/dev/null || true)
 P3_RC=$(grep -oE 'P3ATTACH=[0-9]+' "$P3/console.log" | head -1 | cut -d= -f2)
 P3_CANARY=$(grep -oE 'CANARY-SHA [0-9a-f]{64}' "$P3/console.log" | tail -1 | awk '{print $2}')
 assert_contains "[phase 3] rebuilt UKI is in the fresh ESP (rebuild ran)" "$LOG_P3" \
-    "debian-fde-harness: init started"
+    "alpine-fde-harness: init started"
 assert_contains "[phase 3] bcache stack reassembled (new cache + backing, attached)" "$LOG_P3" \
     "ATT-50-OK"
 assert_contains "[phase 3] bcache state clean" "$LOG_P3" "STATE clean"

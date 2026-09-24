@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/lib/qemu.sh — guest runner for the Debian FDE e2e harness (TCG by
+# tests/lib/qemu.sh — guest runner for the Alpine FDE e2e harness (TCG by
 # default in this sandbox — no /dev/kvm; KVM is used when available, see the
 # accelerator selection below; budget ~2-4 min per TCG boot, so keep boots
 # minimal and always hard-timeout).
@@ -24,7 +24,7 @@
 #     * pure-argv seam: prints (one per line) exactly the argv qemu_run execs.
 #       No pin checks, no sockets, no accelerator probe — unit-testable (the
 #       once-per-process accelerator choice applies: unset => TCG, no -accel).
-#       DEBIAN_FDE_QEMU_NO_TPM=1 omits the tpmdev trio (chardev chrtpm /
+#       ALPINE_FDE_QEMU_NO_TPM=1 omits the tpmdev trio (chardev chrtpm /
 #       tpmdev tpm0 / device tpm-tis) for the TPM-less-machine scenarios
 #       (s10): the guest then has NO TPM character device at all, while the
 #       rest of the shared path (pins, accelerator, console bridge, pid file)
@@ -41,10 +41,10 @@
 # firmware in its TPM handshake before ANY console output — 0 serial bytes,
 # silent hang. (unixio equivalent of the control-port=server+1 TCP quirk.)
 
-if [[ -n "${_DEBIAN_FDE_QEMU_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_QEMU_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_QEMU_SOURCED=1
+_ALPINE_FDE_QEMU_SOURCED=1
 
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-300}"
 
@@ -66,23 +66,23 @@ _QEMU_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$_QEMU_LIB_DIR/serial.sh"
 
 # --- accelerator selection (/dev/kvm is REQUIRED) ---------------------------------
-# DEBIAN_FDE_ACCEL: kvm (default) | tcg. KVM is a hard requirement for e2e
+# ALPINE_FDE_ACCEL: kvm (default) | tcg. KVM is a hard requirement for e2e
 # (§12): an unusable /dev/kvm is a loud fail-closed error — never a silent TCG
 # downgrade (TCG boots blow the per-scenario time budget and corrupt the serial
 # console; the explicit escape hatch below exists for exactly that reason).
-# DEBIAN_FDE_ACCEL=tcg is honored verbatim as the explicitly-requested dev
+# ALPINE_FDE_ACCEL=tcg is honored verbatim as the explicitly-requested dev
 # opt-out; any other value (including the old silent 'auto') is rejected. The
 # decision is made once per process and logged with a greppable `qemu-accel:`
 # marker; every qemu_run in the process then uses the chosen accelerator (the
 # `-accel kvm` flag is added ONLY for KVM, so TCG invocations stay
 # byte-identical). OVMF + swtpm need no accel-specific flags and work
 # identically under both.
-# DEBIAN_FDE_KVM_PROBE_TIMEOUT (seconds, default 10) bounds the KVM probe guest
+# ALPINE_FDE_KVM_PROBE_TIMEOUT (seconds, default 10) bounds the KVM probe guest
 # below: the probe is SELF-TERMINATING (QMP `quit` over stdio), so the bound is
 # only a hang guard — a refusal costs ~0.1s on a broken-KVM host, never a
 # 30s idle-kill.
-DEBIAN_FDE_ACCEL="${DEBIAN_FDE_ACCEL:-kvm}"
-DEBIAN_FDE_KVM_PROBE_TIMEOUT="${DEBIAN_FDE_KVM_PROBE_TIMEOUT:-10}"
+ALPINE_FDE_ACCEL="${ALPINE_FDE_ACCEL:-kvm}"
+ALPINE_FDE_KVM_PROBE_TIMEOUT="${ALPINE_FDE_KVM_PROBE_TIMEOUT:-10}"
 
 _qemu_accel=""
 
@@ -91,13 +91,13 @@ _qemu_accel=""
 # instead of idling until an external killer arrives (the old `timeout 30 …`
 # form paid a 30s hang on every refusal). Success ONLY = KVM-accelerated qemu
 # (a lone `-accel kvm` never falls back to TCG) starts AND exits cleanly within
-# the DEBIAN_FDE_KVM_PROBE_TIMEOUT bound; timeout-kill, nonzero exit, or a
+# the ALPINE_FDE_KVM_PROBE_TIMEOUT bound; timeout-kill, nonzero exit, or a
 # missing binary are all "not working". VERIFIED on this sandbox: 0.115s, rc 0,
 # query-kvm -> {"enabled": true}; with stdin at EOF qemu would idle, hence the
 # piped quit AND the timeout guard (belt and braces).
 _qemu_kvm_probe_run() {
     printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"quit"}' \
-        | timeout "${DEBIAN_FDE_KVM_PROBE_TIMEOUT}" \
+        | timeout "${ALPINE_FDE_KVM_PROBE_TIMEOUT}" \
             qemu-system-x86_64 -accel kvm -machine none -display none \
             -qmp stdio >/dev/null 2>&1
 }
@@ -119,31 +119,31 @@ _qemu_kvm_ok() {
 # once-per-process cache.
 _qemu_accel_choose() {
     [[ -n "$_qemu_accel" ]] && return 0
-    local mode="${DEBIAN_FDE_ACCEL:-kvm}" why
+    local mode="${ALPINE_FDE_ACCEL:-kvm}" why
     case "$mode" in
         tcg)
-            _qemu_accel="tcg"; why="requested (DEBIAN_FDE_ACCEL=tcg)" ;;
+            _qemu_accel="tcg"; why="requested (ALPINE_FDE_ACCEL=tcg)" ;;
         kvm)
             if _qemu_kvm_ok; then
-                _qemu_accel="kvm"; why="requested (DEBIAN_FDE_ACCEL=kvm)"
+                _qemu_accel="kvm"; why="requested (ALPINE_FDE_ACCEL=kvm)"
             else
                 echo "qemu-accel: KVM is REQUIRED for e2e but /dev/kvm is unusable here" >&2
                 echo "  (need /dev/kvm, writable, and a working probe:" >&2
                 echo "   qemu-system-x86_64 -accel kvm -machine none -display none" >&2
-                echo "   -qmp stdio, bounded by DEBIAN_FDE_KVM_PROBE_TIMEOUT" >&2
-                echo "   =${DEBIAN_FDE_KVM_PROBE_TIMEOUT}s: success only on a clean exit)" >&2
+                echo "   -qmp stdio, bounded by ALPINE_FDE_KVM_PROBE_TIMEOUT" >&2
+                echo "   =${ALPINE_FDE_KVM_PROBE_TIMEOUT}s: success only on a clean exit)" >&2
                 echo "  enable KVM (modprobe kvm_intel / kvm_amd) or run on KVM-capable" >&2
-                echo "  hardware; explicitly set DEBIAN_FDE_ACCEL=tcg to opt out anyway" >&2
+                echo "  hardware; explicitly set ALPINE_FDE_ACCEL=tcg to opt out anyway" >&2
                 return 1
             fi
             ;;
         auto)
-            echo "qemu-accel: DEBIAN_FDE_ACCEL=auto removed — KVM is required by default;" >&2
-            echo "  set DEBIAN_FDE_ACCEL=tcg explicitly to request software emulation" >&2
+            echo "qemu-accel: ALPINE_FDE_ACCEL=auto removed — KVM is required by default;" >&2
+            echo "  set ALPINE_FDE_ACCEL=tcg explicitly to request software emulation" >&2
             return 1
             ;;
         *)
-            echo "qemu-accel: invalid DEBIAN_FDE_ACCEL='$mode' (want kvm|tcg)" >&2
+            echo "qemu-accel: invalid ALPINE_FDE_ACCEL='$mode' (want kvm|tcg)" >&2
             return 1
             ;;
     esac
@@ -166,10 +166,10 @@ qemu_accel() {
 # select):
 #   OVMF_CODE / OVMF_VARS_STOCK          path overrides (same vars as the boot
 #                                        code pflash / keys-fixture enrollment)
-#   DEBIAN_FDE_OVMF_CODE_SHA256          expected sha256 of the code image
-#   DEBIAN_FDE_OVMF_VARS_SHA256          expected sha256 of the vars template
-DEBIAN_FDE_OVMF_CODE_SHA256_DEFAULT="cc150d941d4f1d39e596dedc545384a66ccfb3c9ba5cf9bc3a54d8d427d4d88f"
-DEBIAN_FDE_OVMF_VARS_SHA256_DEFAULT="5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e"
+#   ALPINE_FDE_OVMF_CODE_SHA256          expected sha256 of the code image
+#   ALPINE_FDE_OVMF_VARS_SHA256          expected sha256 of the vars template
+ALPINE_FDE_OVMF_CODE_SHA256_DEFAULT="cc150d941d4f1d39e596dedc545384a66ccfb3c9ba5cf9bc3a54d8d427d4d88f"
+ALPINE_FDE_OVMF_VARS_SHA256_DEFAULT="5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e"
 
 _qemu_ovmf_code() { printf '%s\n' "${OVMF_CODE:-/usr/share/ovmf/x64/OVMF_CODE.secboot.4m.fd}"; }
 _qemu_ovmf_vars() { printf '%s\n' "${OVMF_VARS_STOCK:-/usr/share/ovmf/x64/OVMF_VARS.4m.fd}"; }
@@ -198,10 +198,10 @@ _ovmf_pin_one() {
 # (env override wins, else the recorded default). Nonzero = loud mismatch.
 ovmf_pin_check() {
     local rc=0
-    _ovmf_pin_one "$(_qemu_ovmf_code)" DEBIAN_FDE_OVMF_CODE_SHA256 \
-        "$DEBIAN_FDE_OVMF_CODE_SHA256_DEFAULT" || rc=1
-    _ovmf_pin_one "$(_qemu_ovmf_vars)" DEBIAN_FDE_OVMF_VARS_SHA256 \
-        "$DEBIAN_FDE_OVMF_VARS_SHA256_DEFAULT" || rc=1
+    _ovmf_pin_one "$(_qemu_ovmf_code)" ALPINE_FDE_OVMF_CODE_SHA256 \
+        "$ALPINE_FDE_OVMF_CODE_SHA256_DEFAULT" || rc=1
+    _ovmf_pin_one "$(_qemu_ovmf_vars)" ALPINE_FDE_OVMF_VARS_SHA256 \
+        "$ALPINE_FDE_OVMF_VARS_SHA256_DEFAULT" || rc=1
     return "$rc"
 }
 
@@ -281,7 +281,7 @@ qemu_argv() {
         -drive "if=pflash,format=raw,file=$vars" \
         -drive "file=$esp,format=raw,if=virtio" \
         -drive "file=$disk,format=$(_qemu_disk_format "$disk"),if=virtio"
-    if [[ "${DEBIAN_FDE_QEMU_NO_TPM:-}" == "1" ]]; then
+    if [[ "${ALPINE_FDE_QEMU_NO_TPM:-}" == "1" ]]; then
         :   # TPM-less machine (s10): no chardev/tpmdev/tpm-tis trio at all
     else
         # DEVICE INTERFACE: tpm-crb, not tpm-tis. ROOT CAUSE (2026-09-22,

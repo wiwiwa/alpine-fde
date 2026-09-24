@@ -54,24 +54,24 @@ manifest_upsert "$M" "6.1.0-1-amd64" "p11" "pd" "sig"
 BEFORE_ESP=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 BEFORE_MANIFEST=$(cat "$M")
 
-debian-fde() {
-    DEBIAN_FDE_ROOT="$ROOT" \
-        DEBIAN_FDE_ESP="$ESP" \
-        DEBIAN_FDE_KEYDIR="$1" \
-        DEBIAN_FDE_NO_INSTALL=1 \
-        DEBIAN_FDE_CONF="$TMP/debian-fde.conf" \
+alpine-fde() {
+    ALPINE_FDE_ROOT="$ROOT" \
+        ALPINE_FDE_ESP="$ESP" \
+        ALPINE_FDE_KEYDIR="$1" \
+        ALPINE_FDE_NO_INSTALL=1 \
+        ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
-        "$REPO/bin/debian-fde" "${@:2}"
+        "$REPO/bin/alpine-fde" "${@:2}"
 }
 
 # --- case 1: keydir not configured at all --------------------------------------------
-out=$(debian-fde "" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "unconfigured keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error names the missing configuration" "$out" "release key directory not configured"
 
 # --- case 2: keydir exists but is empty (USB not attached / backup not restored) ------
-out=$(debian-fde "$TMP/empty-keydir" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$TMP/empty-keydir" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "empty keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error explains what is missing" "$out" "release.pem is missing"
@@ -84,7 +84,7 @@ assert_contains "recovery copy offers the scp backup + medium paths (ADR-18)" "$
 # --- case 3: keydir has the public key but the private key is offline ------------------
 mkdir -p "$TMP/pubonly"
 cp "$REPO/fixtures/keys/release.pub" "$TMP/pubonly/"
-out=$(debian-fde "$TMP/pubonly" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$TMP/pubonly" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "public-key-only keydir -> fail-closed exit 64 (I4)" 64 $rc
 assert_contains "error names the absent private key" "$out" "release.pem is missing"
@@ -99,13 +99,13 @@ rc=$?
 assert_rc "no predictions.json emitted on failure" 0 "$rc"
 
 marker="$ROOT/etc/alpine-fde/build-failed"
-assert_file_exists "failure marker persisted for debian-fde status" "$marker"
+assert_file_exists "failure marker persisted for alpine-fde status" "$marker"
 assert_contains "marker names the kernel" "$(cat "$marker")" "$KVER"
 assert_contains "marker records the reason" "$(cat "$marker")" "reason:"
 
 # recovery: attach the key (fixture stands in for the signing medium) -> build
 # succeeds and the marker is cleared (§8.3 operator recovery)
-out=$(debian-fde "$REPO/fixtures/keys" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$REPO/fixtures/keys" ukictl build "$KVER" 2>&1)
 rc=$?
 assert_rc "recovery build with the key attached succeeds" 0 $rc
 [ ! -e "$marker" ]

@@ -29,14 +29,14 @@ command -v swtpm >/dev/null 2>&1 || {
     exit 1
 }
 
-TPMDIR=$(mktemp -d /tmp/debian-fde-crosscheck.XXXXXX)
+TPMDIR=$(mktemp -d /tmp/alpine-fde-crosscheck.XXXXXX)
 swtpm_start "$TPMDIR" || {
     echo "FAIL: swtpm did not start" >&2
     exit 1
 }
 # Route the W0 tpm() TCTI wrapper at the fixture (the fixture exports SWTPM_TCTI).
-DEBIAN_FDE_TCTI=$SWTPM_TCTI
-export DEBIAN_FDE_TCTI
+ALPINE_FDE_TCTI=$SWTPM_TCTI
+export ALPINE_FDE_TCTI
 
 # pcr_hex <pcr> — read a PCR via binary output + od (POSIX). NOTE: the W0
 # fixture's swtpm_pcrread awk only matches single-digit PCR lines

@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmd/pcrsign.sh — `debian-fde pcrsign` (docs/Architecture.md §8.1 row pcrsign;
+# cmd/pcrsign.sh — `alpine-fde pcrsign` (docs/Architecture.md §8.1 row pcrsign;
 # normative signer contract §6.1.1, gap G-B4).
 #
 # Standalone signer: combined {7,11} PolicyPCR policy digest -> release-key
@@ -34,7 +34,7 @@
 
 _pcrsign_lib() {
     # shellcheck disable=SC1090  # resolved next to this command file
-    . "$DEBIAN_FDE_CMD_DIR/../$1"
+    . "$ALPINE_FDE_CMD_DIR/../$1"
 }
 
 # _pcrsign_marker_write REASON — persist the ADR-8 failure marker for a
@@ -44,7 +44,7 @@ _pcrsign_lib() {
 # <etc>/build-failed). Only the unlock path writes it: this command is a
 # standalone signer with no ESP/build state of its own.
 _pcrsign_marker_write() {
-    _pm_etc="${DEBIAN_FDE_ROOT:-}/etc/alpine-fde"
+    _pm_etc="${ALPINE_FDE_ROOT:-}/etc/alpine-fde"
     mkdir -p "$_pm_etc" 2>/dev/null || true
     {
         printf 'pcrsign failed (release key unlock, ADR-18)\n'
@@ -71,8 +71,8 @@ Usage: $PROG pcrsign (--uki <file> | --linux <file> [--initrd <file>] [--cmdline
   --baseline <file>   baseline.json override (default: <root>/etc/alpine-fde/)
   --out <file>        write the signature JSON here (default: stdout)
 
-The baseline PCR 7 must be finalized ('debian-fde audit --init'); release key
-material must be available (--keydir / KEY_PATH / DEBIAN_FDE_KEYDIR).
+The baseline PCR 7 must be finalized ('alpine-fde audit --init'); release key
+material must be available (--keydir / KEY_PATH / ALPINE_FDE_KEYDIR).
 EOF
 }
 
@@ -92,7 +92,7 @@ cmd_pcrsign_main() {
                 [ $# -ge 2 ] || {
                     err "pcrsign: option $1 requires an argument"
                     cmd_pcrsign_usage
-                    exit "$DEBIAN_FDE_USAGE"
+                    exit "$ALPINE_FDE_USAGE"
                 }
                 _ps_opt=$1
                 [ "$1" = --uki ] && _ps_uki=$2
@@ -111,12 +111,12 @@ cmd_pcrsign_main() {
             -*)
                 err "pcrsign: unknown option: $1"
                 cmd_pcrsign_usage
-                exit "$DEBIAN_FDE_USAGE"
+                exit "$ALPINE_FDE_USAGE"
                 ;;
             *)
                 err "pcrsign: unexpected argument: $1"
                 cmd_pcrsign_usage
-                exit "$DEBIAN_FDE_USAGE"
+                exit "$ALPINE_FDE_USAGE"
                 ;;
         esac
         shift
@@ -126,12 +126,12 @@ cmd_pcrsign_main() {
     if [ -n "$_ps_uki" ] && [ -n "$_ps_linux" ]; then
         err "pcrsign: --uki and --linux are mutually exclusive"
         cmd_pcrsign_usage
-        exit "$DEBIAN_FDE_USAGE"
+        exit "$ALPINE_FDE_USAGE"
     fi
     if [ -z "$_ps_uki" ] && [ -z "$_ps_linux" ]; then
         err "pcrsign: need a measurement input: --uki <file> or --linux <file>"
         cmd_pcrsign_usage
-        exit "$DEBIAN_FDE_USAGE"
+        exit "$ALPINE_FDE_USAGE"
     fi
     # S-L3: --initrd/--cmdline/--os-release would be silently ignored next to
     # --uki (the UKI's own components are what gets measured)
@@ -140,7 +140,7 @@ cmd_pcrsign_main() {
             if [ -n "$_ps_c" ]; then
                 err "pcrsign: component inputs cannot be combined with --uki (drop them, or sign from components without --uki)"
                 cmd_pcrsign_usage
-                exit "$DEBIAN_FDE_USAGE"
+                exit "$ALPINE_FDE_USAGE"
             fi
         done
     fi
@@ -160,20 +160,20 @@ cmd_pcrsign_main() {
 
     # --- §6.1.1 step 2: finalized baseline PCR 7 (§8.4) ---------------------------
     if [ -z "$_ps_baseline" ]; then
-        _ps_root=${DEBIAN_FDE_ROOT:-}
+        _ps_root=${ALPINE_FDE_ROOT:-}
         _ps_baseline="$_ps_root/etc/alpine-fde/baseline.json"
     fi
     if [ ! -f "$_ps_baseline" ]; then
-        die "pcrsign: baseline file not found: $_ps_baseline (expected the finalized baseline.json — run 'debian-fde audit --init' after the first boot into the final SB state)"
+        die "pcrsign: baseline file not found: $_ps_baseline (expected the finalized baseline.json — run 'alpine-fde audit --init' after the first boot into the final SB state)"
     fi
     _ps_d7=$(jq -r '.expected_pcr7 // empty' "$_ps_baseline" 2>/dev/null || true)
     if [ "$_ps_d7" = "pending" ]; then
-        die "pcrsign: baseline PCR 7 is still pending — boot once into the final SB state and run 'debian-fde audit --init' (§8.4); refusing to sign against an unknown PCR 7"
+        die "pcrsign: baseline PCR 7 is still pending — boot once into the final SB state and run 'alpine-fde audit --init' (§8.4); refusing to sign against an unknown PCR 7"
     fi
-    policy_check_digest "$_ps_d7" || die "pcrsign: baseline has no usable expected_pcr7 digest (got '${_ps_d7:-<none>}' in $_ps_baseline) — run 'debian-fde audit --init' (§8.4)"
+    policy_check_digest "$_ps_d7" || die "pcrsign: baseline has no usable expected_pcr7 digest (got '${_ps_d7:-<none>}' in $_ps_baseline) — run 'alpine-fde audit --init' (§8.4)"
 
     # --- §6.1.1 step 1: expected PCR 11 digest (enter-initrd) ----------------------
-    _ps_work=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-pcrsign.XXXXXX") || die "pcrsign: mktemp failed"
+    _ps_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-pcrsign.XXXXXX") || die "pcrsign: mktemp failed"
     _ps_d11=''
     if [ -n "$_ps_uki" ]; then
         [ -f "$_ps_uki" ] || {
@@ -249,12 +249,12 @@ cmd_pcrsign_main() {
     # release.pem may be the encrypted-at-rest form, and signing with the raw
     # ciphertext would simply fail (or worse, bypass custody). ALPINE_FDE_KEY_
     # PASSPHRASE is the canonical credential-agent env spelling (§8.1); keys_
-    # unlock consumes DEBIAN_FDE_KEY_PASSPHRASE (the finalize.sh mapping).
-    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
-        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
+    # unlock consumes ALPINE_FDE_KEY_PASSPHRASE (the finalize.sh mapping).
+    if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        ALPINE_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
     fi
     _ps_had_pass=0
-    [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && _ps_had_pass=1
+    [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ] && _ps_had_pass=1
     # command substitution: a die inside keys_unlock (missing/wrong passphrase)
     # exits THAT subshell 64 — its stderr is already loud; persist the ADR-8
     # marker, leave NO signature artifact and scrub _ps_work/_ps_tmp (S-L1).
@@ -268,7 +268,7 @@ cmd_pcrsign_main() {
             die "pcrsign: wrong passphrase for $_ps_keydir/release.pem (unlock failed) — no signature written (ADR-8/ADR-18)"
         fi
         _pcrsign_marker_write "release.pem is encrypted and no passphrase is available (ADR-18) — no signature written (ADR-8)"
-        die "pcrsign: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE / DEBIAN_FDE_KEY_PASSPHRASE or run interactively — no signature written (ADR-8/ADR-18)"
+        die "pcrsign: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE / ALPINE_FDE_KEY_PASSPHRASE or run interactively — no signature written (ADR-8/ADR-18)"
     }
 
     if command -v ukify >/dev/null 2>&1; then
@@ -300,7 +300,7 @@ cmd_pcrsign_main() {
     }
 
     # --- §6.1.1 steps 3–5: combined digest + release-key signature JSON -------------
-    _ps_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-pcrsig.XXXXXX") || {
+    _ps_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-pcrsig.XXXXXX") || {
         rm -rf "$_ps_work"
         die "pcrsign: mktemp failed"
     }
@@ -319,7 +319,7 @@ cmd_pcrsign_main() {
     # medium) keydir keys_unlock returned the input path itself
     [ "$_ps_priv" != "$_ps_keydir/release.pem" ] && keys_scrub "$_ps_priv"
     rm -rf "$_ps_work"
-    unset DEBIAN_FDE_KEY_PASSPHRASE ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    unset ALPINE_FDE_KEY_PASSPHRASE ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
 
     if [ -n "$_ps_out" ]; then
         # atomic: same-directory temp + rename (S-M1: a slash-less relative

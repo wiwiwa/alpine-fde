@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/run-e2e.sh — e2e orchestrator for the Debian FDE harness (§12).
+# tests/run-e2e.sh — e2e orchestrator for the Alpine FDE harness (§12).
 #
 # Usage: tests/run-e2e.sh [-j N] [scenario-id ...]
 #   Runs named scenarios (default: every registered scenario), aggregates
@@ -7,7 +7,7 @@
 #
 #   -j N | -jN | --jobs=N   run up to N scenarios CONCURRENTLY (default 1 =
 #                           today's sequential behavior; env
-#                           DEBIAN_FDE_E2E_JOBS presets it). The state chain
+#                           ALPINE_FDE_E2E_JOBS presets it). The state chain
 #                           s00 -> s00b always runs first and alone; the
 #                           remaining requested scenarios are independent
 #                           state consumers (they snapshot their inputs) and
@@ -17,7 +17,7 @@
 #
 # Failure classes (§12):
 #   exit 64 — environment/prerequisite failure (env-check, missing tools,
-#             invalid -j / DEBIAN_FDE_E2E_JOBS)
+#             invalid -j / ALPINE_FDE_E2E_JOBS)
 #   exit 65 — HARNESS-FAILURE: the infra self-test failed before any scenario
 #             ran (never reported as a scenario failure)
 #   exit 1  — one or more scenario-class failures (including registry ids
@@ -40,7 +40,7 @@ mkdir -p "$RUNS"
 # --- argument parsing (-j N; ids) ------------------------------------------------
 # Parsed BEFORE the env gate so a runner misuse (bad -j) fails fast with the
 # env-class exit code instead of running the full prerequisite check first.
-JOBS="${DEBIAN_FDE_E2E_JOBS:-1}"
+JOBS="${ALPINE_FDE_E2E_JOBS:-1}"
 REQUESTED=()
 _parse_args() {
     local args=("$@") i=0 a
@@ -72,7 +72,7 @@ _parse_args() {
 }
 _parse_args "$@"
 if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "run-e2e: invalid job count '$JOBS' (-j / DEBIAN_FDE_E2E_JOBS want an integer >= 1)" >&2
+    echo "run-e2e: invalid job count '$JOBS' (-j / ALPINE_FDE_E2E_JOBS want an integer >= 1)" >&2
     exit 64
 fi
 # Duplicate ids on the command line are runner misuse, not a run mode: under
@@ -102,7 +102,7 @@ _reject_duplicate_ids
 # already has the floor free; otherwise it is overridden, loudly. Less than
 # the floor on the fallback filesystem is a fail-closed exit-64 (ADR-8: loud
 # environment failure, never a half-run).
-E2E_TMP_MIN_FREE_MB="${DEBIAN_FDE_E2E_TMP_MIN_FREE_MB:-8192}"
+E2E_TMP_MIN_FREE_MB="${ALPINE_FDE_E2E_TMP_MIN_FREE_MB:-8192}"
 E2E_TMPDIR_CREATED=""
 _e2e_tmpdir_free_mb() { df -Pm "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
 _registry_tmpdir_teardown() {
@@ -157,13 +157,13 @@ _registry_tmpdir_setup() {
     if [[ -z "$free" ]] || ((free < E2E_TMP_MIN_FREE_MB)); then
         echo "run-e2e: registry TMPDIR $cand sits on a filesystem with ${free:-unknown} MB free — need >= ${E2E_TMP_MIN_FREE_MB} MB" >&2
         echo "  (each parallel scenario's ukify intermediates are ~850 MB; free up /var/tmp" >&2
-        echo "   or lower the floor via DEBIAN_FDE_E2E_TMP_MIN_FREE_MB at your own risk)" >&2
+        echo "   or lower the floor via ALPINE_FDE_E2E_TMP_MIN_FREE_MB at your own risk)" >&2
         E2E_TMPDIR_CREATED=""
         rmdir "$cand" 2>/dev/null
         exit 64
     fi
     export TMPDIR="$cand"
-    export DEBIAN_FDE_E2E_TMPDIR="$cand"   # consumed by harness-cleanup.sh registry-exit
+    export ALPINE_FDE_E2E_TMPDIR="$cand"   # consumed by harness-cleanup.sh registry-exit
     echo "# run-e2e: registry TMPDIR=$TMPDIR (${free} MB free)"
 }
 _registry_tmpdir_setup
@@ -194,7 +194,7 @@ for c in ukify objdump cpio xz openssl depmod; do
     fi
 done
 # --- accelerator selection (loud, greppable, once per run) ------------------------
-# tests/lib/qemu.sh owns the decision (DEBIAN_FDE_ACCEL=kvm|tcg; kvm is the
+# tests/lib/qemu.sh owns the decision (ALPINE_FDE_ACCEL=kvm|tcg; kvm is the
 # default and REQUIRED — no /dev/kvm is a fail-closed 64 here, tcg is the
 # explicit dev opt-out); the runner only asks for it up front so the choice is
 # on the record BEFORE any scenario boots, and lands it in the results JSON
@@ -297,24 +297,24 @@ _script_for() {
     return 0
 }
 
-# scenarios that reuse the ENROLLED s00b artifacts via DEBIAN_FDE_E2E_STATE
+# scenarios that reuse the ENROLLED s00b artifacts via ALPINE_FDE_E2E_STATE
 _STATE_CONSUMERS=" s01 s05 s06 s07 s09 s12 s13 s18 "
 
 # CR-02/MD-03 prune contract: scenario prunes must never delete the state
 # dirs this invocation chains on (s00's populated state -> s00b -> the state
 # consumers AND the final G-T11b artifact scan). run-e2e owns the protected
 # set; scenarios filter it out of their prune pipelines.
-export DEBIAN_FDE_PROTECT_DIRS=""
+export ALPINE_FDE_PROTECT_DIRS=""
 _protect_add() {   # _protect_add <dir> — append to the colon-separated set
     [[ -n "$1" ]] || return 0
-    DEBIAN_FDE_PROTECT_DIRS="${DEBIAN_FDE_PROTECT_DIRS:+${DEBIAN_FDE_PROTECT_DIRS}:}$1"
-    export DEBIAN_FDE_PROTECT_DIRS
+    ALPINE_FDE_PROTECT_DIRS="${ALPINE_FDE_PROTECT_DIRS:+${ALPINE_FDE_PROTECT_DIRS}:}$1"
+    export ALPINE_FDE_PROTECT_DIRS
 }
 
 # Parallel prune safety (-j > 1): a peer's rundir must never be pruned
 # mid-run, so every EXISTING .runs dir is fed to the filter the scenarios
-# already honor (DEBIAN_FDE_PROTECT_DIRS) — the "protect all peer dirs"
-# option of the prune contract. Chosen over a DEBIAN_FDE_NO_PRUNE flag
+# already honor (ALPINE_FDE_PROTECT_DIRS) — the "protect all peer dirs"
+# option of the prune contract. Chosen over a ALPINE_FDE_NO_PRUNE flag
 # because the prune filters live in the scenario scripts themselves; this
 # way the runner alone disables pruning. Called once before the parallel
 # phase AND before each worker fork, so later workers also protect the dirs
@@ -336,7 +336,7 @@ _protect_all_runs() {
 # s00b from-scratch chain at ~907 s (build + 3 boots); 1500 s = ~1.6x margin.
 # (Consumers on the cached state run 40-260 s.) Was 7200 s from the slow
 # tpm-tis era — a hung scenario burned 2 h before the watchdog fired.
-SCENARIO_BUDGET="${DEBIAN_FDE_SCENARIO_BUDGET:-1500}"
+SCENARIO_BUDGET="${ALPINE_FDE_SCENARIO_BUDGET:-1500}"
 
 # --- selection -------------------------------------------------------------------
 # REQUESTED was built by _parse_args (ids only, -j stripped). Default: every
@@ -420,10 +420,10 @@ _run_one() {
     # §12 S-00 leaves the disk populated and the baseline finalized, the
     # enrollment happens from the guest in S-00b.
     if [[ "$id" == "s00b" && -n "${S00_RUNDIR:-}" ]]; then
-        export DEBIAN_FDE_S00_STATE="$S00_RUNDIR"
+        export ALPINE_FDE_S00_STATE="$S00_RUNDIR"
     fi
     if [[ "$_STATE_CONSUMERS" == *" $id "* && -n "${S00B_RUNDIR:-}" ]]; then
-        export DEBIAN_FDE_E2E_STATE="$S00B_RUNDIR"
+        export ALPINE_FDE_E2E_STATE="$S00B_RUNDIR"
     fi
     # MD-05(b): hard outer budget (status `timeout`); MD-05(a): an exit-0
     # scenario with zero assertions is a vacuous pass and fails here.
@@ -567,7 +567,7 @@ fi
 if [[ -n "${S00_RUNDIR:-}" || -n "${S00B_RUNDIR:-}" ]]; then
     echo "== artifact scan: e2e_infra_smoke (G-T11b)"
     SCAN_RC=0
-    SCAN_OUT=$(DEBIAN_FDE_S00_STATE="${S00_RUNDIR:-}" DEBIAN_FDE_E2E_STATE="${S00B_RUNDIR:-}" \
+    SCAN_OUT=$(ALPINE_FDE_S00_STATE="${S00_RUNDIR:-}" ALPINE_FDE_E2E_STATE="${S00B_RUNDIR:-}" \
         bash "$HERE/e2e/e2e_infra_smoke.sh" 2>&1) || SCAN_RC=$?
     printf '%s\n' "$SCAN_OUT"
     if (( SCAN_RC == 0 )); then

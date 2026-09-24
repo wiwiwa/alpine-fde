@@ -1,4 +1,4 @@
-# tests/sentinels-257.13.txt — versioned sentinel table for the Debian FDE
+# tests/sentinels-257.13.txt — versioned sentinel table for the Alpine FDE
 # harness (docs/Architecture.md §12 "Sentinel pinning").
 #
 # Schema: one sentinel per line, `name<TAB>string`. Data lines carry NO

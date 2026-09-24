@@ -101,15 +101,15 @@ cli_enroll_retire	existing TPM enrollment found — retiring it
 # they are stable across the platform seam; names exist ONLY here (257.13
 # predates them), values stable for scenario consumption.
 #
-harness_init_started	debian-fde-harness: init started
+harness_init_started	alpine-fde-harness: init started
 harness_tpm_present	/dev/tpmrm0 present
-harness_pcr_re	^debian-fde-pcr sha256:[0-9]{1,2}=[0-9a-f]{64}
-harness_rootfs_re	^debian-fde-rootfs: kib=[0-9]+ packages=[0-9]+
-harness_unsealed	debian-fde: UNSEALED
-harness_prompt_failed	debian-fde: PROMPT-FAILED
-harness_switch_root	debian-fde: SWITCH-ROOT
-harness_install_failed	debian-fde: INSTALL-FAILED
-harness_poweroff	debian-fde: POWEROFF
+harness_pcr_re	^alpine-fde-pcr sha256:[0-9]{1,2}=[0-9a-f]{64}
+harness_rootfs_re	^alpine-fde-rootfs: kib=[0-9]+ packages=[0-9]+
+harness_unsealed	alpine-fde: UNSEALED
+harness_prompt_failed	alpine-fde: PROMPT-FAILED
+harness_switch_root	alpine-fde: SWITCH-ROOT
+harness_install_failed	alpine-fde: INSTALL-FAILED
+harness_poweroff	alpine-fde: POWEROFF
 #
 # ===========================================================================
 # Section 5 — carried 257.13 sentinels (VALUES IDENTICAL, name-for-name).

@@ -42,8 +42,8 @@
 # primary on an untouched TPM (verified on swtpm: identical readpublic Name).
 #
 # Random volume passphrase (I1): 48 random raw bytes (384-bit entropy) staged
-# BASE64-FRAMED at $(seal_stage_dir)/debian-fde-seal-pass.XXXXXX — i.e. ALWAYS
-# under the tmpfs root ${DEBIAN_FDE_TMPDIR:-/dev/shm}, never /tmp — mode 600.
+# BASE64-FRAMED at $(seal_stage_dir)/alpine-fde-seal-pass.XXXXXX — i.e. ALWAYS
+# under the tmpfs root ${ALPINE_FDE_TMPDIR:-/dev/shm}, never /tmp — mode 600.
 # FRAMING (ADR-19): the LUKS2 credential is base64(unsealed secret) — upstream
 # systemd's token plugin base64-encodes the TPM-unsealed bytes before using
 # them as the passphrase. The staged file IS that credential; the RAW bytes
@@ -67,28 +67,28 @@
 # Depends on: lib/common.sh, lib/policy.sh, lib/keys.sh, lib/token.sh,
 # openssl, tpm2-tools via the tpm() TCTI wrapper.
 
-if [ -n "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_SEAL_LOADED=1
+ALPINE_FDE_SEAL_LOADED=1
 
-_sl_cmd_dir=${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+_sl_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _sl_lib_dir=${_sl_cmd_dir%/*}
-if [ -z "${DEBIAN_FDE_COMMON_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ]; then
     if [ -r "$_sl_lib_dir/common.sh" ]; then
         # shellcheck disable=SC1090
         . "$_sl_lib_dir/common.sh"
     fi
 fi
-if [ -z "${DEBIAN_FDE_POLICY_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_POLICY_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$_sl_lib_dir/policy.sh"
 fi
-if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$_sl_lib_dir/keys.sh"
 fi
-if [ -z "${DEBIAN_FDE_TOKEN_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_TOKEN_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$_sl_lib_dir/token.sh"
 fi
@@ -114,24 +114,24 @@ seal_digest_11() {
         policy_hex_to_bin | openssl dgst -sha256 -hex | awk '{print $NF}'
 }
 
-# seal_stage_dir — the I1 staging root. ALWAYS tmpfs: ${DEBIAN_FDE_TMPDIR:-/dev/shm}
+# seal_stage_dir — the I1 staging root. ALWAYS tmpfs: ${ALPINE_FDE_TMPDIR:-/dev/shm}
 # (the repo-wide tmpfs seam convention; rotate.sh/keys.sh/finalize.sh agree).
 # NEVER default to /tmp: every staging site below may hold the RANDOM VOLUME
 # PASSPHRASE or key material in flight (§11 I1 — no plaintext secret on a
-# persistent filesystem), and /tmp is not guaranteed to be a tmpfs. DEBIAN_FDE_TMPDIR
+# persistent filesystem), and /tmp is not guaranteed to be a tmpfs. ALPINE_FDE_TMPDIR
 # (tests / exotic setups) wins; /dev/shm is the fail-safe default.
 seal_stage_dir() {
-    printf '%s\n' "${DEBIAN_FDE_TMPDIR:-/dev/shm}"
+    printf '%s\n' "${ALPINE_FDE_TMPDIR:-/dev/shm}"
 }
 
 # seal_pcrread <idx> — live sha256 PCR digest as bare lowercase hex (the -o +
 # od form: format-independent, unlike pcrread's aligned text output).
 seal_pcrread() {
     [ $# -eq 1 ] || die "seal_pcrread: usage: seal_pcrread <idx>"
-    _spr_f=$(mktemp "$(seal_stage_dir)/debian-fde-seal-pcr.XXXXXX") || die "seal: mktemp failed"
+    _spr_f=$(mktemp "$(seal_stage_dir)/alpine-fde-seal-pcr.XXXXXX") || die "seal: mktemp failed"
     if ! tpm pcrread -Q -o "$_spr_f" "sha256:$1" >/dev/null 2>&1; then
         rm -f "$_spr_f"
-        die "seal: cannot read live PCR $1 (TCTI: ${DEBIAN_FDE_TCTI:-<default>})"
+        die "seal: cannot read live PCR $1 (TCTI: ${ALPINE_FDE_TCTI:-<default>})"
     fi
     _spr_hex=$(od -An -v -tx1 "$_spr_f" | tr -d ' \n')
     rm -f "$_spr_f"
@@ -144,7 +144,7 @@ seal_require_env() {
     command -v tpm2 >/dev/null 2>&1 ||
         die "seal: tpm2-tools not found (tpm2 binary) — Mechanism B sealing requires tpm2-tools"
     if ! tpm getcap properties-fixed >/dev/null 2>&1; then
-        die "seal: no usable TPM via TCTI '${DEBIAN_FDE_TCTI:-<default>}' — cannot seal"
+        die "seal: no usable TPM via TCTI '${ALPINE_FDE_TCTI:-<default>}' — cannot seal"
     fi
 }
 
@@ -185,7 +185,7 @@ seal_verify_pcrsig() {
     _svp_sigb64=$(seal_pcrsig_field "$_svp_sig" "$_svp_sel" sig)
     [ -n "$_svp_sigb64" ] ||
         die "seal: the .pcrsig [$_svp_sel] entry carries no signature"
-    _svp_work=$(mktemp -d "$(seal_stage_dir)/debian-fde-seal-verify.XXXXXX") ||
+    _svp_work=$(mktemp -d "$(seal_stage_dir)/alpine-fde-seal-verify.XXXXXX") ||
         die "seal: mktemp failed"
     chmod 700 "$_svp_work"
     printf '%s' "$_svp_pol" | policy_hex_to_bin >"$_svp_work/pol.bin"
@@ -205,7 +205,7 @@ seal_verify_pcrsig() {
 }
 
 # seal_gen_passphrase — stage the random volume passphrase (I1) under
-# ${DEBIAN_FDE_SEAL_STAGE:-$(seal_stage_dir)}, mode 600.
+# ${ALPINE_FDE_SEAL_STAGE:-$(seal_stage_dir)}, mode 600.
 # FRAMING (ADR-19): the staged file is base64(48 random raw bytes) — 64
 # canonical base64 chars, no padding, no trailing newline (384-bit secret).
 # Upstream systemd's TPM2 token plugin base64-encodes the unsealed secret
@@ -215,12 +215,12 @@ seal_verify_pcrsig() {
 # RAW bytes go into the TPM sealed object only (seal_create decodes).
 # BYTE-EXACT: no trailing newline — every consumer (luksAddKey --key-file,
 # the mkinitfs hook's stdin feed) must see identical bytes.
-# DEBIAN_FDE_SEAL_STAGE (enroll-tpm's choreography staging dir) wins when set
+# ALPINE_FDE_SEAL_STAGE (enroll-tpm's choreography staging dir) wins when set
 # so the whole staging tree is scrubbed with one rm by the caller; the default
 # is the seal_stage_dir tmpfs root — NEVER /tmp (I1).
 seal_gen_passphrase() {
-    _sgp_dir=${DEBIAN_FDE_SEAL_STAGE:-$(seal_stage_dir)}
-    SEAL_PASS_FILE=$(mktemp "$_sgp_dir/debian-fde-seal-pass.XXXXXX") ||
+    _sgp_dir=${ALPINE_FDE_SEAL_STAGE:-$(seal_stage_dir)}
+    SEAL_PASS_FILE=$(mktemp "$_sgp_dir/alpine-fde-seal-pass.XXXXXX") ||
         die "seal: cannot stage the volume passphrase ($_sgp_dir usable?)"
     chmod 600 "$SEAL_PASS_FILE"
     if ! openssl rand 48 | openssl base64 -A >"$SEAL_PASS_FILE"; then
@@ -269,7 +269,7 @@ seal_blob_pack() {
 # the structure size).
 seal_blob_split() {
     _sbs_priv=$1 _sbs_pub=$2
-    _sbs_tmp=$(mktemp "$(seal_stage_dir)/debian-fde-seal-blob.XXXXXX") || die "seal: mktemp failed"
+    _sbs_tmp=$(mktemp "$(seal_stage_dir)/alpine-fde-seal-blob.XXXXXX") || die "seal: mktemp failed"
     openssl base64 -d -A >"$_sbs_tmp"
     _sbs_plen=$((0x$(xxd -p -l 2 "$_sbs_tmp")))
     dd if="$_sbs_tmp" of="$_sbs_priv" bs=1 count=$((2 + _sbs_plen)) status=none
@@ -293,7 +293,7 @@ seal_create() {
     fi
     if ! tpm createprimary -C o -g sha256 -G rsa -c "$_sc_w/primary.ctx" >/dev/null 2>&1; then
         seal_scrub "$_sc_w" # I1: zeroize the staged passphrase, drop the work dir
-        die "seal: tpm2_createprimary failed (SRK; TCTI: ${DEBIAN_FDE_TCTI:-default})"
+        die "seal: tpm2_createprimary failed (SRK; TCTI: ${ALPINE_FDE_TCTI:-default})"
     fi
     if ! tpm create -C "$_sc_w/primary.ctx" -g sha256 -i "$_sc_w/secret.bin" \
         -L "$_sc_sealed" -u "$_sc_w/seal.pub" -r "$_sc_w/seal.priv" >/dev/null 2>&1; then
@@ -333,7 +333,7 @@ seal_unseal() {
     fi
     # the approved policy must be release-key-signed AND match the live PCRs
     seal_verify_pcrsig "$_su_keydir" "$_su_sig" "$_su_sel" "$_su_fresh"
-    _su_w=$(mktemp -d "$(seal_stage_dir)/debian-fde-seal-unseal.XXXXXX") ||
+    _su_w=$(mktemp -d "$(seal_stage_dir)/alpine-fde-seal-unseal.XXXXXX") ||
         die "seal: mktemp failed"
     chmod 700 "$_su_w"
     keys_keyname_verifying "$_su_keydir/release.pub" "$_su_w/name.hex"
@@ -451,11 +451,11 @@ seal_enroll() {
     fi
 
     # seal under the pinned sealed-object digest (§6.1.1 step 4b); all staging
-    # (work dir + passphrase) lands in DEBIAN_FDE_SEAL_STAGE when the caller
+    # (work dir + passphrase) lands in ALPINE_FDE_SEAL_STAGE when the caller
     # set it, so the choreography driver can scrub everything with one rm.
     # Default: the seal_stage_dir TMPFS root — NEVER /tmp (I1).
-    _se_stage=${DEBIAN_FDE_SEAL_STAGE:-$(seal_stage_dir)}
-    _se_w=$(mktemp -d "$_se_stage/debian-fde-seal.XXXXXX") ||
+    _se_stage=${ALPINE_FDE_SEAL_STAGE:-$(seal_stage_dir)}
+    _se_w=$(mktemp -d "$_se_stage/alpine-fde-seal.XXXXXX") ||
         die "seal: mktemp failed"
     chmod 700 "$_se_w"
     # SEAL_WORK_DIR: the caller's scrub handle (seal_scrub removes it with the
@@ -524,16 +524,16 @@ seal_upgrade_token() {
     [ $# -ge 4 ] || die "seal_upgrade_token: usage: <keydir> <luks_dev> <pcrsig> <out_token> [auth_key_file]"
     _sut_keydir=$1 _sut_dev=$2 _sut_sig=$3 _sut_out=$4 _sut_auth=${5:-}
     [ -e "$_sut_dev" ] || die "seal: LUKS device not resolvable: $_sut_dev"
-    _sut_stage=$(mktemp -d "$(seal_stage_dir)/debian-fde-seal-upg.XXXXXX") ||
+    _sut_stage=$(mktemp -d "$(seal_stage_dir)/alpine-fde-seal-upg.XXXXXX") ||
         die "seal: mktemp failed"
     chmod 700 "$_sut_stage"
-    _sut_env=$(mktemp "$(seal_stage_dir)/debian-fde-seal-upg-env.XXXXXX") ||
+    _sut_env=$(mktemp "$(seal_stage_dir)/alpine-fde-seal-upg-env.XXXXXX") ||
         {
             rm -rf "$_sut_stage"
             die "seal: mktemp failed"
         }
     # pre-state: find the standing enrollment (token id + keyslot), if any
-    _sut_pre=$(mktemp "$(seal_stage_dir)/debian-fde-seal-upg.XXXXXX") ||
+    _sut_pre=$(mktemp "$(seal_stage_dir)/alpine-fde-seal-upg.XXXXXX") ||
         {
             rm -rf "$_sut_stage" "$_sut_env"
             die "seal: mktemp failed"
@@ -553,7 +553,7 @@ seal_upgrade_token() {
     _sut_rc=0
     (
         trap 'seal_scrub' EXIT # zeroize the passphrase, remove the work dir
-        export DEBIAN_FDE_SEAL_STAGE="$_sut_stage"
+        export ALPINE_FDE_SEAL_STAGE="$_sut_stage"
         seal_finalized "$_sut_keydir" "$_sut_dev" "$_sut_sig" "$_sut_out" || exit 1
         if [ -n "$_sut_old_slot" ] && [ "$SEAL_SLOT" = "$_sut_old_slot" ]; then
             err "seal_upgrade_token: the fresh keyslot collides with the standing slot $_sut_old_slot — refusing"
@@ -577,7 +577,7 @@ seal_upgrade_token() {
     rm -rf "$_sut_stage"
 
     # 5: post-assert on the real metadata (no passphrase needed from here on)
-    _sut_post=$(mktemp "$(seal_stage_dir)/debian-fde-seal-upg.XXXXXX") ||
+    _sut_post=$(mktemp "$(seal_stage_dir)/alpine-fde-seal-upg.XXXXXX") ||
         {
             rm -f "$_sut_env" "$_sut_pre"
             return 1

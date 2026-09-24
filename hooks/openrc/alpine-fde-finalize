@@ -31,10 +31,10 @@ depend() {
 }
 
 start() {
-    _aff_dir=${DEBIAN_FDE_CMD_DIR:-/opt/alpine-fde/lib/cmd}
+    _aff_dir=${ALPINE_FDE_CMD_DIR:-/opt/alpine-fde/lib/cmd}
     _aff_lib=${_aff_dir%/*}
     if [ -r "$_aff_lib/install-state.sh" ]; then
-        DEBIAN_FDE_CMD_DIR=$_aff_dir
+        ALPINE_FDE_CMD_DIR=$_aff_dir
         # shellcheck disable=SC1090
         . "$_aff_lib/install-state.sh"
     fi
@@ -71,10 +71,10 @@ start() {
 
     # --- the non-interactive completion (lib/cmd/finalize.sh) ------------------
     # Sourced (not executed) so the completion runs in the service's own
-    # failure-contained shell; DEBIAN_FDE_FINALIZE_LOADED guards double-load
+    # failure-contained shell; ALPINE_FDE_FINALIZE_LOADED guards double-load
     # (and provides the test seam). A completion failure is mapped to the loud
     # advisory + attempt marker (written by fin_service_main) + exit 0.
-    if [ -z "${DEBIAN_FDE_FINALIZE_LOADED:-}" ]; then
+    if [ -z "${ALPINE_FDE_FINALIZE_LOADED:-}" ]; then
         if [ -r "$_aff_dir/finalize.sh" ]; then
             # shellcheck disable=SC1090
             . "$_aff_dir/finalize.sh"

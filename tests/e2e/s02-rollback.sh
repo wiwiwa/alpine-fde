@@ -17,7 +17,7 @@
 # host-side with uki_pcrsig_append_combined (the same recipe pcrsign uses;
 # a ladder-only drive would leave the hook no {7,11} entry to admit).
 #
-# Boot 2 (6.1.0) must reach `debian-fde: UNSEALED` with ZERO new enrollment
+# Boot 2 (6.1.0) must reach `alpine-fde: UNSEALED` with ZERO new enrollment
 # and ZERO console input: the hook's PolicyAuthorize pivots on the release
 # keyName and admits 6.1.0's freshly delivered combined entry, whose pol
 # covers the LIVE PCR state under the older kernel. §10 row "old retained
@@ -61,10 +61,10 @@ T0=$SECONDS
 
 # prune .runs aggressively (disk ~90%): keep the 2 newest run dirs overall —
 # but NEVER the invocation's chained state dirs (CR-02/MD-03: run-e2e exports
-# DEBIAN_FDE_PROTECT_DIRS; deleting them defeated §12 chaining and made the
+# ALPINE_FDE_PROTECT_DIRS; deleting them defeated §12 chaining and made the
 # final artifact scan report "nothing to scan" on a green run)
 while IFS= read -r _d; do
-    case ":${DEBIAN_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
+    case ":${ALPINE_FDE_PROTECT_DIRS:-}:" in *":$_d:"*) continue ;; esac
     rm -rf "$_d"
 done < <(find "$TESTS/e2e/.runs" -mindepth 1 -maxdepth 1 -type d -printf "%T@\t%p\n" 2>/dev/null | sort -rn | tail -n +3 | cut -f2-)
 
@@ -212,8 +212,8 @@ _vuki_build() {
     ln -sfn usr/sbin "$st/sbin"
     _uki_link_busybox "$tree"   # the hook's busybox PATH surface (idempotent)
     uki_initrd_write_init "$st"
-    printf '# debian-fde variant: %s\n' "$mk" >>"$st/init"
-    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
+    printf '# alpine-fde variant: %s\n' "$mk" >>"$st/init"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$st/kf0"
     chmod 600 "$st/kf0"
     cp "$kd/release.pub" "$st/rel.pub"
     # THE SHIPPED HOOK (§8.2/ADR-13 staging contract) — without it the variant
@@ -223,7 +223,7 @@ _vuki_build() {
     cp "$REPO/hooks/mkinitfs/alpine-fde-unseal.sh" "$hook_dst" || return 1
     chmod 755 "$hook_dst"
     uki_initrd_pack "$st" "$st.cpio" || return 1
-    printf 'ID=debian-fde-harness\nVERSION_ID=%s\nNAME=Debian FDE harness UKI\n' "$un" >"$st/os-release.txt"
+    printf 'ID=alpine-fde-harness\nVERSION_ID=%s\nNAME=Alpine FDE harness UKI\n' "$un" >"$st/os-release.txt"
     printf '%s\n' "$UKI_KERNEL_CMDLINE" >"$st/cmdline.txt"
     _vuki_measure "$st" "$tree" "$kd" "$un" || return 1
     cp "$st.pcr11.txt" "$out.pcr11-enter-initrd.txt"
@@ -312,7 +312,7 @@ assert_file_exists "uki 6.2.0: .pcrsig extracted" "$RUN/uki-6.2.0.efi.pcrsig.jso
 UKI_MIB=$(( ($(stat -c%s "$RUN/uki-6.2.0.efi") + 1048575) / 1048576 ))
 ESP_MIB=$(( UKI_MIB * 3 + 12 ))   # two UKIs + headroom
 esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/uki-6.2.0.efi" || exit 1
-_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.2.0.efi" debian-fde-6.2.0.efi || exit 1
+_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.2.0.efi" alpine-fde-6.2.0.efi || exit 1
 disk_make_luks "$RUN/disk.img" 128 || exit 1
 
 # --- boot 1: 6.2.0 baseline (token-less disk -> the hook's recovery path) ------
@@ -328,11 +328,11 @@ qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_B1" "$RUN/vars-enrolled.fd" "$RUN/tpm" 
 # for the recovery path; the token enrollment happens HOST-SIDE afterwards)
 for _attempt in 1 2; do
     if uki_wait_hook_prompt 1 300 "$RUN"; then
-        feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _wedge_wait "$RUN" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
     overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
-    grep -q "debian-fde: UNSEALED" "$CONSOLE" && break
+    grep -q "alpine-fde: UNSEALED" "$CONSOLE" && break
     echo "s02: baseline boot attempt $_attempt failed"
     ((_attempt < 2)) && { swtpm_ensure "$RUN/tpm" || exit 1; }
     rm -f "$CONSOLE"
@@ -341,17 +341,17 @@ for _attempt in 1 2; do
     overlay_create "$RUN/disk.img" "$OVERLAY_B1" || { echo "s02: overlay create failed"; exit 1; }
     qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_B1" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/uki-6.2.0.efi.pcrsig.img"
 done
-grep -q "debian-fde: UNSEALED" "$CONSOLE" || { echo "s02: baseline boot did not reach UNSEALED"; exit 1; }
+grep -q "alpine-fde: UNSEALED" "$CONSOLE" || { echo "s02: baseline boot did not reach UNSEALED"; exit 1; }
 cp "$CONSOLE" "$RUN/console-6.2.0-enroll.log"
 LOG=$(log_of "6.2.0-enroll")
-assert_contains "[6.2.0] init ran" "$LOG" "debian-fde-harness: init started"
+assert_contains "[6.2.0] init ran" "$LOG" "alpine-fde-harness: init started"
 assert_contains "[6.2.0] TPM present" "$LOG" "/dev/tpmrm0 present"
 assert_contains "[6.2.0] hook ran the enter-initrd extend" "$LOG" "$(sentinel_of unseal_pcrextend_ok)"
 assert_contains "[6.2.0] no token yet (fresh disk) — recovery path armed" "$LOG" \
     "$(sentinel_of unseal_token_missing)"
 assert_contains "[6.2.0] unlocked via the recovery passphrase" "$LOG" "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[6.2.0] UNSEALED" "$LOG" "debian-fde: UNSEALED"
-assert_contains "[6.2.0] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[6.2.0] UNSEALED" "$LOG" "alpine-fde: UNSEALED"
+assert_contains "[6.2.0] clean poweroff" "$LOG" "alpine-fde: POWEROFF"
 # G-T13/G-E9 (boot reaches the UKI stub): $RUN/uki-pcrsig.json is 6.2.0's
 # signed prediction (uki_build wrote it), the console is this boot's — the
 # hook UNSEALED, so /init printed the post-hook postphase PCR 11 reading.
@@ -361,7 +361,7 @@ assert_pcr11_prediction "S-02 [6.2.0]"
 # --- host-side finalized enrollment (the production CLI;
 # digest-anchored enroll (Option A — no between-boot reseeding — the CLI compares the entry's recorded d7/d11 against the baseline (pure data): d7 = the booted console's PCR 7, d11 = 6.2.0's
 # enter-initrd prediction; the combined {7,11} entry is what the hook extracts.
-PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-6.2.0-enroll.log" | head -1 | cut -d= -f2)
+PCR7_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-6.2.0-enroll.log" | head -1 | cut -d= -f2)
 [[ -n "$PCR7_ENROLLED" ]] || { echo "s02: no PCR 7 in the baseline console"; exit 1; }
 D11_620=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
 [[ -n "$D11_620" ]] || { echo "s02: no enter-initrd d11 prediction from the build"; exit 1; }
@@ -382,7 +382,7 @@ uki_pcrsig_disk "$RUN/pcrsig.img" "$RUN/uki-6.2.0-combined.json" || exit 1
 # the entry's recorded d7/d11 components against the baseline (pure data);
 # only the seal's getcap probe + SRK operations touch the TPM.
 _ensure_tpm || { echo "s02: swtpm re-anchor after boot 6.2.0 failed"; exit 1; }
-printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 EFIVARS="$RUN/efivars-sb-on"
 mkdir -p "$EFIVARS"
@@ -433,11 +433,11 @@ assert_eq "6.1.0 combined entry pol == policy_digest(booted d7, 6.1.0 enter-init
     "$(policy_digest "$PCR7_ENROLLED" "$D11_610")" \
     "$(jq -r '.sha256[-1].pol' "$RUN/uki-6.1.0-combined.json")"
 uki_pcrsig_disk "$RUN/uki-6.1.0-combined.img" "$RUN/uki-6.1.0-combined.json" || exit 1
-_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.1.0.efi" debian-fde-6.1.0.efi || exit 1
+_esp_add_uki "$RUN/esp.img" "$RUN/uki-6.1.0.efi" alpine-fde-6.1.0.efi || exit 1
 _esp_set_default "$RUN/esp.img" "$RUN/uki-6.1.0.efi" || exit 1
 ESPLS=$(_esp_ls "$RUN/esp.img")
-assert_contains "ESP retains 6.2.0 entry" "$ESPLS" "debian-fde-6.2.0.efi"
-assert_contains "ESP retains 6.1.0 entry" "$ESPLS" "debian-fde-6.1.0.efi"
+assert_contains "ESP retains 6.2.0 entry" "$ESPLS" "alpine-fde-6.2.0.efi"
+assert_contains "ESP retains 6.1.0 entry" "$ESPLS" "alpine-fde-6.1.0.efi"
 
 # --- boot 2: 6.1.0 rollback must unlock passwordless (zero console input) ------
 if ! boot_and_wait "6.1.0-rollback" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/uki-6.1.0-combined.img"; then
@@ -445,7 +445,7 @@ if ! boot_and_wait "6.1.0-rollback" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-en
     exit 1
 fi
 LOG=$(log_of "6.1.0-rollback")
-assert_contains "[6.1.0] init ran" "$LOG" "debian-fde-harness: init started"
+assert_contains "[6.1.0] init ran" "$LOG" "alpine-fde-harness: init started"
 assert_contains "[6.1.0] hook ran the enter-initrd extend" "$LOG" "$(sentinel_of unseal_pcrextend_ok)"
 assert_contains "[6.1.0] hook discovered the standing {7,11} token" "$LOG" \
     "$(sentinel_of unseal_token_info)7,11]"
@@ -455,9 +455,9 @@ assert_not_contains "[6.1.0] no new enrollment (Mechanism B seal)" "$LOG" "$(sen
 assert_not_contains "[6.1.0] no new enrollment (cryptenroll)" "$LOG" "$(sentinel_of cryptenroll_enrolled)"
 PROMPTS_RB=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
 assert_eq "[6.1.0] zero recovery-passphrase prompts (zero-input rollback)" "0" "$PROMPTS_RB"
-assert_contains "[6.1.0] UNSEALED (rollback passwordless)" "$LOG" "debian-fde: UNSEALED"
+assert_contains "[6.1.0] UNSEALED (rollback passwordless)" "$LOG" "alpine-fde: UNSEALED"
 assert_not_contains "[6.1.0] no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "[6.1.0] clean poweroff" "$LOG" "debian-fde: POWEROFF"
+assert_contains "[6.1.0] clean poweroff" "$LOG" "alpine-fde: POWEROFF"
 # G-T13/G-E9 for the ROLLBACK boot: pair the helper with 6.1.0's OWN signed
 # prediction (the older UKI's pols differ — asserted above) — the post-hook
 # PCR 11 reading under 6.1.0 must match 6.1.0's per-kernel signed policy.

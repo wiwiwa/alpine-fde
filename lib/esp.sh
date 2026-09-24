@@ -10,26 +10,26 @@
 # computed ONCE here and drives both the ESP prune and the manifest prune so the
 # two can never diverge (§9.2: "pruned together").
 #
-# The ESP is a directory mount point (DEBIAN_FDE_ESP flag / ESP_PATH config /
+# The ESP is a directory mount point (ALPINE_FDE_ESP flag / ESP_PATH config /
 # /efi). ESP image files are mounted by the caller (install / CI harness).
 #
 # Depends on: lib/common.sh. esp_version_sort is busybox-safe (no `sort -V`,
 # ADR-20 §3.1).
 
-if [ -n "${DEBIAN_FDE_ESP_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_ESP_LOADED:-}" ]; then
     return 0
 fi
-DEBIAN_FDE_ESP_LOADED=1
+ALPINE_FDE_ESP_LOADED=1
 
-# esp_dir — effective ESP mount point. Resolution order: $DEBIAN_FDE_ESP (flag)
+# esp_dir — effective ESP mount point. Resolution order: $ALPINE_FDE_ESP (flag)
 # > $ESP_PATH (config/env) > the ESP_PATH persisted at install time in
 # /etc/alpine-fde/alpine-fde.conf (single source of truth for the actual mount,
 # §8.1) > /efi (the layout install sets up — same default as the boot-manager
 # hook, so library-only consumers can never drift back to a created-on-root
 # /boot/efi; review B-CR1).
 esp_dir() {
-    if [ -n "${DEBIAN_FDE_ESP:-}" ]; then
-        printf '%s\n' "$DEBIAN_FDE_ESP"
+    if [ -n "${ALPINE_FDE_ESP:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_ESP"
         return 0
     fi
     if [ -n "${ESP_PATH:-}" ]; then
@@ -66,7 +66,7 @@ esp_dir() {
     printf '%s\n' /efi
 }
 
-# esp_uki_dir — directory holding Debian FDE UKIs on the ESP
+# esp_uki_dir — directory holding Alpine FDE UKIs on the ESP
 esp_uki_dir() {
     printf '%s/EFI/Linux\n' "$(esp_dir)"
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmd/ukictl-build.sh — `debian-fde ukictl build` (docs/Architecture.md §8.1, §9.2;
+# cmd/ukictl-build.sh — `alpine-fde ukictl build` (docs/Architecture.md §8.1, §9.2;
 # gap report B-G1/G3/G4/G5/G10/G11/G12; mechanism ladder resolved by ADR-19/
 # ADR-20: Mechanism B (rung b) is the normative Alpine seal path — a2 remains
 # an accepted alias; documented-absent rungs fail closed at the
@@ -50,11 +50,11 @@ EOF
 # _ukictl_lib NAME — source a sibling library next to this command file
 _ukictl_lib() {
     # shellcheck disable=SC1090  # resolved next to this file
-    . "${DEBIAN_FDE_CMD_DIR:?}/../$1"
+    . "${ALPINE_FDE_CMD_DIR:?}/../$1"
 }
 
 # _ukictl_marker_write <marker> <etc-dir> <kver> <reason> — persist the loud
-# failure marker (consumed by `debian-fde status`), best effort
+# failure marker (consumed by `alpine-fde status`), best effort
 _ukictl_marker_write() {
     _mk_file=$1
     _mk_etc=$2
@@ -85,7 +85,7 @@ cmd_ukictl_build_main() {
             -*)
                 err "ukictl build: unknown option: $1"
                 cmd_ukictl_build_usage
-                exit "$DEBIAN_FDE_USAGE"
+                exit "$ALPINE_FDE_USAGE"
                 ;;
             *)
                 break
@@ -97,7 +97,7 @@ cmd_ukictl_build_main() {
     [ $# -le 1 ] || {
         err "ukictl build: too many arguments"
         cmd_ukictl_build_usage
-        exit "$DEBIAN_FDE_USAGE"
+        exit "$ALPINE_FDE_USAGE"
     }
 
     _ukictl_lib common.sh
@@ -109,11 +109,11 @@ cmd_ukictl_build_main() {
     # G-R3: the build's ensure-once enroll step IS enroll-tpm's enrollment
     # (enrl_run/enrl_ensure_once shared core); sourced next to this command.
     # shellcheck disable=SC1091  # sibling in the same command directory
-    . "${DEBIAN_FDE_CMD_DIR:?}/enroll-tpm.sh"
+    . "${ALPINE_FDE_CMD_DIR:?}/enroll-tpm.sh"
     load_config
 
     # --- paths / config ---------------------------------------------------------
-    _uk_root=${DEBIAN_FDE_ROOT:-}
+    _uk_root=${ALPINE_FDE_ROOT:-}
     _uk_etc="${_uk_root}/etc/alpine-fde"
     _uk_marker="$_uk_etc/build-failed"
     _uk_manifest="$_uk_etc/digests.json"
@@ -127,7 +127,7 @@ cmd_ukictl_build_main() {
     if ! esp_validate_kver "$_uk_kver"; then
         err "ukictl build: invalid kernel version: '$_uk_kver' (alphanumerics, '.', '_', '-' only)"
         cmd_ukictl_build_usage
-        exit "$DEBIAN_FDE_USAGE"
+        exit "$ALPINE_FDE_USAGE"
     fi
     # G-B3/ADR-19/ADR-20: the ladder is resolved — Mechanism B (rung b) is the
     # normative Alpine seal path; a2 / a-prime-prime / native remain accepted
@@ -137,11 +137,11 @@ cmd_ukictl_build_main() {
     _uk_pm_rc=0
     _uk_policy_mode=$(policy_mode_normalize "${POLICY_MODE:-${policy_mode:-a2}}") || _uk_pm_rc=$?
     if [ "$_uk_pm_rc" -ne 0 ]; then
-        if [ "$_uk_pm_rc" -eq "$DEBIAN_FDE_FAIL_CLOSED" ]; then
+        if [ "$_uk_pm_rc" -eq "$ALPINE_FDE_FAIL_CLOSED" ]; then
             _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
                 "POLICY_MODE documented-absent (ADR-19/ADR-20): Mechanism B (rung b) is the normative seal path; refusing to build"
             err "ukictl build: refusing to build — see the POLICY_MODE error above (ADR-19/ADR-20)"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         die "ukictl build: invalid policy_mode (expected: b — a2 / a-prime-prime / native accepted as aliases; ADR-19/ADR-20)"
     fi
@@ -159,7 +159,7 @@ cmd_ukictl_build_main() {
         _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" "$_uk_key_reason"
         err "ukictl build: $_uk_key_reason"
         err "ukictl build: refusing to touch the ESP — restore the scp backup or attach the signing medium and re-run (ADR-8/ADR-18)"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     # baseline PCR 7 (pending until `audit --init` finalizes it, §8.4) — under
@@ -214,7 +214,7 @@ cmd_ukictl_build_main() {
 
     # --- G-KC4/ADR-18: release-key unlock seam (ONCE, before any signer) ---------
     # keys_check proved release.pem EXISTS. When it is the ADR-18 encrypted
-    # form, decrypt it ONCE via keys_unlock (DEBIAN_FDE_KEY_PASSPHRASE env ->
+    # form, decrypt it ONCE via keys_unlock (ALPINE_FDE_KEY_PASSPHRASE env ->
     # no-echo TTY prompt -> loud 64) and hand the UNLOCKED tmpfs path to every
     # signer below (ukify --pcr-private-key, sbsign --key, policy_sign). A
     # plaintext release.pem (offline medium / legacy) keeps the previous
@@ -224,14 +224,14 @@ cmd_ukictl_build_main() {
     _uk_keyfile="$_uk_keydir/release.pem"
     if keys_is_encrypted "$_uk_keyfile"; then
         _uk_unlock_tmp=$(keys_unlock "$_uk_keydir") || {
-            if [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
-                _uk_fail_reason="release.pem unlock failed: wrong passphrase (DEBIAN_FDE_KEY_PASSPHRASE rejected) — release key stays locked (ADR-18)"
+            if [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+                _uk_fail_reason="release.pem unlock failed: wrong passphrase (ALPINE_FDE_KEY_PASSPHRASE rejected) — release key stays locked (ADR-18)"
             else
-                _uk_fail_reason="release.pem is encrypted: passphrase required; provide DEBIAN_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
+                _uk_fail_reason="release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
             fi
             err "ukictl build: $_uk_fail_reason"
             err "ukictl build: refusing to touch the ESP (ADR-8/ADR-18)"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         }
         chmod 600 "$_uk_unlock_tmp" 2>/dev/null || :
         _uk_keyfile=$_uk_unlock_tmp
@@ -248,7 +248,7 @@ cmd_ukictl_build_main() {
         if [ ! -f "$_uk_f" ]; then
             _uk_fail_reason="required build input missing: $_uk_f"
             err "ukictl build: $_uk_fail_reason"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
     done
 
@@ -257,7 +257,7 @@ cmd_ukictl_build_main() {
         _uk_fail_reason=$_uk_pins_reason
         err "ukictl build: $_uk_pins_reason"
         err "ukictl build: refusing to embed an unpinned cmdline (emergency-shell escape) — restore rd.shell=0 rd.emergency=poweroff"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     # --- crypttab guard (G-U4; §8.2 verified coupling) — BEFORE the initramfs -----
@@ -268,14 +268,14 @@ cmd_ukictl_build_main() {
         _uk_fail_reason=$_uk_ct_reason
         err "ukictl build: $_uk_ct_reason"
         err "ukictl build: refusing to build the initramfs — fix /etc/crypttab first (§8.2)"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     # --- workdir + guarded build body ----------------------------------------------
-    _uk_work=$(mktemp -d "${TMPDIR:-/tmp}/debian-fde-build.XXXXXX") || {
+    _uk_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-build.XXXXXX") || {
         _uk_fail_reason="mktemp for the build workdir failed"
         err "ukictl build: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     _uk_uki="$_uk_work/uki.efi"
     _uk_uki_signed="$_uk_work/uki.signed.efi"
@@ -294,7 +294,7 @@ cmd_ukictl_build_main() {
         _uk_fail_reason="${_uk_fail_reason:-build step failed (rc=$_uk_rc); full output above}"
         err "ukictl build: failed — $_uk_fail_reason"
         err "ukictl build: previous UKI left untouched; marker: $_uk_marker"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     exit 0 # EXIT trap wipes the (already removed) workdir; rc 0 writes no marker
@@ -355,7 +355,7 @@ _uk_body() {
     if policy_check_digest "$_uk_d7"; then
         _uk_policy_digest=$(policy_digest "$_uk_d7" "$_uk_pcr11")
     else
-        warn "ukictl build: baseline PCR 7 pending — policy_digest/signature recorded as empty (run 'debian-fde audit --init')"
+        warn "ukictl build: baseline PCR 7 pending — policy_digest/signature recorded as empty (run 'alpine-fde audit --init')"
     fi
 
     # --- 4. Secure Boot signing + verification --------------------------------------
@@ -428,7 +428,7 @@ _uk_body() {
         # NEW kver just upserted (upsert carry-over covers same-kver rebuilds
         # only). Source: the token introspection ensure-once already read —
         # a luksDump metadata read only, still ZERO TPM operations.
-        _uk_standing=$(mktemp "${TMPDIR:-/tmp}/debian-fde-standing.XXXXXX") ||
+        _uk_standing=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-standing.XXXXXX") ||
             die "ukictl build: mktemp failed"
         if enrl_cryptsetup luksDump --dump-json-metadata "$_uk_luks_dev" \
             >"$_uk_standing" 2>/dev/null; then
@@ -532,20 +532,20 @@ _ukictl_re_sign_all() {
     # precheck: a pending baseline PCR 7 makes every policy_digest computation
     # impossible — refuse BEFORE any transformation (torn-manifest prevention)
     if ! policy_check_digest "$_uk_d7"; then
-        _uk_fail_reason="re-sign-all: baseline PCR 7 pending — run 'debian-fde audit --init' first; nothing re-signed"
+        _uk_fail_reason="re-sign-all: baseline PCR 7 pending — run 'alpine-fde audit --init' first; nothing re-signed"
         err "ukictl build --re-sign-all: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
     _uk_keydir=$(keys_dir)
-    _uk_rs_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-resign.XXXXXX") || {
+    _uk_rs_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
         _uk_fail_reason="mktemp failed (re-sign-all manifest copy)"
         err "ukictl build: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     }
-    _uk_rs_sig_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-resign.XXXXXX") || {
+    _uk_rs_sig_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
         _uk_fail_reason="mktemp failed (re-sign-all signature)"
         err "ukictl build: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     # transactional: all re-signs land in the COPY; the live manifest is
     # replaced once, atomically, after the last entry succeeded
@@ -554,7 +554,7 @@ _ukictl_re_sign_all() {
     cp "$_uk_manifest" "$_uk_rs_tmp" || {
         _uk_fail_reason="cannot copy the manifest for re-signing ($_uk_manifest -> $_uk_rs_tmp)"
         err "ukictl build --re-sign-all: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     for _uk_kver in $(manifest_kvers "$_uk_manifest"); do
         _uk_pcr11=$(jq -r --arg kver "$_uk_kver" \
@@ -562,22 +562,22 @@ _ukictl_re_sign_all() {
         if ! policy_check_digest "$_uk_pcr11"; then
             _uk_fail_reason="re-sign-all: entry $_uk_kver has no/invalid stored pcr11_digest"
             err "ukictl build --re-sign-all: entry $_uk_kver has no stored pcr11_digest"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! _uk_pd=$(policy_digest "$_uk_d7" "$_uk_pcr11"); then
             _uk_fail_reason="re-sign-all: policy digest computation failed for $_uk_kver"
             err "ukictl build --re-sign-all: $_uk_fail_reason"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! policy_sign "$_uk_d7" "$_uk_pcr11" "$_uk_keyfile" "$_uk_rs_sig_tmp"; then
             _uk_fail_reason="re-sign-all: signing the policy digest failed for $_uk_kver (key: $_uk_keyfile)"
             err "ukictl build --re-sign-all: $_uk_fail_reason"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! _uk_sig=$(openssl base64 -A -in "$_uk_rs_sig_tmp"); then
             _uk_fail_reason="re-sign-all: base64 encoding the signature failed for $_uk_kver"
             err "ukictl build --re-sign-all: $_uk_fail_reason"
-            exit "$DEBIAN_FDE_FAIL_CLOSED"
+            exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         manifest_upsert "$_uk_rs_tmp" "$_uk_kver" "$_uk_pcr11" "$_uk_pd" "$_uk_sig"
         _uk_old=$(jq -r --arg kver "$_uk_kver" \
@@ -591,7 +591,7 @@ _ukictl_re_sign_all() {
     if ! _uk_fp=$(policy_pubkey_fp "$_uk_keydir/release.pub") || [ -z "$_uk_fp" ]; then
         _uk_fail_reason="re-sign-all: cannot fingerprint the release public key ($_uk_keydir/release.pub)"
         err "ukictl build --re-sign-all: $_uk_fail_reason"
-        exit "$DEBIAN_FDE_FAIL_CLOSED"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
     manifest_set_meta "$_uk_rs_tmp" "$(jq -r '.current_kernel // empty' "$_uk_rs_tmp")" "$_uk_fp"
 
@@ -604,10 +604,10 @@ _ukictl_re_sign_all() {
         && _uk_cur_sig=$(jq -r --arg kver "$_uk_cur" \
             '.digests[] | select(.kernel_version == $kver) | .signature // empty' "$_uk_rs_tmp"); then
         if [ -n "$_uk_cur_pd" ]; then
-            _uk_rs_pred_tmp=$(mktemp "${TMPDIR:-/tmp}/debian-fde-resign.XXXXXX") || {
+            _uk_rs_pred_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
                 _uk_fail_reason="mktemp failed (re-sign-all predictions)"
                 err "ukictl build: $_uk_fail_reason"
-                exit "$DEBIAN_FDE_FAIL_CLOSED"
+                exit "$ALPINE_FDE_FAIL_CLOSED"
             }
             if ! jq --arg pd "$_uk_cur_pd" --arg sig "$_uk_cur_sig" \
                 --arg now "$(manifest_now)" \
@@ -615,7 +615,7 @@ _ukictl_re_sign_all() {
                 "$_uk_pred" >"$_uk_rs_pred_tmp"; then
                 _uk_fail_reason="re-sign-all: refreshing predictions.json failed"
                 err "ukictl build --re-sign-all: $_uk_fail_reason"
-                exit "$DEBIAN_FDE_FAIL_CLOSED"
+                exit "$ALPINE_FDE_FAIL_CLOSED"
             fi
             manifest_atomic_write "$_uk_pred" <"$_uk_rs_pred_tmp"
             rm -f "$_uk_rs_pred_tmp"

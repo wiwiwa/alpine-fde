@@ -36,18 +36,18 @@ chmod +x "$tmpbin/tpm2"
 PATH="$tmpbin:$PATH"
 export PATH
 
-# --- DEBIAN_FDE_TCTI unset/empty: TPM2TOOLS_TCTI must be set-but-empty (tctildr default) ---
-out=$(DEBIAN_FDE_TCTI='' tpm getcap -l)
+# --- ALPINE_FDE_TCTI unset/empty: TPM2TOOLS_TCTI must be set-but-empty (tctildr default) ---
+out=$(ALPINE_FDE_TCTI='' tpm getcap -l)
 assert_eq "wrapper returns the tool's stdout" "canned-tpm2-output" "$out"
 line=$(tail -n 1 "$FAKE_TPM2_LOG")
-assert_eq "empty DEBIAN_FDE_TCTI -> set-but-empty TPM2TOOLS_TCTI, argv forwarded" \
+assert_eq "empty ALPINE_FDE_TCTI -> set-but-empty TPM2TOOLS_TCTI, argv forwarded" \
     "tcti=[] args=[getcap][-l]" "$line"
 
-# --- DEBIAN_FDE_TCTI propagated ---
-out=$(DEBIAN_FDE_TCTI=swtpm tpm pcrread sha256 0)
+# --- ALPINE_FDE_TCTI propagated ---
+out=$(ALPINE_FDE_TCTI=swtpm tpm pcrread sha256 0)
 assert_eq "wrapper returns the tool's stdout (tcti set)" "canned-tpm2-output" "$out"
 line=$(tail -n 1 "$FAKE_TPM2_LOG")
-assert_eq "DEBIAN_FDE_TCTI propagated to TPM2TOOLS_TCTI" \
+assert_eq "ALPINE_FDE_TCTI propagated to TPM2TOOLS_TCTI" \
     "tcti=[swtpm] args=[pcrread][sha256][0]" "$line"
 
 # --- argument quoting preserved ---

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/lib/swtpm-fixture.sh — swtpm (software TPM 2.0) lifecycle for the
-# Debian FDE test harness.
+# Alpine FDE test harness.
 #
 # Usage: source tests/lib/swtpm-fixture.sh, then:
 #   swtpm_start <state-dir>       start detached; exports SWTPM_TCTI on success
@@ -51,7 +51,7 @@
 # between-boot register state explicitly:
 #     swtpm_ensure <dir>                       # restart after the EOF death
 #     swtpm_seed_pcrs <dir> <d7> <D11>         # pcrextend 7 + 11
-# where <d7> is the boot console's `debian-fde-pcr sha256:7=` digest and
+# where <d7> is the boot console's `alpine-fde-pcr sha256:7=` digest and
 # <D11> the build's pcr11-enter-initrd.txt prediction. That makes the CLI's
 # live-PCR drift check (cli_pcr7_drift: live d7 == expected d7) pass
 # naturally and PolicyPCR(d7, d11) match — digest-anchored sealing needs no
@@ -64,10 +64,10 @@
 # is RETIRED AND DELETED; its design survives only as the README's
 # "data-loop stall" section for reference.
 
-if [[ -n "${_DEBIAN_FDE_SWTPM_FIXTURE_SOURCED:-}" ]]; then
+if [[ -n "${_ALPINE_FDE_SWTPM_FIXTURE_SOURCED:-}" ]]; then
     return 0
 fi
-_DEBIAN_FDE_SWTPM_FIXTURE_SOURCED=1
+_ALPINE_FDE_SWTPM_FIXTURE_SOURCED=1
 
 SWTPM_ACTIVE_DIRS=()
 _SWTPM_CLEANUP_TRAP_SET=0
@@ -259,7 +259,7 @@ swtpm_ensure() {
 
 # swtpm_seed_pcrs <dir> <d7> <d11> — between-boot register reseeding
 # (simplified design): after the restart the PCRs are zero; extend the booted
-# PCR 7 digest (the console's `debian-fde-pcr sha256:7=` line) and the build's
+# PCR 7 digest (the console's `alpine-fde-pcr sha256:7=` line) and the build's
 # enter-initrd PCR 11 prediction so the CLI's live-PCR drift check and the
 # PolicyPCR(d7, d11) seal both see exactly the state the guest booted with.
 swtpm_seed_pcrs() {
@@ -321,8 +321,8 @@ swtpm_da_lockout() {
         echo "swtpm_da_lockout: arming DictionaryAttackParameters failed" >&2
         return 1
     }
-    tpm2_clear -T "$(_swtpm_tcti_for "$dir")" debian-fde-da-wrong-auth >/dev/null 2>&1
-    tpm2_clear -T "$(_swtpm_tcti_for "$dir")" debian-fde-da-wrong-auth >/dev/null 2>&1
+    tpm2_clear -T "$(_swtpm_tcti_for "$dir")" alpine-fde-da-wrong-auth >/dev/null 2>&1
+    tpm2_clear -T "$(_swtpm_tcti_for "$dir")" alpine-fde-da-wrong-auth >/dev/null 2>&1
     if ! swtpm_da_locked_probe "$dir"; then
         echo "swtpm_da_lockout: lockout did not engage (enforcement probe passed)" >&2
         return 1

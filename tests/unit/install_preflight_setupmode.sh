@@ -3,7 +3,7 @@
 # Stage-1 preflight, UserGuide §1): `install` must gate on firmware Setup Mode
 # BEFORE ANY disk mutation:
 #   * inst_preflight's FIRST check is the firmware SetupMode==1 gate
-#     (fw_sb_state over the DEBIAN_FDE_EFIVARS_DIR seam)
+#     (fw_sb_state over the ALPINE_FDE_EFIVARS_DIR seam)
 #   * SetupMode=0        ⇒ fail-closed 64, "clear vendor PK in BIOS" guidance,
 #                          ZERO plan records (no destructive command executed)
 #   * SetupMode=1        ⇒ proceed — the full ADR-20 unattended plan runs
@@ -23,26 +23,26 @@ REPO=$(cd "$HERE/../.." && pwd)
 source "$HERE/../lib/assert.sh"
 # shellcheck source=../../lib/common.sh
 source "$REPO/lib/common.sh"
-export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
-T=$(mktemp -d /tmp/debian-fde-install-setupmode.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-install-setupmode.XXXXXX)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-export DEBIAN_FDE_NO_INSTALL=1
-export DEBIAN_FDE_INSTALL_RUNNER=chroot
-export DEBIAN_FDE_YES=1
-export DEBIAN_FDE_INSTALL_MNT=$T/mnt
-export DEBIAN_FDE_HOOKS_DIR=$T/hooks
-export DEBIAN_FDE_ROOT=$T/root
-export DEBIAN_FDE_TMPDIR=$T
-export DEBIAN_FDE_TEST_LOG=$T/cmd.log
-export DEBIAN_FDE_INSTALL_NO_REBOOT=1
-export DEBIAN_FDE_EFIVARS_DIR=$T/efivars
+export ALPINE_FDE_NO_INSTALL=1
+export ALPINE_FDE_INSTALL_RUNNER=chroot
+export ALPINE_FDE_YES=1
+export ALPINE_FDE_INSTALL_MNT=$T/mnt
+export ALPINE_FDE_HOOKS_DIR=$T/hooks
+export ALPINE_FDE_ROOT=$T/root
+export ALPINE_FDE_TMPDIR=$T
+export ALPINE_FDE_TEST_LOG=$T/cmd.log
+export ALPINE_FDE_INSTALL_NO_REBOOT=1
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 
 GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
 DISK=$T/disk.img
@@ -53,7 +53,7 @@ mkdir -p "$T/stub"
 make_stub() { # NAME
     cat >"$T/stub/$1" <<EOF
 #!/bin/sh
-printf '%s %s\n' "$1" "\$*" >>"$DEBIAN_FDE_TEST_LOG"
+printf '%s %s\n' "$1" "\$*" >>"$ALPINE_FDE_TEST_LOG"
 exit 0
 EOF
     chmod +x "$T/stub/$1"
@@ -70,7 +70,7 @@ chmod +x "$T/stub/id"
 # lsblk: report the canned ESP PARTUUID for `-no PARTUUID <dev>`
 cat >"$T/stub/lsblk" <<'EOF'
 #!/bin/sh
-printf 'lsblk %s\n' "$*" >>"$DEBIAN_FDE_TEST_LOG"
+printf 'lsblk %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
 case " $* " in
     *" PARTUUID "*) printf '%s\n' '5f2a9b01-02' ;;
 esac
@@ -84,7 +84,7 @@ MARKER='fake-pbes2-encrypted-ADR18'
 export MARKER
 cat >"$T/stub/openssl" <<'EOF'
 #!/bin/sh
-printf 'openssl %s\n' "$*" >>"$DEBIAN_FDE_TEST_LOG"
+printf 'openssl %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
 case " $* " in
     *" rand "*) printf 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' ;;
     *" asn1parse "*)
@@ -126,12 +126,12 @@ make_stub cryptsetup
 # uses; the generic log-only stub would leave nothing for the ceremony).
 cat >"$T/stub/chroot" <<EOF
 #!/bin/sh
-printf '%s %s\n' "chroot" "\$*" >>"\$DEBIAN_FDE_TEST_LOG"
+printf '%s %s\n' "chroot" "\$*" >>"\$ALPINE_FDE_TEST_LOG"
 case "\$*" in
     *"provision stage1"*)
-        mkdir -p "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys"
+        mkdir -p "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys"
         printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
-            >"$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
+            >"$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
         ;;
 esac
 exit 0
@@ -140,17 +140,17 @@ chmod +x "$T/stub/chroot"
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
-mkdir -p "$DEBIAN_FDE_HOOKS_DIR/kernel-hooks.d" "$DEBIAN_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$DEBIAN_FDE_HOOKS_DIR/apk/triggers" "$DEBIAN_FDE_HOOKS_DIR/openrc"
+mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
+    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
-    printf '#!/bin/sh\nexit 0\n' >"$DEBIAN_FDE_HOOKS_DIR/$h"
-    chmod +x "$DEBIAN_FDE_HOOKS_DIR/$h"
+    printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
+    chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
 done
 
 mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte (efivars fixture)
-    printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$DEBIAN_FDE_EFIVARS_DIR/$1-$GUID_GLOBAL"
+    printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$ALPINE_FDE_EFIVARS_DIR/$1-$GUID_GLOBAL"
 }
 
 # §9.1 step-4 credential-ceremony answers (the documented test/CI seam): six
@@ -167,32 +167,32 @@ R3lease-K3ypass-X7!qmz
 EOF
 
 run_install() {
-    : >"$DEBIAN_FDE_TEST_LOG"
-    rm -rf "$DEBIAN_FDE_INSTALL_MNT"
-    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 <"$ANSWERS")
+    : >"$ALPINE_FDE_TEST_LOG"
+    rm -rf "$ALPINE_FDE_INSTALL_MNT"
+    OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 <"$ANSWERS")
     RC=$?
 }
 
 # =============================================================================
 # SetupMode=0 -> fail-closed 64 BEFORE any disk mutation (zero plan records)
 # =============================================================================
-mkdir -p "$DEBIAN_FDE_EFIVARS_DIR"
+mkdir -p "$ALPINE_FDE_EFIVARS_DIR"
 mkvar SetupMode 0
 
 run_install
 assert_eq "SetupMode=0 -> fail-closed 64" "64" "$RC"
 assert_contains "SetupMode=0: error says what to fix" "$OUT" "clear the vendor PK in BIOS"
 assert_contains "SetupMode=0: error reports the observed state" "$OUT" "setup_mode=0"
-assert_eq "SetupMode=0: ZERO destructive commands executed" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
+assert_eq "SetupMode=0: ZERO destructive commands executed" "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 assert_eq "SetupMode=0: mountpoint never created" "0" \
-    "$([ -e "$DEBIAN_FDE_INSTALL_MNT" ] && echo 1 || echo 0)"
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT" ] && echo 1 || echo 0)"
 
 # =============================================================================
 # FIRST check: the SetupMode gate fires before every other preflight check —
 # even with a target disk that would independently fail the disk check.
 # =============================================================================
-: >"$DEBIAN_FDE_TEST_LOG"
-OUT=$("$REPO/bin/debian-fde" install --disk "$T/does-not-exist.img" 2>&1 </dev/null)
+: >"$ALPINE_FDE_TEST_LOG"
+OUT=$("$REPO/bin/alpine-fde" install --disk "$T/does-not-exist.img" 2>&1 </dev/null)
 RC=$?
 assert_eq "ordering: bad disk + SetupMode=0 -> still the SetupMode 64" "64" "$RC"
 assert_contains "ordering: SetupMode gate is FIRST (disk check not reached)" "$OUT" \
@@ -203,17 +203,17 @@ assert_not_contains "ordering: disk-not-found is NOT the reported failure" "$OUT
 # =============================================================================
 # absent efivars / absent SetupMode variable -> fail-closed 64
 # =============================================================================
-rm -rf "$DEBIAN_FDE_EFIVARS_DIR"
+rm -rf "$ALPINE_FDE_EFIVARS_DIR"
 run_install
 assert_eq "absent efivars dir -> fail-closed 64" "64" "$RC"
 assert_contains "absent efivars: error explains" "$OUT" "efivars"
-assert_eq "absent efivars: ZERO destructive commands" "0" "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
+assert_eq "absent efivars: ZERO destructive commands" "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 
-mkdir -p "$DEBIAN_FDE_EFIVARS_DIR" # dir exists, SetupMode variable absent
+mkdir -p "$ALPINE_FDE_EFIVARS_DIR" # dir exists, SetupMode variable absent
 run_install
 assert_eq "SetupMode variable absent -> fail-closed 64" "64" "$RC"
 assert_eq "SetupMode variable absent: ZERO destructive commands" "0" \
-    "$(wc -l <"$DEBIAN_FDE_TEST_LOG")"
+    "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 
 # =============================================================================
 # SetupMode=1 -> proceed: the full ADR-20 unattended plan runs under stubs
@@ -222,19 +222,19 @@ mkvar SetupMode 1
 
 run_install
 assert_eq "SetupMode=1 -> chroot install rc 0 (unattended)" "0" "$RC"
-assert_contains "SetupMode=1: partitioning ran" "$(cat "$DEBIAN_FDE_TEST_LOG")" "sfdisk"
+assert_contains "SetupMode=1: partitioning ran" "$(cat "$ALPINE_FDE_TEST_LOG")" "sfdisk"
 assert_contains "SetupMode=1: luksFormat ran (ephemeral keyslot 0, G-C23)" \
-    "$(cat "$DEBIAN_FDE_TEST_LOG")" "luksFormat"
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "luksFormat"
 assert_file_exists "SetupMode=1: MOTD banner dropped (G-C25)" \
-    "$DEBIAN_FDE_INSTALL_MNT/etc/motd"
+    "$ALPINE_FDE_INSTALL_MNT/etc/motd"
 assert_contains "SetupMode=1: MOTD banner says NOT finalized" \
-    "$(cat "$DEBIAN_FDE_INSTALL_MNT/etc/motd")" "NOT finalized"
+    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/motd")" "NOT finalized"
 assert_file_exists "SetupMode=1: install-state written" \
-    "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
+    "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
 assert_contains "SetupMode=1: state=installed" \
-    "$(cat "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
+    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
 assert_eq "SetupMode=1: NO OsIndications write (G-C26)" "0" \
-    "$(find "$DEBIAN_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
+    "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
 assert_not_contains "SetupMode=1: NO interactive disk-passphrase prompt (retired; the ceremony is the only credential seam)" "$OUT" \
     "Set disk encryption passphrase"
 

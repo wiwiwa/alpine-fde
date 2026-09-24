@@ -7,7 +7,7 @@
 # via the PRODUCTION CLI in the guest — `/opt/alpine-fde/bin/alpine-fde
 # enroll-tpm` (Mechanism B backing: tpm2-tools seal + LUKS2 token import,
 # ADR-19/§7; exactly ONE enrollment; the pcrsig source rides the documented
-# DEBIAN_FDE_PCRSIG seam so no release.pem is needed in-guest) — REPLACING
+# ALPINE_FDE_PCRSIG seam so no release.pem is needed in-guest) — REPLACING
 # the harness stand-in (the initrd's hand-run cryptenroll), which is proven
 # OUT of the loop by console evidence. NO systemd-cryptenroll runs anywhere
 # in this scenario (Mechanism B never invokes it).
@@ -29,7 +29,7 @@
 #               import`, the s06/s13 mechanism): the §8.2 unseal hook cannot
 #               select a policy for it and refuses it (I3 gate) -> the hook's
 #               bounded recovery loop opens -> fed slot-0 passphrase -> the
-#               initrd's DEBUG SHELL seam (DEBIAN_FDE_DEBUG_SHELL, serial);
+#               initrd's DEBUG SHELL seam (ALPINE_FDE_DEBUG_SHELL, serial);
 #             - the fed session untars the §5-shaped tooling payload off the
 #               tail of the pcrsig payload drive (/opt/alpine-fde tree +
 #               guest-bound baseline + release.pub + jq + the tpm2
@@ -39,7 +39,7 @@
 #               live PCR 7 == baseline, LUKS uuid resolvable) and enrl_run
 #               performs the single A'' enrollment. Console asserts the
 #               CLI's own markers: the argv line, the cryptenroll_enrolled
-#               sentinel and `debian-fde: enrolled (...)` + rc 0. NO
+#               sentinel and `alpine-fde: enrolled (...)` + rc 0. NO
 #               hand-rolled cryptenroll exists anywhere in this scenario.
 #           Then the PRISTINE disk + TPM state are snapshotted into the
 #           stable cache (tests/e2e/.cache/pristine-s00b/, SHA256-recorded
@@ -60,7 +60,7 @@
 #           the serial console. Plus the §13 ESP-size assertion for the
 #           release UKI.
 #
-# State sourcing (in order): DEBIAN_FDE_S00_STATE (set by run-e2e.sh when s00
+# State sourcing (in order): ALPINE_FDE_S00_STATE (set by run-e2e.sh when s00
 # ran in this invocation) -> the stable pristine cache (verified against its
 # SHA manifest) -> full self-bootstrap (runs the S-00 chain itself).
 #
@@ -74,7 +74,7 @@
 # boot C, asserting ZERO cryptenroll invocations.
 #
 # RUN DIR CONTRACT (consumed by the registered state consumers via run-e2e.sh
-# as DEBIAN_FDE_E2E_STATE): disk.img (populated + ENROLLED), tpm/ (swtpm state,
+# as ALPINE_FDE_E2E_STATE): disk.img (populated + ENROLLED), tpm/ (swtpm state,
 # SRK the token seals to), keys/, vars-enrolled.fd, harness.efi (the enrolled
 # release UKI), pcrsig.img, console.log; last line:
 #     RUNDIR <path>
@@ -93,7 +93,7 @@
 #   * the tooling payload rides the TAIL of the pcrsig payload drive (the
 #     initrd reads only the first 64 KiB — the pcrsig JSON — so the
 #     measurement story of the signed prediction is untouched);
-#   * the initrd has no udev, so the CLI's DEBIAN_FDE_BY_UUID_DIR seam (its
+#   * the initrd has no udev, so the CLI's ALPINE_FDE_BY_UUID_DIR seam (its
 #     documented injection point) is pointed at a fed /run/bu symlink of the
 #     active /dev/mapper/root — the §9.1 enroll-on-active-volume production
 #     shape (no unlock key file involved);
@@ -103,10 +103,10 @@
 #     apk; openssl is required by the Mechanism B CLI (require_pkgs + the
 #     token post-assert pubkey fingerprint) but is not in the initrd tree;
 #   * the volume-passphrase credential for luksAddKey rides the CLI's own
-#     DEBIAN_FDE_LUKS_KEYFILE seam (/kf0, the embedded slot-0 passphrase) —
+#     ALPINE_FDE_LUKS_KEYFILE seam (/kf0, the embedded slot-0 passphrase) —
 #     Mechanism B's documented existing-credential injection point; the
 #     invocation itself stays inside the production CLI;
-#   * boot B's UKI carries the DEBUG SHELL seam (DEBIAN_FDE_DEBUG_SHELL) for
+#   * boot B's UKI carries the DEBUG SHELL seam (ALPINE_FDE_DEBUG_SHELL) for
 #     the fed enrollment session; boot C selects its stage on the payload
 #     drive so the release UKI's measured PCR 11 stays exactly the enroll-time
 #     one (§8.2 hook contract);
@@ -155,13 +155,13 @@ CACHE_DIR="$TESTS/e2e/.cache/pristine-s00b"
 # the pinned tree's apparmor profile load (~100 apparmor_parser spawns) and
 # the §9.1 fstab submounts — 900 s was exceeded once (2026-09-19,
 # s00b-enroll-1789764323: console reached only guest-t=141 s at wall 900 s)
-export QEMU_TIMEOUT="${DEBIAN_FDE_S00B_TIMEOUT:-1800}"
+export QEMU_TIMEOUT="${ALPINE_FDE_S00B_TIMEOUT:-1800}"
 
 # --- hardening: bounded stages, loud failures, overall budget --------------------
 # recalibrated 2026-09-23: run-e2e's outer SCENARIO_BUDGET is now 1500 s —
 # the internal budget must fire FIRST (loud exit 125 + stage name) instead of
 # letting the outer rc-124 kill win silently.
-OVERALL_BUDGET="${DEBIAN_FDE_S00B_BUDGET:-1440}"
+OVERALL_BUDGET="${ALPINE_FDE_S00B_BUDGET:-1440}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
 SWTPM_DIRS=()
@@ -435,7 +435,7 @@ _cache_store() {
     echo "# pristine enrolled state cached in $dir (FORMAT $(cat "$dir/FORMAT"), SHA256 manifest: $(wc -l <"$dir/MANIFEST.sha256") entries)"
 }
 
-STATE="${DEBIAN_FDE_S00_STATE:-}"
+STATE="${ALPINE_FDE_S00_STATE:-}"
 FROM_CACHE=0
 # set to 1 when the consumed state's release key was reissued at the ADR-16
 # floor AND the SB varstore rebuilt from the new certs (below): the db cert is
@@ -496,9 +496,9 @@ else
          rootfs_payload_image '$STATE/rootfs-payload.img' >'$RUN/payload.out'"
     read -r _sha _bytes <"$RUN/payload.out" || { echo "s00b: rootfs payload build failed"; exit 1; }
     [[ -n "$_sha" ]] || { echo "s00b: rootfs payload build failed"; exit 1; }
-    DEBIAN_FDE_ROOTFS_SHA="$_sha" DEBIAN_FDE_ROOTFS_BYTES="$_bytes" \
+    ALPINE_FDE_ROOTFS_SHA="$_sha" ALPINE_FDE_ROOTFS_BYTES="$_bytes" \
         run_stage uki_build-installer 1200 \
-        uki_build "$STATE" "$STATE/keys" "$STATE/harness.efi" "debian-fde-stage=install"
+        uki_build "$STATE" "$STATE/keys" "$STATE/harness.efi" "alpine-fde-stage=install"
     UKI_MIB=$(( ($(stat -c%s "$STATE/harness.efi") + 1048575) / 1048576 ))
     run_stage esp_make-installer 300 esp_make "$STATE/esp.img" \
         $(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB )) "$STATE/harness.efi"
@@ -536,7 +536,7 @@ else
     CURRENT_QEMU_DIR="$STATE"
     run_stage qemu_wait-bootstrap "$((QEMU_TIMEOUT + 60))" qemu_wait "$STATE" "$QEMU_TIMEOUT"
     CURRENT_QEMU_DIR=""
-    grep -q "debian-fde: POWEROFF" "$STATE/console.log" || {
+    grep -q "alpine-fde: POWEROFF" "$STATE/console.log" || {
         echo "s00b: self-bootstrap installer boot failed (no POWEROFF sentinel)"; exit 1; }
 
     # finalize the baseline via the REAL CLI (S-00 stage 6) — the enroll
@@ -588,19 +588,19 @@ JSON
     # the fixture swtpm restarts after the boot; the OPERATOR-meaningful PCR
     # values are stamped from the boot console afterwards (s00/s16 precedent)
     _ensure_tpm "$STATE/tpm"
-    if AUDIT_OUT=$(DEBIAN_FDE_ROOT="$STATE/rootfs" \
-        DEBIAN_FDE_TCTI="swtpm:path=$STATE/tpm/sock" \
-        DEBIAN_FDE_EFIVARS_DIR="$EFIVARS" \
-        DEBIAN_FDE_EVENTLOG="$STATE/rootfs/eventlog-absent" \
-        DEBIAN_FDE_NO_INSTALL=1 \
+    if AUDIT_OUT=$(ALPINE_FDE_ROOT="$STATE/rootfs" \
+        ALPINE_FDE_TCTI="swtpm:path=$STATE/tpm/sock" \
+        ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
+        ALPINE_FDE_EVENTLOG="$STATE/rootfs/eventlog-absent" \
+        ALPINE_FDE_NO_INSTALL=1 \
         timeout 300 "$REPO/bin/alpine-fde" audit --init 2>&1); then
         _assert_result ok "S-00b: audit --init finalized the baseline (real CLI, rc 0)" ""
     else
         _assert_result not-ok "S-00b: audit --init finalized the baseline (real CLI, rc 0)" \
             "output: $(tail -2 <<<"$AUDIT_OUT")"
     fi
-    PCR7_B=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
-    sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)\",|" \
+    PCR7_B=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
+    sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7_B\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)\",|" \
         "$STATE/rootfs/etc/alpine-fde/baseline.json"
     if grep -q '"expected_pcr7": "pending"' "$STATE/rootfs/etc/alpine-fde/baseline.json" \
         || [[ -z "$PCR7_B" ]]; then
@@ -683,7 +683,7 @@ if (( FROM_CACHE == 0 )); then
 # 2026-09-23): keys_create mints RSA-2048 and the production CLI's
 # keys_rsa3072_guard refuses to enroll below RSA-3072 (rc 2). The
 # self-bootstrap branch floors its own keys BEFORE keys_vars_enrolled, but a
-# DEBIAN_FDE_S00_STATE chain (the registry path: s00 -> s00b) hands this
+# ALPINE_FDE_S00_STATE chain (the registry path: s00 -> s00b) hands this
 # scenario a below-floor key — observed in the registry run: boot B's fed
 # enroll-tpm died P6-RC=2 ("release key is RSA-2048") while the standalone
 # self-bootstrap run passed. Reissue at the floor on the RUN-DIR key copy
@@ -726,10 +726,10 @@ echo "# S-00b: building the release UKI (ukictl build product: ukify pcr-signing
 # boot B's UKI carries the DEBUG SHELL seam for the fed session. Explicit
 # empty pins keep any leaked env from shaping later builds.
 # Built BEFORE the tooling payload: the payload carries the release UKI's
-# signed prediction (/etc/alpine-fde/pcrsig.json) as the DEBIAN_FDE_PCRSIG
+# signed prediction (/etc/alpine-fde/pcrsig.json) as the ALPINE_FDE_PCRSIG
 # seam source — Mechanism B's enroll must approve exactly the policy the
 # release UKI's stub delivers, without release.pem in the guest.
-DEBIAN_FDE_DEBUG_SHELL=1 DEBIAN_FDE_ROOTFS_SHA= DEBIAN_FDE_ROOTFS_BYTES= \
+ALPINE_FDE_DEBUG_SHELL=1 ALPINE_FDE_ROOTFS_SHA= ALPINE_FDE_ROOTFS_BYTES= \
     run_stage uki_build-release 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi"
 # the COMBINED {7,11} .pcrsig entry (uki_pcrsig_append_combined, G-B6 shape):
@@ -788,7 +788,7 @@ for d in bin lib hooks docs; do
 done
 run_stage tooling-baseline 60 cp "$RUN/baseline-guest.json" "$TOOLING/etc/alpine-fde/baseline.json"
 run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine-fde/keys/release.pub"
-# the DEBIAN_FDE_PCRSIG seam source: the COMBINED {7,11} .pcrsig — the
+# the ALPINE_FDE_PCRSIG seam source: the COMBINED {7,11} .pcrsig — the
 # finalized enrollment (seal_finalized, the CLI's only mode) refuses a
 # pcrsig without the [7,11] entry (G-B6 wrong-selection gate)
 run_stage tooling-pcrsig 60 cp "$RUN/uki-pcrsig-combined.json" "$TOOLING/etc/alpine-fde/pcrsig.json"
@@ -811,7 +811,7 @@ printf '#!/bin/sh\nexec /opt/jqbin/ld-linux --library-path /opt/jqbin/lib /opt/j
     >"$TOOLING/usr/bin/jq"
 # flock (util-linux): the production CLI's enroll-tpm preconditions demand
 # flock:util-linux (B.5 HW-3 ensure-once serialization) — under
-# DEBIAN_FDE_NO_INSTALL=1 in the initrd a missing binary is the CLI's hard
+# ALPINE_FDE_NO_INSTALL=1 in the initrd a missing binary is the CLI's hard
 # exit 64, so the payload ships it. Same host-closure isolation as jq (own
 # loader + lib set: the initrd's glibc is not the host's), PLUS a
 # closure-identity guard: flock's ELF interp and every shared library ldd
@@ -854,7 +854,7 @@ for _sl in $(ldd "$(command -v openssl)" | awk '$3 ~ /^\// {print $3}'); do
 done
 printf '#!/bin/sh\nexec /opt/sslbin/ld-linux --library-path /opt/sslbin/lib /opt/sslbin/openssl "$@"\n' \
     >"$TOOLING/usr/bin/openssl"
-# cryptsetup output normalizer (the CLI's DEBIAN_FDE_CRYPTSETUP seam): the
+# cryptsetup output normalizer (the CLI's ALPINE_FDE_CRYPTSETUP seam): the
 # CLI's LUKS2 JSON mini-parsers (lib/baseline.sh luks_json_*, unit-tested
 # against PRETTY-PRINTED fixtures) anchor on '"key": value' spacing and on
 # inline '"keyslots": ["N"]' arrays, while real cryptsetup 2.7.5 emits
@@ -964,7 +964,7 @@ _run_bootb() {
 # SHELL seam takes over.
 wait_console "$RUN" "unlock mechanism: hook" "$QEMU_TIMEOUT"
 wait_console_re "$RUN" "$(sentinel_of unseal_prompt_re)" "$QEMU_TIMEOUT"
-feed_line "$RUN/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 wait_console "$RUN" "DEBUG SHELL on console" 300
 # 1) untar the tooling payload off the payload drive's tail
 feed_line "$RUN/serial.sock" \
@@ -980,25 +980,25 @@ wait_console "$RUN" "T9-52-GONE" 120
 # 4) by-uuid seam (no udev in the initrd) -> the CONTAINER (/dev/vdb; the
 #    production /dev/disk/by-uuid shape — the mapper view is not a LUKS2
 #    device, observed live) + the CLI environment, all documented seams:
-#    DEBIAN_FDE_LUKS_KEYFILE=/kf0 is Mechanism B's existing-credential
+#    ALPINE_FDE_LUKS_KEYFILE=/kf0 is Mechanism B's existing-credential
 #    injection (authorizes luksAddKey with the embedded slot-0 passphrase —
 #    the initrd's equivalent of the §9.1 enroll prompt, which has no
-#    ask-password agent here); DEBIAN_FDE_PCRSIG hands the CLI the release
+#    ask-password agent here); ALPINE_FDE_PCRSIG hands the CLI the release
 #    UKI's own signed prediction from the payload (no release.pem in-guest);
 #    everything else (preconditions, seal, post-asserts, enrolled.json) is
 #    the production CLI's own Mechanism B path.
-# DEBIAN_FDE_KEYDIR is REQUIRED here (G-B7): enrl_preconditions resolves the
-# release key from keys_dir ONLY (--keydir / KEY_PATH / DEBIAN_FDE_KEYDIR) and
+# ALPINE_FDE_KEYDIR is REQUIRED here (G-B7): enrl_preconditions resolves the
+# release key from keys_dir ONLY (--keydir / KEY_PATH / ALPINE_FDE_KEYDIR) and
 # never consults the baseline's keys.release_pub_path — without it enroll-tpm
 # dies rc 64 ("no release key directory configured") BEFORE sealing, the disk
 # keeps ZERO systemd-tpm2 tokens, and boot C's zero-input unlock is impossible
 # (observed live 2026-09-22, run s00b-enroll-1790068029: P6-RC=64 -> boot C
 # "no systemd-tpm2 token found" -> recovery-passphrase prompt).
-# DEBIAN_FDE_TMPDIR=/tmp is REQUIRED here: the CLI's scratch mktemps default
+# ALPINE_FDE_TMPDIR=/tmp is REQUIRED here: the CLI's scratch mktemps default
 # to /dev/shm, which the busybox initrd does not mount — enrl_run fails
 # ("mktemp: : No such file or directory" -> "enrolled.json NOT written",
 # observed live 2026-09-22, run s00b-enroll-1790077927: P6-RC=64).
-feed_line "$RUN/serial.sock" "mkdir -p /run/bu && ln -sf /dev/vdb /run/bu/$DISK_UUID && export DEBIAN_FDE_NO_INSTALL=1 DEBIAN_FDE_TCTI=device:/dev/tpmrm0 DEBIAN_FDE_BY_UUID_DIR=/run/bu DEBIAN_FDE_LUKS_KEYFILE=/kf0 DEBIAN_FDE_KEYDIR=/etc/alpine-fde/keys DEBIAN_FDE_TMPDIR=/tmp DEBIAN_FDE_PCRSIG=/etc/alpine-fde/pcrsig.json DEBIAN_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
+feed_line "$RUN/serial.sock" "mkdir -p /run/bu && ln -sf /dev/vdb /run/bu/$DISK_UUID && export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_LUKS_KEYFILE=/kf0 ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/etc/alpine-fde/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
 wait_console "$RUN" "P5-43-OK" 120
 # 5) THE PRODUCTION CLI: the §9.1 first-install enrollment (single Mechanism B seal)
 feed_line "$RUN/serial.sock" 'timeout 180 /opt/alpine-fde/bin/alpine-fde enroll-tpm; echo P6-RC=$?'
@@ -1012,8 +1012,8 @@ done
 CLI_RC=$(grep -oE 'P6-RC=[0-9]+' "$RUN/console.log" | head -1 | cut -d= -f2)
 # the pass's own in-guest register readback (the §8.2 hook's live PCR
 # reading) — captured BEFORE any later pass rm's this console
-BOOTB_D0=$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
-BOOTB_D7=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
+BOOTB_D0=$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
+BOOTB_D7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console.log" | head -1 | cut -d= -f2)
 # 6) done — clean poweroff from the fed shell
 feed_line "$RUN/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-bootb "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN" "$QEMU_TIMEOUT"
@@ -1063,7 +1063,7 @@ _accept_register() {
             "$D7_ENROLL" "$D11_ENROLL" "$RUN/keys"
     run_stage pcrsig-combined-drive-redo 60 \
         uki_pcrsig_disk "$RUN/pcrsig.img" "$RUN/uki-pcrsig-combined.json"
-    # the CLI's DEBIAN_FDE_PCRSIG seam reads the TOOLING copy of the
+    # the CLI's ALPINE_FDE_PCRSIG seam reads the TOOLING copy of the
     # combined pcrsig — re-stage the REBUILT json or the G-B6 gate compares
     # its fresh digest against the ORIGINAL d7's stale signed pol
     # (observed live: "signed bb62a200… != freshly computed e8ee47db…")
@@ -1130,11 +1130,11 @@ if (( ${#_readings[@]} > 0 )); then
 fi
 
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
-assert_contains "[boot B] init ran" "$LOG" "debian-fde-harness: init started"
+assert_contains "[boot B] init ran" "$LOG" "alpine-fde-harness: init started"
 assert_contains "[boot B] the §8.2 unseal hook owns the unlock (default mechanism)" "$LOG" \
-    "debian-fde-harness: unlock mechanism: hook"
+    "alpine-fde-harness: unlock mechanism: hook"
 assert_not_contains "[boot B] the 257.13 oracle stayed out (opt-in only)" "$LOG" \
-    "debian-fde-harness: unlock mechanism: oracle"
+    "alpine-fde-harness: unlock mechanism: oracle"
 # the DEAD fixture token (pcrs [7], no tpm2-pcr-bank/signature): the hook
 # cannot select a policy for it -> the I3 gate refuses it (never a forge)
 assert_contains "[boot B] dead token refused by the hook's I3 gate" "$LOG" \
@@ -1151,13 +1151,13 @@ assert_eq "[boot B] exactly ONE recovery-passphrase prompt (fed slot-0 unlocked 
 assert_contains "[boot B] fed slot-0 passphrase unsealed the volume (hook recovery path)" "$LOG" \
     "$(sentinel_of unseal_pass_unlocked)"
 assert_contains "[boot B] volume UNSEALED" "$LOG" \
-    "debian-fde: UNSEALED"
+    "alpine-fde: UNSEALED"
 assert_contains "[boot B] tooling payload extracted in-guest" "$LOG" "P2B-42-OK"
 assert_contains "[boot B] dead fixture token removed (teardown before enroll)" "$LOG" "T9-52-GONE"
 assert_contains "[boot B] production CLI ran (Mechanism B seal, fixture marker)" "$LOG" \
     "$(sentinel_of cli_seal_slot)"
 assert_contains "[boot B] production CLI's own success marker" "$LOG" \
-    "debian-fde: enrolled (policy_mode="
+    "alpine-fde: enrolled (policy_mode="
 assert_not_contains "[boot B] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG" \
     "$(sentinel_of cryptenroll_enrolled)"
 assert_eq "[boot B] production CLI rc 0" "0" "$CLI_RC"
@@ -1259,12 +1259,12 @@ for _c_attempt in 1 2 3; do
     done
     if [[ -z "$_degraded" ]] && grep -q "unlock mechanism: hook" "$C/console.log" 2>/dev/null; then
         # PCR-0 pin: the initrd's first register readback must equal the baseline
-        if _console_seen_re "$C" "debian-fde-pcr sha256:0=" 120; then
-            _d0_live=$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$C/console.log" | head -1 | cut -d= -f2)
+        if _console_seen_re "$C" "alpine-fde-pcr sha256:0=" 120; then
+            _d0_live=$(grep -oE 'alpine-fde-pcr sha256:0=[0-9a-f]{64}' "$C/console.log" | head -1 | cut -d= -f2)
             [[ "$_d0_live" == "$PCR0_EXPECTED" ]] \
                 || _degraded="PCR-0 pin failed: live $_d0_live != baseline $PCR0_EXPECTED (cumulative/degraded register)"
         else
-            _degraded="no debian-fde-pcr sha256:0 readback within 120s of the hook marker"
+            _degraded="no alpine-fde-pcr sha256:0 readback within 120s of the hook marker"
         fi
     elif [[ -z "$_degraded" ]]; then
         _degraded="qemu exited before the hook marker (console tail: $(tail -2 "$C/console.log" 2>/dev/null | tr '\n' ' '))"
@@ -1314,9 +1314,9 @@ else
     _assert_result not-ok "S-01: \`login:\` reached on the serial console" \
         "never matched within ${QEMU_TIMEOUT}s; console tail: $(tail -3 "$C/console.log" 2>/dev/null | tr '\n' ' ')"
 fi
-assert_contains "[boot C] init ran" "$LOG_C" "debian-fde-harness: init started"
+assert_contains "[boot C] init ran" "$LOG_C" "alpine-fde-harness: init started"
 assert_contains "[boot C] the §8.2 unseal hook owns the unlock (default mechanism)" "$LOG_C" \
-    "debian-fde-harness: unlock mechanism: hook"
+    "alpine-fde-harness: unlock mechanism: hook"
 assert_contains "[boot C] stage selected on the payload drive (release UKI bytes preserved)" "$LOG_C" \
     "payload drive selects stage=login"
 assert_contains "[boot C] hook ran the enter-initrd extend (single phase word)" "$LOG_C" \
@@ -1326,11 +1326,11 @@ assert_contains "[boot C] standing finalized token discovered (pcrs [7,11])" "$L
 assert_contains "[boot C] token unlocked via the TPM (zero-input §8.2 path)" "$LOG_C" \
     "$(sentinel_of unseal_unlocked)"
 assert_contains "[boot C] volume UNSEALED" "$LOG_C" \
-    "debian-fde: UNSEALED"
+    "alpine-fde: UNSEALED"
 assert_contains "[boot C] switch_root into the populated installed system" "$LOG_C" \
-    "debian-fde-harness: switching to the installed system"
+    "alpine-fde-harness: switching to the installed system"
 assert_contains "[boot C] root mount is the §9.1 @ subvolume (G-HW5 btrfs default)" "$LOG_C" \
-    "debian-fde-btrfs: root mounted subvol=@ (login stage)"
+    "alpine-fde-btrfs: root mounted subvol=@ (login stage)"
 assert_contains "[boot C] the installed system's getty banner (real Alpine userspace)" "$LOG_C" \
     "Welcome to Alpine Linux"
 assert_not_contains "[boot C] no recovery-passphrase prompt ever opened (zero-input path)" "$LOG_C" \
@@ -1353,7 +1353,7 @@ if (( FROM_CACHE == 1 )); then
     assert_not_contains "[from-cache] ZERO Mechanism B seals (the cache is never re-enrolled over)" \
         "$LOG_CACHED" "$(sentinel_of cli_seal_slot)"
     assert_not_contains "[from-cache] no enrollment success marker" "$LOG_CACHED" \
-        "debian-fde: enrolled (policy_mode"
+        "alpine-fde: enrolled (policy_mode"
     assert_not_contains "[from-cache] no fed tooling session ran (no enroll work redone)" \
         "$LOG_CACHED" "P2B-42-OK"
 fi

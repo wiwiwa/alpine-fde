@@ -2,8 +2,8 @@
 # tests/unit/dispatch_flags.sh — dispatcher global-flag surface for the Wave 2
 # topologies (README quick start; Architecture.md §8.1 flags):
 #   * --disk repeatable: values accumulate newline-separated into
-#     DEBIAN_FDE_DISKS; DEBIAN_FDE_DISK stays the LAST value (backward compat)
-#   * --bcache <dev> forwards DEBIAN_FDE_BCACHE
+#     ALPINE_FDE_DISKS; ALPINE_FDE_DISK stays the LAST value (backward compat)
+#   * --bcache <dev> forwards ALPINE_FDE_BCACHE
 #   * --fs <btrfs|ext4> validated — anything else is usage (rc 2)
 #   * global flags must precede the subcommand; later flags pass through
 #   * `finalize` is a registered subcommand
@@ -13,9 +13,9 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$HERE/../lib/assert.sh"
-SP="$REPO/bin/debian-fde"
+SP="$REPO/bin/alpine-fde"
 
-T=$(mktemp -d /tmp/debian-fde-dflags.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-dflags.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 CMD=$T/cmd
 mkdir -p "$CMD"
@@ -24,18 +24,18 @@ mkdir -p "$CMD"
 cat >"$CMD/status.sh" <<'EOF'
 cmd_status_main() {
     printf 'STUB|DISK=%s|DISKS=%s|BCACHE=%s|FS=%s|ARGS=%s\n' \
-        "${DEBIAN_FDE_DISK-}" \
-        "$(printf '%s' "${DEBIAN_FDE_DISKS-}" | tr '\n' ',')" \
-        "${DEBIAN_FDE_BCACHE-}" "${DEBIAN_FDE_FS-}" "$*"
+        "${ALPINE_FDE_DISK-}" \
+        "$(printf '%s' "${ALPINE_FDE_DISKS-}" | tr '\n' ',')" \
+        "${ALPINE_FDE_BCACHE-}" "${ALPINE_FDE_FS-}" "$*"
 }
 EOF
 
 sp() {
-    env -u DEBIAN_FDE_DISK -u DEBIAN_FDE_DISKS -u DEBIAN_FDE_BCACHE -u DEBIAN_FDE_FS \
-        -u DEBIAN_FDE_ROOT -u DEBIAN_FDE_ESP -u DEBIAN_FDE_KEYDIR -u DEBIAN_FDE_TCTI \
-        -u DEBIAN_FDE_YES -u DEBIAN_FDE_DRY_RUN \
-        DEBIAN_FDE_CONF="$T/absent.conf" \
-        DEBIAN_FDE_CMD_DIR="$CMD" \
+    env -u ALPINE_FDE_DISK -u ALPINE_FDE_DISKS -u ALPINE_FDE_BCACHE -u ALPINE_FDE_FS \
+        -u ALPINE_FDE_ROOT -u ALPINE_FDE_ESP -u ALPINE_FDE_KEYDIR -u ALPINE_FDE_TCTI \
+        -u ALPINE_FDE_YES -u ALPINE_FDE_DRY_RUN \
+        ALPINE_FDE_CONF="$T/absent.conf" \
+        ALPINE_FDE_CMD_DIR="$CMD" \
         "$SP" "$@"
 }
 
@@ -74,11 +74,15 @@ out=$(sp status --fs btrfs --disk /dev/sda)
 assert_eq "flags after the subcommand pass through untouched" \
     "STUB|DISK=|DISKS=|BCACHE=|FS=|ARGS=--fs btrfs --disk /dev/sda" "$out"
 
-# --- ALPINE_FDE_* env alias layer (§8.1 canonical spelling; ADR-15) -----------------
-# One representative flag env: ALPINE_FDE_DISK must reach the cmd as DEBIAN_FDE_DISK.
-out=$(ALPINE_FDE_DISK=/dev/alpine-live-disk sp status)
-unset ALPINE_FDE_DISK
-assert_eq "ALPINE_FDE_DISK env alias reaches the cmd as DEBIAN_FDE_DISK" \
+# --- ALPINE_FDE_* env namespace read directly (§8.1; alias layer retired) -----------
+# One representative flag env: ALPINE_FDE_DISK must reach the cmd verbatim
+# (no alias rewrite). sp strips it deliberately, so set it downstream of the -u list.
+out=$(env -u ALPINE_FDE_DISKS -u ALPINE_FDE_BCACHE -u ALPINE_FDE_FS \
+    -u ALPINE_FDE_ROOT -u ALPINE_FDE_ESP -u ALPINE_FDE_KEYDIR -u ALPINE_FDE_TCTI \
+    -u ALPINE_FDE_YES -u ALPINE_FDE_DRY_RUN \
+    ALPINE_FDE_CONF="$T/absent.conf" ALPINE_FDE_CMD_DIR="$CMD" \
+    ALPINE_FDE_DISK=/dev/alpine-live-disk "$SP" status)
+assert_eq "ALPINE_FDE_DISK env reaches the cmd as ALPINE_FDE_DISK" \
     "STUB|DISK=/dev/alpine-live-disk|DISKS=|BCACHE=|FS=|ARGS=" "$out"
 
 # --- finalize is a registered subcommand ------------------------------------------
