@@ -75,6 +75,20 @@ Runner contract details:
   completion order. Console logs stay per-scenario in each run dir; the
   runner prints each scenario's output + completion line as workers finish
   (completion order), so lines never interleave.
+- **Step timing**: per-step cost is on the record, not just the per-scenario
+  total. `tests/lib/stage-timing.sh` emits `# stage <label>: begin <epoch>`
+  and `# stage <label>: done <seconds>s` lines into the scenario log (s00b's
+  `run_stage` stages, s00's build/install/finalize legs); `tests/lib/qemu.sh`
+  emits `# boot <run-dir-basename>: powered down after <seconds>s` on a clean
+  guest exit, and `... killed after <seconds>s` on the timeout path (scenario
+  stdout only — `console.log`'s format is the assertion substrate and never
+  changes). Each bridge boot also mirrors the console into
+  `<run>/console-timed.log`: the same lines, each prefixed with an epoch
+  timestamp, for boot-phase hot-spot analysis. The runner parses the `done`
+  lines (never an env var) into an OPTIONAL additive `stages` object
+  (`{label: seconds}`) on each results row; rows without stage lines keep
+  the exact previous schema. Hot-spot triage:
+  `jq '.scenarios[] | {id, seconds, stages}' tests/e2e/.runs/results-<ts>.json`.
 - **Per-scenario budget**: every scenario runs under a wall-clock `timeout`
   (`ALPINE_FDE_SCENARIO_BUDGET`, default 7200 s). A killed scenario is
   recorded with the distinct status `timeout`, never as a plain failure.

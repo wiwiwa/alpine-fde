@@ -32,6 +32,13 @@
 #   qemu_wait <run-dir> <timeout-s>   wait for exit (0 = powered off cleanly)
 #   qemu_kill <run-dir>               hard kill (timeout path)
 #
+# Boot timing (Step timing, tests/README.md): qemu_run records the boot's
+# launch epoch and qemu_wait emits to the SCENARIO stdout (which run-e2e
+# captures per scenario — NEVER to console.log, whose format the sentinel
+# asserts own):
+#   # boot <basename-of-run-dir>: powered down after <seconds>s   (clean exit)
+#   # boot <basename-of-run-dir>: killed after <seconds>s         (timeout path)
+#
 # Drive map (fixed contract with the harness /init): vda=ESP, vdb=LUKS disk,
 # vdc=optional pcrsig payload, vdd, vde, … = extra-drives list order.
 #
@@ -47,6 +54,42 @@ fi
 _ALPINE_FDE_QEMU_SOURCED=1
 
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-300}"
+
+# Boot-timing state: launch epoch per run dir (recorded by qemu_run, consumed
+# by qemu_wait's clean/timeout emission). A run dir whose boot was launched by
+# a PREVIOUS process (e.g. a re-sourced library) falls back to the qemu.pid
+# mtime — see _qemu_boot_note.
+declare -A _QEMU_BOOT_T0=()
+
+# qemu_now_epoch — current unix epoch without a fork (bash >= 5 builtin
+# variable; date(1) only as a pre-bash-5 fallback). Shared by the boot-timing
+# recorder and the stage-timing library's own epoch logic.
+qemu_now_epoch() {
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        printf '%s' "${EPOCHREALTIME%.*}"
+    else
+        date +%s
+    fi
+}
+
+# _qemu_boot_note <run-dir> <powered|killed> — emit the boot's wall time to
+# scenario stdout. No recorded epoch AND no pid file: emit nothing (rc 0) —
+# a missing measurement is never a fabricated one.
+_qemu_boot_note() {
+    local run="$1" outcome="$2" t0 now
+    t0=${_QEMU_BOOT_T0[$run]:-}
+    if [[ -z "$t0" && -f "$run/qemu.pid" ]]; then
+        t0=$(stat -c %Y "$run/qemu.pid" 2>/dev/null || true)
+    fi
+    [[ -n "$t0" ]] || return 0
+    now=$(qemu_now_epoch)
+    if [[ "$outcome" == "killed" ]]; then
+        printf '# boot %s: killed after %ds\n' "${run##*/}" "$((now - t0))"
+    else
+        printf '# boot %s: powered down after %ds\n' "${run##*/}" "$((now - t0))"
+    fi
+    return 0
+}
 
 # --- guest console wiring (persistent bridge, see tests/lib/serial.sh) ------------
 # The serial chardev points at the INTERNAL socket <run>/serial-qemu.sock; the
@@ -335,6 +378,7 @@ qemu_run() {
     local -a args=()
     mapfile -t args < <(qemu_argv "$run" "$esp" "$disk" "$vars" "$swtpmdir" \
         "$pcrsig" "$extra")
+    _QEMU_BOOT_T0["$run"]=$(qemu_now_epoch)   # boot-timing start (qemu_wait emits the elapsed)
     qemu-system-x86_64 "${args[@]}" >"$run/qemu.stdout" 2>"$run/qemu.stderr" &
     echo $! >"$run/qemu.pid"
     # QMP kicker (tpm-crb companion, docs/research/tpm-init-timing.md): a
@@ -392,7 +436,8 @@ qemu_wait() {
     local deadline=$((SECONDS + timeout))
     while ((SECONDS < deadline)); do
         if ! kill -0 "$pid" 2>/dev/null; then
-            # clean guest exit: reap the bridge + the QMP kicker
+            # clean guest exit: time on the record, then reap bridge + kicker
+            _qemu_boot_note "$run" powered
             pkill -9 -f "python3 - $run/qmp.sock" 2>/dev/null
             serial_bridge_stop "$run"
             return 0
@@ -403,6 +448,9 @@ qemu_wait() {
         _qmp_kicker_start "$run"
         sleep 1
     done
+    # timeout path: the elapsed lands on the record too (the kill below is
+    # the wedge-recovery sweep, not a clean exit — the line says "killed")
+    _qemu_boot_note "$run" killed
     qemu_kill "$run"
     return 124   # timeout
 }

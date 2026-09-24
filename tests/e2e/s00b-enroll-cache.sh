@@ -147,6 +147,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/stage-timing.sh
+source "$TESTS/lib/stage-timing.sh"   # Step timing: run_stage emits begin/done lines
 
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
@@ -181,10 +183,16 @@ _budget_check() {   # _budget_check <stage>
 # run_stage <name> <timeout-s> <cmd...> — run a stage (function OR binary)
 # under a process-group watchdog; loud fatal on timeout/failure. run_stage_rc
 # variant returns instead of exiting (for stages whose failure is asserted).
+# Step timing: every stage is wrapped in stage_begin/stage_end so the scenario
+# log carries "# stage <name>: begin <epoch>" / "done <seconds>s" lines
+# (harvested by run-e2e into the results row's `stages` object). A stage_end
+# always precedes the failure handling — the elapsed is valid regardless of rc.
 run_stage_impl() {   # <soft> <name> <timeout-s> <cmd...>
     local soft="$1" name="$2" tmo="$3"; shift 3
     _budget_check "$name"
     echo "# s00b: stage $name (watchdog ${tmo}s)"
+    stage_begin "$name" || _hang_fail STAGE-TIMING "$name" \
+        "stage_begin refused (nested or non-harvestable label)"
     ( "$@" ) &
     local pid=$! rc wrc
     ( sleep "$tmo"; kill -9 -"$pid" 2>/dev/null; exit 125 ) &
@@ -192,6 +200,7 @@ run_stage_impl() {   # <soft> <name> <timeout-s> <cmd...>
     wait "$pid"; rc=$?
     kill "$wpid" 2>/dev/null
     wait "$wpid" 2>/dev/null; wrc=$?
+    stage_end "$name" || _hang_fail STAGE-TIMING "$name" "stage_end refused"
     if (( wrc == 125 )); then
         _hang_fail STAGE-TIMEOUT "$name" "exceeded watchdog ${tmo}s"
     fi

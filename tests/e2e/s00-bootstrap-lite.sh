@@ -63,6 +63,8 @@ source "$TESTS/lib/swtpm-fixture.sh"
 source "$TESTS/lib/qemu.sh"
 # shellcheck source=../lib/sentinels.sh
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
+# shellcheck source=../lib/stage-timing.sh
+source "$TESTS/lib/stage-timing.sh"   # Step timing: # stage <label>: begin/done lines
 
 # §3.3 size budget (G-E1, ADR-12): THE PIN OF RECORD IS THIS HARNESS VAR
 # (default = the ADR-12 planning target ≤ 250 MB, an 80%+ reduction vs the
@@ -109,6 +111,7 @@ assert_contains "enrolled vars: SecureBootEnable ON" \
     "$(keys_vars_get "$RUN/vars-enrolled.fd" SecureBootEnable)" "ON"
 assert_contains "enrolled vars: PK present" "$(keys_vars_get "$RUN/vars-enrolled.fd" PK)" "blob"
 
+stage_begin build   # Step timing: fixtures -> UKI -> ESP -> LUKS (assertion text below unchanged)
 echo "# building rootfs payload drive (SHA256-pinned Alpine artifact, G-E1) ..."
 read -r ROOTFS_SHA ROOTFS_BYTES <<<"$(rootfs_payload_image "$RUN/rootfs-payload.img")"
 [[ -n "$ROOTFS_SHA" ]] || { echo "s00: rootfs payload build failed"; exit 1; }
@@ -145,8 +148,10 @@ else
         "${ESP_ACTUAL_MIB}MiB < ${UKI_MIB}×$ROOTFS_RETENTION"
 fi
 disk_make_luks "$RUN/disk.img" 1600 || exit 1
+stage_end build
 
 # --- boot: installer stage (passphrase unlock + rootfs populate) -----------------
+stage_begin install   # Step timing: the boot itself also carries qemu_wait's "# boot ..." line
 echo "# booting installer (payload drive on vdc; TCG, up to $QEMU_TIMEOUT s) ..."
 qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/rootfs-payload.img"
 qemu_wait "$RUN" "$QEMU_TIMEOUT"
@@ -157,6 +162,7 @@ else
     _assert_result not-ok "guest exited (poweroff, not timeout-kill)" "qemu_wait rc=$BOOT_RC"
 fi
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
+stage_end install
 
 # --- stage assertions ------------------------------------------------------------
 assert_contains "init ran" "$LOG" "alpine-fde-harness: init started"
@@ -270,6 +276,7 @@ assert_pcr11_prediction "G-T13"
 # G-R1 guard: finalization refuses unless the efivars seam reports
 # SecureBoot=1 SetupMode=0 — the fixture efivars dir presents the final SB
 # state (mkvar pattern from tests/unit/baseline_finalize_guard.sh).
+stage_begin finalize   # Step timing: audit --init baseline leg (host-side, real CLI)
 EFIVARS="$RUN/rootfs/efivars-sb-on"
 # the real CLI's sp_etc_dir resolves $ALPINE_FDE_ROOT/etc/alpine-fde (the
 # Alpine-contract rename) — stage the baseline where audit --init looks
@@ -343,6 +350,7 @@ else
     _assert_result ok "baseline is FINAL (no pending PCR 7)" ""
 fi
 cp "$RUN/rootfs/etc/alpine-fde/baseline.json" "$RUN/baseline.json"
+stage_end finalize
 
 kill "$REFRESHER" 2>/dev/null
 echo "# run dir: $RUN (wall $((SECONDS - T0)) s)"

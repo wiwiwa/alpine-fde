@@ -36,13 +36,17 @@
 #      s00/s00b state-chain dirs AND every existing .runs dir, re-collected
 #      before EACH worker fork (a late fork protects dirs a finished peer
 #      created; a peer's own fork predates its dir).
+#   6. Step timing (additive): a scenario whose log carries
+#      `# stage <label>: done <seconds>s` lines yields a row with a `stages`
+#      object ({label: seconds}); rows without stage lines keep the EXACT
+#      previous schema (no stages key) — the change is purely additive.
 #
 # RED scaffolding (not used in CI): PAR_CONTRACT_MUTATION=<name> applies one
 # hand-rolled mutation to the SANDBOX COPY ONLY (never the real file) to
 # demonstrate that the assertions bite:
 #   no-j-validation | no-phase-hoist | frag-index-collision | no-vacuous-guard
 #   | timeout-as-fail | no-latefork-reprotect | jobs-field-dropped
-#   | frag-dropped | no-dup-reject
+#   | frag-dropped | no-dup-reject | stages-dropped
 # Each name must make this file exit nonzero. Empty/unset (default) = the
 # verbatim runner = GREEN.
 
@@ -112,6 +116,9 @@ apply_mutation() {
         # Revert the duplicate-id parse-gate rejection to the old silent
         # twin-boot behavior.
         no-dup-reject)         sed -i 's/^_reject_duplicate_ids$/: # mutation: duplicate-id rejection disabled/' "$f" ;;
+        # Drop the additive stages key from every fragment: the staged-row
+        # assertions must bite (Step timing contract point 6).
+        stages-dropped)        sed -i 's/, "stages": %s}//' "$f" ;;
         *) echo "run_e2e_parallel_contract: unknown mutation '$MUT'" >&2; exit 95 ;;
     esac
 }
@@ -121,6 +128,10 @@ build_sandbox() {
     local sbx=$1 id
     mkdir -p "$sbx/e2e" "$sbx/lib" "$sbx/unit" "$sbx/ctl" "$sbx/state" "$sbx/tmp"
     cp "$REAL_RUNNER" "$sbx/run-e2e.sh"
+    # stage-timing.sh is a pure function library (no sockets, no fixtures, no
+    # state) — the runner sources it for the stages harvest, so the sandbox
+    # carries it VERBATIM rather than stubbed.
+    cp "$TESTS/lib/stage-timing.sh" "$sbx/lib/stage-timing.sh"
     apply_mutation "$sbx/run-e2e.sh"
     chmod +x "$sbx/run-e2e.sh"
 
@@ -189,6 +200,7 @@ rc=0
 case "$kind" in
     pass)     echo "ok 1 - stub $id" ;;
     slowpass) sleep "${PAR_CONTRACT_SLOW:-3}"; echo "ok 1 - stub $id" ;;
+    staged)   echo "# stage snap: done 1s"; echo "# stage build: done 2s"; echo "ok 1 - stub $id (staged)" ;;
     timeout)  sleep "$(( ${PAR_CONTRACT_SLOW:-3} + 2 ))"; rc=124 ;;
     fail)     echo "not ok 1 - stub $id blew up"; rc=3 ;;
     vacuous)  echo "stub $id: no assertions here" ;;
@@ -377,13 +389,15 @@ assert_contains "worker s04: protect set covers pre-existing .runs peer dir" \
     "$(cat "$CTL_A/protect-s04.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
 
 # --- part 3: contract point 5 — re-collected before EACH worker fork ---------------
-# -j 2 over [s09 slowpass 3s, s01 creator, s07 pass]: s01 (fast) finishes while
+# -j 2 over [s09 slowpass 3s, s01 creator, s07 staged]: s01 (fast) finishes while
 # s09 sleeps; s07 is the LATE fork and must protect the dir s01 created, while
 # s01's own fork predates that dir (proves the mechanism, not a tautology).
+# s07 is also the STAGED row for contract point 6 (its stub emits two
+# `# stage ... done` lines; the others emit none — additivity both ways).
 SBX_B="$SBX_ROOT/b"
 CTL_B="$SBX_B/ctl"
 build_sandbox "$SBX_B"
-export_kinds s09=slowpass s01=creator s07=pass
+export_kinds s09=slowpass s01=creator s07=staged
 run_registry "$SBX_B" "$CTL_B/out" "$CTL_B/err" -j 2 s09 s01 s07
 assert_eq "run B (-j 2, all pass): runner exit 0" "0" "$?"
 assert_contains "late fork s07 protects peer dir created by s01 (pre-fork re-collection)" \
@@ -394,6 +408,14 @@ RESULT_JSON_B=$(ls -t "$SBX_B/e2e/.runs/"results-*.json 2>/dev/null | head -1)
 assert_file_exists "run B aggregated results-<ts>.json" "$RESULT_JSON_B"
 assert_rc "run B results: JSON parses cleanly, 3 rows (all-pass run)" 0 \
     jq -e '.scenarios | type == "array" and length == 3' "$RESULT_JSON_B"
+
+# point 6 — Step timing: additive stages object on staged rows, absent elsewhere
+assert_rc "run B results: staged row carries the stages object harvested from '# stage ... done' lines" 0 \
+    jq -e '.scenarios[] | select(.id == "s07") | .stages == {"snap": 1, "build": 2}' "$RESULT_JSON_B"
+assert_rc "run B results: rows WITHOUT stage lines keep the exact previous schema (no stages key)" 0 \
+    jq -e '.scenarios[] | select(.id != "s07") | has("stages") | not' "$RESULT_JSON_B"
+assert_rc "run A results: no row carries a stages key when no scenario emits stage lines (additive)" 0 \
+    jq -e '[.scenarios[] | has("stages")] | all(.) == false' "$RESULT_JSON"
 
 # --- summary -----------------------------------------------------------------------
 TOTAL=$((TESTS_PASS + TESTS_FAIL))

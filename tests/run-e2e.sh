@@ -203,6 +203,8 @@ done
 # deterministic per machine) and log the same greppable line.
 # shellcheck source=lib/qemu.sh
 source "$TESTS/lib/qemu.sh"
+# shellcheck source=lib/stage-timing.sh
+source "$TESTS/lib/stage-timing.sh"   # stage_timing_json: harvest "# stage <l>: done <N>s"
 ACCEL=$(qemu_accel) || {
     echo "run-e2e: KVM (/dev/kvm) is required for e2e — see qemu-accel lines above" >&2
     exit 64
@@ -375,9 +377,19 @@ for _i in "${!REQUESTED[@]}"; do
 done
 unset _i
 
-_frag_write() {    # _frag_write <frag> <id> <status> <seconds>
-    printf '{"id": "%s", "status": "%s", "seconds": %s}\n' \
-        "$(_json_escape "$2")" "$(_json_escape "$3")" "$4" >"$1"
+_frag_write() {    # _frag_write <frag> <id> <status> <seconds> [stages-json]
+    # ADDITIVE schema (Step timing, tests/README.md): when the scenario log
+    # carried "# stage <label>: done <seconds>s" lines, the row gains a
+    # `stages` object ({label: seconds}); without stage lines the row is
+    # byte-identical to the pre-timing schema.
+    local stages="${5:-}"
+    if [[ -n "$stages" ]]; then
+        printf '{"id": "%s", "status": "%s", "seconds": %s, "stages": %s}\n' \
+            "$(_json_escape "$2")" "$(_json_escape "$3")" "$4" "$stages" >"$1"
+    else
+        printf '{"id": "%s", "status": "%s", "seconds": %s}\n' \
+            "$(_json_escape "$2")" "$(_json_escape "$3")" "$4" >"$1"
+    fi
 }
 _frag_field() {    # _frag_field <status|seconds> <frag>
     if [[ "$1" == "status" ]]; then
@@ -396,7 +408,7 @@ _frag_field() {    # _frag_field <status|seconds> <frag>
 # (background workers are subshells; the phase split guarantees s00/s00b
 # never fork).
 _run_one() {
-    local idx="$1" id="$2" script hint out rc st t0 secs frag
+    local idx="$1" id="$2" script hint out rc st t0 secs frag stages
     frag="${FRAG[$idx]}"
     : >"${frag}.log"
     script=$(_script_for "$id")
@@ -453,6 +465,11 @@ _run_one() {
         st=pass
     fi
     secs=$((SECONDS - t0))
+    # Step timing: harvest the scenario's "# stage <label>: done <seconds>s"
+    # lines into the row's OPTIONAL additive `stages` object (parse, don't
+    # trust env). Boot legs are NOT in here — they live on the scenario log
+    # as "# boot <run>: powered down|killed after <N>s" lines.
+    stages=$(stage_timing_json "$out_log")
     printf '%s\n' "$out" >"${frag}.log"
     if [[ "$id" == "s00" && "$st" == "pass" ]]; then
         S00_RUNDIR=$(awk '/^RUNDIR /{print $2; exit}' <<<"$out")
@@ -462,7 +479,7 @@ _run_one() {
         S00B_RUNDIR=$(awk '/^RUNDIR /{print $2; exit}' <<<"$out")
         _protect_add "$S00B_RUNDIR"  # CR-02/MD-03: prunes must spare s00b's state
     fi
-    _frag_write "$frag" "$id" "$st" "$secs"
+    _frag_write "$frag" "$id" "$st" "$secs" "$stages"
 }
 
 # _print_done <index> — completion line for one scenario (its captured output

@@ -77,7 +77,15 @@ connection while the guest UART is backpressured destroys in-flight input).
 Fronts <listen-path> to any number of short-lived console clients: output is
 broadcast to all clients, input from any client goes to the guest.
 
-Usage: serial-bridge.py <qemu-sock-path> <listen-path> <log-path>
+Usage: serial-bridge.py <qemu-sock-path> <listen-path> <log-path> [timed-log-path]
+
+The optional 5th argument is the TIMED MIRROR path (Step timing, Step timing
+paragraph in tests/README.md): every upstream (guest console) line is ALSO
+written there as "<epoch> <original line>" — console.log itself (qemu's
+chardev logfile) stays byte-identical; the mirror is the per-line timestamped
+view for boot-phase timing analysis. Lines are buffered across recv chunks
+and across qemu reconnects within one boot (append mode); the file is
+truncated fresh per boot by serial_bridge_start.
 """
 import select
 import socket
@@ -95,12 +103,47 @@ def log(path, msg):
         pass
 
 
+class TimedMirror:
+    """Appends '<epoch> <line>' per console line; buffers partial lines across
+    recv chunks and across upstream reconnects (opened in append mode)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.f = None
+        self.buf = b""
+
+    def _open(self):
+        if self.f is None:
+            self.f = open(self.path, "ab")
+
+    def feed(self, data):
+        self._open()
+        self.buf += data
+        while True:
+            i = self.buf.find(b"\n")
+            if i < 0:
+                break
+            self.f.write(f"{time.time():.3f} ".encode() + self.buf[:i + 1])
+            self.buf = self.buf[i + 1:]
+        self.f.flush()
+
+    def flush_partial(self):
+        """Bridge exit: emit a trailing partial line so it is not lost. A
+        partial line spanning an upstream RECONNECT is NOT flushed there —
+        the buffer survives and the reconnecting stream completes it."""
+        if self.buf and self.f is not None:
+            self.f.write(f"{time.time():.3f} ".encode() + self.buf + b"\n")
+            self.buf = b""
+            self.f.flush()
+
+
 def main():
-    if len(sys.argv) != 4:
-        print(f"usage: {sys.argv[0]} <qemu-sock> <listen-path> <log-path>",
-              file=sys.stderr)
+    if len(sys.argv) not in (4, 5):
+        print(f"usage: {sys.argv[0]} <qemu-sock> <listen-path> <log-path> "
+              f"[timed-log-path]", file=sys.stderr)
         return 64
     qemu_path, listen_path, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    mirror = TimedMirror(sys.argv[4]) if len(sys.argv) == 5 else None
     try:
         import os
         os.unlink(listen_path)
@@ -148,6 +191,8 @@ def main():
                 if not ever_connected:
                     if time.monotonic() - started > 120.0:
                         log(log_path, "qemu socket never appeared in 120s — exiting")
+                        if mirror is not None:
+                            mirror.flush_partial()
                         return 0
                 else:
                     if up_gone_since is None:
@@ -155,6 +200,8 @@ def main():
                     if not clients or time.monotonic() - up_gone_since > 60.0:
                         log(log_path, "qemu gone — exiting (no clients)"
                             if not clients else "qemu gone 60s — exiting")
+                        if mirror is not None:
+                            mirror.flush_partial()
                         return 0
         rl = [srv] + ([up] if up is not None else []) + clients
         try:
@@ -179,6 +226,8 @@ def main():
                 data = b""
             if data:
                 stat["out"] += len(data)
+                if mirror is not None:
+                    mirror.feed(data)
                 dead = []
                 for c in clients:
                     try:
@@ -193,7 +242,9 @@ def main():
                         pass
                 log(log_path, f"client gone (total {len(clients)})") if dead else None
             elif data == b"":
-                # qemu closed (exit/restart): drop and reconnect-retry
+                # qemu closed (exit/restart): drop and reconnect-retry. The
+                # mirror's partial-line buffer SURVIVES the reconnect — the
+                # reconnected stream completes the line (one boot, one file).
                 log(log_path, f"qemu connection lost (in={stat['in']} out={stat['out']})")
                 try:
                     up.close()
@@ -230,10 +281,14 @@ if __name__ == "__main__":
 BRIDGEPY
     chmod 755 "$py"
     : >"$(serial_bridge_log "$run")"
+    # Step timing: FRESH mirror per boot (qemu_run calls this on every boot) —
+    # the timed view of console.log appends across reconnects WITHIN a boot
+    # only. console.log itself is qemu's chardev logfile, untouched here.
+    : >"$run/console-timed.log"
     # detach: the bridge must outlive the scenario shell's foreground work but
     # stay discoverable/reapable via the pid file (the swtpm-fixture pattern)
     setsid python3 "$py" "$(_qemu_serial_sock "$run")" "$run/serial.sock" \
-        "$(serial_bridge_log "$run")" >/dev/null 2>&1 &
+        "$(serial_bridge_log "$run")" "$run/console-timed.log" >/dev/null 2>&1 &
     echo $! >"$run/serial-bridge.pid"
     # bound the "is it listening" wait — the bind happens immediately
     local i=0
