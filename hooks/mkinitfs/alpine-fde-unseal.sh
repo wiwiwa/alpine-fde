@@ -11,13 +11,17 @@
 #      via `cryptsetup token export` and the UKI stub's synthetic initrd
 #      files /.extra/tpm2-pcr-signature.json + /.extra/tpm2-pcr-public-key.pem.
 #   3. Policy session over the token's PCRs (policypcr) + PolicyAuthorize of
-#      the approved policy digest: the token's tpm2-signature is verified
-#      (openssl) over the .pcrsig `pol` digest against the /.extra public key,
-#      then re-verified in-TPM (tpm2_verifysignature) before tpm2_policyauthorize
-#      admits it — the keyName anchor lives INSIDE the sealed blob, so a
-#      swapped /.extra key still fails the unseal (I3). tpm2_unseal feeds
-#      `cryptsetup open --key-file -` per /etc/crypttab (UUID= resolved via
-#      /dev/disk/by-uuid). Mirrors lib/seal.sh seal_unseal argv-for-argv.
+#      the approved policy digest: the DRIVE ENTRY's OWN .pcrsig signature is
+#      verified (openssl) over the entry's `pol` digest against the /.extra
+#      public key, then re-verified in-TPM (tpm2_verifysignature) before
+#      tpm2_policyauthorize admits it — the keyName anchor lives INSIDE the
+#      sealed blob, so a swapped /.extra key still fails the unseal (I3).
+#      The token's tpm2-signature covers the ENROLL-time policy only and is
+#      deliberately NOT required to cover the booting kernel's entry (G4:
+#      any retained kernel unseals passwordless off its own .pcrsig entry,
+#      §9.3). tpm2_unseal feeds `cryptsetup open --key-file -` per
+#      /etc/crypttab (UUID= resolved via /dev/disk/by-uuid). Mirrors
+#      lib/seal.sh seal_unseal argv-for-argv.
 #   4. Fail-closed: TPM absent/refused, tampered token, missing /.extra
 #      artifacts, or an empty unsealed secret fall back to a BOUNDED keyslot-0
 #      recovery-passphrase prompt — 3 strikes total (shared across RAID1
@@ -144,6 +148,7 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
     # target/device fields are whitespace-free by grammar): odd word = target,
     # even word = device.
     _fdh_tok=''
+    _fdh_exp_err=''
     _fdh_pos=0
     for _fdh_wd in $_fdh_members; do
         _fdh_pos=$((_fdh_pos + 1))
@@ -157,13 +162,25 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         # a token parked at id >=16 must still be found, never silently
         # dropped into the passphrase fallback (§8.2 step 2)
         while [ "$_fdh_tid" -le 31 ]; do
-            _fdh_out=$(cryptsetup token export --token-id "$_fdh_tid" "$_fdh_dev" 2>/dev/null) || {
-                _fdh_tid=$((_fdh_tid + 1))
-                continue
-            }
-            case $(printf '%s' "$_fdh_out" | tr -d ' \t\n\r') in
-                *'"type":"systemd-tpm2"'*) _fdh_tok=$_fdh_out ;;
-            esac
+            _fdh_out=$(cryptsetup token export --token-id "$_fdh_tid" "$_fdh_dev" 2>"$_fdh_w/exp.err")
+            if [ $? -ne 0 ]; then
+                # fail VISIBLE: keep the FIRST line of WHY an export was
+                # refused, so the recovery path is diagnosable from console
+                if [ -s "$_fdh_w/exp.err" ] && [ -z "$_fdh_exp_err" ]; then
+                    _fdh_exp_err=$(head -n 1 "$_fdh_w/exp.err" | tr -d '\r')
+                fi
+            else
+                _fdh_tokflat=$(printf '%s' "$_fdh_out" | tr -d ' \t\n\r')
+                case $_fdh_tokflat in
+                    *'"type":"systemd-tpm2"'*) _fdh_tok=$_fdh_out ;;
+                esac
+                if [ -z "$_fdh_tok" ] && [ -z "$_fdh_exp_err" ]; then
+                    # a successful export the type filter rejected: keep a
+                    # fingerprint of the payload for the console record
+                    _fdh_exp_err="token id $_fdh_tid exported, no systemd-tpm2 type in [$(printf '%s' \
+                        "$_fdh_tokflat" | cut -c 1-60)]"
+                fi
+            fi
             [ -n "$_fdh_tok" ] && break
             _fdh_tid=$((_fdh_tid + 1))
         done
@@ -177,29 +194,41 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         _fdh_pcrs=$(_fdh_json_array "$_fdh_tokflat" tpm2-pcrs)
         _fdh_bank=$(_fdh_json_field "$_fdh_tokflat" tpm2-pcr-bank)
         _fdh_blob=$(_fdh_json_field "$_fdh_tokflat" tpm2-blob)
-        _fdh_toksig=$(_fdh_json_field "$_fdh_tokflat" tpm2-signature)
         case $_fdh_pcrs in
             11 | 7,11) _fdh_sel=$_fdh_pcrs ;;
             *) _fdh_sel='' ;;
         esac
         _msg "token: pcrs=[$_fdh_pcrs] bank=$_fdh_bank keyslots=[$(_fdh_json_array "$_fdh_tokflat" keyslots)]"
 
-        # the approved policy digest comes from the UKI stub's .pcrsig entry
-        # for EXACTLY the PCR selection the token pins
+        # the approved policy digest AND the drive entry's own release-key
+        # signature come from the UKI stub's .pcrsig entry for EXACTLY the
+        # PCR selection the token pins
         _fdh_pol=''
-        if [ -n "$_fdh_sel" ] && [ "$_fdh_bank" = "sha256" ] &&
-            [ -n "$_fdh_blob" ] && [ -n "$_fdh_toksig" ]; then
+        _fdh_entsig=''
+        if [ -n "$_fdh_sel" ] && [ "$_fdh_bank" = "sha256" ] && [ -n "$_fdh_blob" ]; then
             _fdh_sigflat=$(tr -d ' \t\n\r' <"$FDE_EXTRA_DIR/tpm2-pcr-signature.json")
             _fdh_pol=$(printf '%s\n' "$_fdh_sigflat" |
                 sed -n "s/^.*\"pcrs\":\\[$_fdh_sel\\],[^{]*\"pol\":\"\([0-9a-fA-F]\{64\}\)\".*$/\1/p")
+            _fdh_entsig=$(printf '%s\n' "$_fdh_sigflat" |
+                sed -n "s/^.*\"pcrs\":\\[$_fdh_sel\\],[^{]*\"sig\":\"\([A-Za-z0-9+/=]*\)\".*$/\1/p")
         fi
 
-        # openssl-level gate (I3): the release-key signature carried in the
-        # token's tpm2-signature must cover the approved policy digest and
-        # verify against the /.extra public key BEFORE any TPM session
+        # openssl-level gate (I3, G4 rollback semantics): the DRIVE ENTRY's
+        # OWN release-key signature must cover the entry's approved policy
+        # digest and verify against the /.extra public key BEFORE any TPM
+        # session — i.e. the entry was signed by the same authority whose
+        # keyName the sealed policy's PolicyAuthorize pins. The token's
+        # tpm2-signature covers the ENROLL-time policy only and is NOT
+        # required to cover the booting kernel's entry (G4: retained kernels
+        # unseal passwordless off their own .pcrsig entries, §9.3); it is
+        # inert metadata here. The remaining anchors stay in the TPM and
+        # fail closed: keyName via PolicyAuthorize (a swapped /.extra key or
+        # a forged entry from an unknown key cannot rebuild the enrollment
+        # policy) and live PCRs via PolicyPCR (a pol that does not match the
+        # measured boot refuses).
         _fdh_rc=1
-        if [ -n "$_fdh_pol" ]; then
-            if printf '%s' "$_fdh_toksig" | openssl base64 -d -A >"$_fdh_w/sig.bin" 2>/dev/null; then
+        if [ -n "$_fdh_pol" ] && [ -n "$_fdh_entsig" ]; then
+            if printf '%s' "$_fdh_entsig" | openssl base64 -d -A >"$_fdh_w/sig.bin" 2>/dev/null; then
                 _fdh_hex2bin "$_fdh_pol" >"$_fdh_w/pol.bin"
                 if openssl dgst -sha256 -verify "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" \
                     -signature "$_fdh_w/sig.bin" "$_fdh_w/pol.bin" >/dev/null 2>&1; then
@@ -209,11 +238,19 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         fi
 
         if [ "$_fdh_rc" -ne 0 ]; then
-            _msg "token/signature verification refused (tampered token or wrong .pcrsig selection) — recovery passphrase path (I3)"
+            _msg "token/signature verification refused (no release-key-signed .pcrsig entry for the token's PCR selection) — recovery passphrase path (I3)"
         else
-            # in-TPM signature verification -> ticket for PolicyAuthorize
+            # in-TPM signature verification -> ticket for PolicyAuthorize.
+            # The verifying key MUST be loaded into the OWNER hierarchy (-C o,
+            # lib/seal.sh seal_unseal parity): TPM2_VerifySignature under the
+            # NULL hierarchy (-C n) succeeds but issues NO validation ticket,
+            # and without the ticket tpm2_policyauthorize aborts client-side
+            # ("Could not load verification ticket file") before it ever sends
+            # TPM2_PolicyAuthorize — the unseal then dies with a policy-check
+            # failure on EVERY boot regardless of PCR state (0x910-style
+            # session teardown noise in the swtpm trace is downstream of this).
             _fdh_rc=1
-            if tpm2_loadexternal -C n -G rsa -u "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" \
+            if tpm2_loadexternal -C o -G rsa -u "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" \
                 -c "$_fdh_w/pub.ctx" -n "$_fdh_w/pub.name" >/dev/null 2>&1 &&
                 tpm2_verifysignature -c "$_fdh_w/pub.ctx" -m "$_fdh_w/pol.bin" \
                     -s "$_fdh_w/sig.bin" -f rsassa -g sha256 -t "$_fdh_w/ticket.bin" >/dev/null 2>&1; then
@@ -239,9 +276,16 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
                             tpm2_policyauthorize -S "$_fdh_w/sess.ctx" -i "$_fdh_w/pol.bin" \
                                 -n "$_fdh_w/pub.name" -t "$_fdh_w/ticket.bin" >/dev/null 2>&1 &&
                             tpm2_unseal -c "$_fdh_w/seal.ctx" -p "session:$_fdh_w/sess.ctx" \
-                                -o "$_fdh_w/pass.bin" >/dev/null 2>&1; then
+                                -o "$_fdh_w/pass.raw" >/dev/null 2>&1; then
                             tpm2_flushcontext -t >/dev/null 2>&1 || :
-                            [ -s "$_fdh_w/pass.bin" ] && _fdh_rc=0
+                            # FRAMING (ADR-19): the keyslot credential is
+                            # base64(unsealed secret) — upstream's token plugin
+                            # hands cryptsetup base64mem(secret), and
+                            # lib/seal.sh staged exactly that at enroll time.
+                            if openssl base64 -A -in "$_fdh_w/pass.raw" \
+                                -out "$_fdh_w/pass.bin" >/dev/null 2>&1 && [ -s "$_fdh_w/pass.bin" ]; then
+                                _fdh_rc=0
+                            fi
                         fi
                     fi
                     tpm2_flushcontext -t >/dev/null 2>&1 || :
@@ -254,7 +298,7 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
             fi
         fi
     else
-        _msg "no systemd-tpm2 token found on any crypttab member — recovery passphrase path (§8.2)"
+        _msg "no systemd-tpm2 token found on any crypttab member — recovery passphrase path (§8.2)${_fdh_exp_err:+ [last export refusal: $_fdh_exp_err]}"
     fi
 fi
 

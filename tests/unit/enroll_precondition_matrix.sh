@@ -47,7 +47,19 @@ BYUUID=$T/by-uuid
 CS_LOG=$T/cryptsetup.log
 TPM_LOG=$T/tpm2.log
 UUID=12345678-90ab-cdef-1234-567890abcdef
-KEYDIR=$REPO/fixtures/keys
+# HERMETIC release key (ADR-16: the enroll gate refuses RSA < 3072, so the
+# shared fixtures/keys 2048 tree can no longer pass the precondition matrix;
+# also the parallel suites mutate that tree). Generated once per run.
+KEYDIR=$T/keys3072
+mkdir -p "$KEYDIR"
+openssl genrsa -out "$KEYDIR/release.pem" 3072 2>/dev/null
+openssl pkey -in "$KEYDIR/release.pem" -pubout -out "$KEYDIR/release.pub" 2>/dev/null
+openssl req -new -x509 -key "$KEYDIR/release.pem" -out "$KEYDIR/release.crt" \
+    -subj /CN=debian-fde-enroll-matrix 2>/dev/null
+[ -s "$KEYDIR/release.pem" ] && [ -s "$KEYDIR/release.pub" ] || {
+    echo "FAIL: 3072-bit release key fixture did not generate" >&2
+    exit 1
+}
 DER=$(openssl pkey -pubin -in "$KEYDIR/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 export DEBIAN_FDE_ROOT=$T/root
 export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
@@ -137,7 +149,9 @@ write_post_ok() { # SLOT(=2)
         "tokens": {
             "0": { "type": "systemd-tpm2", "keyslots": ["3"],
                    "tpm2-blob": "AAEAC0RhdGE=", "tpm2-pcrs": [7, 11],
-                   "tpm2-pcr-bank": "sha256", "tpm2-pubkey": $der,
+                   "tpm2-pcr-bank": "sha256",
+                   "tpm2-policy-hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                   "tpm2-primary-alg": "rsa", "tpm2-pubkey": $der,
                    "tpm2-signature": "U0lH" }
         }
     }' >"$T/luks-post.json"
@@ -157,7 +171,7 @@ write_compact_pre_token() {
     printf '%s\n' '{"keyslots":{"0":{"type":"luks2","key_size":64,"kdf":{"type":"pbkdf2","hash":"sha256","iterations":1000}},"1":{"type":"luks2","key_size":64,"kdf":{"type":"argon2id"}}},"tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"AAEAC0RhdGE="}}}' >"$T/luks-pre.json"
 }
 write_compact_post_reseat() {
-    printf '%s\n' "{\"keyslots\":{\"0\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"pbkdf2\",\"hash\":\"sha256\",\"iterations\":1000}},\"1\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"argon2id\"}},\"2\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"argon2id\"}}},\"tokens\":{\"0\":{\"type\":\"systemd-tpm2\",\"keyslots\":[\"3\"],\"tpm2-blob\":\"AAEAC0RhdGE=\",\"tpm2-pcrs\":[7,11],\"tpm2-pcr-bank\":\"sha256\",\"tpm2-pubkey\":\"$DER\",\"tpm2-signature\":\"U0lH\"}}}" >"$T/luks-post.json"
+    printf '%s\n' "{\"keyslots\":{\"0\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"pbkdf2\",\"hash\":\"sha256\",\"iterations\":1000}},\"1\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"argon2id\"}},\"2\":{\"type\":\"luks2\",\"key_size\":64,\"kdf\":{\"type\":\"argon2id\"}}},\"tokens\":{\"0\":{\"type\":\"systemd-tpm2\",\"keyslots\":[\"3\"],\"tpm2-blob\":\"AAEAC0RhdGE=\",\"tpm2-pcrs\":[7,11],\"tpm2-pcr-bank\":\"sha256\",\"tpm2-policy-hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"tpm2-primary-alg\":\"rsa\",\"tpm2-pubkey\":\"$DER\",\"tpm2-signature\":\"U0lH\"}}}" >"$T/luks-post.json"
 }
 
 reset_state() { # counters + logs + record only — fixture files are the caller's
@@ -300,6 +314,43 @@ assert_eq "a2 alias reaches the same path" "0" "$MODE_RC"
 run_enroll_mode native
 assert_eq "native alias reaches the same path" "0" "$MODE_RC"
 
+# --- 9b. digest-anchored precondition (Option A): entry.d7 vs baseline, NO live read ---------------
+# Option A: the pre-seal PCR 7 check is a PURE DATA comparison — the pcrsig
+# entry's recorded d7 anchor vs baseline.expected_pcr7. The seal's PolicyPCR
+# embeds the PROVIDED digests; the TPM evaluates them only at unseal against
+# the guest's firmware-measured PCRs (fail-at-unseal replaces fail-at-seal).
+sb_vars 1 0
+make_baseline final # baseline expected_pcr7 == LIVE_PCR7
+PSIG_ANCH=$T/pcrsig-anch.json
+policy_sign_json "$LIVE_PCR7" "$LIVE_PCR11" "$KEYDIR/release.pem" "$KEYDIR/release.pub" "$PSIG_ANCH"
+assert_eq "anchor fields recorded: entry d7" "$LIVE_PCR7" "$(jq -r '.sha256[] | select((.pcrs | join(",")) == "7,11") | .d7' "$PSIG_ANCH")"
+assert_eq "anchor fields recorded: entry d11" "$LIVE_PCR11" "$(jq -r '.sha256[] | select((.pcrs | join(",")) == "7,11") | .d11' "$PSIG_ANCH")"
+# drift the LIVE register away from the baseline: a digest-anchored enroll must
+# NOT consult it (the old live-read precondition would refuse here)
+swtpm_pcrextend "$STATE" 7 "$HEX_AB"
+run_enroll --pcrsig "$PSIG_ANCH"
+assert_eq "anchored .pcrsig: enroll rc 0 despite LIVE PCR 7 drift (no live read)" "0" "$ENROLL_RC"
+assert_eq "anchored: enrolled.json written" "b" "$(baseline_get "$(sp_enrolled_file)" policy_mode)"
+
+# anchored MISMATCH: entry d7 != baseline -> fail-closed 64, message names the
+# digest comparison and shows both digests; nothing enrolled
+make_baseline final
+BL_PCR7="$HEX_AB" baseline_write "$BL"
+run_enroll --pcrsig "$PSIG_ANCH"
+assert_eq "digest-anchor drift -> fail-closed 64" "64" "$ENROLL_RC"
+assert_contains "anchor-drift message names the digest comparison" "$ENROLL_OUT" "digest-anchor drift"
+assert_contains "anchor-drift message shows the entry d7" "$ENROLL_OUT" "$LIVE_PCR7"
+assert_contains "anchor-drift message shows the baseline d7" "$ENROLL_OUT" "$HEX_AB"
+assert_absent "anchor drift: no enrolled.json" "$(sp_enrolled_file)"
+
+# legacy anchor-less entry -> the live-read oracle path (drifted live != baseline
+# here, so the fallback REFUSES with the classic live comparison message)
+make_baseline final
+jq 'del(.sha256[].d7, .sha256[].d11)' "$PSIG_ANCH" >"$T/pcrsig-legacy.json"
+run_enroll --pcrsig "$T/pcrsig-legacy.json"
+assert_eq "legacy anchor-less .pcrsig: live-read precondition still enforced" "64" "$ENROLL_RC"
+assert_contains "legacy fallback message is the live comparison" "$ENROLL_OUT" "PCR 7 drift: live"
+
 # --- 10. --pcrsig: explicit source + G-B6 CLI negatives -------------------------------------------
 sb_vars 1 0
 PSIG=$T/pcrsig.json
@@ -321,12 +372,14 @@ assert_eq "wrong-selection .pcrsig -> fail-closed 64" "64" "$ENROLL_RC"
 assert_eq "wrong-selection: NO luksAddKey" "0" "$(grep -c luksAddKey "$CS_LOG")"
 
 # --- 11. compact LUKS2 wire shape: standing token reseat --------------------------------------------
+# (rides the ANCHORED pcrsig: after 9b the LIVE register is deliberately
+# drifted off the baseline — the digest-anchored precondition does not care)
 sb_vars 1 0
 make_baseline final
 reset_state
 write_compact_pre_token
 write_compact_post_reseat
-ENROLL_OUT=$("$REPO/bin/debian-fde" enroll-tpm --reseat 2>&1)
+ENROLL_OUT=$("$REPO/bin/debian-fde" enroll-tpm --reseat --pcrsig "$PSIG_ANCH" 2>&1)
 ENROLL_RC=$?
 assert_eq "compact standing token: reseat rc 0" "0" "$ENROLL_RC"
 assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luksKillSlot "$CS_LOG")"
@@ -334,7 +387,7 @@ assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luk
 # --- 12. dry-run: prints the plan, runs nothing ------------------------------------------------------
 make_baseline final
 sb_vars 1 0
-run_enroll --dry-run
+run_enroll --dry-run --pcrsig "$PSIG_ANCH"
 assert_eq "dry-run rc 0" "0" "$ENROLL_RC"
 assert_contains "dry-run names the mode" "$ENROLL_OUT" "policy_mode=b"
 assert_contains "dry-run names the device" "$ENROLL_OUT" "$DEBIAN_FDE_BY_UUID_DIR/$UUID"
@@ -344,10 +397,10 @@ assert_absent "dry-run writes no enrolled.json" "$(sp_enrolled_file)"
 
 # --- 13. `ukictl enroll` alias: identical surface ------------------------------------------------------
 sb_vars 1 0
-run_enroll --dry-run
+run_enroll --dry-run --pcrsig "$PSIG_ANCH"
 PLAN=$(printf '%s\n' "$ENROLL_OUT" | grep 'policy_mode=b')
 reset_state # fresh metadata counter — the alias must see the SAME pre-state
-ALIAS_OUT=$("$REPO/bin/debian-fde" ukictl enroll --dry-run 2>&1)
+ALIAS_OUT=$("$REPO/bin/debian-fde" ukictl enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
 ALIAS_RC=$?
 assert_eq "ukictl enroll alias: same rc" "0" "$ALIAS_RC"
 assert_contains "ukictl enroll alias: same plan line" "$ALIAS_OUT" "$PLAN"
@@ -365,9 +418,10 @@ eval "$(declare -f token_post_assert | sed 's/^token_post_assert/token_post_asse
 stub_seal() { # OUTFILE — pretend seal_finalized ran
     SEAL_SLOT=2
     SEAL_PASS_FILE=$T/staged-pass
-    printf 'staged-passphrase-0123456789abcdef' >"$SEAL_PASS_FILE"
+    printf 'c3RhZ2VkLXBhc3NwaHJhc2UtMDEyMzQ1Njc4OWFiY2RlZg==' >"$SEAL_PASS_FILE"
     chmod 600 "$SEAL_PASS_FILE"
-    token_build_json '[7, 11]' "$DER" "U0lH" "AAJhYg==" 2 "$1"
+    token_build_json '[7, 11]' "$DER" "U0lH" "AAJhYg==" 2 \
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$1"
 }
 wire_stubs() {
     seal_finalized() { echo "CALL seal_finalized $*" >>"$FNLOG"; stub_seal "$4"; }
@@ -448,6 +502,27 @@ enrl_ensure_once "$DEBIAN_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" || EO_RC=
 assert_eq "ensure-once: standing token stands (rc 0)" "0" "$EO_RC"
 assert_eq "ensure-once: NO seal op (zero TPM ops, s14)" "0" "$(grep -c seal_finalized "$FNLOG")"
 assert_eq "ensure-once: ENRL_ENROLLED stays 0" "0" "$ENRL_ENROLLED"
+
+# >1 standing tokens on the ensure-once path: loud refusal citing the REAL
+# LUKS2 slot budget (§7.2: LUKS2 provides 32 keyslots; the enrollment's free
+# slot domain is 1..31 — token_free_slot) — the stale "capped at 8" claim is
+# gone
+reset_state
+cat >"$T/luks-pre.json" <<'EOF'
+{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]},"1":{"type":"systemd-tpm2","keyslots":["2"]}}}
+EOF
+write_post_ok
+: >"$FNLOG"
+EO2_RC=0
+EO2_OUT=$(enrl_ensure_once "$DEBIAN_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
+assert_eq "ensure-once >1 tokens: rc 1" "1" "$EO2_RC"
+assert_contains "ensure-once >1 tokens: names the count" "$EO2_OUT" "2 systemd-tpm2 tokens"
+assert_contains "ensure-once >1 tokens: cites manual intervention" "$EO2_OUT" "manual intervention"
+assert_contains "ensure-once >1 tokens: cites the REAL LUKS2 slot budget (32)" \
+    "$EO2_OUT" "32 keyslots"
+assert_not_contains "ensure-once >1 tokens: stale 'capped at 8' claim GONE" \
+    "$EO2_OUT" "capped at 8"
 
 swtpm_stop "$STATE" || true
 exit $((TESTS_FAIL > 0 ? 1 : 0))

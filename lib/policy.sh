@@ -183,6 +183,16 @@ policy_pubkey_fp() {
 # fields only, with pcrs [7,11] in the same field). This JSON is what the
 # Mechanism A'/A enrollment steps consume (exact .pcrsig embedding is pinned by
 # the cryptenroll-acceptance spike, B-G3).
+#
+# Digest anchoring (Option A): the entry ALSO records the `d7`/`d11` components
+# the signature was computed over — the anchoring digests the composing flow
+# already holds (d7 = the console-measured/baselined PCR 7, d11 = the build's
+# enter-initrd prediction). They are INFORMATIVE (never signed separately; the
+# release-key signature over `pol` remains the only trust anchor): the seal-time
+# G-B6 gate recomputes policy_digest(entry.d7, entry.d11) and compares it to the
+# signed `pol` — a pure data check that lets between-boot enrollment verify the
+# entry WITHOUT a live TPM read. Consumers outside this toolchain (systemd-
+# cryptsetup, the mkinitfs hook's sed extraction) ignore the extra fields.
 policy_sign_json() {
     [ $# -eq 5 ] || die "policy_sign_json: usage: <d7hex> <d11hex> <privkey.pem> <pubkey.pem> <out.json>"
     require_cmds jq
@@ -205,7 +215,9 @@ policy_sign_json() {
     }
     _pol_pd=$(policy_digest "$1" "$2")
     if ! jq -n --arg sig "$_pol_b64" --arg pkfp "$_pol_fp" --arg pol "$_pol_pd" \
-        '{"sha256": [{"pcrs": [7, 11], "pkfp": $pkfp, "pol": $pol, "sig": $sig}]}' \
+        --arg d7 "$1" --arg d11 "$2" \
+        '{"sha256": [{"pcrs": [7, 11], "pkfp": $pkfp, "pol": $pol, "sig": $sig,
+                      "d7": $d7, "d11": $d11}]}' \
         >"$5"; then
         rm -rf "$_pol_tmp"
         die "policy_sign_json: jq failed"

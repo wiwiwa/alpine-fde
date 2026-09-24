@@ -4,9 +4,12 @@
 # Secure Boot vars — no kernel, no initrd, no guest sentinels at all.
 #
 # Boot 1 (positive control, same session, same vars file): the SIGNED
-#   harness UKI boots and the s00 flow reaches `debian-fde: UNSEALED` — proves
-#   firmware, ESP path and harness are healthy in THIS session, so boot 2's
-#   refusal is attributable to the missing signature alone.
+#   harness UKI boots; the fixture disk is TOKEN-LESS, so the unlock runs
+#   through the SHIPPED mkinitfs unseal hook's (§8.2; ADR-13) bounded
+#   keyslot-0 recovery-passphrase prompt (fed over serial,
+#   prompt-synchronized) and reaches `debian-fde: UNSEALED` — proves
+#   firmware, ESP path, harness AND hook are healthy in THIS session, so
+#   boot 2's refusal is attributable to the missing signature alone.
 # Boot 2 (the scenario): the same ESP slot carries the UNSIGNED build
 #   ($run/uki-unsigned.efi — the `uki_build` no-sign path: no .pcrsig and no
 #   sbsign signature). Enrolled vars still have SecureBoot ON → the firmware
@@ -42,6 +45,10 @@ source "$TESTS/lib/swtpm-fixture.sh"
 source "$TESTS/lib/qemu.sh"
 # shellcheck source=../lib/sentinels.sh
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
+# shellcheck source=../lib/serial.sh
+source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 # _snap SRC DST — copy the console log right after the boot. Resilience
 # against a concurrent sibling scenario's broad .runs housekeeping deleting
@@ -111,11 +118,62 @@ fi
 
 # _swtpm_ensure DIR — make sure a swtpm is serving DIR, (re)starting it when a
 # prior boot/external kill took it down; tolerant when it is already alive.
+# The probe is BOUNDED (timeout 10, the fixture-probe pattern): swtpm 0.10.2
+# sometimes stops servicing its data socket after the ctrl handshake, and an
+# unbounded tpm2_getcap hangs forever on it (observed live 2026-09-23) —
+# failing fast lets the caller's restart path recover.
 _swtpm_ensure() {
-    if [ -S "$1/sock.ctrl" ] && tpm2_getcap -T "swtpm:path=$1/sock" properties-fixed >/dev/null 2>&1; then
+    if [ -S "$1/sock.ctrl" ] && timeout 10 tpm2_getcap -T "swtpm:path=$1/sock" properties-fixed >/dev/null 2>&1; then
         return 0
     fi
-    swtpm_start "$1"
+    # swtpm_ensure, NOT raw swtpm_start: a live-but-wedged instance (probe
+    # failed while the pidfile is alive) makes swtpm_start refuse with
+    # "already running" and there is no recovery — swtpm_ensure is the
+    # promoted restart path (bounded probe -> persist volatile state ->
+    # kill + start; IN-03; observed live 2026-09-23).
+    swtpm_ensure "$1"
+}
+
+# _wedge_wait <dir> <timeout-s> — qemu_wait + the swtpm data-loop WEDGE guard
+# (mitigation 2026-09-23; gdb poll-dump root cause: swtpm 0.10.2 de-registers
+# the data client when a ctrl-channel client EOFs and never re-adds it — the
+# data connection sits with Recv-Q > 0, absent from swtpm's poll set, and the
+# guest stalls forever). Wedge signature, sampled every 5 s: qemu alive +
+# console.log size unchanged for >60 s + Recv-Q > 0 on <dir>/tpm/sock.
+# Recovery: qemu_kill + swtpm_stop + swtpm_start (fresh startup-clear), loud
+# WEDGE-RECOVERED line, return 43 (distinct from qemu_wait's 0/64/124) so the
+# caller's bounded retry re-runs the boot; 44 = recovery restart failed.
+_wedge_wait() {
+    local dir="$1" timeout="$2" pid
+    pid=$(cat "$dir/qemu.pid" 2>/dev/null) || return 64
+    local deadline=$((SECONDS + timeout)) sz last_sz last_chg
+    last_sz=$(stat -c%s "$dir/console.log" 2>/dev/null || echo 0)
+    last_chg=$SECONDS
+    while ((SECONDS < deadline)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            pkill -9 -f "python3 - $dir/qmp.sock" 2>/dev/null
+            serial_bridge_stop "$dir"
+            return 0
+        fi
+        _qmp_kicker_start "$dir"
+        sz=$(stat -c%s "$dir/console.log" 2>/dev/null || echo 0)
+        if ((sz != last_sz)); then last_sz=$sz; last_chg=$SECONDS; fi
+        if ((SECONDS - last_chg > 60)); then
+            if ss -xn 2>/dev/null | awk -v s="$dir/tpm/sock" '$0 ~ s && ($3 + 0) > 0 { found = 1 } END { exit !found }'; then
+                echo "WEDGE-RECOVERED: swtpm data-loop stall (console idle >60 s, Recv-Q>0 on $dir/tpm/sock) — killing qemu, restarting swtpm fresh"
+                qemu_kill "$dir"
+                swtpm_stop "$dir" >/dev/null 2>&1
+                if ! swtpm_start "$dir" >/dev/null 2>&1; then
+                    echo "WEDGE-RECOVERED: swtpm restart FAILED — caller must abort"
+                    return 44
+                fi
+                return 43
+            fi
+        fi
+        sleep 5
+    done
+    qemu_kill "$dir"
+    return 124
 }
 
 # --- boot 1: positive control (signed UKI, same vars file) ----------------------
@@ -126,11 +184,23 @@ BOOT_OK=0
 for _att in 1 2 3; do
     _swtpm_ensure "$CONTROL/tpm" || { echo "s04: swtpm failed"; exit 1; }
     echo "# boot 1/2: signed control (TCG, attempt $_att, up to $QEMU_TIMEOUT s) ..."
-    qemu_run "$CONTROL" "$CONTROL/esp.img" "$CONTROL/disk.img" "$CONTROL/vars-enrolled.fd" "$CONTROL/tpm" "$CONTROL/pcrsig.img"
+    # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the pristine
+    # base (base LOCK_SH for the boot; overlay discarded after the attempt —
+    # a retry is free, no run-dir pollution)
+    OVERLAY_B1="$CONTROL/disk-boot1-$_att.qcow2"
+    overlay_create "$CONTROL/disk.img" "$OVERLAY_B1" || { echo "s04: overlay create failed"; exit 1; }
+    qemu_run "$CONTROL" "$CONTROL/esp.img" "$OVERLAY_B1" "$CONTROL/vars-enrolled.fd" "$CONTROL/tpm" "$CONTROL/pcrsig.img"
+    # the token-less disk leaves the SHIPPED unseal hook's bounded keyslot-0
+    # recovery prompt as the ONLY way in: feed the slot-0 passphrase,
+    # prompt-synchronized (the hook's read has NO timeout)
+    if uki_wait_hook_prompt 1 300 "$CONTROL"; then
+        feed_line "$CONTROL/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+    fi
     _snap_while_running "$(cat "$CONTROL/qemu.pid")" "$CONTROL/console.log" "$SNAPDIR/console-control.snap" &
     _snap_poller1=$!
-    qemu_wait "$CONTROL" "$QEMU_TIMEOUT"
+    _wedge_wait "$CONTROL" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
     wait "$_snap_poller1"
+    overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
     if grep -q "debian-fde: POWEROFF" "$SNAPDIR/console-control.snap" 2>/dev/null; then
         BOOT_OK=1
         break
@@ -145,6 +215,8 @@ else
 fi
 CLOG=$(cat "$SNAPDIR/console-control.snap" 2>/dev/null || true)
 assert_contains "control boot: init ran" "$CLOG" "debian-fde-harness: init started"
+assert_contains "control boot: hook unlocked via the recovery passphrase (token-less disk)" "$CLOG" \
+    "$(sentinel_of unseal_pass_unlocked)"
 assert_contains "control boot: firmware accepted signed UKI -> UNSEALED" "$CLOG" "debian-fde: UNSEALED"
 assert_contains "control boot: clean poweroff" "$CLOG" "debian-fde: POWEROFF"
 
@@ -155,11 +227,14 @@ REFUSAL_OK=0
 for _att in 1 2 3; do
     _swtpm_ensure "$CONTROL/tpm" || { echo "s04: swtpm restart failed"; exit 1; }
     echo "# boot 2/2: UNSIGNED UKI under enrolled vars (TCG, attempt $_att, refusal budget 150 s) ..."
-    qemu_run "$RUN" "$RUN/esp-unsigned.img" "$CONTROL/disk.img" "$CONTROL/vars-enrolled.fd" "$CONTROL/tpm" "$CONTROL/pcrsig.img"
+    OVERLAY_B2="$RUN/disk-boot2-$_att.qcow2"
+    overlay_create "$CONTROL/disk.img" "$OVERLAY_B2" || { echo "s04: overlay create failed"; exit 1; }
+    qemu_run "$RUN" "$RUN/esp-unsigned.img" "$OVERLAY_B2" "$CONTROL/vars-enrolled.fd" "$CONTROL/tpm" "$CONTROL/pcrsig.img"
     _snap_while_running "$(cat "$RUN/qemu.pid")" "$CONSOLE" "$SNAPDIR/console-refusal.snap" &
     _snap_poller2=$!
-    qemu_wait "$RUN" 150
+    _wedge_wait "$RUN" 150 || true   # 43: swtpm already restarted fresh
     wait "$_snap_poller2"
+    overlay_discard "$OVERLAY_B2"
     if grep -qF "$(sentinel_of ovmf_sb_denied)" "$SNAPDIR/console-refusal.snap" 2>/dev/null; then
         REFUSAL_OK=1
         break
@@ -197,11 +272,14 @@ assert_not_contains "refusal: no guest init banner" "$LOG" "debian-fde-harness: 
 for pcr in 0 7 11; do
     assert_not_contains "refusal: no PCR $pcr line" "$LOG" "debian-fde-pcr sha256:$pcr="
 done
-assert_not_contains "refusal: token never discovered" "$LOG" "$(sentinel_of token_discovered)"
-assert_not_contains "refusal: no PCR signature policy" "$LOG" "$(sentinel_of pcr_sig_added)"
-assert_not_contains "refusal: never unlocked" "$LOG" "$(sentinel_of unlocked)"
+assert_not_contains "refusal: the unseal hook never ran (no enter-initrd extend)" "$LOG" \
+    "$(sentinel_of unseal_pcrextend_ok)"
+assert_not_contains "refusal: no hook token discovery" "$LOG" "$(sentinel_of unseal_token_info)"
+assert_not_contains "refusal: never unlocked (token)" "$LOG" "$(sentinel_of unseal_unlocked)"
+assert_not_contains "refusal: never unlocked (recovery passphrase)" "$LOG" \
+    "$(sentinel_of unseal_pass_unlocked)"
 assert_not_contains "refusal: never UNSEALED" "$LOG" "debian-fde: UNSEALED"
-assert_not_contains "refusal: no prompt" "$LOG" "$(sentinel_of prompt_re)"
+assert_not_contains "refusal: no hook recovery prompt" "$LOG" "$(sentinel_of unseal_prompt_re)"
 assert_not_contains "refusal: no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
 assert_not_contains "refusal: no harness poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
 assert_not_contains "refusal: no Linux kernel banner" "$LOG" "$(sentinel_of linux_banner)"

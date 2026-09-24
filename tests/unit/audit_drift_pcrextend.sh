@@ -241,5 +241,60 @@ assert_eq "sbverify FAIL on a present binary -> drift (rc 1)" "1" "$AUD_RC"
 assert_contains "sbverify FAIL line reported" "$AUD_OUT" "FAIL"
 echo 0 >"$DEBIAN_FDE_SBV_RC"
 
+# --- 16. §9.5 firmware identity (vendor/version) is INFORMATIONAL ---------------
+# The baseline records fw.vendor/fw.version (baseline_finalize_from_live), but
+# the ORCHESTRATOR DECISION for §9.5 is: audit reports a CHANGED vendor/version
+# as an information line — firmware updates legitimately change these (audit is
+# a detective control; PCR 0 drift is the security signal). A changed identity
+# string must NOT flip the verdict to drift.
+BL=$(sp_baseline_file)
+baseline_set_field "$BL" '    ' fw vendor "BaselineCorp"
+baseline_set_field "$BL" '    ' fw version "9.9"
+DMI=$T/dmi
+mkdir -p "$DMI"
+printf 'Acme Corp' >"$DMI/sys_vendor"
+printf '1.2.3' >"$DMI/bios_version"
+export DEBIAN_FDE_DMI_DIR=$DMI
+run_audit
+assert_eq "changed firmware identity stays rc 0 (informational, not drift)" "0" "$AUD_RC"
+assert_contains "changed fw vendor reported as an info line" "$AUD_OUT" \
+    "fw vendor  live=Acme Corp baseline=BaselineCorp   info"
+assert_contains "changed fw version reported as an info line" "$AUD_OUT" \
+    "fw version live=1.2.3 baseline=9.9   info"
+assert_not_contains "fw identity change is NEVER a DRIFT line" "$AUD_OUT" \
+    "fw vendor  live=Acme Corp baseline=BaselineCorp   DRIFT"
+assert_contains "verdict unchanged by the informational identity change" "$AUD_OUT" \
+    "all checked values match"
+assert_eq "last-audit result stays ok" "ok" "$(baseline_get "$(sp_last_audit_file)" result)"
+# unchanged identity (live == baseline) reports match
+printf 'BaselineCorp' >"$DMI/sys_vendor"
+printf '9.9' >"$DMI/bios_version"
+run_audit
+assert_eq "unchanged firmware identity -> clean audit" "0" "$AUD_RC"
+assert_contains "unchanged fw vendor reports match" "$AUD_OUT" \
+    "fw vendor  live=BaselineCorp baseline=BaselineCorp   match"
+
+# --- 17. last-audit.json is written ATOMICALLY (staged temp + rename, M-3) ------
+LA=$(sp_last_audit_file)
+LADIR=${LA%/*}
+run_audit # a good write first
+assert_eq "last-audit.json mode 600 (pinned before the rename)" "600" "$(stat -c %a "$LA")"
+assert_eq "no staged temp left behind after a good write" "" \
+    "$(find "$LADIR" -name '.last-audit.*' -print -quit)"
+# torn-write: with the staged-temp pattern a READ-ONLY state directory makes the
+# write FAIL LOUDLY and the previous last-audit.json survives UNTOUCHED (the
+# direct `cat > file` it replaces would silently truncate the existing doc)
+cp "$LA" "$T/last-audit.sentinel"
+chmod 555 "$LADIR"
+run_audit
+assert_contains "unusable state dir: write fails LOUDLY" "$AUD_OUT" "cannot create temp file"
+assert_eq "previous last-audit.json survives the failed write" \
+    "$(md5sum <"$T/last-audit.sentinel")" "$(md5sum <"$LA")"
+chmod 700 "$LADIR"
+assert_eq "no staged temp left behind after the failed write" "" \
+    "$(find "$LADIR" -name '.last-audit.*' -print -quit)"
+run_audit
+assert_eq "state dir writable again -> audit clean" "0" "$AUD_RC"
+
 swtpm_stop "$STATE" || true
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

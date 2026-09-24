@@ -6,16 +6,22 @@
 # OBSERVED effects: the staged target tree contents, §9.1 plan execution
 # order, fail-closed preconditions, and the on-target baseline/state.
 #
-# ADR-20 unattended contract pinned here at EXECUTION level:
+# ADR-20 AMENDED contract pinned here at EXECUTION level:
 #   * G-C23: the internal ephemeral install key is staged (openssl stub),
-#     used via --key-file for luksFormat/open, and SCRUBBED at teardown —
-#     no passphrase prompt, no DEBIAN_FDE_DISK_PASSPHRASE anywhere
+#     formats the TEMPORARY keyslot 2 (§7.2: keyslot 0 = recovery, keyslot 1
+#     = provisional token), is used via --key-file for luksFormat/open AND
+#     authorizes the ceremony's recovery luksAddKey, and is SCRUBBED at
+#     teardown — no DEBIAN_FDE_DISK_PASSPHRASE anywhere
+#   * §9.1 step 4 credential ceremony (ADR-20 amended): the THREE no-echo
+#     prompts are the only credential seam — executed host-side (plan
+#     records), fed from an ANSWERS FILE on stdin (the documented test/CI
+#     seam); no flag and no env var carries any credential; a run with
+#     stdin CLOSED fails closed 64; secrets never appear in argv/logs
 #   * G-C1/C2/C3: apk populate + in-chroot apk additions txn + repositories
 #     drop (debootstrap/apt retired)
 #   * G-C24: provisional seal guest line runs after the in-chroot build
 #   * G-C25/C28: MOTD/issue banner on target, written BEFORE the state write
 #   * G-C26: NO OsIndications write; teardown scrubs the ephemeral key
-#   * the run completes with stdin CLOSED (</dev/null) — zero prompts
 #
 # Topologies executed here: single-disk (deep) and Btrfs RAID1 (per-member
 # LUKS2 + raid1 mkfs). The bcache topologies are pinned at the record level
@@ -78,12 +84,47 @@ for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup
 done
 
 # openssl — log argv; deterministic 256-bit hex body (the staged ephemeral
-# install key; G-C23)
+# install key; G-C23). pkcs8/asn1parse emulate the ADR-18 PKCS#8 envelope so
+# the §9.1 step 4 release-key ceremony (keys_encrypt_release) runs for real:
+#   * `pkcs8 -topk8 ... -out F`  -> writes the MARKER + copies -in (fake
+#     ciphertext), exit 0 (the round-trip `-out /dev/null` call also passes)
+#   * `asn1parse -in F`          -> conformant PBES2/PBKDF2/hmacWithSHA256/
+#     aes-256-cbc/iter>=600000 output ONLY for marker files (keys_is_encrypted
+#     verdicts), exit 1 otherwise (plaintext PEM = not-encrypted)
+MARKER='fake-pbes2-encrypted-ADR18'
+export MARKER
 cat >"$T/stub/openssl" <<'EOF'
 #!/bin/sh
 printf '%s %s\n' "openssl" "$*" >>"$DEBIAN_FDE_TEST_LOG"
 case " $* " in
     *" rand "*) printf 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' ;;
+    *" asn1parse "*)
+        in=''
+        prev=''
+        for a in "$@"; do
+            [ "$prev" = "-in" ] && in=$a
+            prev=$a
+        done
+        if [ -f "$in" ] && grep -q "$MARKER" "$in" 2>/dev/null; then
+            printf '    0:d=0 hl=4 l= 828 cons: SEQUENCE\n    4:d=1 hl=2 l= 61 cons: SEQUENCE\n    6:d=2 hl=2 l= 9 prim: OBJECT :PBES2\n   17:d=2 hl=2 l= 48 cons: SEQUENCE\n   19:d=3 hl=2 l= 25 cons: SEQUENCE\n   21:d=4 hl=2 l= 9 prim: OBJECT :PBKDF2\n   43:d=4 hl=2 l= 14 cons: SEQUENCE\n   45:d=5 hl=2 l= 8 prim: OCTET STRING\n   55:d=5 hl=2 l= 2 prim: INTEGER :0927C0\n   59:d=3 hl=2 l= 13 cons: SEQUENCE\n   61:d=4 hl=2 l= 8 prim: OBJECT :hmacWithSHA256\n   77:d=2 hl=2 l= 27 cons: SEQUENCE\n   79:d=3 hl=2 l= 9 prim: OBJECT :aes-256-cbc\n'
+        else
+            exit 1
+        fi
+        ;;
+    *" pkcs8 "*)
+        in=''
+        out=''
+        prev=''
+        for a in "$@"; do
+            [ "$prev" = "-in" ] && in=$a
+            [ "$prev" = "-out" ] && out=$a
+            prev=$a
+        done
+        if [ -n "$out" ]; then
+            printf '%s\n' "$MARKER" >"$out"
+            [ -f "$in" ] && cat "$in" >>"$out"
+        fi
+        ;;
 esac
 exit 0
 EOF
@@ -124,6 +165,24 @@ exit 0
 EOF
 
 chmod +x "$T/stub/cryptsetup" "$T/stub/id" "$T/stub/lsblk" "$T/stub/openssl"
+
+# chroot — log argv; when the guest line is the §9.1 step 3 platform-key
+# ceremony, simulate its OUTPUT on the target (the in-chroot keygen leaves an
+# UNencrypted release.pem in /etc/alpine-fde/keys — the input the §9.1 step 4
+# credential ceremony encrypts). Every other guest line is logged only.
+cat >"$T/stub/chroot" <<EOF
+#!/bin/sh
+printf '%s %s\n' "chroot" "\$*" >>"\$DEBIAN_FDE_TEST_LOG"
+case "\$*" in
+    *"provision stage1"*)
+        mkdir -p "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys"
+        printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
+            >"$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$T/stub/chroot"
 export PATH="$T/stub:$PATH"
 
 # --- fixtures ------------------------------------------------------------------
@@ -143,10 +202,26 @@ mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte (efivars fixture)
 mkdir -p "$DEBIAN_FDE_EFIVARS_DIR"
 mkvar SetupMode 1   # §9.1 preflight: Stage 1 runs with the vendor PK cleared
 
-run_install() { # extra args pass through (e.g. a second --disk)
+# §9.1 step 4 credential-ceremony answers (the documented test/CI seam: the
+# three no-echo prompts read stdin; six lines = confirm-typed pairs for the
+# account password, the recovery passphrase and the release-key passphrase —
+# every value passes the §13 entropy floor and none is blocklisted)
+ANSWERS=$T/answers
+cat >"$ANSWERS" <<'EOF'
+U5er-P4ss-X9k2-!qmwjpz
+U5er-P4ss-X9k2-!qmwjpz
+Fin4l-Rec0very-X9k2-!qmwjpz
+Fin4l-Rec0very-X9k2-!qmwjpz
+R3lease-K3ypass-X7!qmz
+R3lease-K3ypass-X7!qmz
+EOF
+
+first_line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
+
+run_install() { # extra args pass through (e.g. a second --disk); answers on stdin
     : >"$DEBIAN_FDE_TEST_LOG"
     rm -rf "$DEBIAN_FDE_INSTALL_MNT"
-    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" "$@" 2>&1)
+    OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" "$@" <"$ANSWERS" 2>&1)
     RC=$?
 }
 
@@ -167,8 +242,8 @@ mkvar SetupMode 1
 # stubs — UNATTENDED (stdin closed). G-C23: the staged ephemeral key SURVIVES
 # until the cryptsetup plan steps run and is SCRUBBED at teardown.
 # =============================================================================
-run_install </dev/null
-assert_eq "unattended chroot install rc 0 (stdin closed, zero prompts)" "0" "$RC"
+run_install
+assert_eq "§9.1 Stage 1 chroot install rc 0 (ceremony answers on stdin)" "0" "$RC"
 assert_not_contains "BR-01: --key-file names an EXISTING file at cryptsetup execution time" \
     "$(cat "$DEBIAN_FDE_TEST_LOG")" "key-file target missing at execution time"
 assert_contains "BR-01: luksFormat ran scripted via the staged ephemeral key-file" \
@@ -176,14 +251,55 @@ assert_contains "BR-01: luksFormat ran scripted via the staged ephemeral key-fil
 EPHKEY=$(grep -oE "$T/debian-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
 assert_eq "G-C23: ephemeral key staged under the tmpfs seam" "1" \
     "$([ -n "$EPHKEY" ] && echo 1 || echo 0)"
-assert_contains "G-C23: keyslot 0 formatted with the ephemeral key via --key-file" \
-    "$(cat "$DEBIAN_FDE_TEST_LOG")" "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid"
+assert_contains "G-C23: keyslot 2 (TEMPORARY) formatted with the ephemeral key via --key-file" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid"
+assert_eq "G-C23: keyslot 0 NEVER used at luksFormat (reserved for the ceremony, §7.2)" "0" \
+    "$(grep -Fc 'luksFormat --key-slot 0' "$DEBIAN_FDE_TEST_LOG")"
 assert_contains "G-C23: open uses the same staged key-file" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
     "cryptsetup open --key-file $EPHKEY"
 assert_eq "G-C23: NO operator passphrase consumed anywhere" "0" \
     "$(grep -c 'DEBIAN_FDE_DISK_PASSPHRASE=' <<<"$OUT")"
 assert_not_contains "G-C23: NO interactive passphrase prompt in the run" "$OUT" \
     "Set disk encryption passphrase"
+
+# =============================================================================
+# §9.1 step 4 credential ceremony (ADR-20 amended): executed host-side, the
+# ONLY credential seam is stdin (the answers file) — no flag, no env var.
+# =============================================================================
+assert_contains "ceremony (1/3): user password set in-chroot via chpasswd" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" "chroot $DEBIAN_FDE_INSTALL_MNT /usr/sbin/chpasswd"
+assert_eq "ceremony: NO interactive passwd(1) step anywhere" "0" \
+    "$(grep -Ec '[/:]passwd( |$)' <<<"$(cat "$DEBIAN_FDE_TEST_LOG")")"
+assert_contains "ceremony (2/3): recovery passphrase enrolled into keyslot 0 via luksAddKey" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --key-file $EPHKEY /dev/mapper/root-crypt"
+assert_contains "ceremony (3/3): release.pem encrypted via keys_encrypt_release (ADR-18 pkcs8)" \
+    "$(cat "$DEBIAN_FDE_TEST_LOG")" \
+    "openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256"
+assert_eq "ceremony: NO secret ever appears in command argv (the log IS the argv record)" "0" \
+    "$(grep -Ec 'U5er-P4ss|Fin4l-Rec0very|R3lease-K3ypass' <<<"$(cat "$DEBIAN_FDE_TEST_LOG")")"
+assert_eq "ceremony: NO credential env seam in the emitted run" "0" \
+    "$(grep -Ec 'DEBIAN_FDE_(KEY|RECOVERY|DISK)_PASSPHRASE=' <<<"$OUT")"
+assert_eq "ceremony: recovery passfile scrubbed (keys_scrub, I1)" "0" \
+    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-ceremony.*' 2>/dev/null | wc -l)"
+assert_eq "ceremony: encrypt stage scrubbed (keys_encrypt_release tmp)" "0" \
+    "$(find "$DEBIAN_FDE_TMPDIR" -name 'debian-fde-enc.*' 2>/dev/null | wc -l)"
+assert_eq "ceremony (3/3): release.pem on target IS the encrypted form" "1" \
+    "$(grep -qc 'fake-pbes2-encrypted-ADR18' "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem" && echo 1 || echo 0)"
+assert_eq "ceremony (3/3): encrypted release.pem locked 0400" "400" \
+    "$(stat -c '%a' "$DEBIAN_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem")"
+# ceremony order: AFTER the platform keys, BEFORE NVRAM enrollment (§9.1)
+O_KEYGEN=$(first_line_no "$OUT" "provision stage1 --mode in-chroot")
+O_CERU=$(first_line_no "$OUT" "host: inst_ceremony_user_password")
+O_CERR=$(first_line_no "$OUT" "host: inst_ceremony_recovery")
+O_CERK=$(first_line_no "$OUT" "host: inst_ceremony_release_key")
+O_ENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
+assert_eq "order: platform keys BEFORE the ceremony (release.pem must exist)" "1" \
+    "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERU ? 1 : 0 ))"
+assert_eq "order: ceremony (1/3) before (2/3) before (3/3)" "1" \
+    "$(( O_CERU > 0 && O_CERU < O_CERR && O_CERR < O_CERK ? 1 : 0 ))"
+assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
+    "$(( O_CERK > 0 && O_CERK < O_ENROLL ? 1 : 0 ))"
 
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$DEBIAN_FDE_TEST_LOG" | head -1 | awk '{print $2}')
 ROOTFS_UUID=$(grep -oE -- '-U [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$DEBIAN_FDE_TEST_LOG" | head -1 | awk '{print $2}')
@@ -296,9 +412,8 @@ assert_contains "§9.1 step 1: apk additions txn ran in-guest" "$LOG" "apk add -
 APK_TXN_LOG=$(grep -m1 'apk add --no-cache' "$DEBIAN_FDE_TEST_LOG")
 assert_contains "apk txn includes btrfs-progs (default fs, topology-conditional)" \
     "$APK_TXN_LOG" "btrfs-progs"
-assert_contains "§9.1 step 1: user account created in-guest (locked, unattended)" "$LOG" \
+assert_contains "§9.1 step 1: user account created in-guest (locked; password set by the §9.1 step 4 ceremony)" "$LOG" \
     "adduser -D -s /bin/ash admin"
-assert_not_contains "ADR-20: NO interactive passwd step anywhere" "$LOG" "passwd"
 assert_contains "§9.1 step 1: OpenRC networking enabled in-guest" "$LOG" \
     "rc-update add networking boot"
 assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot" "$LOG" \
@@ -314,7 +429,11 @@ assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot" "$LOG"
     'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
 assert_contains "§9.1 step 6: guest line pins the provisional slot contract" "$LOG" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
-assert_not_contains "ADR-20: keys_encrypt_release moved to finalize" "$LOG" "keys_encrypt_release"
+# ADR-20 AMENDED: release.pem is encrypted IN STAGE 1 by the §9.1 step 4
+# credential ceremony (keys_encrypt_release, executed host-side); finalize
+# only CONSUMES the encrypted release.pem
+assert_contains "ADR-20 amended: release.pem encrypted in Stage 1 (ceremony 3/3 ran)" \
+    "$OUT" "host: inst_ceremony_release_key"
 # I1 (§11): the Stage-1 provisional-seal one-liner must scrub its secrets —
 # the random volume passphrase (overwrite-then-unlink, the shared keys_scrub
 # idiom) and the seal work dir (blob halves + primary.ctx under the
@@ -326,7 +445,6 @@ assert_contains "I1: seal one-liner scrubs the seal work dir (blob halves + prim
     "$SEAL_LINE" 'debian-fde-seal.'
 assert_contains "I1: seal one-liner still removes /run/alpine-fde" "$SEAL_LINE" \
     'rm -rf /run/alpine-fde'
-first_line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 L_SFDISK=$(first_line_no "$LOG" "sfdisk")
 L_APKPOP=$(first_line_no "$LOG" "apk add --root")
 L_POLICY=$(first_line_no "$OUT" "etc/apk/repositories")
@@ -479,7 +597,7 @@ truncate -s 20M "$DEBIAN_FDE_TREE/tests/.cache/blob-20M"
 
 run_install_tree() { # TREE — run_install against a different tooling tree
     : >"$DEBIAN_FDE_TEST_LOG"
-    OUT=$(DEBIAN_FDE_CMD_DIR="$1/lib/cmd" "$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
+    OUT=$(DEBIAN_FDE_CMD_DIR="$1/lib/cmd" "$REPO/bin/debian-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
     RC=$?
 }
 
@@ -546,9 +664,24 @@ assert_eq "WR-01: injected --keydir: zero commands executed" "0" "$(wc -l <"$DEB
 assert_eq "WR-01: injected --keydir executed nothing (no /tmp/pwned)" "0" \
     "$([ -e /tmp/pwned ] && echo 1 || echo 0)"
 rm -f /tmp/pwned
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
+OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
 RC=$?
 assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$RC"
+
+# =============================================================================
+# §9.1 step 4 negative seam proof: with stdin CLOSED the ceremony fails
+# closed — the prompts are the ONLY credential seam (no flag, no env var).
+# Runs LAST against the main-run fixtures: it mutates the target before it
+# dies (config drops execute before the ceremony), so every later section
+# re-runs install and re-derives its own state.
+# =============================================================================
+NEG_OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" 2>&1 </dev/null)
+NEG_RC=$?
+assert_eq "ceremony: stdin closed -> fail-closed 64 (prompts are the only seam)" "64" "$NEG_RC"
+assert_contains "ceremony: the failure names the empty/unequal answers" "$NEG_OUT" \
+    "did not match"
+assert_contains "ceremony: the die names ceremony (1/3) (fail happens at the FIRST prompt pair)" \
+    "$NEG_OUT" "inst_ceremony_user_password"
 
 # =============================================================================
 # §8.1 provision row / ADR-18: `install --keydir` is CONSUMED — the
@@ -564,7 +697,7 @@ for f in release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.de
 done
 : >"$DEBIAN_FDE_TEST_LOG"
 rm -rf "$DEBIAN_FDE_INSTALL_MNT"
-OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --keydir "$KEYDIR" 2>&1 </dev/null)
+OUT=$("$REPO/bin/debian-fde" install --disk "$DISK" --keydir "$KEYDIR" <"$ANSWERS" 2>&1)
 RC=$?
 assert_eq "keydir: chroot install rc 0 (medium-staged keys)" "0" "$RC"
 assert_contains "keydir: release.pem staged from the medium (host record)" "$OUT" \
@@ -585,7 +718,7 @@ assert_eq "keydir: staging before NVRAM enrollment" "1" \
 assert_eq "keydir: NO key material anywhere on the ESP (I2)" "0" \
     "$(find "$DEBIAN_FDE_INSTALL_MNT/efi" -name 'release*' -o -name '*.auth' -o -name '*.esl' 2>/dev/null | wc -l)"
 # default (no --keydir): in-chroot ceremony unchanged
-run_install </dev/null
+run_install
 assert_eq "keydir: default run (no --keydir) rc 0" "0" "$RC"
 assert_contains "keydir: default run keeps the in-chroot ceremony" "$(cat "$DEBIAN_FDE_TEST_LOG")" \
     "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys"

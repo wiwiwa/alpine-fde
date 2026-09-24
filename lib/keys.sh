@@ -106,6 +106,49 @@ keys_require() {
     fi
 }
 
+# --- ADR-16 release-key strength gate (RSA >= 3072) ------------------------------
+# ADR-16 pins the release key at RSA-3072 (RSA-2048 for PK/KEK/db): the one
+# identity that signs UKIs, lives in db, and anchors every PCR policy. Nothing
+# validated the SIZE before — a sub-3072 release key would seal/enroll without
+# complaint. Fail-closed AT ENROLL (orchestrator decision, usage-class rc 2):
+# the enroll path entry refuses before any TPM or LUKS2 state is touched.
+# Deliberately NOT inside keys_check: that is the completeness contract
+# (ukictl build's loud-fail marker) and stays size-blind.
+
+KEYS_MIN_RSA_BITS=3072 # ADR-16 floor for the release key
+
+# keys_rsa_bits FILE — RSA modulus size in bits of a public key PEM (same
+# modulus-based method as keys_tpmt_public); rc 1 if FILE is not a parseable
+# RSA public key.
+keys_rsa_bits() {
+    [ -n "$1" ] && [ -f "$1" ] || return 1
+    _keys_bits_mod=$(openssl rsa -pubin -in "$1" -noout -modulus 2>/dev/null | sed 's/^Modulus=//')
+    case $_keys_bits_mod in
+        '' | *[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    printf '%s\n' $(( ${#_keys_bits_mod} * 4 ))
+}
+
+# keys_rsa3072_guard KEYDIR — ADR-16 fail-closed gate for the enroll path
+# entry: die rc 2 (usage-class, the operator's key configuration is the
+# defect) naming ADR-16 unless <KEYDIR>/release.pub is an RSA key of at least
+# $KEYS_MIN_RSA_BITS bits.
+keys_rsa3072_guard() {
+    _keys_gd=${1:-$(keys_dir)}
+    _keys_gpub="$_keys_gd/release.pub"
+    [ -n "$_keys_gd" ] ||
+        die -r "$DEBIAN_FDE_USAGE" "release key: no key directory configured — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS release-key floor"
+    [ -f "$_keys_gpub" ] ||
+        die -r "$DEBIAN_FDE_USAGE" "release key: release public key not found: $_keys_gpub — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS floor"
+    _keys_gbits=$(keys_rsa_bits "$_keys_gpub") ||
+        die -r "$DEBIAN_FDE_USAGE" "release key: cannot read an RSA modulus from $_keys_gpub (not a valid RSA public key?) — ADR-16 requires RSA >= $KEYS_MIN_RSA_BITS for the release key"
+    if [ "$_keys_gbits" -lt "$KEYS_MIN_RSA_BITS" ]; then
+        die -r "$DEBIAN_FDE_USAGE" \
+            "release key is RSA-$_keys_gbits ($_keys_gpub) — ADR-16 requires an RSA-$KEYS_MIN_RSA_BITS (or larger) release key (db/UKI/PCR-policy identity): refusing to enroll. Generate a >= $KEYS_MIN_RSA_BITS-bit release key, re-sign the artifacts, and re-run"
+    fi
+    return 0
+}
+
 # --- ADR-18: encrypted release.pem custody (G-KC2/G-KC4, RESOLVED-1/4) ----------
 
 # KEYS_PBKDF2_ITER — the ADR-18 PKCS#8 PBKDF2 iteration count (>= 600000)

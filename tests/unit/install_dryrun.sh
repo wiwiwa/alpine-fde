@@ -85,9 +85,12 @@ assert_contains "plan: luksFormat luks2" "$INS_OUT" "luksFormat --type luks2"
 assert_contains "plan: Argon2id KDF pinned" "$INS_OUT" "--pbkdf argon2id"
 assert_contains "plan: argon2id memory pin" "$INS_OUT" "--pbkdf-memory 1048576"
 assert_contains "plan: argon2id time pin" "$INS_OUT" "--iter-time 2000"
-assert_contains "plan: keyslot 0 is the ephemeral-key slot (G-C23)" "$INS_OUT" "--key-slot 0"
-assert_contains "plan: keyslot 0 comment names the ephemeral install key (ADR-20)" \
-    "$INS_OUT" "keyslot 0: ephemeral install key"
+assert_contains "plan: keyslot 2 is the TEMPORARY ephemeral-key slot (§9.1: a temporary keyslot)" \
+    "$INS_OUT" "--key-slot 2"
+assert_contains "plan: ephemeral keyslot comment names the temporary slot (§9.1 Stage 2 purge)" \
+    "$INS_OUT" "keyslot 2: ephemeral install key"
+assert_not_contains "plan: keyslot 0 NOT used at luksFormat (reserved for the ceremony, §7.2)" \
+    "$(grep -F 'luksFormat' <<<"$INS_OUT")" "--key-slot 0"
 assert_contains "plan: G-ST1 mkfs.btrfs is the default root fs" "$INS_OUT" "mkfs.btrfs -U"
 assert_eq "plan: exactly 3 btrfs subvolume records (@ @home @snapshots)" "3" \
     "$(grep -c 'btrfs subvolume create' <<<"$INS_OUT")"
@@ -124,11 +127,39 @@ assert_contains "plan: repositories drop pins the Alpine CDN main repo" "$INS_OU
     "dl-cdn.alpinelinux.org/alpine"
 assert_not_contains "plan: apt sources drop retired" "$INS_OUT" "apt/sources.list.d"
 assert_not_contains "plan: dpkg trims drop retired" "$INS_OUT" "dpkg.cfg.d"
-# G-C23: unattended — zero interactive prompt records anywhere
-assert_not_contains "plan: NO passphrase prompt (unattended, G-C23)" "$INS_OUT" \
+# G-C23/ADR-20 amended: unattended until REBOOT — the plan carries the three
+# §9.1 step 4 credential-ceremony records; the no-echo prompts themselves live
+# ONLY in the qemu/chroot execution path (never in the dry-run plan text) and
+# there is NO flag/env credential seam (S-24).
+assert_not_contains "plan: NO passphrase prompt text in the plan" "$INS_OUT" \
     "Set disk encryption passphrase"
-assert_not_contains "plan: NO repeat-prompt" "$INS_OUT" "Repeat passphrase"
-assert_not_contains "plan: NO interactive passwd record (ADR-20 zero-touch)" "$INS_OUT" "passwd"
+assert_not_contains "plan: NO repeat-prompt text in the plan" "$INS_OUT" "Repeat passphrase"
+assert_contains "plan: ceremony (1/3) user account password record" "$INS_OUT" \
+    "inst_ceremony_user_password"
+assert_contains "plan: ceremony user record targets the created account" "$INS_OUT" \
+    "inst_ceremony_user_password admin"
+assert_contains "plan: ceremony (2/3) recovery passphrase record" "$INS_OUT" \
+    "inst_ceremony_recovery"
+assert_contains "plan: ceremony recovery record pins keyslot 0 (§7.2)" "$INS_OUT" \
+    "recovery passphrase -> keyslot 0"
+assert_contains "plan: ceremony recovery record names the ephemeral authorization" "$INS_OUT" \
+    "authorized by the staged ephemeral install key"
+assert_contains "plan: ceremony recovery record pins Argon2id" "$INS_OUT" \
+    "KDF pinned: Argon2id"
+assert_contains "plan: §13 entropy-floor retry record (re-prompt until met)" "$INS_OUT" \
+    "re-prompt until met"
+assert_contains "plan: ceremony (3/3) release-key record (keys_encrypt_release, ADR-18)" \
+    "$INS_OUT" "inst_ceremony_release_key"
+assert_contains "plan: ceremony release record pins keys_encrypt_release" "$INS_OUT" \
+    "keys_encrypt_release"
+assert_contains "plan: ceremony release record pins AES-256 PBKDF2 (ADR-18)" "$INS_OUT" \
+    "AES-256 PBKDF2"
+assert_eq "plan: exactly three ceremony records" "3" \
+    "$(grep -c 'credential ceremony ([123]/3)' <<<"$INS_OUT")"
+assert_not_contains "plan: NO credential env seam in the plan (ADR-20 amended)" "$INS_OUT" \
+    "DEBIAN_FDE_RECOVERY_PASSPHRASE"
+assert_not_contains "plan: NO release-key passphrase env in the plan" "$INS_OUT" \
+    "DEBIAN_FDE_KEY_PASSPHRASE"
 assert_not_contains "plan: NO operator passphrase env consumption" "$INS_OUT" \
     "DEBIAN_FDE_DISK_PASSPHRASE"
 assert_contains "plan: user account created (§8.1 user account row)" "$INS_OUT" "adduser"
@@ -187,8 +218,6 @@ assert_contains "plan: step 6 consumes the UKI .pcrsig (stage-1 build output)" \
     "$INS_OUT" "only-section=.pcrsig"
 assert_contains "plan: step 6 authorizes luksAddKey with the ephemeral key" \
     "$INS_OUT" "token_add_keyslot"
-assert_not_contains "plan: keys_encrypt_release moved to finalize (ADR-20 Stage 3)" \
-    "$INS_OUT" "keys_encrypt_release"
 # G-C25/§9.1 step 8: unfinalized banner to /etc/motd AND /etc/issue
 assert_contains "plan: §9.1 step 8 — MOTD banner drop" "$INS_OUT" "PLAN  write  /etc/motd"
 assert_contains "plan: §9.1 step 8 — issue banner drop" "$INS_OUT" "PLAN  write  /etc/issue"
@@ -218,15 +247,20 @@ assert_eq "plan: zero ukify command records (in-chroot build)" "0" \
     "$(grep -Ec 'PLAN  (host|guest) .*ukify build' <<<"$INS_OUT")"
 assert_eq "plan: zero sbverify records" "0" \
     "$(grep -Ec 'PLAN  (host|guest) .*sbverify' <<<"$INS_OUT")"
-assert_not_contains "plan: zero --keydir signing references" "$INS_OUT" "release.pem"
 assert_not_contains "plan: no <signing-medium> placeholder" "$INS_OUT" "<signing-medium>"
+assert_eq "plan: release.pem named ONLY by the ceremony record" "1" \
+    "$(grep -c 'release.pem' <<<"$INS_OUT")"
 # plan-order discipline (§9.1): baseline pending BEFORE the key ceremony; the
-# ceremony BEFORE enrollment; enrollment BEFORE the build; build BEFORE the
+# CREDENTIAL ceremony (§9.1 step 4, ADR-20 amended) after the platform keys and
+# BEFORE NVRAM enrollment; enrollment BEFORE the build; build BEFORE the
 # provisional seal; banner BEFORE the state write (§9.1 step 8/9); teardown
 # BEFORE the scrub; scrub BEFORE the reboot (G-C26)
 line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 I_BASE=$(line_no "$INS_OUT" "inst_baseline_pending_write")
 I_KEYGEN=$(line_no "$INS_OUT" "provision stage1 --mode in-chroot")
+I_CERU=$(line_no "$INS_OUT" "inst_ceremony_user_password")
+I_CERR=$(line_no "$INS_OUT" "inst_ceremony_recovery")
+I_CERK=$(line_no "$INS_OUT" "inst_ceremony_release_key")
 I_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
 I_BUILD=$(line_no "$INS_OUT" "ukictl build")
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
@@ -236,6 +270,14 @@ I_TEARDOWN=$(line_no "$INS_OUT" "umount -R /mnt")
 I_SCRUB=$(line_no "$INS_OUT" "rm -f <ephemeral-keyfile>")
 I_REBOOT=$(line_no "$INS_OUT" "reboot #")
 assert_eq "order: baseline pending before key ceremony" "1" "$(( I_BASE < I_KEYGEN ? 1 : 0 ))"
+assert_eq "order: §9.1 step 4 — platform keys BEFORE the credential ceremony" "1" \
+    "$(( I_KEYGEN > 0 && I_KEYGEN < I_CERU ? 1 : 0 ))"
+assert_eq "order: ceremony (1/3) user password before (2/3) recovery" "1" \
+    "$(( I_CERU > 0 && I_CERU < I_CERR ? 1 : 0 ))"
+assert_eq "order: ceremony (2/3) recovery before (3/3) release key" "1" \
+    "$(( I_CERR > 0 && I_CERR < I_CERK ? 1 : 0 ))"
+assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
+    "$(( I_CERK > 0 && I_CERK < I_ENROLL ? 1 : 0 ))"
 assert_eq "order: key ceremony before NVRAM enrollment" "1" "$(( I_KEYGEN < I_ENROLL ? 1 : 0 ))"
 assert_eq "order: enrollment before ukictl build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
@@ -587,7 +629,12 @@ assert_contains "help: repeatable --disk documented" "$HELP_OUT" "--disk DEVICE2
 assert_contains "help: --no-reboot documented" "$HELP_OUT" "--no-reboot"
 assert_contains "help: SetupMode gate documented" "$HELP_OUT" "SetupMode"
 assert_contains "help: btrfs default documented" "$HELP_OUT" "Btrfs root with subvolumes"
-assert_contains "help: unattended contract documented (no prompts)" "$HELP_OUT" "unattended"
+assert_contains "help: unattended contract documented (unattended until reboot)" "$HELP_OUT" \
+    "unattended"
+assert_contains "help: credential ceremony documented (ADR-20 amended)" "$HELP_OUT" \
+    "credential ceremony"
+assert_contains "help: no-echo prompts documented" "$HELP_OUT" "no-echo"
+assert_contains "help: NO credential flag/env seam documented" "$HELP_OUT" "no flag"
 assert_contains "help: ephemeral install key documented" "$HELP_OUT" "ephemeral"
 assert_contains "help: direct reboot documented (no firmware trip)" "$HELP_OUT" "direct reboot"
 assert_contains "help: finalize handoff documented" "$HELP_OUT" "finalize"

@@ -271,7 +271,9 @@ assert_pcr11_prediction "G-T13"
 # SecureBoot=1 SetupMode=0 — the fixture efivars dir presents the final SB
 # state (mkvar pattern from tests/unit/baseline_finalize_guard.sh).
 EFIVARS="$RUN/rootfs/efivars-sb-on"
-mkdir -p "$EFIVARS" "$RUN/rootfs/etc/debian-fde"
+# the real CLI's sp_etc_dir resolves $DEBIAN_FDE_ROOT/etc/alpine-fde (the
+# Alpine-contract rename) — stage the baseline where audit --init looks
+mkdir -p "$EFIVARS" "$RUN/rootfs/etc/alpine-fde"
 _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 _mkcertvar() { printf '\007\000\000\000%s' "$2" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 _mkvar SecureBoot 1
@@ -280,7 +282,7 @@ _mkcertvar PK pk-cert-v1
 _mkcertvar KEK kek-cert-v1
 _mkcertvar db db-cert-v1
 _mkcertvar dbx dbx-cert-v1
-cat >"$RUN/rootfs/etc/debian-fde/baseline.json" <<'JSON'
+cat >"$RUN/rootfs/etc/alpine-fde/baseline.json" <<'JSON'
 {
   "schema_version": "1",
   "created_at": "PENDING-BY-SCENARIO",
@@ -328,19 +330,19 @@ AUDIT_OUT=$(DEBIAN_FDE_ROOT="$RUN/rootfs" \
 AUDIT_RC=$?
 assert_eq "audit --init finalizes the baseline (real CLI, rc 0)" "0" "$AUDIT_RC"
 assert_contains "finalized baseline records secure_boot=1" \
-    "$(cat "$RUN/rootfs/etc/debian-fde/baseline.json")" '"secure_boot": "1"'
+    "$(cat "$RUN/rootfs/etc/alpine-fde/baseline.json")" '"secure_boot": "1"'
 # stamp the finalized PCR 0/7 from the boot console evidence (the installed
 # machine's trust root is the BOOTED state, not the restarted fixture)
 sed -i "s|^  \"expected_pcr7\": \".*\",\{0,1\}$|  \"expected_pcr7\": \"$PCR7\",|; s|^  \"pcr0\": \".*\",\{0,1\}$|  \"pcr0\": \"$(grep -oE 'debian-fde-pcr sha256:0=[0-9a-f]{64}' "$CONSOLE" | head -1 | cut -d= -f2)\",|" \
-    "$RUN/rootfs/etc/debian-fde/baseline.json"
+    "$RUN/rootfs/etc/alpine-fde/baseline.json"
 assert_eq "baseline expected_pcr7 == the booted machine's PCR 7" "$PCR7" \
-    "$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/debian-fde/baseline.json")"
-if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs/etc/debian-fde/baseline.json"; then
+    "$(sed -n 's/^  "expected_pcr7": "\(.*\)",\{0,1\}$/\1/p' "$RUN/rootfs/etc/alpine-fde/baseline.json")"
+if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs/etc/alpine-fde/baseline.json"; then
     _assert_result not-ok "baseline is FINAL (no pending PCR 7)" "still pending"
 else
     _assert_result ok "baseline is FINAL (no pending PCR 7)" ""
 fi
-cp "$RUN/rootfs/etc/debian-fde/baseline.json" "$RUN/baseline.json"
+cp "$RUN/rootfs/etc/alpine-fde/baseline.json" "$RUN/baseline.json"
 
 kill "$REFRESHER" 2>/dev/null
 echo "# run dir: $RUN (wall $((SECONDS - T0)) s)"

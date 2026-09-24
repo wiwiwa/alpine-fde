@@ -59,5 +59,31 @@ PCR7_FRESH=$(swtpm_pcrread "$STATE_DIR" 7)
 assert_eq "PCR7 back to zero on fresh state" "$ZERO64" "$PCR7_FRESH"
 
 swtpm_stop "$STATE_DIR" || true
+
+# 8. start must survive a caller running with JOB CONTROL (set -m — the s22
+# watchdog discipline). Under -m a background job becomes a process-group
+# leader, util-linux setsid then auto-forks, and the recorded pid dies
+# instantly: swtpm_start's readiness loop broke on the dead-parent check and
+# declared a healthy (re-parented, unpinned) swtpm "not ready" — live defect
+# 2026-09-24, two s22 standalone runs lost at the first fixture start. A
+# start under -m must report ready AND leave a LIVE, SERVING recorded pid.
+_m_start_under_job_control() {
+    set -m
+    swtpm_start "$STATE_DIR"
+    local _rc=$?
+    set +m
+    return "$_rc"
+}
+if assert_rc "fixture start under job control (set -m)" 0 _m_start_under_job_control; then
+    if kill -0 "$(cat "$STATE_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+        assert_eq "set -m start: recorded pid is the live swtpm" "alive" "alive"
+    else
+        assert_eq "set -m start: recorded pid is the live swtpm" "alive" "dead"
+    fi
+    assert_rc "set -m start: swtpm serves on the recorded pid's sockets" 0 \
+        timeout 10 tpm2_getcap -T "$SWTPM_TCTI" properties-fixed
+    swtpm_stop "$STATE_DIR" || true
+fi
+
 rm -rf "$STATE_DIR"
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

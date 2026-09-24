@@ -104,9 +104,11 @@ verify_sig "$OUT"
 assert_rc "artifact: openssl verifies the release signature over the policyDigest" 0 $?
 assert_contains "measure was pinned to --phases=enter-initrd" "$(cat "$UKIFY_LOG")" "--phases=enter-initrd"
 assert_contains "measure ran in --measure mode" "$(cat "$UKIFY_LOG")" "--measure"
-# systemd-measure sign output shape: no invented fields
-assert_eq "artifact: fields are exactly pcrs|pkfp|pol|sig" \
-    "pcrs,pkfp,pol,sig" "$(jq -r '.sha256[0] | keys_unsorted | join(",")' "$OUT")"
+# systemd-measure sign output shape: no invented fields BEYOND the Option A
+# digest anchors (d7/d11 — the components the signature was computed over,
+# consumed by the seal-time digest-anchored G-B6/precondition checks)
+assert_eq "artifact: fields are exactly pcrs|pkfp|pol|sig|d7|d11" \
+    "pcrs,pkfp,pol,sig,d7,d11" "$(jq -r '.sha256[0] | keys_unsorted | join(",")' "$OUT")"
 
 # --- happy path: explicit component inputs ------------------------------------------
 OUT2="$TMP/pcrsig-comp.json"

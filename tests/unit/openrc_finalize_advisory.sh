@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# tests/unit/openrc_finalize_advisory.sh — ADR-20 (§9.1 Stage 2): the first-boot
-# OpenRC service hooks/openrc/alpine-fde-finalize is ADVISORY ONLY. The
-# fail-closed Secure Boot gate lives in the GUIDED `alpine-fde finalize`
-# (lib/cmd/finalize.sh STEP 3); the boot-time artifact NEVER runs it.
+# tests/unit/openrc_finalize_advisory.sh — ADR-20 AMENDED (§9.1 Stage 2): the
+# first-boot OpenRC service hooks/openrc/alpine-fde-finalize is the
+# AUTO-FINALIZER: when the state is provisional (installed/provisional-booted)
+# AND the final Secure Boot state holds (secureboot=1 && setup_mode=0) it
+# INVOKES the non-interactive completion (fin_service_main, lib/cmd/finalize.sh
+# — guard -> audit --init -> token upgrade {PCR 7, PCR 11} -> ephemeral purge
+# -> MOTD clear -> state finalized). On SB-guard failure or ANY completion
+# failure it prints the ADR-8 advisory warning, exits 0 (NEVER blocks boot) and
+# retries on the next boot. finalized / missing / corrupt state / missing
+# libraries => silent degrade-safe exit 0.
 #
 # The REAL hook script is exercised (sourced; start() invoked) against the REAL
-# collaborators lib/install-state.sh + lib/firmware.sh. Only the seams are
-# stubbed: DEBIAN_FDE_INSTALL_STATE (state file), DEBIAN_FDE_EFIVARS_DIR
-# (firmware state), and a PATH set of RECORDING stubs for the finalize/TPM/LUKS
-# vocabulary (observability tripwire — the hook may at most print).
+# collaborators lib/install-state.sh + lib/firmware.sh. The completion entry
+# point is intercepted with a RECORDING STUB (fin_service_main defined before
+# the hook runs; finalize.sh honors DEBIAN_FDE_FINALIZE_LOADED and returns
+# early, so the stub stands in for the whole completion chain). The full
+# REAL-chain service simulation lives in tests/unit/finalize_service_guard.sh.
 #
 # Pinned invariants (rc 0 ALWAYS — never blocks boot):
-#   * unfinalized (provisional-booted) ⇒ prints install state + read-only SB
-#     state + "Run: alpine-fde finalize" guidance
-#   * finalized ⇒ rc 0, silent (no nag)
-#   * Secure Boot OFF + unfinalized ⇒ STILL rc 0 (advisory-only is the
-#     contract); the SB state is printed as-is and the guidance points at
-#     finalize, where the fail-closed gate lives
-#   * the hook NEVER invokes the finalize implementation: zero recording-stub
-#     invocations (cryptsetup / cryptenroll / tpm / the CLI entrypoints), the
-#     cmd_* handlers are never even defined, the state file is never written
-#   * robustness: missing / corrupt state file, and even missing libraries ⇒
-#     rc 0, advisory text, no die/crash output on the console
+#   * provisional + SB final          => completion chain INVOKED once, silent
+#   * provisional + SB guard failure  => completion chain NOT invoked, loud
+#                                       advisory, retry-next-boot text, rc 0
+#   * completion failure (stub rc 1)  => rc 0, loud advisory (ADR-8), rc 0
+#   * finalized                        => silent rc 0, chain NOT invoked
+#   * missing / corrupt state          => silent rc 0 (degrade safe), not invoked
+#   * libraries missing                => silent rc 0 (degrade safe)
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -41,38 +44,19 @@ assert_not_contains() {
 
 HOOK=$REPO/hooks/openrc/alpine-fde-finalize
 T=$(mktemp -d /tmp/alpine-fde-advisory.XXXXXX)
-FAKEBIN=$T/bin
 EFIVARS=$T/efivars
 STATE=$T/etc/install-state.json
+ATTEMPT=$T/etc/finalize-attempt.txt
 CALL_LOG=$T/calls.log
 
 export DEBIAN_FDE_ROOT=$T/root
 export DEBIAN_FDE_INSTALL_STATE=$STATE
+export DEBIAN_FDE_INSTALL_ATTEMPT=$ATTEMPT
 export DEBIAN_FDE_EFIVARS_DIR=$EFIVARS
 
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
-mkdir -p "$FAKEBIN" "$EFIVARS" "${STATE%/*}" "$T/root"
-
-# --- seams ---------------------------------------------------------------------
-# Recording tripwire: the advisory hook may at most PRINT. Any invocation of the
-# finalize/enroll/token/LUKS/TPM vocabulary is logged here and fails the suite.
-record_stub() { # NAME — a stub that logs its own invocation and fails loudly
-    cat >"$FAKEBIN/$1" <<EOF
-#!/bin/sh
-printf 'CALL $1 %s\n' "\$*" >>'$CALL_LOG'
-exit 1
-EOF
-    chmod +x "$FAKEBIN/$1"
-}
-record_stub cryptsetup   # LUKS keyslot/token operations (lib/cmd/finalize.sh)
-record_stub systemd-cryptenroll # ADR-19 tripwire (never anywhere)
-record_stub cryptenroll  # the alpine-fde enroll verb
-record_stub tpm          # tpm2-tools wrapper (mechanism B seal ops)
-record_stub tpm2         # direct tpm2-tools
-record_stub alpine-fde   # the CLI entrypoint (`alpine-fde finalize`)
-record_stub debian-fde   # historical CLI entrypoint
-: >"$CALL_LOG"
+mkdir -p "$EFIVARS" "${STATE%/*}" "$T/root"
 
 # --- efivarfs fixture -----------------------------------------------------------
 mkvar() { # NAME BYTE — attrs header (NV+BS+RT=7) + payload byte
@@ -97,162 +81,149 @@ write_state() { # STATE — the §8.4 install-state document
 }
 
 # --- driver: source the REAL hook in a subshell and call start() -----------------
-# The cmd dir points at the REAL lib/cmd (the hook derives the lib dir from it
-# and sources the REAL install-state.sh + firmware.sh). PATH carries the
-# recording stubs. Output is merged stdout+stderr (what would hit the console).
-run_hook() {
+# SVC_RC / SVC_CALLS: the recording stub's rc and invocation count. The stub is
+# defined BEFORE the hook is sourced; finalize.sh honors
+# DEBIAN_FDE_FINALIZE_LOADED (the hook exports it? no — the HOOK sees it already
+# set in its environment and skips sourcing finalize.sh), so the stub survives.
+run_hook() { # SVC_RC — the rc the completion stub returns
+    SVC_CALLS=0
     ADV_OUT=$(
+        exec 2>&1
         export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
-        export PATH="$FAKEBIN:$PATH"
+        DEBIAN_FDE_FINALIZE_LOADED=1
+        export DEBIAN_FDE_FINALIZE_LOADED
+        SVC_RC=$1
+        fin_service_main() {
+            printf 'CALL fin_service_main\n' >>"$CALL_LOG"
+            return $SVC_RC
+        }
         # shellcheck disable=SC1090
         . "$HOOK"
         start
     ) 2>&1
     ADV_RC=$?
+    SVC_CALLS=$(grep -c . "$CALL_LOG" 2>/dev/null || true)
+    : >"$CALL_LOG"
 }
-# Variant with the LIBRARIES absent (broken install): the hook must still be a
-# silent-success advisory (command -v guards).
+# Variant with the LIBRARIES absent (broken install): silent degrade, rc 0.
 run_hook_no_libs() {
     ADV_OUT=$(
-        export DEBIAN_FDE_CMD_DIR="$T/absent/cmd"
-        export PATH="$FAKEBIN:$PATH"
+        exec 2>&1
+        DEBIAN_FDE_CMD_DIR="$T/absent/cmd"
+        export DEBIAN_FDE_CMD_DIR
+        SVC_RC=0
+        fin_service_main() { return 0; }
         # shellcheck disable=SC1090
         . "$HOOK"
         start
     ) 2>&1
     ADV_RC=$?
 }
-reset_calls() { : >"$CALL_LOG"; }
-calls() { grep -c . "$CALL_LOG" 2>/dev/null || true; }
 
 # =================================================================================
-# 0. static contract: the artifact exists, is an openrc oneshot, and carries no
-# finalize-implementation vocabulary at all (belt to the dynamic braces below).
-assert_file_exists "static: advisory hook exists" "$HOOK"
+# 0. static contract: the artifact exists, is an openrc oneshot, wires the
+# completion entrypoint (fin_service_main) and its own degrade-safe guard rails.
+assert_file_exists "static: finalize hook exists" "$HOOK"
 assert_eq "static: openrc-run shebang" "#!/sbin/openrc-run" "$(head -n1 "$HOOK")"
 HOOK_TXT=$(cat "$HOOK")
 assert_contains "static: depend() needs localmount" "$HOOK_TXT" "need localmount"
-assert_contains "static: state-aware (finalized check)" "$HOOK_TXT" "istate_is_finalized"
-assert_not_contains "static: no LUKS vocabulary" "$HOOK_TXT" "cryptsetup"
-assert_not_contains "static: no cryptenroll vocabulary" "$HOOK_TXT" "cryptenroll"
-assert_not_contains "static: no tpm vocabulary" "$HOOK_TXT" "tpm"
-case $HOOK_TXT in
-    *"$REPO/bin/debian-fde"* | *"$REPO/bin/alpine-fde"* | *"cmd/finalize.sh"*)
-        _fail "static: must not reference the finalize implementation" ;;
-    *) _pass "static: must not reference the finalize implementation" ;;
-esac
+assert_contains "static: invokes the completion chain (fin_service_main)" "$HOOK_TXT" \
+    "fin_service_main"
+assert_contains "static: skip-sourcing guard so a stub seam is possible" "$HOOK_TXT" \
+    "DEBIAN_FDE_FINALIZE_LOADED"
+assert_contains "static: reads the install state (finalized is a no-op)" "$HOOK_TXT" \
+    "istate_state"
+assert_contains "static: read-only final SB guard before the completion" "$HOOK_TXT" \
+    "fw_sb_state"
+assert_contains "static: failure path writes the ADR-8 attempt marker" "$HOOK_TXT" \
+    "istate_attempt_write"
+assert_contains "static: advisory names the retry contract" "$HOOK_TXT" "next boot"
+assert_not_contains "static: no LUKS vocabulary in the hook itself" "$HOOK_TXT" "cryptsetup"
+assert_not_contains "static: no cryptenroll vocabulary in the hook itself" "$HOOK_TXT" \
+    "cryptenroll"
+assert_not_contains "static: no raw tpm2 vocabulary in the hook itself" "$HOOK_TXT" "tpm2 "
+assert_eq "static: systemd unit deleted" "0" \
+    "$([ -e "$REPO/hooks/systemd/debian-fde-finalize.service" ] && echo 1 || echo 0)"
 
 # =================================================================================
-# 1. Unfinalized (provisional-booted: Stage 2 done, finalize pending) ⇒ rc 0
-# ALWAYS, prints the state + the read-only SB state + the finalize guidance.
+# 1. provisional-booted + final SB state ⇒ the completion chain IS invoked
+# (ADR-20 amended Stage 2 — the inverted contract), success is silent, rc 0.
 sb_state 1 0
 write_state provisional-booted
-reset_calls
-run_hook
-assert_eq "provisional-booted: rc 0 (never blocks boot)" "0" "$ADV_RC"
-assert_contains "provisional-booted: names the install state" "$ADV_OUT" \
-    "provisional-booted"
-assert_contains "provisional-booted: prints the read-only SB state" "$ADV_OUT" \
-    "secureboot=1 setup_mode=0 pk=1"
-assert_contains "provisional-booted: directs to the guided command" "$ADV_OUT" \
-    "Run: alpine-fde finalize"
-assert_eq "provisional-booted: ZERO recorded invocations (advisory only)" "0" \
-    "$(calls)"
-assert_eq "provisional-booted: state file untouched" "provisional-booted" \
-    "$(sed -n 's/^  "state": "\(.*\)",$/\1/p' "$STATE")"
+run_hook 0
+assert_eq "provisional+SB-final: rc 0 (never blocks boot)" "0" "$ADV_RC"
+assert_eq "provisional+SB-final: completion chain invoked exactly once" "1" "$SVC_CALLS"
+assert_eq "provisional+SB-final: silent on success (no advisory)" "" "$ADV_OUT"
 
 # =================================================================================
-# 2. Finalized ⇒ rc 0, silent (no finalize nag on every boot).
-write_state finalized
-reset_calls
-run_hook
-assert_eq "finalized: rc 0" "0" "$ADV_RC"
-assert_eq "finalized: quiet" "" "$ADV_OUT"
-assert_eq "finalized: ZERO recorded invocations" "0" "$(calls)"
-
-# =================================================================================
-# 3. Secure Boot OFF + unfinalized ⇒ STILL rc 0 (advisory-only is the ADR-20
-# contract; the fail-closed SB gate lives in the guided finalize, which the
-# guidance names).
+# 2. SB guard failure (secureboot=0) ⇒ the completion chain is NOT invoked;
+# loud advisory, retry-next-boot, rc 0 (§9.1 Stage 2 step 1 / §12 S-21).
 sb_state 0 0
 write_state provisional-booted
-reset_calls
-run_hook
-assert_eq "SB off: rc 0 (advisory never blocks or fails boot)" "0" "$ADV_RC"
-assert_contains "SB off: SB state printed as-is (secureboot=0)" "$ADV_OUT" \
-    "secureboot=0 setup_mode=0 pk=1"
-assert_contains "SB off: guidance still names the finalize gate" "$ADV_OUT" \
-    "Run: alpine-fde finalize"
-assert_not_contains "SB off: no fail-closed exit-code text on the console" \
-    "$ADV_OUT" "error:"
-assert_eq "SB off: ZERO recorded invocations" "0" "$(calls)"
+run_hook 0
+assert_eq "SB-off: rc 0 (advisory never blocks or fails boot)" "0" "$ADV_RC"
+assert_eq "SB-off: completion chain NOT invoked (guard fails closed first)" "0" \
+    "$SVC_CALLS"
+assert_contains "SB-off: advisory prints the read-only SB state" "$ADV_OUT" \
+    "secureboot=0"
+assert_contains "SB-off: advisory names the not-finalized state" "$ADV_OUT" \
+    "provisional-booted"
+assert_contains "SB-off: advisory names the retry contract" "$ADV_OUT" "next boot"
+assert_contains "SB-off: advisory still names the guided entry point" "$ADV_OUT" \
+    "alpine-fde finalize"
+
+# --- 2b. SetupMode=1 is equally a guard failure (keys not in final state) --------
+sb_state 1 1
+write_state provisional-booted
+run_hook 0
+assert_eq "SetupMode=1: rc 0" "0" "$ADV_RC"
+assert_eq "SetupMode=1: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_contains "SetupMode=1: advisory prints the setup-mode state" "$ADV_OUT" \
+    "setup_mode=1"
 
 # =================================================================================
-# 4. The hook NEVER defines or reaches the finalize implementation: with the
-# REAL libs sourced, no cmd_* handler exists in the hook's shell, and the
-# recording tripwire across EVERY leg above saw nothing.
-run_hook
-assert_eq "impl isolation: rc 0" "0" "$ADV_RC"
-run_defs() {
-    (
-        export DEBIAN_FDE_CMD_DIR="$REPO/lib/cmd"
-        export PATH="$FAKEBIN:$PATH"
-        # shellcheck disable=SC1090
-        . "$HOOK"
-        printf '%s\n' \
-            "cmd_finalize_main=$(command -v cmd_finalize_main || echo absent)" \
-            "cmd_enroll_main=$(command -v cmd_enroll_main || echo absent)" \
-            "seal_make_token=$(command -v seal_make_token || echo absent)" \
-            "seal_upgrade_token=$(command -v seal_upgrade_token || echo absent)"
-        start >/dev/null 2>&1
-    ) 2>&1
-}
-DEFS=$(run_defs)
-assert_contains "impl isolation: cmd_finalize_main never defined" "$DEFS" \
-    "cmd_finalize_main=absent"
-assert_contains "impl isolation: cmd_enroll_main never defined" "$DEFS" \
-    "cmd_enroll_main=absent"
-assert_contains "impl isolation: seal_make_token never defined" "$DEFS" \
-    "seal_make_token=absent"
-assert_contains "impl isolation: seal_upgrade_token never defined" "$DEFS" \
-    "seal_upgrade_token=absent"
-assert_eq "impl isolation: ZERO invocations across all legs" "0" "$(calls)"
+# 3. Completion failure (chain rc != 0) ⇒ rc 0, loud ADR-8 advisory, retry next
+# boot. The attempt marker itself is fin_service_main's contract (asserted end-
+# to-end in finalize_service_guard.sh); here the loud console message is pinned.
+sb_state 1 0
+write_state provisional-booted
+run_hook 1
+assert_eq "chain-fail: rc 0 (boot is NEVER blocked)" "0" "$ADV_RC"
+assert_eq "chain-fail: completion chain WAS attempted" "1" "$SVC_CALLS"
+assert_contains "chain-fail: loud advisory (ADR-8)" "$ADV_OUT" "WARNING"
+assert_contains "chain-fail: advisory names the not-finalized state" "$ADV_OUT" \
+    "provisional-booted"
+assert_contains "chain-fail: advisory names the retry contract" "$ADV_OUT" "next boot"
 
 # =================================================================================
-# 5. Robustness: missing / corrupt state file (and even missing libraries) ⇒
-# rc 0, advisory text, no crash traceback on the console.
+# 4. finalized ⇒ silent rc 0, the chain is NOT invoked (idempotent, no nag).
+sb_state 1 0
+write_state finalized
+run_hook 0
+assert_eq "finalized: rc 0" "0" "$ADV_RC"
+assert_eq "finalized: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "finalized: quiet" "" "$ADV_OUT"
+
+# =================================================================================
+# 5. Robustness: missing / corrupt state file ⇒ silent rc 0 (degrade safe), the
+# chain is never invoked, no crash traceback on the console.
 rm -f "$STATE"
-reset_calls
-run_hook
+run_hook 0
 assert_eq "absent state: rc 0" "0" "$ADV_RC"
-assert_contains "absent state: still advisory (state unknown)" "$ADV_OUT" "unknown"
-assert_contains "absent state: still names the finalize guidance" "$ADV_OUT" \
-    "Run: alpine-fde finalize"
-assert_not_contains "absent state: no die/error output" "$ADV_OUT" "error:"
-assert_eq "absent state: ZERO recorded invocations" "0" "$(calls)"
+assert_eq "absent state: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "absent state: quiet (degrade safe)" "" "$ADV_OUT"
 
 printf 'not json at all {{\n' >"$STATE"
-reset_calls
-run_hook
+run_hook 0
 assert_eq "corrupt state: rc 0" "0" "$ADV_RC"
-assert_contains "corrupt state: still advisory (state unreadable)" "$ADV_OUT" \
-    "unknown"
-assert_contains "corrupt state: still names the finalize guidance" "$ADV_OUT" \
-    "Run: alpine-fde finalize"
+assert_eq "corrupt state: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "corrupt state: quiet (degrade safe)" "" "$ADV_OUT"
 assert_not_contains "corrupt state: no crash traceback markers" "$ADV_OUT" \
     "syntax error"
-assert_eq "corrupt state: ZERO recorded invocations" "0" "$(calls)"
 
-# 5b. libraries entirely missing (broken/partial install) — the command -v
-# guards degrade to the placeholder SB line and the guidance, rc 0 still.
-rm -f "$STATE"
-reset_calls
+# 5b. libraries entirely missing (broken/partial install) — silent degrade, rc 0.
 run_hook_no_libs
 assert_eq "no libs: rc 0" "0" "$ADV_RC"
-assert_contains "no libs: placeholder SB line" "$ADV_OUT" \
-    "secureboot=? setup_mode=? pk=?"
-assert_contains "no libs: still names the finalize guidance" "$ADV_OUT" \
-    "Run: alpine-fde finalize"
-assert_eq "no libs: ZERO recorded invocations" "0" "$(calls)"
+assert_eq "no libs: quiet" "" "$ADV_OUT"
 
 finish

@@ -103,10 +103,10 @@ cmd_status_main() {
     # Install-state row (§8.1/§9.1, G-IL12): the lifecycle headline. SILENT for
     # pre-state-machine installs (no state file), a quiet line when finalized,
     # PROMINENT warnings + the resume hint while the ceremony is unfinished —
-    # state=installed (pending first-boot finalization) or state=provisional-
-    # booted (ADR-20: first boot done via the provisional PCR-11-only token,
-    # recovery passphrase not yet set — §10's mid-finalization row). Report-
-    # only: rc stays 0.
+    # state=installed (Stage 1 done in-chroot; Stage-2 finalization pending)
+    # or state=provisional-booted (ADR-20 as amended: first boot done via the
+    # provisional PCR-11-only token; the recovery passphrase is already set,
+    # the {7,11} token upgrade + ephemeral purge are not). Report-only: rc 0.
     _st_isf=$(istate_file)
     if [ -f "$_st_isf" ]; then
         printf '== Install state\n'
@@ -114,14 +114,16 @@ cmd_status_main() {
         case $_st_is in
             installed)
                 printf '    WARNING: installation is NOT finalized (install state: installed)\n'
-                printf '    First-boot finalization pending: the advisory alpine-fde-finalize\n'
-                printf '    OpenRC service (/etc/init.d/) prints this on boot; resume now:\n'
+                printf '    The alpine-fde-finalize OpenRC service completes finalization\n'
+                printf '    automatically on next boot; to resume manually now:\n'
                 printf '    alpine-fde finalize\n'
                 ;;
             provisional-booted)
                 printf '    WARNING: PROVISIONAL trust window ACTIVE (install state: provisional-booted)\n'
                 printf '    First boot unlocked via the ADR-20 provisional token (PCR 11 only);\n'
-                printf '    the permanent recovery passphrase is NOT yet set. Resume now:\n'
+                printf '    the recovery passphrase is set, but the {7,11} token upgrade and\n'
+                printf '    ephemeral keyslot purge are pending. The service retries next\n'
+                printf '    boot; to crash-resume manually now:\n'
                 printf '    alpine-fde finalize\n'
                 ;;
             finalized)

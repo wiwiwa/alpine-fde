@@ -115,6 +115,34 @@ aud_sb_report() {
     done
 }
 
+# aud_fw_report BASELINE — §9.5 firmware identity (fw.vendor / fw.version,
+# recorded at finalize from the DMI id seam). INFORMATIONAL by decision: audit
+# is a detective control and firmware updates legitimately change the vendor /
+# BIOS version strings — the SECURITY signal for firmware change is PCR 0
+# drift (aud_pcr_report) plus the event-log tripwire (aud_eventlog_report).
+# A changed (or newly absent) identity string is therefore reported as an info
+# line and never sets AUD_DRIFT.
+aud_fw_report() {
+    _afr_bl=$1
+    for _afr_pair in vendor:sys_vendor version:bios_version; do
+        _afr_k=${_afr_pair%%:*}
+        _afr_dmi=${_afr_pair#*:}
+        _afr_base=$(baseline_get_in "$_afr_bl" fw "$_afr_k")
+        _afr_live=$(dmi_field "$_afr_dmi")
+        if [ -z "$_afr_base" ]; then
+            # L-2: nothing was compared — "match" would be dishonest wording
+            printf 'fw %-7s live=%s baseline=not recorded (finalize with --init)\n' \
+                "$_afr_k" "${_afr_live:-<absent>}"
+        elif [ "$_afr_live" != "$_afr_base" ]; then
+            printf 'fw %-7s live=%s baseline=%s   info (informational — PCR 0 drift is the security signal)\n' \
+                "$_afr_k" "${_afr_live:-<absent>}" "$_afr_base"
+        else
+            printf 'fw %-7s live=%s baseline=%s   match\n' \
+                "$_afr_k" "$_afr_live" "$_afr_base"
+        fi
+    done
+}
+
 # aud_eventlog_report BASELINE — v1 scope: existence + size + sha256
 aud_eventlog_report() {
     _aer_bl=$1
@@ -170,12 +198,24 @@ or tampering?), then:
 EOF
 }
 
-# aud_write_last_audit FILE BASELINE RESULT ACCEPTED — last-audit.json
+# aud_write_last_audit FILE BASELINE RESULT ACCEPTED — last-audit.json.
+# M-3 (the baseline_finalize_from_live / enrl_record pattern): the document is
+# staged in a temp file NEXT TO the target, chmod 600 BEFORE the rename, then
+# moved into place ATOMICALLY — no default-umask window and no torn
+# last-audit.json (a failed stage leaves the previous document untouched
+# instead of truncating it). rc 1 with a loud err on failure; rc 0 otherwise.
 aud_write_last_audit() {
     _aw_f=$1 _aw_bl=$2 _aw_result=$3 _aw_acc=$4
     _aw_dir=${_aw_f%/*}
-    mkdir -p "$_aw_dir"
-    cat >"$_aw_f" <<EOF
+    mkdir -p "$_aw_dir" || {
+        err "audit: cannot create state directory $_aw_dir"
+        return 1
+    }
+    _aw_tmp=$(mktemp "$_aw_dir/.last-audit.XXXXXX") || {
+        err "audit: cannot create temp file for last-audit.json in $_aw_dir"
+        return 1
+    }
+    if ! cat >"$_aw_tmp" <<EOF
 {
   "schema_version": 1,
   "audited_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -190,7 +230,18 @@ aud_write_last_audit() {
   "eventlog_size": "$(baseline_get_in "$_aw_bl" fw eventlog_size)"
 }
 EOF
-    chmod 600 "$_aw_f"
+    then
+        rm -f "$_aw_tmp"
+        err "audit: serializing last-audit.json failed"
+        return 1
+    fi
+    chmod 600 "$_aw_tmp"
+    if ! mv -f "$_aw_tmp" "$_aw_f"; then
+        rm -f "$_aw_tmp"
+        err "audit: installing last-audit.json failed: $_aw_f"
+        return 1
+    fi
+    return 0
 }
 
 cmd_audit_main() {
@@ -232,6 +283,7 @@ cmd_audit_main() {
 
     aud_pcr_report "$_am_bl"
     aud_sb_report "$_am_bl"
+    aud_fw_report "$_am_bl"
     aud_eventlog_report "$_am_bl"
     aud_sbverify_report
 

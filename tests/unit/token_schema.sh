@@ -2,9 +2,13 @@
 # tests/unit/token_schema.sh — G-B8 (§7.2 + §12 interop oracle dependency): pin
 # the EXACT emitted field-set of the systemd-tpm2 token the Mechanism B sealer
 # writes. Dash-form upstream names, literal field-set assert:
-#   type, keyslots, tpm2-blob, tpm2-pcrs, tpm2-pcr-bank, tpm2-pubkey,
-#   tpm2-signature — NOTHING else, NO underscore spellings (tpm2_blob & co
-#   would be silently ignored by some consumers and break the oracle).
+#   type, keyslots, tpm2-blob, tpm2-pcrs, tpm2-pcr-bank, tpm2-policy-hash,
+#   tpm2-primary-alg, tpm2-pubkey, tpm2-signature — NOTHING else, NO underscore
+#   spellings (tpm2_blob & co would be silently ignored by some consumers and
+#   break the oracle). tpm2-policy-hash is the upstream-257-mandatory sealed
+#   digest; tpm2-primary-alg "rsa" pins the SRK parent template (upstream
+#   defaults ECC) — both ADR-19 interop findings (see the SCHEMA DELTA note in
+#   tests/lib/interop-oracle.sh and tests/unit/interop_token_framing.sh).
 #   * b64 pubkey equality: tpm2-pubkey decodes to the DER SubjectPublicKeyInfo
 #     of release.pub
 #   * keyslots shape: exactly one string element, != "0"
@@ -44,7 +48,7 @@ mkdir -p "$TMP/tmp"
 DEBIAN_FDE_TMPDIR=$TMP/tmp
 KEYDIR=$REPO/fixtures/keys
 
-EXACT_FIELDS="keyslots,tpm2-blob,tpm2-pcr-bank,tpm2-pcrs,tpm2-pubkey,tpm2-signature,type"
+EXACT_FIELDS="keyslots,tpm2-blob,tpm2-pcr-bank,tpm2-pcrs,tpm2-policy-hash,tpm2-primary-alg,tpm2-pubkey,tpm2-signature,type"
 DER=$(openssl pkey -pubin -in "$KEYDIR/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 
 # schema_check FILE PCRSLIST — the literal field-set + shape pins
@@ -56,6 +60,9 @@ schema_check() { # FILE DESC_PREFIX PCRSLIST EXPECTED_SLOT
     assert_eq "$_sc_p: type" "systemd-tpm2" "$(jq -r '.type' "$_sc_f")"
     assert_eq "$_sc_p: pcr-bank" "sha256" "$(jq -r '.["tpm2-pcr-bank"]' "$_sc_f")"
     assert_eq "$_sc_p: pcrs for the mode" "$_sc_pcrs" "$(jq -c '.["tpm2-pcrs"]' "$_sc_f")"
+    assert_eq "$_sc_p: policy-hash is 64 lowercase hex chars (upstream 257 mandatory)" "yes" \
+        "$(jq -r '.["tpm2-policy-hash"]' "$_sc_f" | grep -qE '^[0-9a-f]{64}$' && echo yes || echo no)"
+    assert_eq "$_sc_p: primary-alg rsa" '"rsa"' "$(jq -c '.["tpm2-primary-alg"]' "$_sc_f")"
     assert_eq "$_sc_p: b64 pubkey == DER of release.pub" "$DER" \
         "$(jq -r '.["tpm2-pubkey"]' "$_sc_f")"
     assert_eq "$_sc_p: pubkey b64 decodes to valid DER (openssl parses it)" "0" \
@@ -76,8 +83,11 @@ schema_check() { # FILE DESC_PREFIX PCRSLIST EXPECTED_SLOT
 
 # --- 1. unit level: token_build_json ------------------------------------------------
 TOKU=$TMP/token-unit.json
-# blob fixture with a valid TPM2B_PRIVATE prefix (len=2 + 2 bytes)
-token_build_json '[7, 11]' "$DER" "c2ln" "AAJhYg==" 1 "$TOKU"
+# blob fixture with a valid TPM2B_PRIVATE prefix (len=2 + 2 bytes); the
+# policy-hash VALUE semantic (== policy_sealed_digest of the release keyName)
+# is pinned by interop_token_framing.sh — here only the field-set/shape
+token_build_json '[7, 11]' "$DER" "c2ln" "AAJhYg==" 1 \
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$TOKU"
 assert_rc "token_build_json rc 0" 0 $?
 schema_check "$TOKU" "unit token" '[7,11]' 1
 

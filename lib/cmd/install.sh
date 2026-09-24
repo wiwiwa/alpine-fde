@@ -21,14 +21,19 @@
 #                                                  Dn: LUKS p1 only;
 #                                                  mkfs.btrfs -d raid1 -m raid1
 #
-# SLOT CONTRACT (ADR-20 keyslot choreography, §8.1 finalize row; consumed by
-# finalize's slot discovery — NO marker is ever written to disk):
-#   keyslot 0 = internal ephemeral install key (luksFormat --key-slot 0)
-#   keyslot 1 = provisional token slot (Mechanism B, PCR 11 only)
-# finalize adds the operator recovery passphrase to the NEXT FREE keyslot
-# (authorized by the handed-over ephemeral key) and then kills keyslot 0 (the
-# ephemeral slot) on EVERY member container — leaving exactly ONE passphrase
-# slot beyond the token-referenced slots (the recovery slot).
+# SLOT CONTRACT (ADR-20 amended keyslot choreography, §7.2 keyslot table +
+# §9.1; consumed by finalize's slot discovery — NO marker is ever written to
+# the LUKS2 metadata beyond the documented keyslots):
+#   keyslot 0 = the OPERATOR'S RECOVERY PASSPHRASE, enrolled in-chroot by the
+#               §9.1 step 4 credential ceremony (luksAddKey --key-slot 0,
+#               Argon2id, authorized by the staged ephemeral install key)
+#   keyslot 1 = provisional token slot (Mechanism B, PCR 11 only; upgraded to
+#               {PCR 7, PCR 11} by the §9.1 Stage 2/3 completion)
+#   keyslot 2 = the internal ephemeral install key — a TEMPORARY keyslot
+#               (luksFormat --key-slot 2), the ceremony's authorizing
+#               credential while staged; PURGED at first-boot finalization
+#               (§9.1 Stage 2 step 4). I1's two-keyslot at-rest state (0 + 1)
+#               is reached exactly there.
 #
 # RUNNER SEAM (DEBIAN_FDE_INSTALL_RUNNER):
 #   dry-run (default)  print the complete action plan, execute nothing
@@ -206,24 +211,31 @@ install_usage() {
 Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
                           [--bcache CACHE_DEV] [--no-reboot] [--yes]
 
-Fully automated unattended Stage-1 install (§9.1/ADR-20): firmware Setup Mode
-gate (SetupMode=1 required — clear the vendor PK in BIOS first), partition +
-block layer, LUKS2 keyslot 0 formatted with the INTERNAL EPHEMERAL INSTALL
-KEY (openssl rand, >=256-bit, staged on tmpfs mode 0600, scrubbed at
-teardown — the operator is NEVER prompted during install; the recovery
-passphrase and the §13 entropy floor move to `finalize`), a
+Unattended-until-reboot Stage-1 install (§9.1/ADR-20 amended; unattended
+except for the §9.1 step 4 credential-ceremony prompts): firmware Setup
+Mode gate (SetupMode=1 required — clear the vendor PK in BIOS first),
+partition + block layer, LUKS2 formatted in the TEMPORARY keyslot 2 with the
+INTERNAL EPHEMERAL INSTALL KEY (openssl rand, >=256-bit, staged on tmpfs
+mode 0600, scrubbed at teardown; keyslot 0 is reserved for the recovery
+passphrase, keyslot 1 for the provisional token — §7.2), a
 Btrfs root with subvolumes @/@home/@snapshots (default; --fs ext4 gives a
-flat ext4 root), apk populate of a minimal Alpine base (§3.3: apk add --root
-<mnt> --initdb alpine-base, one in-chroot apk additions transaction),
-repositories/network config, then the in-chroot provisioning sequence
-(§9.1 steps 1-9): additions set, user account, pending baseline,
-platform-key ceremony, firmware NVRAM enrollment db -> KEK -> PK, bootctl
+flat ext4 root),
+apk populate of a minimal Alpine base (§3.3: apk add --root <mnt> --initdb
+alpine-base, one in-chroot apk additions transaction), repositories/network
+config, then the in-chroot provisioning sequence (§9.1): additions set, user
+account, pending baseline, platform-key ceremony, the INTERACTIVE CREDENTIAL
+CEREMONY (§9.1 step 4 — exactly three no-echo prompts: the account password,
+the LUKS2 recovery passphrase into keyslot 0 with the §13 entropy floor
+enforced via re-prompt until met, and the release-key passphrase encrypting
+release.pem via keys_encrypt_release; there is no flag and no environment
+seam for any credential), firmware NVRAM enrollment db -> KEK -> PK, bootctl
 install + signed boot manager and UKI via `ukictl build`, PROVISIONAL TPM
 token sealed into keyslot 1 (Mechanism B, PCR 11 only, from the UKI's
 .pcrsig), unfinalized MOTD/issue banner, install-state=installed — then
 teardown (unmount + ephemeral-key scrub) and a direct reboot to disk (no
-firmware trip): enable Secure Boot and run `alpine-fde finalize` at first
-login.
+firmware trip): the first boot unlocks via the provisional token and
+alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
+`alpine-fde finalize` is the guided/crash-resume entry point (Stage 3).
 
 Topologies (§4.1): --disk repeatable for Btrfs RAID1 (primary ESP+LUKS,
 secondaries LUKS only); --bcache CACHE_DEV for hybrid acceleration (ESP+cache
@@ -232,8 +244,10 @@ MULTIPLE --disk: shared cache set, one independent LUKS2 container per
 /dev/bcacheN, Btrfs RAID1 pool across the members, ESP only on the cache dev.
 --fs ext4 is single-disk only.
 
-Runner (DEBIAN_FDE_INSTALL_RUNNER): dry-run (default) prints the plan;
-chroot executes (root, live ISO, --yes required); qemu emits a guest script.
+Runner (DEBIAN_FDE_INSTALL_RUNNER): dry-run (default) prints the plan (the
+credential ceremony appears as plan records only — no prompt, no secret);
+chroot executes (root, live ISO, --yes required; the three ceremony prompts
+are asked in the execution path); qemu emits a guest script.
 Env: DEBIAN_FDE_ESP_SIZE (default 512M), DEBIAN_FDE_MIRROR,
 DEBIAN_FDE_INSTALL_MNT, DEBIAN_FDE_INSTALL_USER, DEBIAN_FDE_DISKS
 (dispatcher-provided disk list), DEBIAN_FDE_TMPDIR (ephemeral-key staging
@@ -485,9 +499,10 @@ inst_preflight() {
   # hooks/ ships the Alpine layout (ADR-13/ADR-19, G-C16): kernel-hooks.d
   # build/remove hooks → /etc/kernel-hooks.d/, the mkinitfs unseal hook +
   # features.d entry → /etc/mkinitfs/, the apk trigger → /etc/apk/triggers/,
-  # and the first-boot finalize ADVISORY oneshot → /etc/init.d/ (ADR-20
-  # Stage 3: `finalize` itself is a GUIDED command — the boot artifact only
-  # advises, it never runs it)
+  # and the first-boot AUTO-FINALIZER oneshot → /etc/init.d/ (ADR-20 amended
+  # Stage 2: the service runs the non-interactive completion when
+  # provisional-booted under Secure Boot; `alpine-fde finalize` remains the
+  # guided/crash-resume entry point, Stage 3)
   for _if_h in kernel-hooks.d/alpine-fde-build.hook \
     kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
@@ -513,11 +528,14 @@ inst_preflight() {
 # inst_stage_ephemeral_key — G-C23 (§9.1 Stage 1 LUKS2 creation, ADR-20):
 # generate the INTERNAL EPHEMERAL INSTALL KEY (openssl rand, 256-bit hex) and
 # stage it under the tmpfs seam (${DEBIAN_FDE_TMPDIR:-/dev/shm}), mode 0600.
-# The key is the ONLY credential of keyslot 0 between luksFormat and finalize:
-# it drives luksFormat --key-slot 0 and every `cryptsetup open` via --key-file
-# (the existing key-file staging machinery), and the provisional enrollment's
-# luksAddKey authorization. The operator is NEVER prompted; the §13 recovery
-# passphrase + entropy floor move to `finalize` (Stage 3). I1: the key NEVER
+# The key is the ONLY credential of the TEMPORARY keyslot 2 (§7.2: keyslot 0
+# is reserved for the §9.1 step 4 recovery ceremony) between luksFormat and
+# finalization: it drives luksFormat --key-slot 2, every `cryptsetup open`
+# via --key-file (the existing key-file staging machinery), the §9.1 step 4
+# recovery-ceremony luksAddKey authorization, and the provisional
+# enrollment's token luksAddKey. The ceremony prompts (account password,
+# recovery passphrase, release-key passphrase) are the operator's §9.1 step 4
+# input — the key itself is never shown or persisted. I1: the key NEVER
 # persists — scrubbed by the explicit teardown plan record and on ANY exit
 # path by the EXIT trap armed here (BR-01: callers MUST invoke this DIRECTLY
 # in the main shell — inst_execute_plan's combined L-04a/WR-02 trap replaces
@@ -551,6 +569,176 @@ inst_stage_ephemeral_key() {
   return 0
 }
 
+# --- §9.1 step 4: the interactive credential ceremony (ADR-20 amended) -------
+# Exactly THREE no-echo questions, the only interactive input of the whole
+# lifecycle, run in-chroot while the ephemeral install key (keyslot 2) is
+# still staged to authorize the recovery luksAddKey:
+#   1/3 the user account password (chpasswd in the target root)
+#   2/3 the LUKS2 recovery passphrase -> keyslot 0 of EVERY member container
+#       (luksAddKey --key-slot 0, Argon2id, authorized by the staged ephemeral
+#       install key; §13 entropy floor enforced — re-prompt until met,
+#       confirm-typed, bounded at 3 attempts then die 64)
+#   3/3 the release-key passphrase -> release.pem encrypted via the existing
+#       keys_encrypt_release (ADR-18, AES-256 PBKDF2; its own §13 floor)
+# There is NO flag and NO environment seam for any credential (S-24): the
+# prompts live ONLY in these functions, reached through the executed plan
+# (chroot runner). Dry-run/qemu emit the records as inert text — secrets
+# never appear in plan text, argv, the environment, or on disk/ESP (I1/I4).
+
+# inst_prompt_secret LABEL VARNAME — no-echo read of one secret into VARNAME.
+# stty -echo on a tty (restored immediately); a plain stdin read otherwise,
+# which is exactly the test/CI seam (an answers file on stdin). Control
+# characters are rejected: the secret must be typeable at a console prompt.
+inst_prompt_secret() {
+  _ipl_label=$1
+  _ipl_var=$2
+  printf '%s' "$_ipl_label" >&2
+  _ipl_tty=0
+  if [ -t 0 ] && stty -echo 2>/dev/null; then
+    _ipl_tty=1
+  fi
+  _ipl_val=''
+  IFS= read -r _ipl_val || _ipl_val=''
+  if [ "$_ipl_tty" = "1" ]; then
+    stty echo 2>/dev/null
+  fi
+  printf '\n' >&2
+  case $_ipl_val in
+  *[[:cntrl:]]*)
+    die "install: the entered secret contains control characters — refusing (it must be typeable at a console prompt)"
+    ;;
+  esac
+  eval "$_ipl_var=\$_ipl_val"
+  unset _ipl_val
+  return 0
+}
+
+# inst_ceremony_floor PASSPHRASE — §13 entropy floor, shared implementation
+# (passphrase_floor_ok from lib/cmd/rotate.sh, lazily sourced): >=12 chars
+# across >=3 character classes, or >=16 chars.
+inst_ceremony_floor() {
+  command -v passphrase_floor_ok >/dev/null 2>&1 ||
+    # shellcheck disable=SC1090
+    . "${DEBIAN_FDE_CMD_DIR:-$(sp_cmd_dir)}/rotate.sh"
+  passphrase_floor_ok "$1"
+}
+
+# inst_ceremony_keys_lib — lazily pull in lib/keys.sh (keys_encrypt_release /
+# keys_is_encrypted / keys_scrub; ADR-18 custody, consumed as-is)
+inst_ceremony_keys_lib() {
+  command -v keys_encrypt_release >/dev/null 2>&1 && return 0
+  # shellcheck disable=SC1090
+  . "${DEBIAN_FDE_CMD_DIR:-$(sp_cmd_dir)}/../keys.sh"
+  return 0
+}
+
+# inst_ceremony_user_password USER MNT — ceremony 1/3: set the account
+# password in-chroot (chpasswd; the secret rides stdin through the pipe,
+# never argv).
+inst_ceremony_user_password() {
+  _icu_user=$1
+  _icu_mnt=$2
+  [ -n "$_icu_user" ] && [ -n "$_icu_mnt" ] ||
+    die "inst_ceremony_user_password: USER and MNT are required"
+  inst_prompt_secret "alpine-fde: set the password for account '$_icu_user' (no-echo): " _icu_p1
+  inst_prompt_secret "alpine-fde: repeat the password: " _icu_p2
+  if [ -z "$_icu_p1" ] || [ "$_icu_p1" != "$_icu_p2" ]; then
+    unset _icu_p1 _icu_p2
+    die "install: the account passwords were empty or did not match"
+  fi
+  printf '%s:%s\n' "$_icu_user" "$_icu_p1" | chroot "$_icu_mnt" /usr/sbin/chpasswd ||
+    die "install: setting the '$_icu_user' password in-chroot failed"
+  unset _icu_p1 _icu_p2
+  info "install: credential ceremony (1/3): account '$_icu_user' password set in-chroot (no-echo; the account is loginable)"
+  return 0
+}
+
+# inst_ceremony_recovery AUTH_KEYFILE MAPPER_NAME... — ceremony 2/3: prompt
+# the recovery passphrase (no-echo, confirm-typed, §13 floor — re-prompt
+# until met, bounded at 3 attempts), stage it as a 0600 tmpfs passfile and
+# enroll it into keyslot 0 of EVERY member container via luksAddKey,
+# authorized by the staged ephemeral install key (keyslot 2 credential).
+# Crash resume: a container whose keyslot 0 is already populated is skipped.
+inst_ceremony_recovery() {
+  _icr_auth=$1
+  shift
+  [ -n "$_icr_auth" ] && [ -f "$_icr_auth" ] ||
+    die "install: the staged ephemeral install key is missing — cannot authorize the recovery enrollment (§9.1 step 4 2/3)"
+  [ $# -ge 1 ] || die "inst_ceremony_recovery: no target mapper given"
+  _icr_attempt=0
+  while :; do
+    _icr_attempt=$((_icr_attempt + 1))
+    [ "$_icr_attempt" -le 3 ] ||
+      die "install: recovery passphrase rejected after 3 attempts (§13 entropy floor / mismatch) — restart the install (§12 T2b: one shot at the ceremony)"
+    inst_prompt_secret "alpine-fde: set the LUKS2 recovery passphrase (§13: >=12 chars with 3 character classes, or >=16 chars; permanent recovery credential, keyslot 0): " _icr_p1
+    inst_prompt_secret "alpine-fde: repeat the recovery passphrase: " _icr_p2
+    if [ -n "$_icr_p1" ] && [ "$_icr_p1" = "$_icr_p2" ] && inst_ceremony_floor "$_icr_p1"; then
+      break
+    fi
+    unset _icr_p1 _icr_p2
+    warn "install: recovery passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_icr_attempt/3)"
+  done
+  _icr_dir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
+  _icr_pf=$(mktemp "$_icr_dir/debian-fde-ceremony.XXXXXX") ||
+    die "install: cannot stage the recovery passphrase ($_icr_dir usable?)"
+  chmod 600 "$_icr_pf"
+  printf '%s' "$_icr_p1" >"$_icr_pf"
+  unset _icr_p1 _icr_p2
+  inst_ceremony_keys_lib
+  for _icr_m in "$@"; do
+    if cryptsetup luksDump "/dev/mapper/$_icr_m" 2>/dev/null | grep -q '^0:'; then
+      info "install: /dev/mapper/$_icr_m keyslot 0 already populated — recovery enrollment skipped (crash resume)"
+      continue
+    fi
+    cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 \
+      --key-slot 0 --key-file "$_icr_auth" "/dev/mapper/$_icr_m" "$_icr_pf" ||
+      die "install: /dev/mapper/$_icr_m: enrolling the recovery passphrase into keyslot 0 failed (ephemeral-key authorization)"
+    info "install: credential ceremony (2/3): recovery passphrase enrolled in keyslot 0 of /dev/mapper/$_icr_m (Argon2id, §13)"
+  done
+  keys_scrub "$_icr_pf"
+  return 0
+}
+
+# inst_ceremony_release_key KEYDIR — ceremony 3/3: prompt the release-key
+# passphrase (no-echo, confirm-typed, §13 floor — re-prompt until met,
+# bounded at 3 attempts) and encrypt release.pem in place via the existing
+# keys_encrypt_release (ADR-18, AES-256 PBKDF2), then lock it 0400. Crash
+# resume: an already-encrypted release.pem (keys_is_encrypted) is skipped.
+inst_ceremony_release_key() {
+  _ick_d=$1
+  [ -n "$_ick_d" ] && [ -d "$_ick_d" ] ||
+    die "install: release-key directory missing: ${_ick_d:-} (§9.1 step 3 must provision the platform keys first)"
+  [ -f "$_ick_d/release.pem" ] ||
+    die "install: no release.pem in $_ick_d (§9.1 step 3 platform-key ceremony)"
+  inst_ceremony_keys_lib
+  if keys_is_encrypted "$_ick_d/release.pem"; then
+    info "install: credential ceremony (3/3): release.pem already encrypted (ADR-18) — skipping (crash resume)"
+    chmod 0400 "$_ick_d/release.pem" 2>/dev/null || :
+    return 0
+  fi
+  _ick_attempt=0
+  while :; do
+    _ick_attempt=$((_ick_attempt + 1))
+    [ "$_ick_attempt" -le 3 ] ||
+      die "install: release-key passphrase rejected after 3 attempts (§13 entropy floor / mismatch) — restart the install (§12 T2b)"
+    inst_prompt_secret "alpine-fde: set the release-key passphrase (encrypts release.pem; §13: >=12 chars with 3 character classes, or >=16 chars): " _ick_p1
+    inst_prompt_secret "alpine-fde: repeat the release-key passphrase: " _ick_p2
+    if [ -n "$_ick_p1" ] && [ "$_ick_p1" = "$_ick_p2" ] && inst_ceremony_floor "$_ick_p1"; then
+      break
+    fi
+    unset _ick_p1 _ick_p2
+    warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_ick_attempt/3)"
+  done
+  DEBIAN_FDE_KEY_PASSPHRASE=$_ick_p1
+  unset _ick_p1 _ick_p2
+  keys_encrypt_release "$_ick_d" ||
+    die "install: encrypting release.pem (keys_encrypt_release) failed"
+  unset DEBIAN_FDE_KEY_PASSPHRASE
+  chmod 0400 "$_ick_d/release.pem"
+  info "install: credential ceremony (3/3): release.pem encrypted (AES-256 PBKDF2, ADR-18), mode 0400"
+  return 0
+}
+
 # G-C25 (§9.1 step 8): the unfinalized warning banner dropped to /etc/motd AND
 # /etc/issue on the target is the SHARED SINGLE-SOURCE line from
 # lib/install-state.sh (fde_motd_banner — consumed below at step 8 and stripped
@@ -565,9 +753,10 @@ inst_stage_ephemeral_key() {
 #      output on the ESP; objcopy section extraction, pcrsign contract)
 #   2. per member: seal_provisional (Mechanism B, PCR 11 only) -> token JSON;
 #      luksAddKey the sealed random passphrase into the token keyslot
-#      (slot contract: keyslot 0 = ephemeral install key, keyslot 1 =
-#      provisional token — token_free_slot returns 1 on the fresh container),
-#      authorized by the staged ephemeral key; then token_import
+#      (slot contract, §7.2: keyslot 0 = recovery passphrase (ceremony),
+#      keyslot 1 = provisional token — token_free_slot returns 1 on the
+#      freshly ceremoneied container, keyslot 2 = temporary ephemeral install
+#      key), authorized by the staged ephemeral key; then token_import
 inst_provisional_enroll_line() {
   _pel_key=$1
   shift
@@ -940,9 +1129,11 @@ cmd_install_main() {
     ;;
   esac
 
-  # --- 2. LUKS2 containers — G-C23: internal ephemeral install key, --------
-  #     keyslot 0 (unattended; see the SLOT CONTRACT at the top of this file)
-  inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 0: ephemeral install key (unattended, ADR-20)"
+  # --- 2. LUKS2 containers — G-C23: internal ephemeral install key in the ---
+  #     TEMPORARY keyslot 2 (unattended; see the SLOT CONTRACT at the top of
+  #     this file — keyslot 0 is reserved for the §9.1 step 4 recovery
+  #     ceremony, keyslot 1 for the provisional token)
+  inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20)"
   inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
   if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     # close/rename: primary mapper is root1 in multi-member topologies;
@@ -955,7 +1146,7 @@ cmd_install_main() {
       _im_i=$((_im_i + 1))
       _im_mu=$1
       shift
-      inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --uuid $_im_mu $_im_keyfile_arg $_im_md"
+      inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_mu $_im_keyfile_arg $_im_md # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2)"
       inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_md root$_im_i"
     done
   fi
@@ -1077,9 +1268,8 @@ cmd_install_main() {
 
   # --- 7. in-chroot provisioning (§9.1 steps 1-9, STRICTLY ORDERED) ----------
   # step 1: apk §3.3 additions set (one --no-cache transaction), user account
-  # (ADR-20 zero-touch: created with a LOCKED password — credentials are the
-  # operator's business at first login; no interactive passwd step exists),
-  # and OpenRC networking.
+  # (created locked here; the §9.1 step 4 credential ceremony below sets its
+  # password in-chroot — the ONLY interactive step), and OpenRC networking.
   inst_plan_run guest "apk add --no-cache $(install_package_list)"
   # step 1b (§8.2/ADR-13): register the `alpine-fde` mkinitfs feature in the
   # target's /etc/mkinitfs/mkinitfs.conf. mkinitfs packs a feature's
@@ -1106,6 +1296,20 @@ cmd_install_main() {
   else
     inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
   fi
+  # step 4 (ADR-20 AMENDED, §9.1 step 4): the interactive CREDENTIAL CEREMONY —
+  # three no-echo questions, the only interactive input of the whole lifecycle,
+  # run in-chroot while the ephemeral install key (TEMPORARY keyslot 2) is
+  # still staged to authorize the recovery luksAddKey. NO flag and NO
+  # credential env seam exists (S-24): the prompts run only in the execution
+  # path (these records are eval'd host-side by the chroot runner), every
+  # secret is §13-floored with re-prompt until met, and no credential ever
+  # appears in plan text, argv, the environment, or on disk/ESP (I1/I4).
+  # Dry-run/qemu emit the records as inert text. Order is normative: AFTER the
+  # platform-key ceremony (so release.pem exists), BEFORE the provisional seal
+  # (so keyslot 0 is occupied and token_free_slot yields 1).
+  inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (1/3): user account password (no-echo prompt; the account becomes loginable)"
+  inst_plan_run host "inst_ceremony_recovery $_im_lukskey_disp $_im_mapper_names $_im_members_names # §9.1 step 4 credential ceremony (2/3): LUKS2 recovery passphrase -> keyslot 0 via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
+  inst_plan_run host "inst_ceremony_release_key $_im_keys # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18, own §13 entropy floor), mode 0400"
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight)
   inst_plan_run guest 'export DEBIAN_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
@@ -1119,11 +1323,13 @@ cmd_install_main() {
   # step 6: PROVISIONAL TPM enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member container
   inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_mapper_names $_im_members_names)"
-  # step 7: hooks + trigger + first-boot finalize advisory (§9.1 step 7;
+  # step 7: hooks + trigger + first-boot AUTO-FINALIZER (§9.1 step 7;
   # ADR-13/ADR-19/ADR-20, G-C16 Alpine layout — flat templates copied to
-  # their run-parts destinations; the advisory oneshot ships to /etc/init.d/
-  # and is enabled for the default runlevel. ADR-20 Stage 3: `finalize` is a
-  # GUIDED command — the boot artifact NEVER runs it, it only advises.)
+  # their run-parts destinations; the auto-finalizer oneshot ships to
+  # /etc/init.d/ and is enabled for the default runlevel. ADR-20 amended
+  # Stage 2: it runs the NON-INTERACTIVE completion when provisional-booted
+  # under Secure Boot; `alpine-fde finalize` is the guided/crash-resume
+  # entry point, Stage 3.)
   # §8.2/ADR-13 staging contract (ONE pinned path): the unseal hook ships to
   # EXACTLY the absolute path listed in
   # hooks/mkinitfs/features.d/alpine-fde.files —
@@ -1178,7 +1384,7 @@ EOF
     inst_execute_plan
     trap - EXIT
     rm -f "$_im_lukskey" 2>/dev/null
-    printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token; run `alpine-fde finalize` after enabling Secure Boot (§9.1/ADR-20)\n' >&2
+    printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
   else
     printf 'alpine-fde: dry-run plan complete (%s) — execute with DEBIAN_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
   fi

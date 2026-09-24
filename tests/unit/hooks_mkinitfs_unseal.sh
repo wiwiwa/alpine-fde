@@ -15,9 +15,10 @@
 #   2. consumes the §7.2 dash-form systemd-tpm2 token (lib/token.sh schema)
 #      via `cryptsetup token export` + the UKI stub's /.extra/ files
 #   3. PolicyAuthorize session: policypcr(sha256:11|7,11) + policyauthorize
-#      over the release-key-signed approved policy (openssl-verified against
-#      /.extra/tpm2-pcr-public-key.pem), tpm2_unseal, cryptsetup open per
-#      /etc/crypttab (UUID mapping)
+#      over the approved policy digest carried by the DRIVE .pcrsig ENTRY,
+#      whose OWN release-key signature is openssl-verified against
+#      /.extra/tpm2-pcr-public-key.pem BEFORE any TPM session, tpm2_unseal,
+#      cryptsetup open per /etc/crypttab (UUID mapping)
 #   4. fail-closed: TPM absent/refused/tampered/empty-unseal -> bounded
 #      keyslot-0 prompt (3 strikes) -> poweroff -f; NEVER a shell
 #   5. RAID1: one prompt, passphrase cached across members; a PARTIAL token
@@ -26,9 +27,22 @@
 #   6. writes the provisional-booted install-state marker on the mounted
 #      NEWROOT when the state file says `installed` (atomic tmp+mv)
 #   7. token scan covers the full LUKS2 token-id range 0..31
-#   8. §6.1/§12 signing negative controls: token/.pcrsig PCR-selection
-#      mismatch in BOTH directions -> no pol extraction -> zero unseals ->
-#      bounded prompt path
+#   8. G4 rollback (§9.3): a token whose tpm2-signature covers UKI-A's
+#      ENROLL-time pol + a drive .pcrsig entry for UKI-B (same release key)
+#      PASSES the I3 gate and unseals — the gate verifies the ENTRY's own
+#      signature over the entry's pol, never the token's signature (which
+#      covers only the enroll-time pol; requiring it to cover the entry made
+#      every retained-kernel boot prompt). The policyauthorize input pin
+#      proves the ENTRY's pol (not the token's enroll pol) is what the TPM
+#      session admits, so PolicyPCR still fail-closes a pol ≠ live digest.
+#   9. §6.1/§12 signing negative controls, ALL fail-closed at the I3 gate
+#      (no verifysignature, no unseal, bounded prompt -> 3-strike poweroff):
+#      token/.pcrsig PCR-selection mismatch in BOTH directions (no matching
+#      entry -> no pol extraction), forged entry signature (unknown/foreign
+#      key), swapped /.extra public key (keyName mismatch), missing .pcrsig
+#      entry. The token's tpm2-signature is INERT metadata under this
+#      semantic: corrupting it can only fail closed elsewhere (the entry's
+#      own signature is what the gate verifies), never grant unseal.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -87,6 +101,9 @@ PHASH=$(printf 'enter-initrd' | sha256sum | awk '{print $1}')
 # the sentinel secret the tpm2_unseal stub writes (the "TPM-unsealed" keyslot-1
 # passphrase the token path feeds to `cryptsetup open`)
 TOKEN_PASS=1111111111111111111111111111111111111111111111111111111111111111
+# the tpm2_unseal stub emits the RAW secret; the hook feeds cryptsetup the
+# base64-framed credential (ADR-19 framing — lib/seal.sh staged base64(raw))
+TOKEN_PASS_B64=$(printf '%s' "$TOKEN_PASS" | openssl base64 -A)
 
 cp "$KEYDIR/release.pub" "$TMP/extra/tpm2-pcr-public-key.pem"
 cat >"$TMP/extra/tpm2-pcr-signature.json" <<EOF
@@ -120,6 +137,43 @@ EOF
 make_token "$TMP/token.json" '[11]' "$SIGB64"
 make_token "$TMP/token-7-11.json" '[7, 11]' "$SIGB64"
 make_token "$TMP/token-tampered.json" '[11]' "$BADSIGB64"
+# sig-corrupt class (s13 parity): the token's tpm2-signature with its first
+# base64 char flipped — under the entry-sig semantic this is INERT metadata
+BADSIG_CORRUPT="A${SIGB64#?}"
+[ "$BADSIG_CORRUPT" = "$SIGB64" ] && BADSIG_CORRUPT="B${SIGB64#?}"
+make_token "$TMP/token-sig-corrupt.json" '[11]' "$BADSIG_CORRUPT"
+
+# --- G4 rollback fixtures: a SECOND (retained-kernel) pol, signed by the SAME
+# release key. The standing token above carries tpm2-signature=$SIGB64 (over
+# the ENROLL-time POL); the rollback drive entry carries pol=POL_B with its
+# OWN release-key signature. The design-conformant I3 gate must admit it.
+POL_B=feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
+hex2bin "$POL_B" >"$TMP/pol-b.bin"
+SIGB64_B=$(openssl dgst -sha256 -sign "$KEYDIR/release.pem" "$TMP/pol-b.bin" | openssl base64 -A)
+# a FOREIGN key (unknown to the release authority) — the forged-entry class
+openssl genrsa -out "$TMP/foreign.key" 2048 2>/dev/null
+openssl rsa -in "$TMP/foreign.key" -pubout -out "$TMP/foreign.pub" 2>/dev/null
+SIGB64_FOREIGN=$(openssl dgst -sha256 -sign "$TMP/foreign.key" "$TMP/pol.bin" | openssl base64 -A)
+
+# extra-dir variants: <dir> <pol> <sig> — one [11] entry each
+make_extra() {
+    mkdir -p "$1"
+    cp "$KEYDIR/release.pub" "$1/tpm2-pcr-public-key.pem"
+    printf '{"sha256":[{"pcrs":[11],"pkfp":"deadbeefcafe","pol":"%s","sig":"%s"}]}\n' \
+        "$2" "$3" >"$1/tpm2-pcr-signature.json"
+}
+make_extra "$TMP/extra-rollback" "$POL_B" "$SIGB64_B"        # UKI-B entry, same release key
+make_extra "$TMP/extra-forged-sig" "$POL" "$SIGB64_FOREIGN"  # entry sig from an UNKNOWN key
+# swapped /.extra public key: a VALID foreign key replaces the release key
+# (the keyName the sealed policy pins would mismatch — user-space refuses too)
+mkdir -p "$TMP/extra-swapped-key"
+cp "$TMP/foreign.pub" "$TMP/extra-swapped-key/tpm2-pcr-public-key.pem"
+printf '{"sha256":[{"pcrs":[11],"pkfp":"cafebabe","pol":"%s","sig":"%s"}]}\n' \
+    "$POL" "$SIGB64" >"$TMP/extra-swapped-key/tpm2-pcr-signature.json"
+# missing entry: well-formed .pcrsig with NO entry for the token's selection
+mkdir -p "$TMP/extra-missing-entry"
+cp "$KEYDIR/release.pub" "$TMP/extra-missing-entry/tpm2-pcr-public-key.pem"
+printf '{"sha256":[]}\n' >"$TMP/extra-missing-entry/tpm2-pcr-signature.json"
 
 UUID1=22222222-2222-2222-2222-222222222222
 UUID2=33333333-3333-3333-3333-333333333333
@@ -147,6 +201,10 @@ for a in "\$@"; do
         -o) [ "\${FDE_UNSEAL_EMPTY:-0}" = 1 ] && : >"\$a" ||
             printf '$TOKEN_PASS' >"\$a" ;;
         -t | -n | -S | -c) : >"\$a" ;;
+        # G4 pin: WHICH policy digest the TPM session admits (sha256 of the
+        # -i file's bytes) — the rollback leg asserts the ENTRY's pol is
+        # authorized, never the token's enroll-time pol
+        -i) printf 'policyauthorize-pol %s\n' "\$(sha256sum "\$a" | cut -d' ' -f1)" >>'$LOG' ;;
     esac
     prev=\$a
 done
@@ -188,7 +246,7 @@ if [ "\$1" = "open" ]; then
     # sentinel passphrase) fails for that member — the keyslot-0 recovery
     # passphrase still succeeds (partial RAID1 unlock scenario)
     [ -n "\${FDE_OPEN_FAIL_TOKEN_TARGET:-}" ] && [ "\$_fdt_tgt" = "\${FDE_OPEN_FAIL_TOKEN_TARGET}" ] &&
-        [ "\$_p" = "$TOKEN_PASS" ] && exit 1
+        [ "\$_p" = "$TOKEN_PASS_B64" ] && exit 1
     exit 0
 fi
 exit 1
@@ -283,6 +341,8 @@ assert_contains "token success: PolicyAuthorize carries the pubkey Name file" \
     "$(grep '^tpm2_policyauthorize' "$LOG")" "pub.name"
 assert_contains "token success: PolicyAuthorize carries the verification ticket" \
     "$(grep '^tpm2_policyauthorize' "$LOG")" "ticket.bin"
+assert_eq "token success: policyauthorize admits the .pcrsig entry's pol" \
+    "$(hex2bin "$POL" | sha256sum | awk '{print $1}')" "$(grep '^policyauthorize-pol' "$LOG" | awk '{print $2}')"
 assert_contains "token success: PolicyPCR over the token's pcrs (sha256:11)" \
     "$(grep '^tpm2_policypcr' "$LOG")" "-l sha256:11"
 assert_contains "token success: unseal under the policy session" \
@@ -363,16 +423,48 @@ assert_eq "3-strike: no state write after failing" "installed" \
     "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
 
 # =============================================================================
-# 5. TAMPERED token (signature over a foreign digest) -> fail-closed prompt
-#    path; TPM chain refused BEFORE unseal (I3)
+# 5. G4 ROLLBACK (§9.3, THE contract change): standing token sealed at UKI-A
+#    enroll time (tpm2-signature covers ENROLL-time POL) + a drive .pcrsig
+#    entry for retained UKI-B (entry pol=POL_B with its OWN release-key
+#    signature, same authority). The I3 gate verifies the ENTRY's own
+#    signature over the ENTRY's pol — NOT the token's signature — so the
+#    rollback must PASS the gate, reach tpm2_unseal, and unlock with ZERO
+#    prompts. The policyauthorize -i pin proves the TPM session admits the
+#    ENTRY's pol (so a pol ≠ live digest still fail-closes in a real TPM via
+#    PolicyPCR), and the openssl verify anchors the entry to the same
+#    release authority whose keyName the sealed policy pins.
 # =============================================================================
 reset_leg
 write_state installed
-rc=$(run_hook "$TMP/stdin-3bad" FDE_TEST_TOKEN_FILE="$TMP/token-tampered.json" FDE_OPEN_FAIL=1)
-assert_ne "tampered token: hook rc nonzero" "0" "$rc"
-assert_eq "tampered token: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
-assert_eq "tampered token: bounded to 3 prompt attempts then poweroff once" \
-    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token.json" FDE_EXTRA_DIR="$TMP/extra-rollback")
+assert_rc "rollback: hook rc 0 (entry-sig gate admits UKI-B's entry)" 0 "$rc"
+assert_eq "rollback: unseal reached" "1" "$(argv_count '^tpm2_unseal')"
+assert_eq "rollback: verifysignature ran on the ENTRY's sig+pol" "1" "$(argv_count '^tpm2_verifysignature')"
+assert_eq "rollback: policyauthorize admits the ENTRY's pol (POL_B), not the enroll pol" \
+    "$(hex2bin "$POL_B" | sha256sum | awk '{print $1}')" "$(grep '^policyauthorize-pol' "$LOG" | awk '{print $2}')"
+assert_ne "rollback: admitted pol differs from the token's enroll pol (genuinely a different UKI)" \
+    "$(hex2bin "$POL" | sha256sum | awk '{print $1}')" "$(grep '^policyauthorize-pol' "$LOG" | awk '{print $2}')"
+assert_eq "rollback: exactly one open, zero prompts" "1" "$(argv_count '^cryptsetup open')"
+assert_eq "rollback: no poweroff" "0" "$(argv_count '^poweroff')"
+assert_contains "rollback: marker moved to provisional-booted" \
+    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+
+# =============================================================================
+# 5a. token tpm2-signature tamper (s13 sig-corrupt class) — INERT under the
+#     entry-sig semantic: the gate consumes the DRIVE ENTRY's signature, so a
+#     corrupted/foreign token signature cannot grant OR block unseal. The
+#     valid entry (release-signed, matching live PCRs) still unlocks.
+# =============================================================================
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token-tampered.json")
+assert_rc "token-sig tamper: hook rc 0 (inert metadata, unlock proceeds)" 0 "$rc"
+assert_eq "token-sig tamper: unseal reached" "1" "$(argv_count '^tpm2_unseal')"
+reset_leg
+rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token-sig-corrupt.json")
+assert_rc "sig-corrupt: hook rc 0 (inert metadata, unlock proceeds)" 0 "$rc"
+assert_eq "sig-corrupt: unseal reached" "1" "$(argv_count '^tpm2_unseal')"
+assert_eq "sig-corrupt: no poweroff" "0" "$(argv_count '^poweroff')"
 
 # =============================================================================
 # 5b/5c. §6.1/§12 signing NEGATIVE CONTROL — PCR-selection mismatch between
@@ -402,6 +494,47 @@ assert_eq "selection mismatch {11}vs[7,11]: pol extraction failed -> no verifysi
     "$(argv_count '^tpm2_verifysignature')"
 assert_eq "selection mismatch {11}vs[7,11]: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
 assert_eq "selection mismatch {11}vs[7,11]: bounded to 3 prompt attempts then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# =============================================================================
+# 5d/5e/5f. §6.1/§12 signing NEGATIVE CONTROLS under the entry-sig semantic —
+#     every entry-level tamper must STILL fail closed at the I3 gate (no
+#     verifysignature, no unseal, bounded 3-strike prompt path):
+#       5d forged entry signature (signed by an UNKNOWN/foreign key)
+#       5e swapped /.extra public key (the keyName the sealed policy pins
+#          would mismatch — user-space refuses the same entry too)
+#       5f missing entry (well-formed .pcrsig, no entry for the selection)
+# =============================================================================
+# 5d: forged entry.sig
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-forged-sig" FDE_OPEN_FAIL=1)
+assert_ne "forged entry sig: hook rc nonzero" "0" "$rc"
+assert_eq "forged entry sig: openssl gate refused -> no verifysignature" "0" \
+    "$(argv_count '^tpm2_verifysignature')"
+assert_eq "forged entry sig: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
+assert_eq "forged entry sig: bounded to 3 prompt attempts then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# 5e: swapped /.extra pubkey (valid foreign key)
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-swapped-key" FDE_OPEN_FAIL=1)
+assert_ne "swapped /.extra pubkey: hook rc nonzero" "0" "$rc"
+assert_eq "swapped /.extra pubkey: entry sig refuses under the foreign key -> no verifysignature" "0" \
+    "$(argv_count '^tpm2_verifysignature')"
+assert_eq "swapped /.extra pubkey: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
+assert_eq "swapped /.extra pubkey: bounded to 3 prompt attempts then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# 5f: missing entry
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-missing-entry" FDE_OPEN_FAIL=1)
+assert_ne "missing entry: hook rc nonzero" "0" "$rc"
+assert_eq "missing entry: no verifysignature" "0" "$(argv_count '^tpm2_verifysignature')"
+assert_eq "missing entry: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
+assert_eq "missing entry: bounded to 3 prompt attempts then poweroff once" \
     "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
 
 # =============================================================================
@@ -503,6 +636,140 @@ if [ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ]; then
     _fail "no state file: absent file must not be created"
 else
     _pass "no state file: absent file must not be created"
+fi
+
+# =============================================================================
+# 11. REAL-TPM regression: the unseal session chain must complete against a
+#     REAL TPM (tpm2-tools 5.8 / swtpm). Root cause of the s15 boot-3 token
+#     unlock failure: `tpm2_loadexternal -C n` loaded the verifying key into
+#     the NULL hierarchy, where TPM2_VerifySignature succeeds but issues NO
+#     validation ticket ("The NULL hierarchy doesn't produce a validation
+#     ticket"). Without the ticket `tpm2_policyauthorize` aborts CLIENT-SIDE
+#     ("Could not load verification ticket file") before TPM2_PolicyAuthorize
+#     is ever sent, `tpm2_unseal` never runs, and the hook falls to the
+#     bounded passphrase path on EVERY boot — deterministic, PCR-state
+#     independent (the swtpm command trace shows PolicyPCR rc=0, then
+#     session save/load teardown including ContextSave 0x910
+#     TPM_RC_REFERENCE_H0 from the aborted tools, and NO TPM2_PolicyAuthorize
+#     at all). The hook now pins -C o (lib/seal.sh seal_unseal parity): the
+#     owner hierarchy issues the ticket, PolicyAuthorize admits the approved
+#     policy, and the unseal completes.
+# =============================================================================
+
+# --- 11a. hermetic argv pin: the verifying key rides the OWNER hierarchy ----
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin1")
+assert_rc "owner-hierarchy pin: hook rc 0" 0 "$rc"
+assert_contains "owner-hierarchy pin: loadexternal uses -C o" \
+    "$(grep '^tpm2_loadexternal' "$LOG")" "-C o"
+assert_not_contains "owner-hierarchy pin: loadexternal never uses NULL (-C n)" \
+    "$(grep '^tpm2_loadexternal' "$LOG")" "-C n"
+assert_eq "owner-hierarchy pin: unseal still reached" "1" "$(argv_count '^tpm2_unseal')"
+
+# --- 11b. live leg: real swtpm + real tpm2-tools (skipped without swtpm) -----
+run_live_leg() {
+    # shellcheck source=../lib/swtpm-fixture.sh
+    source "$HERE/../lib/swtpm-fixture.sh"
+    # shellcheck source=../../lib/common.sh
+    source "$REPO/lib/common.sh"
+    # shellcheck source=../../lib/policy.sh
+    source "$REPO/lib/policy.sh"
+
+    LIVE=$TMP/live
+    LIVEBIN=$LIVE/bin
+    mkdir -p "$LIVEBIN" "$LIVE/extra" "$LIVE/tmp" "$LIVE/newroot/etc/alpine-fde"
+    TPMDIR=$TMP/live-swtpm
+    if ! swtpm_start "$TPMDIR"; then
+        _fail "live leg: swtpm did not start"
+        return 0
+    fi
+    tpm() { TPM2TOOLS_TCTI="$SWTPM_TCTI" tpm2 "$@"; }
+    hex2bin() { # stdin hex -> raw bytes (busybox-safe, mirrors the hook)
+        LC_ALL=C awk '{
+            h = "0123456789abcdef"
+            for (i = 1; i <= length($0); i += 2)
+                printf "%c", (index(h, tolower(substr($0, i, 1))) - 1) * 16 + (index(h, tolower(substr($0, i + 1, 1))) - 1)
+        }'
+    }
+    # boot-shape PCR state: PCR 7 carries a firmware digest; PCR 11 is ZERO
+    # here (fresh boot) — the seal must predict the POST-enter-initrd value
+    # the hook's step-1 extend produces, exactly like lib/cmd/pcrsign does.
+    tpm pcrextend "7:sha256=1111111111111111111111111111111111111111111111111111111111111111" >/dev/null
+    tpm pcrread -Q -o "$LIVE/d7.bin" sha256:7
+    D7=$(od -An -v -tx1 "$LIVE/d7.bin" | tr -d ' \n')
+    PH11=$(printf 'enter-initrd' | sha256sum | awk '{print $1}')
+    D11=$(printf '%064d%s' 0 "$PH11" | hex2bin | openssl dgst -sha256 -hex | awk '{print $NF}')
+    POLHEX=$(policy_digest "$D7" "$D11")
+    printf '%s' "$POLHEX" | hex2bin >"$LIVE/pol.bin"
+
+    # release-key signature over the approved policy digest (the .pcrsig `pol`)
+    openssl dgst -sha256 -sign "$KEYDIR/release.pem" -out "$LIVE/sig.bin" "$LIVE/pol.bin"
+    SIGB64LIVE=$(openssl base64 -A <"$LIVE/sig.bin")
+
+    # release-key Name + the PolicyAuthorize sealed-object policy digest
+    tpm loadexternal -C n -G rsa -u "$KEYDIR/release.pub" -c "$LIVE/kn.ctx" -n "$LIVE/kn.name" >/dev/null
+    tpm flushcontext "$LIVE/kn.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || :
+    KNHEX=$(od -An -v -tx1 "$LIVE/kn.name" | tr -d ' \n')
+    SEALEDHEX=$(policy_sealed_digest "$KNHEX")
+    printf '%s' "$SEALEDHEX" | hex2bin >"$LIVE/sealedpol.bin"
+
+    # seal a secret under the authorized policy (mirrors seal_create)
+    printf 'live-tpm-volume-secret\n' >"$LIVE/secret"
+    tpm flushcontext -t >/dev/null 2>&1 || :
+    tpm createprimary -C o -g sha256 -G rsa -c "$LIVE/primary.ctx" >/dev/null
+    tpm create -C "$LIVE/primary.ctx" -g sha256 -i "$LIVE/secret" \
+        -L "$LIVE/sealedpol.bin" -u "$LIVE/seal.pub" -r "$LIVE/seal.priv" >/dev/null
+    tpm flushcontext -t >/dev/null 2>&1 || :
+    BLOBB64=$(cat "$LIVE/seal.priv" "$LIVE/seal.pub" | openssl base64 -A)
+
+    cp "$KEYDIR/release.pub" "$LIVE/extra/tpm2-pcr-public-key.pem"
+    printf '{"sha256":[{"pcrs":[7,11],"pkfp":"live","pol":"%s","sig":"%s"}]}\n' \
+        "$POLHEX" "$SIGB64LIVE" >"$LIVE/extra/tpm2-pcr-signature.json"
+    printf '{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"%s","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-signature":"%s"}' \
+        "$BLOBB64" "$SIGB64LIVE" >"$LIVE/token.json"
+    printf '%s\n' "root UUID=$UUID1 none luks,tpm2-device=auto" >"$LIVE/crypttab"
+    write_state installed
+    mv "$TMP/newroot/etc/alpine-fde/install-state.json" "$LIVE/newroot/etc/alpine-fde/install-state.json"
+
+    # cryptsetup stub (LUKS itself is out of scope; the TPM chain is what is
+    # under test) + a poweroff that FAILS the leg if ever reached
+    cat >"$LIVEBIN/cryptsetup" <<EOF
+#!/bin/sh
+if [ "\$1" = "token" ]; then cat "$LIVE/token.json"; exit 0; fi
+if [ "\$1" = "open" ]; then printf 'opened\n' >"$LIVE/opened"; exit 0; fi
+exit 1
+EOF
+    cat >"$LIVEBIN/poweroff" <<EOF
+#!/bin/sh
+printf 'poweroff reached\n' >"$LIVE/poweroff"; exit 1
+EOF
+    chmod +x "$LIVEBIN/cryptsetup" "$LIVEBIN/poweroff"
+
+    env PATH="$LIVEBIN:$PATH" TPM2TOOLS_TCTI="$SWTPM_TCTI" \
+        FDE_NEWROOT="$LIVE/newroot" FDE_EXTRA_DIR="$LIVE/extra" \
+        FDE_CRYPTTAB="$LIVE/crypttab" FDE_TMPDIR="$LIVE/tmp" \
+        sh "$HOOK" </dev/null >"$LIVE/hook.out" 2>&1
+    LIVE_RC=$?
+    assert_rc "live swtpm: hook rc 0" 0 "$LIVE_RC"
+    assert_contains "live swtpm: phase extend ran" \
+        "$(cat "$LIVE/hook.out")" "extended 'enter-initrd' into PCR 11"
+    assert_not_contains "live swtpm: NO TPM-refusal fallback sentinel" \
+        "$(cat "$LIVE/hook.out")" "the TPM refused the sealed blob"
+    assert_not_contains "live swtpm: NO recovery-passphrase fallback" \
+        "$(cat "$LIVE/hook.out")" "recovery passphrase"
+    assert_file_exists "live swtpm: cryptsetup open ran (token unlock)" "$LIVE/opened"
+    if [ -e "$LIVE/poweroff" ]; then
+        _fail "live swtpm: poweroff reached (fail-closed triggered — chain failed)"
+    else
+        _pass "live swtpm: fail-closed poweroff never reached (negative control)"
+    fi
+    swtpm_stop "$TPMDIR" >/dev/null 2>&1 || :
+}
+if command -v swtpm >/dev/null 2>&1 && command -v tpm2_startauthsession >/dev/null 2>&1; then
+    run_live_leg
+else
+    _pass "live leg skipped (swtpm/tpm2-tools not available on this host)"
 fi
 
 finish

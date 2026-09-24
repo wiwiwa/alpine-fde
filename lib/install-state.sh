@@ -138,6 +138,65 @@ istate_write() {
     return 0
 }
 
+# --- ADR-8/§9.1 Stage 2 attempt marker ------------------------------------------
+# Distinguishes "finalization was ATTEMPTED and failed" from "never attempted"
+# without extending the canonical state vocabulary (the machine stays exactly
+# installed -> provisional-booted -> finalized). The first-boot OpenRC service
+# writes the marker on ANY failure (guard or completion step) and the
+# completion chain clears it when `finalized` is written; `alpine-fde
+# finalize` (Stage 3 crash-resume) writes it on its bounded-retry exhaustion.
+# A separate best-effort file — the state document's vocabulary is never
+# widened by a transient failure.
+
+# istate_attempt_file — the marker path; DEBIAN_FDE_INSTALL_ATTEMPT overrides
+# wholesale (tests).
+istate_attempt_file() {
+    if [ -n "${DEBIAN_FDE_INSTALL_ATTEMPT:-}" ]; then
+        printf '%s\n' "$DEBIAN_FDE_INSTALL_ATTEMPT"
+        return 0
+    fi
+    printf '%s/finalize-attempt.txt\n' "$(sp_etc_dir)"
+}
+
+# istate_attempt_write REASON — (re)write the marker with the reason; atomic
+# (temp + mv) and mode 600, same discipline as istate_write.
+istate_attempt_write() {
+    _ia_reason=$1
+    _ia_f=$(istate_attempt_file)
+    _ia_dir=${_ia_f%/*}
+    mkdir -p "$_ia_dir" || return 1
+    _ia_tmp=$(mktemp "$_ia_dir/.finalize-attempt.XXXXXX") || return 1
+    printf 'attempted=%s reason=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_ia_reason" \
+        >"$_ia_tmp" || {
+        rm -f "$_ia_tmp"
+        return 1
+    }
+    chmod 600 "$_ia_tmp"
+    mv -f "$_ia_tmp" "$_ia_f" || {
+        rm -f "$_ia_tmp"
+        return 1
+    }
+    return 0
+}
+
+# istate_attempt_read — the marker content (empty when absent); report only.
+istate_attempt_read() {
+    _ia_f=$(istate_attempt_file)
+    [ -f "$_ia_f" ] && cat "$_ia_f"
+    return 0
+}
+
+# istate_attempt_present — rc 0 iff the marker exists
+istate_attempt_present() {
+    [ -f "$(istate_attempt_file)" ]
+}
+
+# istate_attempt_clear — remove the marker; idempotent, rc 0 always.
+istate_attempt_clear() {
+    rm -f "$(istate_attempt_file)" 2>/dev/null
+    return 0
+}
+
 # --- ADR-20 unfinalized MOTD warning banner (Stage 1 step 8 / Stage 3 step 4) ---
 # The banner is ONE exact line so it can be dropped by `install` and stripped
 # line-exactly by `finalize` without ever touching operator content around it.

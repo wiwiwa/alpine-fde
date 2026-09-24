@@ -339,17 +339,28 @@ mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$DEBIAN_FDE_EFIVAR
 mkvar SecureBoot 1
 mkvar SetupMode 0
 # the enrollment anchors the release key from the KEYDIR (G-B7) — a REAL key so
-# the token pubkey post-assert can DER-encode it
-DEBIAN_FDE_KEYDIR="$REPO/fixtures/keys"
+# the token pubkey post-assert can DER-encode it. ADR-16: --reseat-tpm delegates
+# to enroll-tpm, which fails closed on any release key < RSA-3072, so the KEYDIR
+# is a hermetic suite-generated RSA-3072 keydir (same release.pem/.pub/.crt
+# shaping as keys_rsa3072_chain.sh), not the shared RSA-2048 fixtures/keys dir
+openssl genrsa -out "$T/keys/release.pem" 3072 2>/dev/null
+openssl pkey -in "$T/keys/release.pem" -pubout -out "$T/keys/release.pub" 2>/dev/null
+openssl req -new -x509 -key "$T/keys/release.pem" -out "$T/keys/release.crt" \
+    -subj /CN=debian-fde-rotate-reseat 2>/dev/null
+[ -s "$T/keys/release.pub" ] && [ -s "$T/keys/release.crt" ] || {
+    echo "FAIL: cannot generate the RSA-3072 reseat keydir" >&2
+    exit 1
+}
+DEBIAN_FDE_KEYDIR="$T/keys"
 export DEBIAN_FDE_KEYDIR
-cp "$REPO/fixtures/keys/release.pub" "$T/keys/release.pub.pem"
+cp "$T/keys/release.pub" "$T/keys/release.pub.pem"
 BL_PCR0="$LIVE" BL_PCR1="$LIVE" BL_PCR2="$LIVE" BL_PCR3="$LIVE" BL_PCR7="$LIVE" \
     BL_KEYS_RELEASE_PUB_PATH="$T/keys/release.pub.pem" BL_TARGET_LUKS_UUID="$UUID" \
     baseline_write "$(sp_baseline_file)"
 # LUKS metadata for the enrollment path: PRE carries ONE standing token (the
 # reseat retires it in the same run); POST mirrors what the fresh enrollment
 # produces — token on the free slot 2, pubkey = the keydir release key
-DER_B64=$(openssl pkey -pubin -in "$REPO/fixtures/keys/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
+DER_B64=$(openssl pkey -pubin -in "$T/keys/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 reset_state
 # PRE (rotate's own pre-view, n=1): slot-0 with the OLD salt - rotate asserts
 #   the change took effect (slot0 differs pre/post)
@@ -367,7 +378,7 @@ cat >"$PRE3_JSON" <<'PRE311'
 PRE311
 cat >"$POST_JSON" <<POST11
 {"keyslots":{"0":{"type":"luks2","kdf":{"type":"argon2id","salt":"ZZZ"}},"1":{"type":"luks2","kdf":{"type":"argon2id","salt":"BBB"}},"2":{"type":"luks2","kdf":{"type":"argon2id","salt":"CCC"}}},
- "tokens":{"0":{"type":"systemd-tpm2","keyslots":["3"],"tpm2-blob":"AAEAC0RhdGE=","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"$DER_B64","tpm2-signature":"U0lH"}}}
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["3"],"tpm2-blob":"AAEAC0RhdGE=","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-policy-hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","tpm2-primary-alg":"rsa","tpm2-pubkey":"$DER_B64","tpm2-signature":"U0lH"}}}
 POST11
 touch "$PRE_AT3"
 run_rotate --reseat-tpm

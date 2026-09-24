@@ -9,8 +9,21 @@
 #    "tpm2-blob":        <b64 of TPM2B_PRIVATE || TPM2B_PUBLIC>,
 #    "tpm2-pcrs":        [11] provisional / [7, 11] finalized,
 #    "tpm2-pcr-bank":    "sha256",
+#    "tpm2-policy-hash": <64 lowercase hex — the digest the blob is sealed
+#                         under (policy_sealed_digest over the release key's
+#                         TPM Name); upstream 257 token validation REFUSES the
+#                         token without it>,
+#    "tpm2-primary-alg": "rsa"  (our SRK template; upstream defaults ECC),
 #    "tpm2-pubkey":      <b64 DER SubjectPublicKeyInfo of release.pub>,
 #    "tpm2-signature":   <b64 of the .pcrsig release-key signature>}
+#
+# SECRET FRAMING PIN (ADR-19): the volume credential is base64(unsealed
+# secret) — upstream's token plugin base64-encodes the TPM-unsealed bytes
+# before handing them to cryptsetup as the passphrase ("Before using this key
+# as passphrase we base64 encode it, for compat with homed",
+# cryptsetup-token-systemd-tpm2.c). lib/seal.sh stages SEAL_PASS_FILE in
+# exactly that form; every keyslot/token choreography here consumes the file
+# verbatim.
 #
 # Choreography primitives (all cryptsetup calls go through the
 # DEBIAN_FDE_CRYPTSETUP seam — the same env override enroll-tpm/ukictl-build
@@ -87,19 +100,30 @@ token_next_id() {
     printf '%s\n' "$_tni_id"
 }
 
-# token_build_json <pcrs_json> <pub_b64> <sig_b64> <blob_b64> <slot> <out_file>
-# The §7.2 token, jq-built (values can never mangle the JSON).
+# token_build_json <pcrs_json> <pub_b64> <sig_b64> <blob_b64> <slot> \
+#                  <policy_hash_hex> <out_file>
+# The §7.2 token, jq-built (values can never mangle the JSON). <policy_hash_hex>
+# is the digest the blob is sealed under (lib/seal.sh's policy_sealed_digest) —
+# fail-closed 64 unless it is exactly 64 lowercase hex chars: upstream 257
+# refuses the token without a well-formed tpm2-policy-hash, so a malformed one
+# must never reach the LUKS2 header.
 token_build_json() {
-    [ $# -eq 6 ] || die "token_build_json: usage: <pcrs_json> <pub_b64> <sig_b64> <blob_b64> <slot> <out>"
+    [ $# -eq 7 ] || die "token_build_json: usage: <pcrs_json> <pub_b64> <sig_b64> <blob_b64> <slot> <policy_hash_hex> <out>"
+    if ! printf '%s' "$6" | grep -qE '^[0-9a-f]{64}$'; then
+        die "token_build_json: policy hash is not 64 lowercase hex chars: '$6'"
+    fi
     if ! jq -n \
         --argjson pcrs "$1" --arg pub "$2" --arg sig "$3" --arg blob "$4" --arg slot "$5" \
+        --arg pol "$6" \
         '{type: "systemd-tpm2",
           keyslots: [$slot],
           "tpm2-blob": $blob,
           "tpm2-pcrs": $pcrs,
           "tpm2-pcr-bank": "sha256",
+          "tpm2-policy-hash": $pol,
+          "tpm2-primary-alg": "rsa",
           "tpm2-pubkey": $pub,
-          "tpm2-signature": $sig}' >"$6"; then
+          "tpm2-signature": $sig}' >"$7"; then
         die "token: building the systemd-tpm2 token JSON failed"
     fi
 }
@@ -176,6 +200,8 @@ token_kill_slot() {
 #   * exactly one systemd-tpm2 token
 #   * its tpm2-pubkey == <pub_b64> (the pinned release key)
 #   * its tpm2-pcrs == <pcrs_json> for the mode ([11] / [7,11])
+#   * its tpm2-policy-hash is 64 lowercase hex chars (upstream 257 validation
+#     refuses the token without it — ADR-19)
 #   * the referenced keyslot == <slot> and is != 0 (recovery slot)
 #   * recovery keyslot 0 byte-identical to the pre-state (when it existed)
 token_post_assert() {
@@ -200,6 +226,11 @@ token_post_assert() {
             _tpa_fail="token pubkey mismatch (not the pinned release key)"
         [ -z "$_tpa_fail" ] && [ "$_tpa_got_pcrs" != "$_tpa_pcrs" ] &&
             _tpa_fail="token pcrs are $_tpa_got_pcrs, want $_tpa_pcrs for this mode"
+        if [ -z "$_tpa_fail" ]; then
+            _tpa_pol=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-policy-hash"] // empty')
+            printf '%s' "$_tpa_pol" | grep -qE '^[0-9a-f]{64}$' ||
+                _tpa_fail="token tpm2-policy-hash missing or malformed (upstream 257 refuses the token without it)"
+        fi
     fi
     if [ -z "$_tpa_fail" ] && [ -n "$_tpa_pre0" ]; then
         _tpa_post0=$(jq -rS '.keyslots["0"] // empty' "$_tpa_post" 2>/dev/null)

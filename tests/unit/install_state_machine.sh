@@ -162,4 +162,51 @@ export PATH="$OLD_PATH"
 run_write finalized
 assert_eq "recovery: a write after the crash succeeds" "finalized" "$(istate_state)"
 
+# --- 10. ADR-8/§9.1 Stage 2 attempt marker (gap 4): distinguishes "service
+# attempted + failed" from "never attempted" without extending the state
+# vocabulary (provisional-booted/finalized stay canonical) ----------------------
+run_clear() { istate_attempt_clear >/dev/null 2>&1; }
+run_attempt_write() { # REASON
+    A_RC=0
+    ( istate_attempt_write "$1" ) >/dev/null 2>&1 || A_RC=$?
+}
+assert_eq "attempt: absent initially" "" "$(istate_attempt_read 2>/dev/null)"
+assert_rc "attempt: not present initially" 1 istate_attempt_present
+run_attempt_write "guard-failed: secureboot=0 setup_mode=0"
+assert_eq "attempt: write rc 0" "0" "$A_RC"
+assert_rc "attempt: present after write" 0 istate_attempt_present
+assert_contains "attempt: read-back carries the reason" "$(istate_attempt_read 2>/dev/null)" \
+    "guard-failed"
+assert_contains "attempt: read-back names the SB state" "$(istate_attempt_read 2>/dev/null)" \
+    "secureboot=0"
+assert_file_exists "attempt: marker file at the etc dir" \
+    "$(sp_etc_dir)/finalize-attempt.txt"
+assert_eq "attempt: marker mode pinned 600" "600" \
+    "$(stat -c %a "$(sp_etc_dir)/finalize-attempt.txt")"
+run_attempt_write "step-failed: token upgrade"
+assert_contains "attempt: rewrite replaces (one line, latest reason)" \
+    "$(istate_attempt_read 2>/dev/null)" "step-failed"
+assert_eq "attempt: rewrite leaves exactly ONE line" "1" \
+    "$(wc -l <"$(sp_etc_dir)/finalize-attempt.txt" | tr -d ' ')"
+run_clear
+assert_rc "attempt: clear succeeds" 0 istate_attempt_clear
+assert_rc "attempt: not present after clear" 1 istate_attempt_present
+assert_eq "attempt: read empty after clear" "" "$(istate_attempt_read 2>/dev/null)"
+run_clear
+assert_rc "attempt: clear is idempotent (absent file)" 0 istate_attempt_clear
+# re-arm root1's marker for the scoping leg below
+run_attempt_write "step-failed: token upgrade"
+# DEBIAN_FDE_ROOT scoping: the marker follows the same etc dir as the state
+export DEBIAN_FDE_ROOT=$ROOT2
+mkdir -p "$(sp_etc_dir)"
+assert_rc "attempt: scoped root has no marker" 1 istate_attempt_present
+run_attempt_write "scoped-reason"
+assert_contains "attempt: scoped write lands in the scoped root" \
+    "$(istate_attempt_read 2>/dev/null)" "scoped-reason"
+export DEBIAN_FDE_ROOT=$ROOT1
+assert_rc "attempt: root1 marker unaffected by root2 write" 0 istate_attempt_present
+assert_contains "attempt: root1 reason intact" "$(istate_attempt_read 2>/dev/null)" \
+    "step-failed"
+run_clear
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

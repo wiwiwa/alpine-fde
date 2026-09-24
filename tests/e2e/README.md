@@ -101,6 +101,10 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 | `s00b-enroll-cache.sh` | §12 S-00b + S-01 (continues s00): in-guest production-CLI enroll (ensure-once), pristine-state cache with SHA manifest, then the zero-input `login:` happy path. Consumes `DEBIAN_FDE_S00_STATE` (set by run-e2e.sh when s00 ran in the same invocation), else the verified cache, else self-bootstraps. Prints `RUNDIR <path>` (the ENROLLED state consumed by s01/s05/s06/s07/s09/s12/s13/s18). |
 | `s09-tpm-da-locked.sh` | §10 DA-locked row (G-T15): armed + enforced dictionary-attack lockout on swtpm; boots, refuses, bounded 3-strike fallback, clean poweroff; §7.1 budget-preservation asserted via the enforcement probe (see "Full-bootstrap wave" for the swtpm-leniency caveat). |
 | `s18-foreign-pcrsig.sh` | §6.1 foreign-signer negative control (G-T5): correct pol entries, foreign signature → firmware boots (outer sig ours) → policy refuses → bounded fallback → poweroff (see "Full-bootstrap wave"). |
+| `s19-bcache-crash.sh` | §10 cache-SSD-failure row + §12 S-19 (hybrid bcache crash consistency) on the Alpine contract: writethrough bcache stack laid in-guest, raw-offset rescue read on member loss (a CLEAN backing never fabricates a cache-less bcache0 — asserted), replacement-cache re-attach, production `alpine-fde finalize` (recovery-passphrase authorized, Mechanism B {PCR 7, PCR 11} token upgrade, ADR-18 release.pem), host `pcrsign` {7,11} re-sign over the rebuilt ESP, zero-input token unlock end-to-end. Pins `debian-fde-unlock=oracle`: the raw-backing topology cannot host the §8.2 hook's crypttab resolution (documented in the header). |
+| `s20-raid1-member-loss.sh` | §10 RAID1 rows + §12 S-20: btrfs raid1 across two LUKS members; plain mount of a missing-member pool FAILS closed and `-o degraded` is the only rescue; production finalize upgrades BOTH members to the Mechanism B {7,11} token (recovery rekeyed to a §13-floored passphrase first — the Stage-1 stand-in); zero-input token unlock + non-degraded full-pool reassembly, canary intact. Pins `debian-fde-unlock=oracle` for the fed sessions (documented). |
+| `s21-finalize-guard.sh` | §10 "first boot with Secure Boot OFF" + §12 S-21, ADR-20 AMENDED: an `installed`-state disk staged with the REAL advisory oneshot (`/etc/init.d/alpine-fde-finalize` + the rc-update `default` record — byte-for-byte the installer's Stage-1 step 7; NO systemd anywhere). Boot A (SB-off, fed boots ride the SHIPPED §8.2 hook unlock): the oneshot stays ADVISORY (rc 0 + the not-finalized warning + the SB-off reading), the service completion (fin_service_main) fails CONTAINED to the ADR-8 retry-next-boot marker — no baseline capture, no token upgrade, no state flip — and the guided `alpine-fde finalize` halts fail-closed (rc 64) at the fw_sb_state gate. Boot B (SB-on, positive control): the shared completion chain runs end-to-end (passphrase verify → release.pem ADR-18 → audit --init → {7,11} upgrade → ephemeral-purge crash-skip → MOTD banner stripped line-exactly → state `finalized` LAST); host asserts the token binds [7,11] on keyslot 1. |
+| `s22-handoff-immunity.sh` | §12 S-22 + §2.1 T2c provisional-window rows, ADR-20 AMENDED: the window carries a REAL PCR-11-only provisional token beside recovery keyslot 0 (host-side `seal_provisional` + token commit — the installer's step-6 recipe against the fixture swtpm). Boot 1: recovery-at-keyslot-0 is the only way in from install. Boot 2: the STANDING signed UKI auto-unseals with ZERO console input. Host completion leg: the guided finalize drives the shared Stage-2==Stage-3 chain into the {7,11} binding (token on keyslot 1, I1 two-keyslot at-rest). Boot 3: a tampered-cmdline UKI is REFUSED (the PolicyPCR digest misses) → 3 wrong passphrases → 3-strike fail-closed, metadata untouched. |
 | `s01-happy-lite.sh` | LITE tamper variant: boots the s00-enrolled disk under SB-OFF (stock) vars → PCR 7 drift → policy must refuse → fallback prompt → 3 wrong passphrases. Reuses s00 artifacts via `DEBIAN_FDE_E2E_STATE` (set by run-e2e.sh). |
 | `s05-sb-off.sh` | §10 row "SB disabled": SB-off boot of the enrolled disk, PCR 7 drift asserted against the enrolled boot's console (and PCR 11 asserted UNCHANGED — the refusal is purely PCR 7), refused → retry cap → poweroff. |
 | `s06-token-trap.sh` | §12 trap case / I3: SB-off vars + `tpm2_pubkey` swapped for a VALID foreign RSA key via host-side `cryptsetup token remove` + `token import` + otherwise-valid `.pcrsig` → unseal must STILL fail. |
@@ -419,24 +423,35 @@ pinned historical status, not a fresh measurement.
 
 ## W2b multi-drive rows (s19–s22) — validation fidelity notes
 
-Validated green under TCG: s20 2026-09-19 (54 asserts, wall 912 s), s19
-2026-09-20 (43 asserts, wall 992 s; first-ever validation), s21/s22 in the
-prior same-day pass (28/30 asserts). The validation surfaced three
-kernel/tooling realities the scenarios now encode (all documented in the
-scenario headers, none silent):
+Validated green under TCG against the PRIOR (Debian-era) contract: s20
+2026-09-19 (54 asserts, wall 912 s), s19 2026-09-20 (43 asserts, wall 992 s;
+first-ever validation), s21/s22 in the prior same-day pass (28/30 asserts).
+The 2026-09-21 Alpine-contract migration (s19/s20 path re-pin + the documented
+`debian-fde-unlock=oracle` pin; s21 re-written to the amended ADR-20 semantics
+— advisory oneshot + contained service failure + fail-closed SB gate; s22
+re-written to the amended T2c provisional-window shape with a real PCR-11
+token) is static-verified (`bash -n`, product-message cross-checks against
+lib/cmd/finalize.sh, seal.sh, token.sh, install-state.sh, hooks/openrc/
+alpine-fde-finalize, hooks/mkinitfs/alpine-fde-unseal.sh) and PENDING the
+consolidated QEMU re-run. The validation surfaced these kernel/tooling
+realities the scenarios encode (all documented in the scenario headers, none
+silent):
 
 - **§8.4 state gate is real** (both s19/s20): `finalize` without
-  `/etc/debian-fde/install-state.json` is a LOUD NO-OP (rc 0, "nothing to
-  finalize") — the scenarios stage the state doc at `installed` in the
+  `<root>/etc/alpine-fde/install-state.json` is a LOUD NO-OP (rc 0, "nothing
+  to finalize") — the scenarios stage the state doc at `installed` in the
   tooling tail; the `finalized` write stays scenario-ephemeral in-guest.
-  The host-side baseline stub must live at `<root>/etc/debian-fde/`
-  (`sp_etc_dir` resolution), not `<root>/debian-fde/`.
-- **§8.3 ensure-once counts, never verifies** (s20): a member entering
-  finalize with ANY single systemd-tpm2 token takes the zero-op "token
-  already stands" branch (it never tries to unseal, so a DEAD token reads
-  as standing). Both members therefore enter finalize with ZERO tokens;
-  the §9.4 wipe+reseat recovery belongs to `enroll-tpm --reseat`, out of
-  scope here.
+  `sp_etc_dir` resolves `<root>/etc/alpine-fde/` with NO legacy fallback
+  (lib/baseline.sh), so the host-side baseline stub must live THERE (the
+  retired `/etc/debian-fde` path is denied by tests/unit/residue_guard.sh in
+  shipped paths).
+- **Mechanism B entry shape** (s20/s21/s22): finalize upgrades tokens via
+  `seal_upgrade_token` and NEVER invokes cryptenroll; members enter finalize
+  with ZERO standing tokens (s20: both members; s21/s22: the handoff shape),
+  so the upgrade takes the first-seal branch exactly once per member, and the
+  fixture's well-known slot-0 passphrase is §13-floor-BLOCKLISTED — the
+  scenarios rekey keyslot 0 in-guest (cryptsetup luksChangeKey) to a floored
+  recovery passphrase first, the Stage-1 credential-ceremony stand-in.
 - **bcache recovery is raw-offset, not standalone-bcache0** (s19): a CLEAN
   backing device never runs without its cache set (register_bdev runs
   NONE/STALE only — asserted as a fail-closed negative), the registered
@@ -450,6 +465,12 @@ scenario headers, none silent):
   re-derive from live guest state instead of replaying markers, and fed
   markers stay arithmetic (`$((..))`) so the tty echo can never satisfy a
   wait.
+- **Fed sessions and the §8.2 hook** (s21/s22, post-wave-0): the shipped
+  hook is the unlock of record and its bounded recovery loop feeds
+  prompt-synchronized via `uki_wait_hook_prompt` (the hook's read has NO
+  timeout); s19/s20's multi-command fed sessions instead pin the opt-in
+  `debian-fde-unlock=oracle` unlock, whose console-fallback + DEBUG SHELL
+  seams they were built on (documented in both headers).
 
 ## Remaining gaps / follow-ups
 
@@ -457,7 +478,9 @@ scenario headers, none silent):
   s10–s13, s17 carry their 2026-09-14 pinned statuses (`pinned_from` in
   `results-final.json`); wave 3b (2026-09-18) re-observed only s00, s00b,
   s14, s15, s16. The W2b multi-drive rows s19–s22 are validated as of
-  2026-09-19/20 (see the W2b section above and `results-final.json`).
+  2026-09-19/20 against the prior contract (see the W2b section above and
+  `results-final.json`); the 2026-09-21 Alpine-contract migration of all four
+  rows awaits the consolidated re-run.
 - **s18 sentinel-table follow-up (deb byte-check)**: the foreign-signer
   refusal logs `Failed to validate signature in TPM` — a refusal class
   distinct from the stale-pol `pcr_sig_missing` shape — which needs a

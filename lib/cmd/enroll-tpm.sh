@@ -13,10 +13,17 @@
 #   1. policy_mode gate (ADR-19: b canonical; a2/native aliases; a / ap exit 64)
 #   2. finalized baseline (expected_pcr7 != pending — finalize via audit --init)
 #   3. Secure Boot on AND SetupMode=0 (efivarfs seam)
-#   4. live PCR 7 == baseline.expected_pcr7 (tpm() pcrread)
+#   4. PCR 7 digest-anchored baseline: when a .pcrsig with anchor fields is
+#      supplied, the entry the seal will use must carry d7 ==
+#      baseline.expected_pcr7 (PURE data comparison — no live TPM read,
+#      Option A: the guest's console-measured PCR 7 IS the machine state and
+#      PolicyPCR enforces it fail-closed at UNSEAL). Legacy anchor-less
+#      .pcrsig / the in-process re-sign path keep the live-PCR-7 oracle
+#      (tpm() pcrread) as the production advisory refusal.
 #   5. release public key present in the KEYDIR (keys_dir; NEVER the baseline's
 #      keys.release_pub_path — G-B7: keydir-explicit so K1->K2 rotation +
-#      re-enroll anchors under the keydir the operator selected)
+#      re-enroll anchors under the keydir the operator selected) AND RSA >=
+#      3072 bits (ADR-16 fail-closed rc 2, keys_rsa3072_guard)
 #   6. LUKS device resolvable via /dev/disk/by-uuid/<baseline target.luks_uuid>
 #   7. a usable TPM via TCTI (tpm2 getcap probe; seal_require_env)
 # Then enrl_run: the Mechanism B enrollment (seal under the finalized {7,11}
@@ -26,11 +33,13 @@
 # keyslot 0 byte-identical), then enrolled.json.
 #
 # Signed-policy source (§9.1 step 6): --pcrsig FILE (or DEBIAN_FDE_PCRSIG env)
-# supplies the release-key-signed .pcrsig JSON the seal embeds; it is verified
-# openssl-level against the fresh live-PCR digest BEFORE anything is embedded
-# (G-B6). Without one, enroll-tpm re-signs in-process from the keydir's
-# release.pem (keys_unlock; ADR-18) over the CURRENT PCR 7/11 — the §9.4
-# re-enroll path (re-captures the new current PCR 7).
+# supplies the release-key-signed .pcrsig JSON the seal embeds; its entry is
+# verified openssl-level against the policy digest recomputed from the entry's
+# own anchored d7/d11 components BEFORE anything is embedded (G-B6, digest-
+# anchored — no live PCR read). Without one, enroll-tpm re-signs in-process
+# from the keydir's release.pem (keys_unlock; ADR-18) over the CURRENT PCR 7/11
+# — the §9.4 re-enroll path (re-captures the new current PCR 7; live-read
+# precondition kept).
 #
 # Recovery semantics (§9.4): an existing TPM enrollment is retired in the SAME
 # run as the fresh one is standing (add new keyslot + token FIRST, then remove
@@ -136,10 +145,12 @@ Usage: debian-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
 
 Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 token;
 ADR-19). Preconditions: finalized baseline, Secure Boot on + SetupMode=0,
-live PCR 7 == baseline, release key in KEYDIR (--keydir / KEY_PATH /
-DEBIAN_FDE_KEYDIR), LUKS device resolvable (--uuid takes a LUKS uuid or a
-/dev/... block-device path). A standing enrollment is retired in the SAME run
-the fresh one is standing (--reseat forces it).
+PCR 7 digest-anchor (the .pcrsig entry's d7 == baseline.expected_pcr7 — a
+pure data check; legacy anchor-less .pcrsig keeps the live-PCR-7 read),
+release key in KEYDIR (--keydir / KEY_PATH / DEBIAN_FDE_KEYDIR), LUKS device
+resolvable (--uuid takes a LUKS uuid or a /dev/... block-device path). A
+standing enrollment is retired in the SAME run the fresh one is standing
+(--reseat forces it).
 
 Signed-policy source: --pcrsig FILE (the release-key-signed .pcrsig JSON,
 verified against the fresh live-PCR digest before anything is embedded); when
@@ -160,16 +171,17 @@ documented-absent (fail closed, 64, ADR-19).
 EOF
 }
 
-# enrl_preconditions UUID-OVERRIDE — on success rc 0 with the resolved triple in
-# the ENRL_PRE_UUID / ENRL_PRE_PUB / ENRL_PRE_DEV globals (review MD-02: a flat
-# space-joined stdout cannot round-trip paths containing spaces); dies
-# fail-closed otherwise. KEYDIR-explicit (G-B7): the release key comes from
+# enrl_preconditions UUID-OVERRIDE [PCRSIG] — on success rc 0 with the resolved
+# triple in the ENRL_PRE_UUID / ENRL_PRE_PUB / ENRL_PRE_DEV globals (review
+# MD-02: a flat space-joined stdout cannot round-trip paths containing spaces);
+# dies fail-closed otherwise. KEYDIR-explicit (G-B7): the release key comes from
 # keys_dir — the baseline's keys.release_pub_path is never consulted.
 enrl_preconditions() {
     ENRL_PRE_UUID=''
     ENRL_PRE_PUB=''
     ENRL_PRE_DEV=''
     _ep_override=${1:-}
+    _ep_pcrsig=${2:-${DEBIAN_FDE_PCRSIG:-}}
     _ep_bl=$(sp_baseline_file)
     [ -f "$_ep_bl" ] || die "enroll-tpm: no baseline at $_ep_bl (run 'debian-fde provision stage1')"
     baseline_validate "$_ep_bl" || die "enroll-tpm: baseline invalid: $_ep_bl"
@@ -186,11 +198,29 @@ enrl_preconditions() {
     esac
 
     _ep_expected=$(baseline_get "$_ep_bl" expected_pcr7)
-    if ! _ep_live=$(tpm_pcr_read 7) || [ -z "$_ep_live" ]; then
-        die "enroll-tpm: cannot read live PCR 7 (TCTI: ${DEBIAN_FDE_TCTI:-<default>})"
+    # PCR 7 drift gate (Option A digest anchoring): when the .pcrsig source the
+    # seal will consume carries the entry's anchor components, the comparison
+    # is PURE DATA — entry.d7 == baseline.expected_pcr7 (both digests the
+    # composing flow provides: d7 is the console-measured PCR 7 the baseline
+    # stamps; the guest's own measurement IS the machine state). No TPM read:
+    # a machine whose real state diverged fails CLOSED at unseal (PolicyPCR) —
+    # fail-at-unseal replaces fail-at-seal. Legacy anchor-less entries and the
+    # in-process re-sign path keep the live-read oracle.
+    _ep_anchor=''
+    if [ -n "$_ep_pcrsig" ] && [ -f "$_ep_pcrsig" ]; then
+        _ep_anchor=$(seal_pcrsig_field "$_ep_pcrsig" "7,11" d7)
     fi
-    if [ "$_ep_live" != "$_ep_expected" ]; then
-        die "enroll-tpm: PCR 7 drift: live $_ep_live != baseline $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
+    if [ -n "$_ep_anchor" ]; then
+        if [ "$_ep_anchor" != "$_ep_expected" ]; then
+            die "enroll-tpm: PCR 7 digest-anchor drift: pcrsig entry d7 $_ep_anchor != baseline expected_pcr7 $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
+        fi
+    else
+        if ! _ep_live=$(tpm_pcr_read 7) || [ -z "$_ep_live" ]; then
+            die "enroll-tpm: cannot read live PCR 7 (TCTI: ${DEBIAN_FDE_TCTI:-<default>})"
+        fi
+        if [ "$_ep_live" != "$_ep_expected" ]; then
+            die "enroll-tpm: PCR 7 drift: live $_ep_live != baseline $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
+        fi
     fi
 
     _ep_keydir=$(keys_dir)
@@ -198,6 +228,9 @@ enrl_preconditions() {
     [ -d "$_ep_keydir" ] || die "enroll-tpm: release key directory not found: $_ep_keydir"
     _ep_pub="$_ep_keydir/release.pub"
     [ -f "$_ep_pub" ] || die "enroll-tpm: release public key not found: $_ep_pub"
+    # ADR-16: the release key must be RSA >= 3072 — fail-closed rc 2 at the
+    # enroll path entry, BEFORE any TPM/LUKS2 state is touched
+    keys_rsa3072_guard "$_ep_keydir"
 
     _ep_uuid=${_ep_override:-$(baseline_get_in "$_ep_bl" target luks_uuid)}
     [ -n "$_ep_uuid" ] || die "enroll-tpm: no LUKS uuid (baseline target.luks_uuid empty; set it in install or pass --uuid)"
@@ -311,10 +344,18 @@ enrl_sign_pcrsig() {
 # rc 1 with the reason on stderr.
 enrl_run() {
     _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4 _er_sig_arg=${5:-${DEBIAN_FDE_PCRSIG:-}}
+    # ADR-16: same release-key floor as enrl_preconditions — this shared core
+    # is also the `ukictl build` ensure-once entry, which never passes through
+    # the CLI precondition gate
+    keys_rsa3072_guard "${_er_pub%/*}"
     ENRL_SLOT=''
     ENRL_TOKEN_ID=''
     ENRL_WIPE=no
-    _er_pre=$(mktemp "${TMPDIR:-/tmp}/debian-fde-lukspre.XXXXXX") || return 1
+    # I1: every enroll-owned scratch/staging root is TMPFS — the enrollment
+    # stage holds the RANDOM VOLUME PASSPHRASE, so the default is /dev/shm
+    # (the repo tmpfs seam; cf. seal_stage_dir), never /tmp. The same root
+    # pins the LUKS2 metadata dumps (not secret, scrubbed anyway).
+    _er_pre=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspre.XXXXXX") || return 1
     if ! enrl_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_pre" 2>/dev/null; then
         rm -f "$_er_pre"
         err "enroll-tpm: cannot read LUKS2 metadata of $_er_dev"
@@ -340,8 +381,10 @@ enrl_run() {
     _er_slot0_pre=$(luks_json_slot_blob "$_er_pre" 0)
 
     # staging: ONE directory holding the .pcrsig, the sealed blob halves, the
-    # random volume passphrase and the token JSON — scrubbed on every exit (I1)
-    _er_stage=$(mktemp -d "${DEBIAN_FDE_TMPDIR:-${TMPDIR:-/tmp}}/debian-fde-enroll.XXXXXX") || {
+    # random volume passphrase and the token JSON — scrubbed on every exit (I1).
+    # The stage root is TMPFS by construction (${DEBIAN_FDE_TMPDIR:-/dev/shm};
+    # cf. seal_stage_dir) — the /tmp default is BANNED for this directory.
+    _er_stage=$(mktemp -d "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-enroll.XXXXXX") || {
         rm -f "$_er_pre"
         return 1
     }
@@ -386,6 +429,11 @@ enrl_run() {
         keys_scrub "$ENRL_PASS"
     fi
     if [ "$_er_rc" -ne 0 ]; then
+        # I1 invariant (c): the staged passphrase is ZEROIZED, not merely
+        # unlinked, on the failure path too
+        for _er_p in "$_er_stage"/debian-fde-seal-pass.*; do
+            [ -f "$_er_p" ] && keys_scrub "$_er_p" || :
+        done
         rm -rf "$_er_stage"
         rm -f "$_er_pre"
         err "enroll-tpm: the Mechanism B enrollment failed — LUKS2 state may hold a fresh keyslot without its token (re-run enrollment; §8.3)"
@@ -393,7 +441,7 @@ enrl_run() {
     fi
 
     # Post-assertions on the fresh metadata (rc-based: the caller decides)
-    _er_post=$(mktemp "${TMPDIR:-/tmp}/debian-fde-lukspost.XXXXXX") || {
+    _er_post=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspost.XXXXXX") || {
         rm -rf "$_er_stage" "$_er_pre"
         return 1
     }
@@ -514,7 +562,7 @@ enrl_ensure_once() {
 # the enrollment lock
 enrl_ensure_once_locked() {
     _ee_dev=$1 _ee_pub=$2
-    _ee_pre=$(mktemp "${TMPDIR:-/tmp}/debian-fde-enroll-ensure.XXXXXX") || return 1
+    _ee_pre=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-enroll-ensure.XXXXXX") || return 1
     if ! enrl_cryptsetup luksDump --dump-json-metadata "$_ee_dev" >"$_ee_pre" 2>/dev/null; then
         rm -f "$_ee_pre"
         err "enroll: cannot read LUKS2 metadata of $_ee_dev"
@@ -527,8 +575,10 @@ enrl_ensure_once_locked() {
         return 0
     fi
     if [ "$_ee_tok" -gt 1 ]; then
-        ENRL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 1) — manual intervention required (§8.3 one-enrollment invariant)"
-        err "enroll: $ENRL_FAIL_REASON — clean up the surplus tokens/slots before any further enrollment (LUKS2 slots are capped at 8)"
+        # §7.2 fact check: LUKS2 provides 32 keyslots (0..31); this tool's
+        # enrollment allocates from 1..31 (token_free_slot; slot 0 is recovery)
+        ENRL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 1) — manual intervention required (§8.3 one-enrollment invariant; LUKS2 provides 32 keyslots, this tool enrolls into 1..31)"
+        err "enroll: $ENRL_FAIL_REASON — clean up the surplus tokens/slots before any further enrollment"
         return 1
     fi
     info "enroll: no TPM token on $_ee_dev — enrolling once (Mechanism B)"
@@ -588,7 +638,7 @@ cmd_enroll_tpm_main() {
 
     require_pkgs cryptsetup:cryptsetup tpm2:tpm2-tools jq:jq openssl:openssl flock:util-linux
 
-    enrl_preconditions "$_em_uuid"
+    enrl_preconditions "$_em_uuid" "$_em_pcrsig"
     _em_uuid=$ENRL_PRE_UUID
     _em_pub=$ENRL_PRE_PUB
     _em_dev=$ENRL_PRE_DEV
@@ -597,7 +647,7 @@ cmd_enroll_tpm_main() {
     # free slot, print the plan, touch nothing (no seal, no enrollment, no
     # enrolled.json)
     if [ -n "${DEBIAN_FDE_DRY_RUN:-}" ]; then
-        _em_prej=$(mktemp "${TMPDIR:-/tmp}/debian-fde-lukspre.XXXXXX") || die "enroll-tpm: mktemp failed"
+        _em_prej=$(mktemp "${DEBIAN_FDE_TMPDIR:-/dev/shm}/debian-fde-lukspre.XXXXXX") || die "enroll-tpm: mktemp failed"
         enrl_cryptsetup luksDump --dump-json-metadata "$_em_dev" >"$_em_prej" 2>/dev/null ||
             {
                 rm -f "$_em_prej"

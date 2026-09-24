@@ -5,31 +5,44 @@
 #
 # Implementation note (task deviation, empirically pinned 2026-09-14): the
 # task's literal "loader/entries .conf with modified options" does NOT reach
-# a UKI on Debian trixie — sd-boot 257.13 boots a type1 UKI entry but DROPS
-# its `options` line; the Debian sd-boot build has no \EFI\Linux UKI
-# auto-entry scan; firmware Boot#### OptionalData is dropped by the stub
-# (with SB on AND off); and UKI addons are not picked up by this stub build
-# (verified from \EFI\BOOT\BOOTX64.addon.efi and \loader\addons). The
-# loader-level cmdline injection is therefore structurally dead in this
-# stack — itself a relevant fail-closed finding (documented in
-# tests/e2e/README.md).
+# a UKI on this stack — sd-boot boots a type1 UKI entry but DROPS its
+# `options` line; firmware Boot#### OptionalData handling varies by build;
+# and UKI addons are not picked up by this stub build (verified 2026-09-14;
+# see tests/e2e/README.md). The loader-level cmdline injection is therefore
+# structurally unreliable in this stack — itself a relevant fail-closed
+# finding (documented in tests/e2e/README.md).
 #
 # The INVARIANT under test — I5: a UKI unseals iff signature-valid AND the
 # trial digest over the CURRENT PCR 7 + PCR 11 values is release-key-signed
 # and present in the token — is exercised via a release-key-signed UKI
 # VARIANT whose .cmdline carries one extra word (the compromised-signer
 # model: a backdoored cmdline inside otherwise-valid signed artifacts).
-# systemd-stub measures the tampered .cmdline into PCR 11 -> the PCR 11
-# trial value drifts away from every signed .pcrsig entry -> unseal
-# refused -> fail closed. The guest's `debian-fde-cmdline` print proves the
-# tamper actually reached the kernel (without it, a refusal could be a
-# false pass from an unrelated mismatch).
-# REQUIRED: init ran; debian-fde-cmdline contains the extra word; PCR 11
-#           differs from the enrolled boot; TPM2 unseal refused; UNSEALED /
-#           unlocked / emergency shell NEVER; clean poweroff.
+# systemd-stub measures the tampered .cmdline into PCR 11 -> the live PCR 11
+# at the hook's policy session drifts away from the value the shipped
+# (stale, clean-cmdline) combined .pcrsig entry was signed over -> the
+# hook's PolicyAuthorize admits the (validly signed) entry but the policy
+# session no longer matches -> tpm2_unseal refuses (unseal_seal_refused) ->
+# the hook's BOUNDED recovery-passphrase loop -> 3 wrong answers -> 3-strike
+# fail-closed `poweroff -f` (§8.2; ADR-13 — the harness DEFAULT unlock). The
+# guest's `debian-fde-cmdline` print proves the tamper actually reached the
+# kernel (without it, a refusal could be a false pass from an unrelated
+# mismatch).
 #
-# Reuses s00 artifacts when DEBIAN_FDE_E2E_STATE points at the s00 run dir
-# (run-e2e.sh sets it); otherwise builds + boots them itself (2 boots).
+# NB (G-T13): NO assert_pcr11_prediction on this boot — the hook fails closed
+# INSIDE its own invocation, so /init never reaches its post-hook postphase
+# PCR 11 reading; the pre-extend PCR 11 drift vs the enrolled console is the
+# equivalent tamper-scoping evidence (the tampered cmdline is measured by the
+# stub BEFORE the hook's phase extension).
+#
+# REQUIRED: init ran; debian-fde-cmdline contains the extra word; PCR 11
+#           differs from the enrolled boot; unseal_token_info (pcrs=[7,11]);
+#           unseal_seal_refused BEFORE the first prompt; exactly 3 prompts
+#           fed; unseal_3strike + unseal_poweroff; unlocked / UNSEALED /
+#           emergency shell NEVER; guest exited by its own poweroff.
+#
+# Reuses the enrolled s00b state when DEBIAN_FDE_E2E_STATE points at the s00b
+# run dir (run-e2e.sh sets it); otherwise builds + enrolls it itself
+# (bootstrap boot + host-side production enroll, then the tamper boot).
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -42,14 +55,14 @@ source "$TESTS/lib/keys-fixture.sh"
 source "$TESTS/lib/disk-fixture.sh"
 # shellcheck source=../lib/uki-build.sh
 source "$TESTS/lib/uki-build.sh"
-# shellcheck source=../lib/prediction.sh
-source "$TESTS/lib/prediction.sh"   # assert_pcr11_prediction (G-T13/G-E9)
 # shellcheck source=../lib/swtpm-fixture.sh
 source "$TESTS/lib/swtpm-fixture.sh"
 # shellcheck source=../lib/qemu.sh
 source "$TESTS/lib/qemu.sh"
 # shellcheck source=../lib/sentinels.sh
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
+# shellcheck source=../lib/serial.sh
+source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
 
 RUN="$TESTS/e2e/.runs/s07-lite-$(date +%s)"
 mkdir -p "$RUN"
@@ -74,44 +87,82 @@ trap 'kill "$REFRESHER" 2>/dev/null; swtpm_cleanup_all 2>/dev/null' EXIT INT TER
 
 STATE="${DEBIAN_FDE_E2E_STATE:-}"
 if [[ -n "$STATE" && -f "$STATE/disk.img" && -d "$STATE/tpm" && -f "$STATE/harness.efi" \
-    && -f "$STATE/pcrsig.img" && -f "$STATE/console.log" ]]; then
+    && -f "$STATE/pcrsig.img" && -f "$STATE/console.log" && -d "$STATE/keys" \
+    && -f "$STATE/vars-enrolled.fd" ]]; then
     echo "# reusing enrolled state from $STATE"
-    RUN_ENROLLED="$STATE"
 else
-    echo "# no s00 state — building + booting it (boot 1 of 2: enroll under SB-on vars)"
+    echo "# no state — self-bootstrapping (boot 1 of 2: baseline boot + host-side enroll under SB-on vars)"
     RUN_ENROLLED="$RUN/enroll-boot"
     mkdir -p "$RUN_ENROLLED"
     swtpm_start "$RUN_ENROLLED/tpm" || { echo "s07: swtpm failed"; exit 1; }
     keys_create "$RUN_ENROLLED/keys"
+    uki_release_key_floor "$RUN_ENROLLED/keys" || exit 1   # ADR-16 floor for enroll
     keys_vars_enrolled "$RUN_ENROLLED/keys" "$RUN_ENROLLED/vars-enrolled.fd" || exit 1
     uki_build "$RUN_ENROLLED" "$RUN_ENROLLED/keys" "$RUN_ENROLLED/harness.efi" || exit 1
     UKI_MIB=$(( ($(stat -c%s "$RUN_ENROLLED/harness.efi") + 1048575) / 1048576 ))
     ESP_MIB=$(( UKI_MIB * 2 + 8 ))
     esp_make "$RUN_ENROLLED/esp.img" "$ESP_MIB" "$RUN_ENROLLED/harness.efi" || exit 1
     disk_make_luks "$RUN_ENROLLED/disk.img" 128 || exit 1
-    qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
-        "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
-    qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
-    ENROLL_WAIT_RC=$?
-    grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break_early=1 || break_early=0
-    if (( break_early == 0 )); then
-        echo "s07: enroll boot attempt 1 failed (qemu_wait rc=$ENROLL_WAIT_RC)"
-        swtpm_reset "$RUN_ENROLLED/tpm" && swtpm_start "$RUN_ENROLLED/tpm" || exit 1
-        rm -f "$RUN_ENROLLED/console.log"
+    # baseline boot: token-less disk -> the hook's recovery-passphrase path
+    # (prompt-synchronized feed: the hook has NO read timeout); the TPM must
+    # be RESET on retry so PCR 11 carries only one phase extension
+    for _attempt in 1 2; do
         qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
+        if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
+            feed_line "$RUN_ENROLLED/serial.sock" "$DEBIAN_FDE_SLOT0_PASSPHRASE"
+        fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
-    fi
+        grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
+        echo "s07: baseline boot attempt $_attempt failed"
+        echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
+        echo "--- qemu.stderr (tail):"
+        tail -10 "$RUN_ENROLLED/qemu.stderr" 2>/dev/null
+        if ((_attempt < 2)); then
+            swtpm_reset "$RUN_ENROLLED/tpm" && swtpm_start "$RUN_ENROLLED/tpm" || exit 1
+            rm -f "$RUN_ENROLLED/console.log"
+        fi
+    done
     grep -q "debian-fde: UNSEALED" "$RUN_ENROLLED/console.log" || {
-        echo "s07: enroll boot did not reach UNSEALED — state unusable"
+        echo "s07: baseline boot did not reach UNSEALED — state unusable"
         exit 1
     }
+    # host-side finalized enrollment (the production CLI;
+    # digest-anchored enroll (Option A — no between-boot reseeding — the CLI compares the entry's recorded d7/d11 against the baseline (pure data): d7 = the booted console's PCR 7, d11 = the
+    # build's enter-initrd prediction; the combined {7,11} entry is what the
+    # hook extracts for the finalized token.
+    swtpm_ensure "$RUN_ENROLLED/tpm" || { echo "s07: swtpm restart failed"; exit 1; }
+    PCR7_ENROLLED=$(grep -oE 'debian-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN_ENROLLED/console.log" | head -1 | cut -d= -f2)
+    [[ -n "$PCR7_ENROLLED" ]] || { echo "s07: no PCR 7 in the baseline console"; exit 1; }
+    uki_baseline_stamp "$RUN_ENROLLED/cli-state" "$PCR7_ENROLLED"
+    D11=$(cat "$RUN_ENROLLED/pcr11-enter-initrd.txt" 2>/dev/null)
+    [[ -n "$D11" ]] || { echo "s07: no enter-initrd d11 prediction from the build"; exit 1; }
+# digest-anchored enroll (Option A): no reseeding — the CLI compares the
+# entry's recorded d7/d11 against the baseline (pure data, no live TPM read).
+    uki_pcrsig_append_combined "$RUN_ENROLLED/uki-pcrsig.json" "$RUN_ENROLLED/uki-pcrsig-combined.json" \
+        "$PCR7_ENROLLED" "$D11" "$RUN_ENROLLED/keys" || exit 1
+    uki_pcrsig_disk "$RUN_ENROLLED/pcrsig.img" "$RUN_ENROLLED/uki-pcrsig-combined.json" || exit 1
+    printf '%s' "$DEBIAN_FDE_SLOT0_PASSPHRASE" >"$RUN_ENROLLED/kf-slot0"   # verbatim kf0 (no newline)
+    chmod 600 "$RUN_ENROLLED/kf-slot0"
+    EFIVARS="$RUN_ENROLLED/efivars-sb-on"
+    mkdir -p "$EFIVARS"
+    _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
+    _mkvar SecureBoot 1
+    _mkvar SetupMode 0
+    uki_host_enroll_finalized "$EFIVARS" "$RUN_ENROLLED/uki-pcrsig-combined.json" \
+        "$RUN_ENROLLED/disk.img" "$RUN_ENROLLED/keys" "$RUN_ENROLLED/kf-slot0" \
+        "$RUN_ENROLLED/cli-state" || {
+        echo "s07: production enroll-tpm FAILED"; exit 1; }
+    TOK=$(disk_token_json "$RUN_ENROLLED/disk.img")
+    assert_contains "standing token is systemd-tpm2 (Mechanism B)" "$TOK" '"type":"systemd-tpm2"'
+    assert_contains "standing token pins {PCR 7, PCR 11}" "$TOK" '"tpm2-pcrs":[7,11]'
+    swtpm_stop "$RUN_ENROLLED/tpm"
     STATE="$RUN_ENROLLED"
 fi
 
-# Snapshot the shared s00 state into OUR run dir: sibling prunes may remove
-# the state dir mid-run; from here on this scenario only touches the local
-# copy (the swtpm permall carries the seed -> the copy seals to the same SRK).
+# Snapshot the shared state into OUR run dir: sibling prunes may remove the
+# state dir mid-run; from here on this scenario only touches the local copy
+# (the swtpm permall carries the seed -> the copy seals to the same SRK).
 mkdir -p "$RUN/state"
 cp "$STATE/harness.efi" "$RUN/state/"
 cp "$STATE/pcrsig.img" "$RUN/state/"
@@ -125,8 +176,6 @@ cp "$STATE/tpm/tpm2-00.permall" "$RUN/state/tpm/" 2>/dev/null || true
 STATE="$RUN/state"
 
 swtpm_start "$STATE/tpm" || { echo "s07: swtpm restart failed"; exit 1; }
-cp "$STATE/harness.efi" "$RUN/harness.efi"
-cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"
 cp "$STATE/disk.img" "$RUN/disk.img"
 cp "$STATE/vars-enrolled.fd" "$RUN/vars-enrolled.fd"
 assert_contains "enrolled vars in use: SecureBootEnable ON" \
@@ -141,7 +190,8 @@ assert_contains "enrolled vars in use: SecureBootEnable ON" \
 # primitive. Host-side: prove the tampered UKI's own prediction DIVERGES
 # from the shipped (clean) one, then boot the tampered UKI with the stale
 # payload: the stub measures the tampered effective cmdline into PCR 11 ->
-# the trial digest matches NO signed .pcrsig entry -> fail closed.
+# the policy session's trial digest matches NO signed .pcrsig entry ->
+# fail closed.
 echo "# building tampered-cmdline UKI variant (cmdline + $TAMPER_WORD, same release key)"
 uki_build "$RUN" "$STATE/keys" "$RUN/harness.efi" "$TAMPER_WORD" || exit 1
 assert_file_exists "tampered-cmdline UKI built (signed with the release key)" "$RUN/harness.efi"
@@ -167,8 +217,21 @@ ESP_MIB=$(( UKI_MIB * 2 + 8 ))
 esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/harness.efi" || exit 1
 
 # --- boot the tampered-cmdline UKI (SB-enrolled vars) ---------------------------
-echo "# booting: tampered cmdline addon + enrolled disk (TCG, up to $QEMU_TIMEOUT s) ..."
+echo "# booting: tampered-cmdline UKI + stale .pcrsig drive, feeding 3 WRONG passphrases (TCG, up to $QEMU_TIMEOUT s) ..."
 qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img"
+# the hook's bounded loop has NO read timeout: feed 3 WRONG answers through
+# the hook's OWN prompt (uki_wait_hook_prompt), else the boot could only end
+# in a timeout-kill instead of the 3-strike poweroff
+for n in 1 2 3; do
+    if uki_wait_hook_prompt "$n" 300 "$RUN"; then
+        _assert_result ok "hook awaiting recovery passphrase $n/3 (hook read path)" ""
+        feed_line "$RUN/serial.sock" "debian-fde-wrong-passphrase-$n"
+    else
+        _assert_result not-ok "hook awaiting recovery passphrase $n/3 (hook read path)" \
+            "no prompt $n in console"
+        break
+    fi
+done
 qemu_wait "$RUN" "$QEMU_TIMEOUT"
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
 
@@ -180,6 +243,9 @@ PCR11_ENROLLED=$(pcr_of "$STATE/console.log" 11)
 # --- assertions ---------------------------------------------------------------
 assert_contains "init ran (UKI started via the tampered boot entry)" "$LOG" \
     "debian-fde-harness: init started"
+assert_contains "hook ran the enter-initrd extend" "$LOG" "$(sentinel_of unseal_pcrextend_ok)"
+assert_contains "hook discovered the {7,11} token (still valid LUKS2 metadata)" "$LOG" \
+    "$(sentinel_of unseal_token_info)7,11]"
 if grep -aqE 'debian-fde-cmdline2? .*rdinit=/init loglevel=7' "$CONSOLE" 2>/dev/null; then
     _assert_result ok "embedded cmdline intact in /proc/cmdline" ""
 else
@@ -198,41 +264,42 @@ else
     _assert_result not-ok "PCR 11 drifted (stub measured the effective cmdline)" \
         "PCR11=$PCR11 enrolled=$PCR11_ENROLLED"
 fi
-if grep -qF "$(sentinel_of pcr_sig_missing)" "$CONSOLE" 2>/dev/null \
-    || grep -qF "$(sentinel_of tpm2_refused)" "$CONSOLE" 2>/dev/null; then
-    _assert_result ok "TPM2 unseal refused (drifted PCR 11 matches NO signed .pcrsig entry)" ""
+# ordering proof: the hook's refusal strictly precedes its first passphrase
+# prompt (the recovery loop may only arm AFTER the token path failed)
+_ref_line=$(grep -nm1 -F "$(sentinel_of unseal_seal_refused)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
+_p1_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
+if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line )); then
+    _assert_result ok "hook refusal BEFORE any passphrase prompt (line $_ref_line < $_p1_line)" ""
 else
-    _assert_result not-ok "TPM2 unseal refused (drifted PCR 11 matches NO signed .pcrsig entry)" \
-        "neither signature-lookup failure nor tpm2_refused in console"
+    _assert_result not-ok "hook refusal BEFORE any passphrase prompt" \
+        "ref=$_ref_line prompt1=$_p1_line"
 fi
-assert_contains "harness fail-closed sentinel" "$LOG" "debian-fde: PROMPT-FAILED"
-
-# G-T13/G-E9 (boot reaches the UKI stub): the stub measured the TAMPERED
-# effective cmdline into PCR 11 — the drifted pre-unlock reading must equal
-# the tampered UKI's OWN signed prediction ($RUN/uki-pcrsig.json, rebuilt
-# above with the extra cmdline word), proving the prediction formula covers
-# the cmdline measurement the tamper relied on.
-assert_pcr11_prediction "S-07"
-assert_not_contains "interactive prompt never appeared" "$LOG" "$(sentinel_of prompt_re)"
-assert_not_contains "never unlocked (token)" "$LOG" "$(sentinel_of unlocked)"
-assert_not_contains "never unlocked (harness sentinel)" "$LOG" "debian-fde: UNSEALED"
+# the STALE combined entry is properly release-signed over the selection the
+# token pins, so the hook's I3 gate ADMITS it — the refusal is the policy
+# session: the live (drifted) PCR 11 trial digest no longer matches the
+# signed pol, and tpm2_unseal refuses the sealed blob
+assert_contains "unseal refused (drifted PCR 11 matches NO signed .pcrsig entry)" "$LOG" \
+    "$(sentinel_of unseal_seal_refused)"
+PROMPTS=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
+assert_eq "exactly 3 recovery-passphrase prompts (bounded loop)" "3" "$PROMPTS"
+assert_contains "3-strike give-up (§8.2 fail-closed)" "$LOG" "$(sentinel_of unseal_3strike)"
+assert_contains "fail-closed poweroff (no shell is offered)" "$LOG" "$(sentinel_of unseal_poweroff)"
+assert_not_contains "never unlocked via the TPM token" "$LOG" "$(sentinel_of unseal_unlocked)"
+assert_not_contains "never unlocked via the recovery passphrase" "$LOG" "$(sentinel_of unseal_pass_unlocked)"
+assert_not_contains "never UNSEALED (harness sentinel)" "$LOG" "debian-fde: UNSEALED"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-assert_contains "clean poweroff sentinel" "$LOG" "debian-fde: POWEROFF"
-# IN-08: honest in both directions (missing pid file is not a clean exit)
+# IN-08: an absent pid file (qemu_run failed outright) must not read as a
+# clean "guest exited" — the check is honest in both directions
 if [[ -f "$RUN/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-    _assert_result ok "guest exited (poweroff, not timeout-kill)" ""
+    _assert_result ok "guest exited (hook poweroff -f, not timeout-kill)" ""
 else
-    _assert_result not-ok "guest exited (poweroff, not timeout-kill)" \
+    _assert_result not-ok "guest exited (hook poweroff -f, not timeout-kill)" \
         "qemu still running or qemu.pid missing"
 fi
 
-# keep run dirs small (state dir is not ours to prune)
-rm -rf "$RUN/enroll-boot/guest-tree" "$RUN/enroll-boot/initrd.cpio" \
-    "$RUN/enroll-boot/uki-unsigned.efi" "$RUN/enroll-boot/uki-pcrsigned.efi"
-
 echo "# run dir: $RUN"
-echo "RUNDIR $RUN"
 kill "$REFRESHER" 2>/dev/null
+echo "RUNDIR $RUN"
 if (( TESTS_FAIL == 0 )); then
     echo "# s07-lite: PASS ($TESTS_PASS assertions)"
     exit 0

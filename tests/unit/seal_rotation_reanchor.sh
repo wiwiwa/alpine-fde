@@ -45,15 +45,25 @@ trap cleanup EXIT
 mkdir -p "$TMP/tmp" "$TMP/by-uuid" "$TMP/efivars" "$TMP/root/etc/alpine-fde"
 DEBIAN_FDE_TMPDIR=$TMP/tmp
 
-K1=$REPO/fixtures/keys
-K2=$TMP/key2
-mkdir -p "$K2"
-openssl genrsa -out "$K2/release.pem" 2048 2>/dev/null
-openssl rsa -in "$K2/release.pem" -pubout -out "$K2/release.pub" 2>/dev/null
-[ -s "$K2/release.pub" ] || {
-    echo "FAIL: cannot generate the K2 rotation key" >&2
-    exit 1
+# ADR-16: the enroll path fails closed on any release key < RSA-3072, so both
+# rotation credentials are hermetic suite-generated RSA-3072 keydirs (same
+# release.pem/release.pub/release.crt shaping as keys_rsa3072_chain.sh) — the
+# shared fixtures/keys dir stays RSA-2048 and is never used here
+new_keydir() { # DIR CN — complete keydir contract for one rotation credential
+    mkdir -p "$1"
+    openssl genrsa -out "$1/release.pem" 3072 2>/dev/null
+    openssl pkey -in "$1/release.pem" -pubout -out "$1/release.pub" 2>/dev/null
+    openssl req -new -x509 -key "$1/release.pem" -out "$1/release.crt" \
+        -subj "/CN=$2" 2>/dev/null
+    [ -s "$1/release.pem" ] && [ -s "$1/release.pub" ] && [ -s "$1/release.crt" ] || {
+        echo "FAIL: cannot generate the RSA-3072 rotation keydir $1" >&2
+        exit 1
+    }
 }
+K1=$TMP/key1
+K2=$TMP/key2
+new_keydir "$K1" debian-fde-rotation-k1
+new_keydir "$K2" debian-fde-rotation-k2
 
 TPMDIR=$TMP/swtpm
 swtpm_start "$TPMDIR" || {

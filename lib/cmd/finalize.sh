@@ -1,65 +1,49 @@
 #!/bin/sh
-# finalize.sh — `debian-fde finalize`: the GUIDED trust finalization command
-# (§8.1 finalize row; §9.1 Stage 3 steps 1-5; ADR-20; gap G-D10). At boot only
-# the OpenRC ADVISORY oneshot (hooks/openrc/alpine-fde-finalize) exists — it
-# NEVER runs this command, it only points the operator here. Every step is
-# crash-idempotent, so an interrupted run converges on the next invocation
-# (§9.1: "the provisional token and keyslot 0 remain safe until successfully
-# replaced").
+# finalize.sh — `debian-fde finalize` (Stage 3: guided / crash-resume) AND
+# fin_service_main (Stage 2: the NON-INTERACTIVE first-boot auto-finalizer the
+# OpenRC oneshot hooks/openrc/alpine-fde-finalize runs), per the AMENDED
+# ADR-20 lifecycle (§8.1 finalize row; §9.1 Stage 2/3; §7.2 keyslot table).
 #
-# State machine (§8.4, G-D11): `installed` | `provisional-booted` proceed;
-# `finalized` and an absent state file are loud no-ops (rc 0); anything else
-# fails closed (64).
+# KEYSLOT CHOREOGRAPHY (AMENDED — §7.2 keyslot table + §9.1; this reconciles
+# and REPLACES the old "keyslot 0 = ephemeral handoff" notes): the §9.1
+# step 4 credential ceremony during Stage 1 already left the handoff shape
+#   keyslot 0 = the OPERATOR'S RECOVERY PASSPHRASE (Argon2id, §13-floored)
+#   keyslot 1 = the PROVISIONAL token slot (Mechanism B, PCR 11 only)
+#   keyslot 2 = the TEMPORARY ephemeral install key — purged at completion
+# There is NO key handoff to finalize (the old DEBIAN_FDE_LUKS_KEYFILE /
+# ephemeral-keyfile seam is RETIRED):
+#   * Stage 3 (guided) is authorized by the OPERATOR'S RECOVERY PASSPHRASE —
+#     verified against keyslot 0 (no-echo prompt or the documented
+#     DEBIAN_FDE_RECOVERY_PASSPHRASE seam); a wrong passphrase is a BOUNDED
+#     retry (3 attempts) then die 64 + the ADR-8 attempt marker.
+#   * Stage 2 (service) is authorized by RE-UNSEALING the standing provisional
+#     token in USERSPACE (lib/seal.sh seal_unseal over the live PCRs with the
+#     UKI's .pcrsig) — never by stored credentials.
 #
-# Order is the doc's listed order (§8.1 finalize row / §9.1 Stage 3) — the
-# LOCAL steps run before the Secure Boot gate, the TPM/audit mutations only
-# after it:
-#   1. Set the permanent recovery passphrase (§13 entropy floor, Argon2id) in
-#      the NEXT FREE keyslot and PURGE the ephemeral install key. Recorded
-#      design decision (the REAL install handoff — install.sh SLOT CONTRACT):
-#      keyslot 0 = ephemeral install key, keyslot 1 = provisional token.
-#      finalize identifies the ephemeral slot from the live LUKS2 metadata as
-#      the passphrase slot NOT referenced by any systemd-tpm2 token (works for
-#      ANY index), adds the recovery passphrase to the next free slot
-#      (authorized by the handed-over ephemeral key / DEBIAN_FDE_LUKS_KEYFILE),
-#      then KILLS the ephemeral slot — a kill must be authorized from a
-#      DIFFERENT keyslot, so the just-added recovery passphrase is the
-#      authorizing credential — and verifies exactly ONE passphrase slot
-#      beyond the token-referenced slots remains (the recovery slot).
-#      Crash-skip: a recovery passphrase that already verifies in any slot
-#      skips the add; a missing ephemeral slot skips the purge.
-#   2. Encrypt release.pem in place (AES-256 PBKDF2 >= 600k iterations,
-#      ADR-18, via keys_encrypt_release; DEBIAN_FDE_KEY_PASSPHRASE /
-#      ALPINE_FDE_KEY_PASSPHRASE seam or interactive prompt), permissions
-#      tightened to 0400. Crash-skip: keys_is_encrypted guard.
-#   3. Secure Boot gate (READ-ONLY fw_sb_state): secureboot=1 AND
-#      setup_mode=0, else exit 64 with the §9.1 instruction text — NO
-#      enrollment, NO wiping, NO baseline capture happens under an unverified
-#      boot (§12 S-21 invariant).
-#   4. Capture the baseline: `audit --init` finalizes pending pcr7
-#      (crash-skip when the baseline is already final).
-#   5. Upgrade the token: replace the provisional PCR-11 keyslot token with
-#      the finalized Mechanism B {PCR 7, PCR 11} token via
-#      seal_upgrade_token — for EVERY member container in RAID1 topologies.
-#      Crash-skip: a standing token whose tpm2-pcrs are already [7,11] skips.
-#   6. Cleanup: strip the unfinalized MOTD/issue banner (fde_motd_banner /
-#      fde_motd_strip from lib/install-state.sh — the same single text
-#      `install` drops at Stage 1).
-#   7. Write state `finalized` LAST, then the audit summary and the §9.1
-#      off-machine backup prompt (scp).
+# The completion chain (§9.1 Stage 2 == Stage 3; fin_completion_steps):
+#   Secure Boot guard (secureboot=1 AND setup_mode=0, else fail-closed 64 /
+#   advisory+retry) -> audit --init (crash-skip when the baseline is already
+#   final) -> for EVERY member: TEMPORARY ephemeral keyslot purge (crash-skip
+#   when absent; §9.1 Stage 2 step 4) THEN the token upgrade to {PCR 7, PCR 11}
+#   (crash-skip when a standing token is already {7,11}; §9.1 Stage 2 step 3).
+#   The purge runs FIRST because the re-unsealed provisional credential
+#   authorizes both keyslot mutations and stops verifying once the upgrade
+#   retires the provisional keyslot — see the ORDER CONSTRAINT at the loop.
+#   Afterwards: unfinalized MOTD/issue banner clear -> ADR-8 marker clear ->
+#   state `finalized` written LAST (I1's two-keyslot at-rest state holds).
+#   Every step is crash-idempotent (§9.1: interrupted runs converge on the
+#   next boot / invocation).
 #
 # Credential seams (scripting/CI; interactive fallbacks are the guided path):
-#   DEBIAN_FDE_RECOVERY_PASSPHRASE  the new keyslot-0 recovery passphrase
-#                                   (else double no-echo prompt)
-#   DEBIAN_FDE_LUKS_KEYFILE         an existing-passphrase key file
-#                                   authorizing luksAddKey/luksKillSlot (the
-#                                   enroll-tpm.sh seam; in the ADR-20 flow
-#                                   this carries the ephemeral install key
-#                                   handed over by the boot chain)
+#   DEBIAN_FDE_RECOVERY_PASSPHRASE  the keyslot-0 recovery passphrase for the
+#                                   guided Stage 3 (else double no-echo prompt)
 #   DEBIAN_FDE_PCRSIG               a release-key-signed {7,11} .pcrsig for
 #                                   the token upgrade (else the policy is
 #                                   re-signed in-process from the keydir's
-#                                   release.pem over the live PCRs, §9.4)
+#                                   release.pem over the live PCRs, §9.4 —
+#                                   in the Stage 2 service a locked
+#                                   release.pem fails CLOSED: advisory +
+#                                   attempt marker + retry next boot)
 #
 # Tool dependencies resolve through the audit/seal internals with loud
 # failures (ADR-8); finalize adds no package-manager step of its own.
@@ -89,9 +73,13 @@ if [ -z "${DEBIAN_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
 fi
+if [ -z "${DEBIAN_FDE_KEYS_LOADED:-}" ]; then
+    # shellcheck disable=SC1090
+    . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
+fi
 if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
-    # the §13 entropy floor (§9.1 Stage 3 step 1) lives in lib/cmd/rotate.sh
-    # (shared with `rotate` and keys_encrypt_release)
+    # the §13 entropy floor (§9.1) lives in lib/cmd/rotate.sh (shared with
+    # `rotate` and keys_encrypt_release)
     # shellcheck disable=SC1090
     . "${DEBIAN_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/rotate.sh"
 fi
@@ -100,17 +88,25 @@ finalize_usage() {
     cat >&2 <<'EOF'
 Usage: debian-fde finalize
 
-Trust finalization (§8.1 finalize row; §9.1 Stage 3; ADR-20). Requires install
-state `installed` or `provisional-booted` and Secure Boot ON with the custom
-keys (secureboot=1, setup_mode=0). Guided steps, in order:
-  1. set the permanent recovery passphrase in the next free keyslot and
-      purge the ephemeral install key (§13 entropy floor enforced)
-  2. encrypt release.pem with AES-256 PBKDF2 (ADR-18) and chmod 0400
+Trust finalization (§8.1 finalize row; §9.1 Stage 3; ADR-20 amended). Requires
+install state `installed` or `provisional-booted` and Secure Boot ON with the
+custom keys (secureboot=1, setup_mode=0). The recovery passphrase set during
+the Stage-1 credential ceremony (keyslot 0) authorizes everything — you are
+prompted for it (no-echo; a wrong passphrase is retried up to 3 times).
+Guided steps, in order:
+  1. verify the recovery passphrase against keyslot 0 (bounded retry; ADR-8
+      marker on exhaustion)
+  2. ensure release.pem is encrypted (AES-256 PBKDF2, ADR-18; skipped when the
+      Stage-1 ceremony already encrypted it) and chmod 0400
   3. verify Secure Boot is active (no enrollment under an unverified boot)
   4. capture the baseline (audit --init; skipped when already final)
-  5. upgrade every crypttab member's token to Mechanism B {PCR 7, PCR 11}
-  6. clear the unfinalized MOTD/issue banner
-  7. write install state `finalized` and print the backup reminder
+  5. purge the temporary ephemeral install keyslot from every member
+      (§9.1 Stage 2 step 4; authorized by the same credential while it still
+      verifies — see the ORDER CONSTRAINT in fin_completion_steps)
+  6. upgrade every crypttab member's token to Mechanism B {PCR 7, PCR 11}
+      (I1's two-keyslot at-rest state)
+  7. clear the unfinalized MOTD/issue banner
+  8. write install state `finalized` and print the backup reminder
 Interrupted runs converge on the next invocation (crash idempotency, §9.1).
 EOF
 }
@@ -145,51 +141,58 @@ fin_crypttab_uuids() {
 # fin_cryptsetup — the cryptsetup seam (same override enroll-tpm/token.sh use)
 fin_cryptsetup() { "${DEBIAN_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
 
+# fin_member_devs — every crypttab LUKS member as a resolvable
+# /dev/disk/by-uuid path, one per line. ANY unresolvable member is a loud die:
+# finalize never operates on a partial array.
+fin_member_devs() {
+    _fmd_ct=$(fin_crypttab_file)
+    _fmd_uuids=$(fin_crypttab_uuids "$_fmd_ct")
+    [ -n "$_fmd_uuids" ] ||
+        die "finalize: no LUKS member UUIDs found in $_fmd_ct — cannot finalize"
+    for _fmd_u in $_fmd_uuids; do
+        _fmd_d="$(enrl_by_uuid_dir)/$_fmd_u"
+        [ -e "$_fmd_d" ] ||
+            die "finalize: member device not resolvable: $_fmd_d — refusing to finalize a partial array"
+        printf '%s\n' "$_fmd_d"
+    done
+}
+
 # fin_recovery_verifies DEV PASS_FILE — rc 0 iff the candidate recovery
-# passphrase already opens SOME keyslot (the crash-idempotency skip check;
-# the recovery slot may sit at ANY index — never a token-referenced one)
+# passphrase already opens SOME keyslot (the Stage 3 authorization check and
+# the crash-idempotency skip check; the recovery slot sits at keyslot 0, §7.2)
 fin_recovery_verifies() {
     fin_cryptsetup open --test-passphrase "$1" \
         --key-file "$2" >/dev/null 2>&1
 }
 
-# fin_ephemeral_slot DEV META_JSON AUTH_FILE — the ephemeral install key's
-# keyslot: among the passphrase slots NOT referenced by any systemd-tpm2
-# token (any index — the recorded design decision), the one the handed-over
-# ephemeral key (AUTH_FILE = DEBIAN_FDE_LUKS_KEYFILE) actually opens. Empty
-# when none: after the recovery passphrase is added, a surviving non-token
-# slot could be the RECOVERY slot — the auth key then verifies nowhere and a
-# re-run correctly skips the purge (crash-resume shape).
-fin_ephemeral_slot() {
+# fin_ephemeral_slots DEV META_JSON — the TEMPORARY install keyslot candidates
+# (§7.2: keyslot 2; §9.1 Stage 2 step 4 purges it): the passphrase slots NOT
+# referenced by any systemd-tpm2 token AND not keyslot 0 — §7.2 pins the
+# operator's recovery passphrase at keyslot 0, so a non-token slot != 0 can
+# only be the temporary ephemeral slot. Prints candidates one per line; empty
+# when none (crash resume). The CALLER fails loud on more than one candidate
+# (a corrupted handoff is never silently purged).
+fin_ephemeral_slots() {
     _fes_dev=$1
     _fes_meta=$2
-    _fes_auth=$3
-    _fes_cands=$(jq -r '
+    jq -r '
         [.keyslots // {} | keys[] | tonumber] as $slots
         | ([.tokens // {} | .[] | select(.type? == "systemd-tpm2")
             | .keyslots[]? | tonumber]) as $sealed
-        | [$slots[] | select(. as $s | $sealed | index($s) | not)]
-        | sort | .[]' "$_fes_meta" 2>/dev/null) || return 0
-    for _fes_s in $_fes_cands; do
-        if fin_cryptsetup open --test-passphrase --key-slot "$_fes_s" \
-            "$_fes_dev" --key-file "$_fes_auth" >/dev/null 2>&1; then
-            printf '%s\n' "$_fes_s"
-            return 0
-        fi
-    done
-    return 0
+        | [$slots[] | select(. as $s | $sealed | index($s) | not)
+            | select(. != 0)] | sort | .[]' "$_fes_meta" 2>/dev/null || return 0
 }
 
-# fin_stray_slots META_JSON — count of EXTRA passphrase slots beyond the ONE
-# recovery slot among the slots NOT referenced by the systemd-tpm2 token
-# (must be 0: exactly ONE passphrase slot remains beyond the sealed one, §9.1)
-fin_stray_slots() {
-    jq '
+# fin_recovery_slot_ok META_JSON — rc 0 iff exactly ONE passphrase slot remains
+# beyond the token-referenced slots and it IS keyslot 0 (the recovery slot,
+# §7.2 — the amended at-rest shape after the ephemeral purge, I1)
+fin_recovery_slot_ok() {
+    jq -e '
         [.keyslots // {} | keys[] | tonumber] as $slots
         | ([.tokens // {} | .[] | select(.type? == "systemd-tpm2")
             | .keyslots[]? | tonumber]) as $sealed
-        | [$slots[] | select(. as $s | $sealed | index($s) | not)]
-        | length - 1' "$1" 2>/dev/null
+        | [$slots[] | select(. as $s | $sealed | index($s) | not)] == [0]' "$1" \
+        >/dev/null 2>&1
 }
 
 # fin_token_pcrs META_JSON — the standing systemd-tpm2 token's tpm2-pcrs
@@ -200,10 +203,11 @@ fin_token_pcrs() {
         | .value["tpm2-pcrs"] // empty) // empty' "$1" 2>/dev/null
 }
 
-# fin_read_recovery_passphrase VAR — the new keyslot-0 passphrase into VAR:
-# DEBIAN_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo prompt.
-# Enforces the §13 entropy floor (passphrase_floor_ok) BEFORE anything else
-# can happen (fail-closed 64; the floor is the same one `rotate` enforces).
+# fin_read_recovery_passphrase VAR — the keyslot-0 recovery passphrase into
+# VAR: DEBIAN_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo
+# prompt. Enforces the §13 entropy floor (passphrase_floor_ok) BEFORE anything
+# else can happen (fail-closed 64; the floor is the same one `rotate`
+# enforces).
 fin_read_recovery_passphrase() {
     _frr_var=$1
     if [ -n "${DEBIAN_FDE_RECOVERY_PASSPHRASE:-}" ]; then
@@ -211,7 +215,7 @@ fin_read_recovery_passphrase() {
     elif [ -t 0 ]; then
         _frr_p1=
         _frr_p2=
-        printf 'Set the permanent recovery passphrase (§13: >=12 chars with 3 character classes, or >=16 chars): ' >&2
+        printf 'Recovery passphrase (keyslot 0, set during the Stage-1 ceremony): ' >&2
         _frr_restore=0
         if stty -echo 2>/dev/null; then
             _frr_restore=1
@@ -234,6 +238,7 @@ fin_read_recovery_passphrase() {
             die -r "$DEBIAN_FDE_USAGE" "finalize: recovery passphrases empty or do not match"
         fi
         _frr_val=$_frr_p1
+        unset _frr_p1 _frr_p2
     else
         die "finalize: no recovery passphrase available — provide DEBIAN_FDE_RECOVERY_PASSPHRASE or run interactively (§9.1 Stage 3)"
     fi
@@ -241,6 +246,250 @@ fin_read_recovery_passphrase() {
         die "finalize: recovery passphrase rejected by the §13 entropy floor (>=12 chars/3 classes or >=16 chars, no common-password hits, no control characters) — refusing (T2b)"
     fi
     eval "$_frr_var=\$_frr_val"
+    return 0
+}
+
+# fin_uki_pcrsig STAGE OUT — extract the .pcrsig from the ESP UKI (the Stage-1
+# `ukictl build` output; the same extraction the provisional enrollment used)
+# for the Stage 2 userspace re-unseal of the provisional token.
+fin_uki_pcrsig() {
+    _fup_stage=$1
+    _fup_out=$2
+    command -v objcopy >/dev/null 2>&1 || return 1
+    _fup_esp=${DEBIAN_FDE_ESP:-}
+    if [ -z "$_fup_esp" ] && command -v esp_dir >/dev/null 2>&1; then
+        _fup_esp=$(esp_dir 2>/dev/null || true)
+    fi
+    [ -n "$_fup_esp" ] || _fup_esp=/efi
+    _fup_uki=$(ls "$_fup_esp"/EFI/Linux/alpine-fde-*.efi 2>/dev/null | head -n 1)
+    [ -n "$_fup_uki" ] && [ -f "$_fup_uki" ] || return 1
+    objcopy -O binary --only-section=.pcrsig "$_fup_uki" "$_fup_out" 2>/dev/null ||
+        return 1
+    [ -s "$_fup_out" ]
+}
+
+# fin_provisional_unseal DEV STAGE OUT_PASSFILE — §9.1 Stage 2 authorization:
+# re-unseal the standing PROVISIONAL token (Mechanism B, PCR 11) in USERSPACE
+# via lib/seal.sh (seal_unseal over the live PCRs with the UKI's .pcrsig).
+# NEVER a stored credential. rc 0 + the provisional passphrase in OUT_PASSFILE
+# (a 0600 passfile the caller scrubs).
+fin_provisional_unseal() {
+    _fpn_dev=$1
+    _fpn_stage=$2
+    _fpn_out=$3
+    fin_uki_pcrsig "$_fpn_stage" "$_fpn_stage/pcrsig-prov.json" || {
+        err "finalize: cannot extract the provisional .pcrsig from the ESP UKI (§9.1 Stage 2 unseal)"
+        return 1
+    }
+    _fpn_meta=$(mktemp "$_fpn_stage/meta.XXXXXX") || return 1
+    token_dump "$_fpn_dev" "$_fpn_meta" || {
+        rm -f "$_fpn_meta"
+        return 1
+    }
+    _fpn_tid=$(jq -r 'first(.tokens // {} | to_entries[]
+        | select(.value.type? == "systemd-tpm2") | .key) // empty' "$_fpn_meta")
+    rm -f "$_fpn_meta"
+    [ -n "$_fpn_tid" ] || {
+        err "finalize: $_fpn_dev: no standing systemd-tpm2 token to re-unseal (§9.1 Stage 2)"
+        return 1
+    }
+    fin_cryptsetup token export --token-id "$_fpn_tid" "$_fpn_dev" \
+        >"$_fpn_stage/token.json" 2>/dev/null || {
+        err "finalize: token export failed for $_fpn_dev"
+        return 1
+    }
+    seal_unseal "$(keys_dir)" "$_fpn_stage/pcrsig-prov.json" provisional \
+        "$_fpn_stage/token.json" "$_fpn_out" || return 1
+    chmod 600 "$_fpn_out" 2>/dev/null || :
+    [ -s "$_fpn_out" ]
+}
+
+# fin_completion_steps AUTHFILE — the §9.1 Stage 2 == Stage 3 completion chain,
+# shared verbatim by the guided command and the first-boot service (ADR-20
+# amended): Secure Boot guard -> audit --init -> token upgrade {PCR 7, PCR 11}
+# per member -> temporary ephemeral keyslot purge per member -> MOTD/issue
+# banner clear -> ADR-8 marker clear -> state `finalized` LAST.
+# AUTHFILE is an existing valid volume credential (guided: the verified
+# recovery passfile at keyslot 0; service: the re-unsealed provisional
+# passfile) authorizing the upgrade's luksAddKey and the ephemeral kill.
+# Deaths are loud (die 64): the guided path surfaces them directly, the
+# service runs this in a failure-contained subshell.
+fin_completion_steps() {
+    _fcs_auth=$1
+    [ -n "$_fcs_auth" ] && [ -f "$_fcs_auth" ] ||
+        die "fin_completion_steps: an authorizing passfile is required"
+
+    # --- Secure Boot guard (READ-ONLY; §9.1 Stage 2 step 2 / §12 S-21) --------
+    # Verified boot with OUR keys, or no enrollment / audit / token mutation /
+    # purge happens at all: the volume stays protected by the recovery
+    # passphrase (keyslot 0) plus the standing seal.
+    _fcs_sb=$(fw_sb_state 2>/dev/null) || true
+    case $_fcs_sb in
+        secureboot=1\ setup_mode=0\ *) : ;;
+        *)
+            die "finalize: Secure Boot is not enabled with your custom keys. Reboot into BIOS setup and toggle Secure Boot ON to complete trust finalization. (fw_sb_state: $_fcs_sb — no enrollment, no wiping, no baseline capture, no purge; the volume remains safely locked)"
+            ;;
+    esac
+
+    # --- baseline capture (audit --init; §9.1 Stage 2 step 3) ------------------
+    # A previous run's final baseline is reused as-is (crash between the audit
+    # and the token upgrade).
+    _fcs_bl=$(sp_baseline_file)
+    [ -f "$_fcs_bl" ] ||
+        die "finalize: no baseline at $_fcs_bl — Stage 1 provisioning must write a pending baseline before finalization (§9.1)"
+    baseline_validate "$_fcs_bl" || die "finalize: baseline invalid: $_fcs_bl"
+    if baseline_is_final "$_fcs_bl"; then
+        info "baseline already final — skipping audit --init (resumed finalization, §9.1 crash idempotency)"
+    else
+        info "finalizing the baseline from live values (audit --init, §9.1 Stage 2/3)"
+        cmd_audit_main --init
+    fi
+
+    # --- token upgrade to Mechanism B {PCR 7, PCR 11}, per member --------------
+    _fcs_keydir=$(keys_dir)
+    [ -n "$_fcs_keydir" ] ||
+        die "finalize: no release key directory configured (set --keydir / KEY_PATH / DEBIAN_FDE_KEYDIR)"
+    [ -d "$_fcs_keydir" ] || die "finalize: release key directory not found: $_fcs_keydir"
+    [ -f "$_fcs_keydir/release.pub" ] ||
+        die "finalize: release public key not found: $_fcs_keydir/release.pub"
+    _fcs_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
+    _fcs_stage=$(mktemp -d "$_fcs_tmpdir/debian-fde-fin.XXXXXX") ||
+        die "finalize: cannot create the staging directory in $_fcs_tmpdir"
+    chmod 700 "$_fcs_stage"
+    if [ -n "${DEBIAN_FDE_PCRSIG:-}" ]; then
+        _fcs_pcrsig=$DEBIAN_FDE_PCRSIG
+    else
+        # in-process re-sign fallback (§9.4): needs an UNLOCKED release.pem —
+        # in the amended lifecycle release.pem is already encrypted by the
+        # Stage-1 ceremony, so without DEBIAN_FDE_KEY_PASSPHRASE (or a
+        # provided DEBIAN_FDE_PCRSIG) this fails CLOSED (the service maps the
+        # failure to advisory + retry next boot)
+        _fcs_pcrsig=$(enrl_sign_pcrsig "$_fcs_stage" "$_fcs_keydir") ||
+            die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — DEBIAN_FDE_PCRSIG or an unlockable release.pem is required (§9.1)"
+    fi
+    # --- per-member keyslot mutations (§9.1 Stage 2 steps 3-4) -----------------
+    # ORDER CONSTRAINT — authorization liveness of the NON-INTERACTIVE service:
+    # the re-unsealed provisional credential (AUTHFILE) authorizes BOTH
+    # keyslot mutations, but it stops verifying the moment the upgrade RETIRES
+    # the provisional keyslot (§7.2) — so the temporary ephemeral purge
+    # (§9.1 Stage 2 step 4) runs BEFORE the token upgrade (§9.1 Stage 2 step
+    # 3), per member. Each mutation is independently crash-idempotent, so the
+    # reorder changes no observable end state: after BOTH, EXACTLY the
+    # recovery keyslot 0 remains beyond the sealed token (I1).
+    for _fcs_dev in $(fin_member_devs); do
+        # (i) purge the temporary ephemeral keyslot (§9.1 Stage 2 step 4) —
+        # keyslot 2 is the temporary install key; the kill is authorized by
+        # AUTHFILE (a DIFFERENT keyslot — cryptsetup requires it).
+        _fcs_meta=$(mktemp "$_fcs_tmpdir/debian-fde-fin-meta.XXXXXX") ||
+            die "finalize: mktemp failed"
+        token_dump "$_fcs_dev" "$_fcs_meta"
+        _fcs_eph=$(fin_ephemeral_slots "$_fcs_dev" "$_fcs_meta")
+        rm -f "$_fcs_meta"
+        case $(printf '%s' "$_fcs_eph" | grep -c .) in
+            0)
+                info "finalize: $(basename "$_fcs_dev"): no temporary ephemeral keyslot remains — skipping the purge (crash resume, §9.1)"
+                ;;
+            1)
+                (token_kill_slot "$_fcs_dev" "$_fcs_eph" "$_fcs_auth") ||
+                    die "finalize: $(basename "$_fcs_dev"): purging the temporary ephemeral keyslot (keyslot $_fcs_eph) failed — fix and retry (§9.1 crash idempotency)"
+                info "finalize: $(basename "$_fcs_dev"): temporary ephemeral install key purged (keyslot $_fcs_eph)"
+                ;;
+            *)
+                die "finalize: $(basename "$_fcs_dev"): multiple non-token passphrase slots ($_fcs_eph) — refusing to purge a corrupted handoff (§7.2)"
+                ;;
+        esac
+
+        # (ii) token upgrade to Mechanism B {PCR 7, PCR 11} (§9.1 Stage 2 step 3)
+        _fcs_cur=$(mktemp "$_fcs_tmpdir/debian-fde-fin-cur.XXXXXX") ||
+            die "finalize: mktemp failed"
+        token_dump "$_fcs_dev" "$_fcs_cur"
+        _fcs_pcrs=$(fin_token_pcrs "$_fcs_cur")
+        rm -f "$_fcs_cur"
+        if [ "$_fcs_pcrs" = "[7,11]" ]; then
+            info "finalize: $(basename "$_fcs_dev"): token already {PCR 7, PCR 11} — skipping the upgrade (crash resume, zero TPM operations)"
+        else
+            # subshell isolation: the seal/token mutators die fail-closed —
+            # contain them so the member context is what the operator sees
+            if ! (seal_upgrade_token "$_fcs_keydir" "$_fcs_dev" "$_fcs_pcrsig" \
+                "$_fcs_stage/token-$(basename "$_fcs_dev").json" "$_fcs_auth"); then
+                die "finalize: token upgrade failed for $(basename "$_fcs_dev") — install state stays unfinalized; the standing seal remains; fix the cause and retry (§9.1 crash idempotency)"
+            fi
+            printf 'debian-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \
+                "$(basename "$_fcs_dev")" >&2
+        fi
+
+        # (iii) exactly the recovery keyslot 0 remains beyond the sealed token
+        _fcs_meta=$(mktemp "$_fcs_tmpdir/debian-fde-fin-meta.XXXXXX") ||
+            die "finalize: mktemp failed"
+        token_dump "$_fcs_dev" "$_fcs_meta"
+        if ! fin_recovery_slot_ok "$_fcs_meta"; then
+            rm -f "$_fcs_meta"
+            die "finalize: $(basename "$_fcs_dev"): unexpected passphrase slots beyond the sealed token — exactly the recovery keyslot 0 must remain (§7.2/I1); manual intervention required"
+        fi
+        rm -f "$_fcs_meta"
+    done
+    rm -rf "$_fcs_stage"
+    unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+
+    # --- clear the unfinalized MOTD/issue banner (§9.1 Stage 2/3) --------------
+    _fcs_root=${DEBIAN_FDE_ROOT:-}
+    fde_motd_strip "${_fcs_root}/etc/motd"
+    fde_motd_strip "${_fcs_root}/etc/issue"
+    info "finalize: unfinalized MOTD/issue banner cleared"
+
+    # --- the state transition is the LAST mutation (§9.1); the ADR-8 marker ---
+    # is cleared first: a successful completion means NO pending failure
+    istate_attempt_clear
+    istate_write finalized
+    return 0
+}
+
+# fin_service_main — §9.1 Stage 2: the NON-INTERACTIVE first-boot completion
+# (ADR-20 amended; the OpenRC oneshot hooks/openrc/alpine-fde-finalize runs
+# this). NEVER prompts. Authorization = re-unsealing the standing provisional
+# token in userspace (fin_provisional_unseal) — NOT stored credentials.
+#   state `finalized`                       -> silent exit 0
+#   state missing / unreadable / garbage    -> degrade: exit 0 (nothing to do)
+#   `installed` | `provisional-booted`      -> the completion chain
+# ANY failure writes the ADR-8 attempt marker (istate_attempt_write) and
+# returns NONZERO — the wrapper maps that to the advisory; boot is NEVER
+# blocked and the next boot retries.
+fin_service_main() {
+    strict_mode
+    _fsv_state=$(istate_state 2>/dev/null)
+    case $_fsv_state in
+        finalized) return 0 ;;
+        installed | provisional-booted) : ;;
+        *) return 0 ;;
+    esac
+    _fsv_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
+    _fsv_stage=$(mktemp -d "$_fsv_tmpdir/debian-fde-svc.XXXXXX") || {
+        istate_attempt_write "service: no staging directory in $_fsv_tmpdir"
+        return 1
+    }
+    chmod 700 "$_fsv_stage"
+    _fsv_auth="$_fsv_stage/prov-pass.bin"
+    _fsv_devs=$(fin_member_devs) || {
+        istate_attempt_write "service: crypttab members unresolvable"
+        rm -rf "$_fsv_stage"
+        return 1
+    }
+    # first member only (POSIX-safe: this function runs under the OpenRC
+    # service shell, where $'...' is not available)
+    _fsv_first=$(printf '%s\n' "$_fsv_devs" | head -n 1)
+    if ! fin_provisional_unseal "$_fsv_first" "$_fsv_stage" "$_fsv_auth"; then
+        istate_attempt_write "service: provisional token re-unseal failed (PCR drift / missing UKI .pcrsig / locked release.pem) — will retry next boot"
+        rm -rf "$_fsv_stage"
+        return 1
+    fi
+    # failure-contained completion: die inside the chain must not escape into
+    # an OpenRC failure — this function's nonzero return IS the contract
+    if ! (fin_completion_steps "$_fsv_auth"); then
+        istate_attempt_write "service: completion step failed — will retry next boot"
+        rm -rf "$_fsv_stage"
+        return 1
+    fi
+    rm -rf "$_fsv_stage"
     return 0
 }
 
@@ -280,24 +529,14 @@ cmd_finalize_main() {
 
     # --- members: every crypttab LUKS member (finalize owns per-member
     # iteration; the storage bucket owns the crypttab FORMAT)
-    _fm_ct=$(fin_crypttab_file)
-    _fm_members=$(fin_crypttab_uuids "$_fm_ct")
-    [ -n "$_fm_members" ] || die "finalize: no LUKS member UUIDs found in $_fm_ct — cannot finalize"
-    _fm_devs=''
-    for _fm_uuid in $_fm_members; do
-        _fm_dev="$(enrl_by_uuid_dir)/$_fm_uuid"
-        [ -e "$_fm_dev" ] || die "finalize: member device not resolvable: $_fm_dev — refusing to finalize a partial array"
-        _fm_devs="$_fm_devs $_fm_dev"
-    done
+    _fm_devs=$(fin_member_devs)
+    set -- $_fm_devs
+    _fm_first=$1
 
-    # --- STEP 1: permanent recovery passphrase (next free keyslot) + ephemeral
-    # purge (§9.1 Stage 3 step 1; local operations — before the SB gate).
-    # Handoff shape (install.sh SLOT CONTRACT): keyslot 0 = ephemeral install
-    # key, keyslot 1 = provisional token; the recovery passphrase goes into
-    # the NEXT FREE slot and the ephemeral slot is killed after — authorized
-    # by the recovery passphrase (a kill must validate against a DIFFERENT
-    # keyslot than the one being killed).
-    # I1 hygiene: the staged passphrase (and the token staging directory) is
+    # --- STEP 1: the operator's recovery passphrase — VERIFIED against
+    # keyslot 0, never re-entered (§9.1 amended: the Stage-1 credential
+    # ceremony already enrolled it). Bounded retry: 3 attempts, then
+    # die 64 + the ADR-8 attempt marker. I1 hygiene: the staged passphrase is
     # scrubbed on EVERY exit path — die, signal, or success.
     _fm_stage=''
     _fm_passfile=''
@@ -307,56 +546,31 @@ cmd_finalize_main() {
         return 0
     }
     trap _fin_cleanup EXIT
-    _fm_pass=''
-    fin_read_recovery_passphrase _fm_pass
     _fm_tmpdir=${DEBIAN_FDE_TMPDIR:-/dev/shm}
     _fm_passfile=$(mktemp "$_fm_tmpdir/debian-fde-fin-pass.XXXXXX") ||
         die "finalize: cannot stage the recovery passphrase in $_fm_tmpdir"
     chmod 600 "$_fm_passfile"
-    printf '%s' "$_fm_pass" >"$_fm_passfile"
-    unset _fm_pass 2>/dev/null || :
-    _fm_auth=${DEBIAN_FDE_LUKS_KEYFILE:-}
-    [ -n "$_fm_auth" ] ||
-        die "finalize: no existing-passphrase key file (DEBIAN_FDE_LUKS_KEYFILE) — cannot authorize the recovery add and the ephemeral purge (§9.1 Stage 3)"
-    [ -f "$_fm_auth" ] ||
-        die "finalize: existing-passphrase key file not found: $_fm_auth — cannot authorize the recovery add (wrong passphrase or missing handoff file?)"
-    for _fm_dev in $_fm_devs; do
-        _fm_pre=$(mktemp "${TMPDIR:-/tmp}/debian-fde-fin-pre.XXXXXX") ||
-            die "finalize: mktemp failed"
-        token_dump "$_fm_dev" "$_fm_pre"
-        if fin_recovery_verifies "$_fm_dev" "$_fm_passfile"; then
-            info "finalize: $(basename "$_fm_dev"): the recovery passphrase already verifies — skipping the add (crash resume, §9.1)"
-        else
-            # subshell: the token.sh mutators die fail-closed on cryptsetup
-            # failures — isolate them so THIS die (with the member context)
-            # fires instead of a bare set -e process exit
-            _fm_slot=$(token_free_slot "$_fm_dev")
-            (token_add_keyslot "$_fm_dev" "$_fm_passfile" "$_fm_slot" "$_fm_auth") ||
-                die "finalize: $(basename "$_fm_dev"): adding the recovery passphrase (next free keyslot $_fm_slot) failed (wrong existing-passphrase key file?) — state stays unfinalized; nothing else was changed (§9.1)"
-            info "finalize: $(basename "$_fm_dev"): permanent recovery passphrase set in keyslot $_fm_slot (Argon2id, §13)"
+    _fm_try=0
+    while :; do
+        _fm_try=$((_fm_try + 1))
+        _fm_pass=''
+        fin_read_recovery_passphrase _fm_pass
+        printf '%s' "$_fm_pass" >"$_fm_passfile"
+        unset _fm_pass 2>/dev/null || :
+        if fin_recovery_verifies "$_fm_first" "$_fm_passfile"; then
+            info "finalize: recovery passphrase verified against keyslot 0 (attempt $_fm_try) — authorizing the completion (§9.1)"
+            break
         fi
-        _fm_eph=$(fin_ephemeral_slot "$_fm_dev" "$_fm_pre" "$_fm_auth")
-        if [ -n "$_fm_eph" ]; then
-            # the kill is authorized by the NEW recovery passphrase: cryptsetup
-            # requires the authorizing credential to validate against a
-            # DIFFERENT keyslot than the one being killed
-            (token_kill_slot "$_fm_dev" "$_fm_eph" "$_fm_passfile") ||
-                die "finalize: $(basename "$_fm_dev"): purging the ephemeral install key (keyslot $_fm_eph) failed — the recovery passphrase IS set; fix and re-run (§9.1 crash idempotency)"
-            info "finalize: $(basename "$_fm_dev"): ephemeral install key purged (keyslot $_fm_eph)"
-        else
-            info "finalize: $(basename "$_fm_dev"): no ephemeral install key remains — skipping the purge (crash resume, §9.1)"
+        warn "finalize: the recovery passphrase does not verify against keyslot 0 (attempt $_fm_try/3)"
+        if [ "$_fm_try" -ge 3 ]; then
+            istate_attempt_write "guided finalize: recovery passphrase rejected after $_fm_try attempts"
+            die "finalize: the recovery passphrase does not verify against keyslot 0 (after $_fm_try attempts) — the passphrase set during the Stage-1 credential ceremony is required (§9.1; ADR-8 marker written)"
         fi
-        token_dump "$_fm_dev" "$_fm_pre"
-        _fm_stray=$(fin_stray_slots "$_fm_pre")
-        [ "${_fm_stray:-0}" -eq 0 ] ||
-            die "finalize: $(basename "$_fm_dev"): $_fm_stray unexpected passphrase slot(s) beyond the token-referenced slots — exactly ONE passphrase slot (the recovery slot) must remain beyond the sealed token (§9.1); manual intervention required"
-        rm -f "$_fm_pre"
     done
 
-    # --- STEP 2: encrypt release.pem (ADR-18; local operation) ---------------
-    # ALPINE_FDE_* is the canonical env spelling (§8.1); the passphrase is
-    # re-armed below for the token-upgrade's in-process re-sign fallback (the
-    # same-process seam keys_encrypt_release legitimately unsets).
+    # --- STEP 2: ensure release.pem is encrypted (ADR-18; local operation) -----
+    # The Stage-1 credential ceremony (§9.1 step 4, 3/3) already encrypted it:
+    # normally a crash-skip. Kept for pre-amendment installs.
     if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
         DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
     fi
@@ -374,83 +588,21 @@ cmd_finalize_main() {
     fi
     chmod 0400 "$_fm_keydir/release.pem" 2>/dev/null || :
 
-    # --- STEP 3: Secure Boot gate (READ-ONLY; §9.1 Stage 3) -------------------
-    # Verified boot with OUR keys, or no enrollment / audit / token mutation
-    # happens at all (§12 S-21): the volume stays protected by the recovery
-    # passphrase plus the standing provisional seal.
-    _fm_sb=$(fw_sb_state) || true
-    case $_fm_sb in
-        secureboot=1\ setup_mode=0\ *) : ;;
-        *)
-            die "finalize: Secure Boot is not enabled with your custom keys. Reboot into BIOS setup and toggle Secure Boot ON to complete trust finalization. (fw_sb_state: $_fm_sb — no enrollment, no wiping, no baseline capture; the volume remains safely locked)"
-            ;;
-    esac
-
-    # --- STEP 4: capture the baseline (audit --init; §9.1 Stage 3 step 3) -----
-    # A previous run's final baseline is reused as-is (crash between the audit
-    # and the token upgrade).
-    _fm_bl=$(sp_baseline_file)
-    [ -f "$_fm_bl" ] || die "finalize: no baseline at $_fm_bl — Stage 1 provisioning must write a pending baseline before finalization (§9.1)"
-    baseline_validate "$_fm_bl" || die "finalize: baseline invalid: $_fm_bl"
-    if baseline_is_final "$_fm_bl"; then
-        info "baseline already final — skipping audit --init (resumed finalization, §9.1 crash idempotency)"
-    else
-        info "finalizing the baseline from live values (audit --init, §9.1 Stage 3)"
-        cmd_audit_main --init
-    fi
-
-    # --- STEP 5: upgrade the token to Mechanism B {PCR 7, PCR 11} -------------
-    # per member (RAID1), via seal_upgrade_token (crash-safe choreography: the
-    # provisional seal stays standing until the finalized one does). A standing
-    # {7,11} token skips (crash resume; zero TPM operations).
-    [ -f "$_fm_keydir/release.pub" ] || die "finalize: release public key not found: $_fm_keydir/release.pub"
-    _fm_stage=$(mktemp -d "$_fm_tmpdir/debian-fde-fin.XXXXXX") ||
-        die "finalize: cannot create the staging directory in $_fm_tmpdir"
-    chmod 700 "$_fm_stage"
-    # re-arm the release-key passphrase for the in-process re-sign fallback
-    # (§9.4; keys_encrypt_release unsets it after step 2) — same process, no
-    # new exposure
+    # --- STEP 3..8: the shared completion chain (§9.1 Stage 2 == Stage 3) ------
+    # SB guard -> audit --init -> token upgrade {PCR 7, PCR 11} per member ->
+    # ephemeral keyslot purge per member -> banner clear -> state finalized.
+    # The in-process re-sign fallback (§9.4) re-uses the release-key
+    # passphrase staged above (same process, no new exposure).
     if [ -n "$_fm_keypass" ] && [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ]; then
         DEBIAN_FDE_KEY_PASSPHRASE=$_fm_keypass
     fi
-    if [ -n "${DEBIAN_FDE_PCRSIG:-}" ]; then
-        _fm_pcrsig=$DEBIAN_FDE_PCRSIG
-    else
-        _fm_pcrsig=$(enrl_sign_pcrsig "$_fm_stage" "$_fm_keydir") ||
-            die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — DEBIAN_FDE_PCRSIG or the keydir release.pem is required (§9.1 Stage 3)"
-    fi
-    for _fm_uuid in $_fm_members; do
-        _fm_dev="$(enrl_by_uuid_dir)/$_fm_uuid"
-        _fm_cur=$(mktemp "${TMPDIR:-/tmp}/debian-fde-fin-cur.XXXXXX") ||
-            die "finalize: mktemp failed"
-        token_dump "$_fm_dev" "$_fm_cur"
-        _fm_pcrs=$(fin_token_pcrs "$_fm_cur")
-        rm -f "$_fm_cur"
-        if [ "$_fm_pcrs" = "[7,11]" ]; then
-            info "finalize: member $_fm_uuid: token already {PCR 7, PCR 11} — skipping the upgrade (crash resume, zero TPM operations)"
-        else
-            # subshell isolation: same rationale as the step-1 mutators
-            if ! (seal_upgrade_token "$_fm_keydir" "$_fm_dev" "$_fm_pcrsig" \
-                "$_fm_stage/token-$_fm_uuid.json" "$_fm_passfile"); then
-                die "finalize: token upgrade failed for member $_fm_uuid — install state stays unfinalized; the provisional seal remains standing; fix the cause and re-run finalize (§9.1 crash idempotency)"
-            fi
-            printf 'debian-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \
-                "$_fm_uuid" >&2
-        fi
-    done
-    rm -rf "$_fm_stage"
-    unset DEBIAN_FDE_KEY_PASSPHRASE 2>/dev/null || :
+    _fm_stage=$(mktemp -d "$_fm_tmpdir/debian-fde-fin.XXXXXX") ||
+        die "finalize: cannot create the staging directory in $_fm_tmpdir"
+    chmod 700 "$_fm_stage"
+    fin_completion_steps "$_fm_passfile"
 
-    # --- STEP 6: clear the unfinalized MOTD/issue banner (§9.1 Stage 3 step 4)
-    _fm_root=${DEBIAN_FDE_ROOT:-}
-    fde_motd_strip "${_fm_root}/etc/motd"
-    fde_motd_strip "${_fm_root}/etc/issue"
-    info "finalize: unfinalized MOTD/issue banner cleared"
-
-    # --- STEP 7: the state transition is the LAST mutation (§9.1) -------------
-    istate_write finalized
-
-    # --- audit summary + §9.1 off-machine backup prompt -----------------------
+    # --- audit summary + §9.1 off-machine backup prompt (guided only) ----------
+    _fm_bl=$(sp_baseline_file)
     printf 'debian-fde: audit summary: baseline %s: expected_pcr7=%s secureboot=%s setup_mode=%s\n' \
         "$_fm_bl" \
         "$(baseline_get "$_fm_bl" expected_pcr7)" \

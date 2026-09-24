@@ -62,7 +62,7 @@ assert_contains "qemu_argv: per-scenario vars pflash" "$ARGV" \
     "if=pflash,format=raw,file=$WORK/argv/vars.fd"
 assert_contains "qemu_argv: swtpm ctrl-socket tpmdev" "$ARGV" \
     "socket,id=chrtpm,path=$WORK/argv/tpm/sock.ctrl"
-assert_contains "qemu_argv: tpm-tis device" "$ARGV" "tpm-tis,tpmdev=tpm0"
+assert_contains "qemu_argv: tpm-crb device (tpm-tis hits qemu 11.1 completion-BH stranding: ~1.2s/command firmware phase)" "$ARGV" "tpm-crb,tpmdev=tpm0"
 assert_not_contains "qemu_argv: TCG argv carries no -accel flag" "$ARGV" "-accel"
 DRIVES=$(sed -n 's/^file=\(.*\),format=raw,if=virtio$/\1/p' <<<"$ARGV" | tr '\n' ' ')
 assert_eq "qemu_argv: virtio drive order == documented map vda..vde (2 extra drives)" \
@@ -98,6 +98,29 @@ PCRSIG=$(cat "$WORK/run/uki-pcrsig.json" 2>/dev/null)
 assert_contains "uki: pcrsig covers bank sha256" "$PCRSIG" '"sha256"'
 assert_contains "uki: pcrsig covers PCR 11" "$PCRSIG" '"pcrs": [11]'
 assert_contains "uki: pcrsig carries signature" "$PCRSIG" '"sig"'
+# G-B6 self-consistency (2026-09-24, s19/s20 registry red): the build's
+# enter-initrd prediction must equal a pcrsign-style re-measure of the SAME
+# components it leaves on disk. ukify needs the @file form for --os-release:
+# a bare value is embedded/measured as the LITERAL PATH STRING, so the
+# prediction diverged from every @-form consumer (pcrsign, the hook) by one
+# section. Also pins the embedded .osrel to the real file content.
+if [ -s "$WORK/run/pcr11-enter-initrd.txt" ]; then
+    _smoke_pred=$(cat "$WORK/run/pcr11-enter-initrd.txt")
+    _smoke_re=$(ukify build --measure --json=short --pcr-banks=sha256 --phases=enter-initrd \
+        --pcr-private-key="$WORK/uki-keys/db.key" \
+        --linux="$WORK/run/guest-tree/vmlinuz" --initrd="$WORK/run/initrd.cpio" \
+        --cmdline="@$WORK/run/cmdline.txt" --os-release="@$WORK/run/os-release.txt" 2>/dev/null \
+        | jq -r '.sha256[] | select(.phase == "enter-initrd") | .hash')
+    assert_eq "uki: build prediction == pcrsign-style re-measure (@-form inputs)" \
+        "$_smoke_pred" "$_smoke_re"
+else
+    assert_eq "uki: build prediction == pcrsign-style re-measure (@-form inputs)" \
+        "prediction-file" "missing"
+fi
+objcopy -O binary --only-section=.osrel "$WORK/run/uki-pcrsigned.efi" \
+    "$WORK/run/osrel.bin" 2>/dev/null
+assert_eq "uki: embedded .osrel is the real os-release content (not a literal path)" \
+    "$(cat "$WORK/run/os-release.txt")" "$(cat "$WORK/run/osrel.bin" 2>/dev/null)"
 # sbverify: the outer signature validates against our release cert
 if sbverify --list "$WORK/run/harness.efi" 2>&1 | grep -q "debian-fde-test-release"; then
     _assert_result ok "uki: sbverify shows release-cert signature" ""
@@ -144,6 +167,17 @@ assert_contains "initrd: 55-dm.rules present" "$CPIO" "usr/lib/udev/rules.d/55-d
 assert_contains "initrd: 60-persistent-storage.rules present" "$CPIO" \
     "usr/lib/udev/rules.d/60-persistent-storage.rules"
 assert_contains "initrd: release pub present" "$CPIO" "rel.pub"
+# Defect s15-1 (live boot 2026-09-21): /init started udevd but never ran the
+# coldplug replay, so no uevent ever reached the udev db AFTER boot —
+# /dev/disk/by-uuid for the payload disk never appeared, the unseal hook's
+# crypttab UUID= resolution found nothing on any member ("no systemd-tpm2
+# token found"), and every boot funneled into the recovery prompt / 3-strike.
+# The dracut pattern (trigger + settle) must be baked into the generated /init.
+INIT_TEXT=$(cat "$WORK/run/guest-tree/init")
+assert_contains "init: udev coldplug trigger (by-uuid resolution, dracut pattern)" \
+    "$INIT_TEXT" "udevadm trigger --type=devices --action=add"
+assert_contains "init: coldplug wait bounded (udevadm settle --timeout)" \
+    "$INIT_TEXT" "udevadm settle --timeout="
 # NOTE: pcrsig.json deliberately NOT in the initrd (would change its own
 # PCR prediction) — travels on the payload drive instead.
 assert_not_contains "initrd: no pcrsig.json (payload-drive design)" "$CPIO" "pcrsig.json"
@@ -260,6 +294,69 @@ if (( $? == 0 )); then
 else
     _assert_result not-ok "serial: read_until matches sentinel" "python read_until failed"
 fi
+
+# --- swtpm fixture: simplified (proxy-less) between-boots design ------------------
+# swtpm binds the PUBLIC sockets DIRECTLY (no ctrl/data proxy — retired and
+# deleted; see tests/README.md's data-loop-stall section). qemu's tpm-emulator
+# sends CMD_SHUTDOWN over the CONTROL socket at its clean exit (swtpm answers
+# success and marks itself shut-down) and then closes both chardevs; swtpm
+# exits on the EOF. swtpm_ensure restarts the stack FRESH (startup-clear, all
+# PCRs zero) and the scenarios reseed the booted registers with
+# swtpm_seed_pcrs (d7 from the console, d11 from the build prediction) —
+# digest-anchored sealing needs no stored live state.
+source "$TESTS/lib/swtpm-fixture.sh"
+if swtpm_start "$WORK/tpm-u"; then
+    _assert_result ok "swtpm: fixture start (direct sockets, no proxy)" ""
+else
+    _assert_result not-ok "swtpm: fixture start (direct sockets, no proxy)" \
+        "swtpm_start failed"
+fi
+MARKER=$(printf 's15-2-marker' | sha256sum | awk '{print $1}')
+MARKER11=$(printf 's15-2-d11' | sha256sum | awk '{print $1}')
+swtpm_pcrextend "$WORK/tpm-u" 7 "$MARKER"
+PCR_BEFORE=$(swtpm_pcrread "$WORK/tpm-u" 7)
+assert_ne "swtpm: pcrextend changed PCR 7 (on the direct sockets)" \
+    "0000000000000000000000000000000000000000000000000000000000000000" "$PCR_BEFORE"
+# fake-qemu client: send CMD_SHUTDOWN over the ctrl socket exactly the way
+# qemu's clean exit does; stock swtpm must answer success itself.
+python3 - "$WORK/tpm-u/sock.ctrl" <<'PYEOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.sendall((0x00000003).to_bytes(4, "big"))
+reply = s.recv(4)
+s.close()
+sys.exit(0 if reply == b"\x00\x00\x00\x00" else 1)
+PYEOF
+assert_eq "swtpm: swtpm answers the fake-qemu CMD_SHUTDOWN with success" "0" "$?"
+# the real qemu exit then closes the chardevs and swtpm exits on the EOF;
+# terminate it directly here — same dead-stack precondition for swtpm_ensure
+for _ in $(seq 1 50); do
+    kill -0 "$(cat "$WORK/tpm-u/pid" 2>/dev/null)" 2>/dev/null || break
+    sleep 0.1
+done
+kill -9 "$(cat "$WORK/tpm-u/pid" 2>/dev/null)" 2>/dev/null
+rm -f "$WORK/tpm-u/pid"
+if swtpm_ensure "$WORK/tpm-u"; then
+    _assert_result ok "swtpm: swtpm_ensure restarts the stack after the EOF-exit" ""
+else
+    _assert_result not-ok "swtpm: swtpm_ensure restarts the stack after the EOF-exit" \
+        "restart failed"
+fi
+assert_eq "swtpm: restart left PCRs ZEROED (scenarios reseed via swtpm_seed_pcrs)" \
+    "0000000000000000000000000000000000000000000000000000000000000000" \
+    "$(swtpm_pcrread "$WORK/tpm-u" 7)"
+swtpm_seed_pcrs "$WORK/tpm-u" "$MARKER" "$MARKER11"
+# pcrextend CONCATENATES: a zeroed PCR becomes sha256(0x00*32 || digest)
+assert_eq "swtpm: swtpm_seed_pcrs reseeds the booted registers (d7 + d11)" \
+    "$(python3 -c "
+import hashlib
+for m in ('$MARKER', '$MARKER11'):
+    print(hashlib.sha256(bytes(32) + bytes.fromhex(m)).hexdigest())" | paste -sd'|')" \
+    "$(swtpm_pcrread "$WORK/tpm-u" 7)|$(swtpm_pcrread "$WORK/tpm-u" 11)"
+swtpm_stop "$WORK/tpm-u"
+RC=$(swtpm_pcrread "$WORK/tpm-u" 7 >/dev/null 2>&1; echo $?)
+assert_ne "swtpm: swtpm_stop really stopped the stack" "0" "$RC"
 
 # --- scenario registry completeness vs the §10/§12 matrix -------------------------
 # The registry in run-e2e.sh must declare the FULL §10/§12 matrix: a dropped

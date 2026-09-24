@@ -229,7 +229,14 @@ assert_eq "token pubkey is the b64 DER of release.pub" "$DER" "$(jq -r '.["tpm2-
 assert_eq "passphrase staged under DEBIAN_FDE_TMPDIR (I1)" "1" \
     "$(case $SEAL_PASS_FILE in "$TMP/tmp"/*) echo 1;; *) echo 0;; esac)"
 assert_eq "passphrase file mode 600" "600" "$(stat -c %a "$SEAL_PASS_FILE")"
-assert_eq "passphrase is >= 256-bit (64 hex chars)" "64" "$(tr -d '\n' <"$SEAL_PASS_FILE" | wc -c)"
+# FRAMING (ADR-19): the staged credential is base64(48 raw random bytes) —
+# 64 canonical base64 chars, the exact form upstream's token plugin hands to
+# cryptsetup ("Before using this key as passphrase we base64 encode it")
+assert_eq "passphrase is exactly 64 bytes (base64 of 48 raw, no newline)" "64" "$(wc -c <"$SEAL_PASS_FILE")"
+assert_eq "passphrase is canonical base64" "yes" \
+    "$(tr -d '\n' <"$SEAL_PASS_FILE" | grep -qE '^[A-Za-z0-9+/]{64}$' && echo yes || echo no)"
+assert_eq "passphrase decodes to 48 raw bytes (384-bit secret)" "48" \
+    "$(openssl base64 -d -A <"$SEAL_PASS_FILE" 2>/dev/null | wc -c)"
 assert_eq "approved policy digest pinned == fixture pol" "$POL11" "$SEAL_POL"
 assert_eq "SEAL_MODE" "provisional" "$SEAL_MODE"
 PROV_PASS_FILE=$SEAL_PASS_FILE
@@ -242,8 +249,11 @@ tpm loadexternal -C n -G rsa -u "$KEYDIR/release.pub" -c "$TMP/nul.ctx" -n "$TMP
 flushall
 raw_unseal "$TOK11" 11 "$TMP/msg11.bin" "$TMP/sig11.bin" "$TMP/name.bin" "$TMP/unsealed.txt"
 assert_rc "raw tpm2_unseal of the token blob succeeds under {11} session" 0 $?
-assert_eq "unsealed bytes == staged random volume passphrase" \
-    "$(cat "$SEAL_PASS_FILE")" "$(cat "$TMP/unsealed.txt")"
+# the blob seals the RAW secret; the staged file is base64(raw) — the ADR-19
+# framing contract, proven at the TPM level here
+assert_eq "RAW unsealed bytes == base64-decode of the staged passphrase" \
+    "$(openssl base64 -d -A <"$SEAL_PASS_FILE" | od -An -v -tx1 | tr -d ' \n')" \
+    "$(od -An -v -tx1 <"$TMP/unsealed.txt" | tr -d ' \n')"
 
 # lib-level unseal helper round-trips too
 seal_unseal "$KEYDIR" "$TMP/pcrsig-11.json" provisional "$TOK11" "$TMP/unsealed2.txt"
@@ -260,8 +270,9 @@ assert_eq "finalized approved digest == policy_digest(d7_live, d11_live)" "$POL7
 assert_eq "finalized keyslot != 0" "1" "$SEAL_SLOT"
 raw_unseal "$TOK711" 7,11 "$TMP/msg711.bin" "$TMP/sig711.bin" "$TMP/name.bin" "$TMP/unsealed-fin.txt"
 assert_rc "raw tpm2_unseal of the finalized blob succeeds under {7,11} session" 0 $?
-assert_eq "finalized unseal bytes == its staged passphrase" \
-    "$(cat "$SEAL_PASS_FILE")" "$(cat "$TMP/unsealed-fin.txt")"
+assert_eq "finalized RAW unseal bytes == base64-decode of its staged passphrase" \
+    "$(openssl base64 -d -A <"$SEAL_PASS_FILE" | od -An -v -tx1 | tr -d ' \n')" \
+    "$(od -An -v -tx1 <"$TMP/unsealed-fin.txt" | tr -d ' \n')"
 
 # --- 5. G-B6: enroll-side signature rejection — die 64, NOTHING written --------------------
 NW=$TMP/neg-token.json

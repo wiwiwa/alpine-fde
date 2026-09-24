@@ -234,9 +234,47 @@ cmd_pcrsign_main() {
         done
     fi
 
+    # --- key unlock BEFORE the measure step (ukify >= 261 requires a
+    # --pcr-private-key for every --phases= specification, even for a pure
+    # prediction: "ValueError: --phases= specifications must match
+    # --pcr-private-key="). The prediction .hash is key-independent, but the
+    # key must be a VALID private key (ukify runs systemd-keyutil on it) — so
+    # this is the SAME unlocked release key the signature step uses below
+    # (unlocked once, here; registry 2026-09-23: s19/s20 pcrsign-711 died on
+    # the ValueError before ever signing).
+    _ps_tmp=''
+    _ps_keydir=$(keys_dir)
+    # ADR-18 + §11 I4: route the private key through the SAME unlock seam as
+    # enrl_sign_pcrsig (lib/cmd/enroll-tpm.sh) and the ukictl hook — the keydir
+    # release.pem may be the encrypted-at-rest form, and signing with the raw
+    # ciphertext would simply fail (or worse, bypass custody). ALPINE_FDE_KEY_
+    # PASSPHRASE is the canonical credential-agent env spelling (§8.1); keys_
+    # unlock consumes DEBIAN_FDE_KEY_PASSPHRASE (the finalize.sh mapping).
+    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
+    fi
+    _ps_had_pass=0
+    [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && _ps_had_pass=1
+    # command substitution: a die inside keys_unlock (missing/wrong passphrase)
+    # exits THAT subshell 64 — its stderr is already loud; persist the ADR-8
+    # marker, leave NO signature artifact and scrub _ps_work/_ps_tmp (S-L1).
+    # The env-provided vs. absent passphrase distinguishes wrong-passphrase
+    # from missing-passphrase in the marker.
+    _ps_priv=$(keys_unlock "$_ps_keydir") || {
+        rm -rf "$_ps_work"
+        rm -f "${_ps_tmp:-}"
+        if [ "$_ps_had_pass" = 1 ]; then
+            _pcrsign_marker_write "release.pem unlock FAILED: wrong passphrase — no signature written (ADR-8/ADR-18/I4)"
+            die "pcrsign: wrong passphrase for $_ps_keydir/release.pem (unlock failed) — no signature written (ADR-8/ADR-18)"
+        fi
+        _pcrsign_marker_write "release.pem is encrypted and no passphrase is available (ADR-18) — no signature written (ADR-8)"
+        die "pcrsign: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE / DEBIAN_FDE_KEY_PASSPHRASE or run interactively — no signature written (ADR-8/ADR-18)"
+    }
+
     if command -v ukify >/dev/null 2>&1; then
         # shellcheck disable=SC2086  # deliberate word split over the arg list
         if ! ukify build --measure --json=short --pcr-banks=sha256 --phases=enter-initrd \
+            --pcr-private-key="$_ps_priv" \
             $_ps_args >"$_ps_work/measure.json" 2>"$_ps_work/measure.err"; then
             _ps_err=$(tail -n 2 "$_ps_work/measure.err" 2>/dev/null || true)
             rm -rf "$_ps_work"
@@ -266,33 +304,8 @@ cmd_pcrsign_main() {
         rm -rf "$_ps_work"
         die "pcrsign: mktemp failed"
     }
-    _ps_keydir=$(keys_dir)
-    # ADR-18 + §11 I4: route the private key through the SAME unlock seam as
-    # enrl_sign_pcrsig (lib/cmd/enroll-tpm.sh) and the ukictl hook — the keydir
-    # release.pem may be the encrypted-at-rest form, and signing with the raw
-    # ciphertext would simply fail (or worse, bypass custody). ALPINE_FDE_KEY_
-    # PASSPHRASE is the canonical credential-agent env spelling (§8.1); keys_
-    # unlock consumes DEBIAN_FDE_KEY_PASSPHRASE (the finalize.sh mapping).
-    if [ -z "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && [ -n "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
-        DEBIAN_FDE_KEY_PASSPHRASE=$ALPINE_FDE_KEY_PASSPHRASE
-    fi
-    _ps_had_pass=0
-    [ -n "${DEBIAN_FDE_KEY_PASSPHRASE:-}" ] && _ps_had_pass=1
-    # command substitution: a die inside keys_unlock (missing/wrong passphrase)
-    # exits THAT subshell 64 — its stderr is already loud; persist the ADR-8
-    # marker, leave NO signature artifact and scrub _ps_work/_ps_tmp (S-L1).
-    # The env-provided vs. absent passphrase distinguishes wrong-passphrase
-    # from missing-passphrase in the marker.
-    _ps_priv=$(keys_unlock "$_ps_keydir") || {
-        rm -rf "$_ps_work"
-        rm -f "$_ps_tmp"
-        if [ "$_ps_had_pass" = 1 ]; then
-            _pcrsign_marker_write "release.pem unlock FAILED: wrong passphrase — no signature written (ADR-8/ADR-18/I4)"
-            die "pcrsign: wrong passphrase for $_ps_keydir/release.pem (unlock failed) — no signature written (ADR-8/ADR-18)"
-        fi
-        _pcrsign_marker_write "release.pem is encrypted and no passphrase is available (ADR-18) — no signature written (ADR-8)"
-        die "pcrsign: release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE / DEBIAN_FDE_KEY_PASSPHRASE or run interactively — no signature written (ADR-8/ADR-18)"
-    }
+    # (_ps_keydir/_ps_priv: unlocked above, before the measure step — ukify >= 261
+    # needs a valid --pcr-private-key alongside --phases= even for a prediction)
     # subshell: a die inside policy_sign_json (corrupt key material) must not
     # strand the decrypted key copy (I4) nor _ps_work/_ps_tmp (S-L1)
     if ! (policy_sign_json "$_ps_d7" "$_ps_d11" "$_ps_priv" \

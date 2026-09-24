@@ -86,7 +86,10 @@ mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux" "$FAKEBIN" "$BYUUI
     "$KEYDIR" "$TMP/shm" "$TMP/swtpm"
 
 # --- hermetic release keys (shared fixtures tree is mutated by parallel suites)
-openssl genrsa -out "$KEYDIR/release.pem" 2048 2>/dev/null
+# ADR-16: the release key must be RSA >= 3072 — the enroll path fail-closes rc 2
+# otherwise (keys_rsa3072_guard, lib/cmd/enroll-tpm.sh), so the fixture mints a
+# 3072-bit key.
+openssl genrsa -out "$KEYDIR/release.pem" 3072 2>/dev/null
 openssl pkey -in "$KEYDIR/release.pem" -pubout -out "$KEYDIR/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$KEYDIR/release.pem" -out "$KEYDIR/release.crt" \
     -subj /CN=debian-fde-enroll-wire-ci 2>/dev/null

@@ -157,8 +157,14 @@ assert_eq "no reboot record (DEBIAN_FDE_INSTALL_NO_REBOOT=1 CI seam)" "0" \
     "$(grep -c '^# HOST: reboot' "$SCRIPT")"
 assert_eq "G-C26: NO OsIndications record in either lane" "0" \
     "$(grep -c 'fw_osindications_set' "$SCRIPT")"
-assert_not_contains "ADR-20: keys_encrypt_release retired from Stage 1" "$(cat "$SCRIPT")" \
-    "keys_encrypt_release"
+# ADR-20 amended (§9.1 step 4): release.pem encryption lives in the INTERACTIVE
+# in-chroot credential ceremony (inst_ceremony_release_key -> keys_encrypt_release,
+# ADR-18) — Stage 1 must carry NO EXECUTABLE keys_encrypt_release invocation (the
+# name may appear only inside inert ceremony-record comments naming the ADR-18
+# mechanism). Docs: §9.1 step 4, T2c, ADR-18/ADR-20 ("encrypted ... in Stage 1
+# before reboot" — via the ceremony).
+assert_eq "ADR-20: NO executable keys_encrypt_release in Stage 1 (ceremony-owned, ADR-18)" "0" \
+    "$(grep -c '^[^#]*keys_encrypt_release' "$SCRIPT")"
 # G-C7: the tooling tree lands at /opt/alpine-fde (§8.1/§12) — the OLD
 # /opt/debian-fde spelling must not survive anywhere in the emitted plan.
 assert_not_contains "G-C7: NO /opt/debian-fde anywhere in the emitted qemu script" \

@@ -1,16 +1,30 @@
 #!/sbin/openrc-run
-# alpine-fde-finalize — first-boot ADVISORY oneshot (§9.1 step 7; ADR-20).
+# alpine-fde-finalize — first-boot AUTO-FINALIZER oneshot (§9.1 Stage 2 step 1-5;
+# ADR-20 amended).
 #
-# ADR-20 Stage 3 makes `alpine-fde finalize` a GUIDED command: the operator
-# runs it after enabling Secure Boot. This boot-time artifact NEVER runs the
-# command, NEVER enrolls, NEVER wipes, NEVER blocks boot — rc 0 ALWAYS. When
-# the install state is not yet `finalized` it only prints the read-only
-# Secure Boot state (fw_sb_state) and the finalize guidance.
+# ADR-20 amended makes the first boot complete trust finalization AUTOMATICALLY
+# (never the operator): when the install state is provisional
+# (installed | provisional-booted) and the final Secure Boot state holds
+# (secureboot=1 AND setup_mode=0, read-only guard) this service runs the
+# NON-INTERACTIVE completion fin_service_main (lib/cmd/finalize.sh):
+#   guarded baseline capture (audit --init)
+#   -> token upgrade to Mechanism B {PCR 7, PCR 11} per member (authorized by
+#      RE-UNSEALING the standing provisional token in userspace — never a
+#      stored credential)
+#   -> temporary ephemeral install keyslot purge per member
+#   -> MOTD/issue banner clear -> state `finalized` written LAST.
+#
+# NEVER blocks boot: on the SB-guard failing, on ANY completion step failing, or
+# on any missing/corrupt state or library, it prints the ADR-8 advisory warning
+# (when unfinalized), leaves the state untouched and exits 0 — the next boot
+# retries (§9.1: "any step failure => stay provisional, warn loudly, exit 0,
+# retry next boot"). state `finalized` is silent and idempotent. The GUIDED
+# crash-resume entry point remains `alpine-fde finalize` (Stage 3).
 #
 # Install: copied to /etc/init.d/ and enabled via
 # `rc-update add alpine-fde-finalize default` (Stage 1 step 7).
 
-description="Advisory: Alpine FDE trust finalization pending (run: alpine-fde finalize)"
+description="Alpine FDE first-boot trust auto-finalization (ADR-20 amended, §9.1 Stage 2)"
 
 depend() {
     need localmount
@@ -23,29 +37,67 @@ start() {
         DEBIAN_FDE_CMD_DIR=$_aff_dir
         # shellcheck disable=SC1090
         . "$_aff_lib/install-state.sh"
-        if [ -r "$_aff_lib/firmware.sh" ]; then
-            # shellcheck disable=SC1090
-            . "$_aff_lib/firmware.sh"
-        fi
     fi
-    if command -v istate_is_finalized >/dev/null 2>&1 &&
-        istate_is_finalized >/dev/null 2>&1; then
-        return 0
-    fi
-    _aff_state=unknown
-    if command -v istate_state >/dev/null 2>&1; then
-        _aff_state=$(istate_state 2>/dev/null)
-        [ -n "$_aff_state" ] || _aff_state=unknown
-    fi
-    _aff_sb='secureboot=? setup_mode=? pk=?'
+    # degrade-safe: no state machine => nothing to do, boot unblocked
+    command -v istate_state >/dev/null 2>&1 || return 0
+    _aff_state=$(istate_state 2>/dev/null)
+    case $_aff_state in
+        finalized) return 0 ;;              # idempotent: silent no-op
+        installed | provisional-booted) : ;;
+        *) return 0 ;;                      # missing/corrupt: degrade safe
+    esac
+
+    # --- read-only final Secure Boot guard (§9.1 Stage 2 step 1) ---------------
+    # Under an unverified boot NOTHING is enrolled, captured, upgraded or
+    # purged: stay provisional, warn, retry next boot (§12 S-21).
+    _aff_sb='unreadable'
     if command -v fw_sb_state >/dev/null 2>&1; then
         _aff_sb=$(fw_sb_state 2>/dev/null || true)
-        [ -n "$_aff_sb" ] || _aff_sb='secureboot=? setup_mode=? pk=?'
+    fi
+    case $_aff_sb in
+        secureboot=1\ setup_mode=0\ *) : ;;
+        *)
+            command -v istate_attempt_write >/dev/null 2>&1 &&
+                istate_attempt_write "service: SB guard failed ($_aff_sb) — staying provisional, retry next boot"
+            printf '%s\n' \
+                "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+                "Secure Boot guard failed: $_aff_sb" \
+                "Enable Secure Boot in BIOS setup; the first-boot service will retry on the next boot," \
+                "or complete it manually with: alpine-fde finalize" \
+                >&2
+            return 0
+            ;;
+    esac
+
+    # --- the non-interactive completion (lib/cmd/finalize.sh) ------------------
+    # Sourced (not executed) so the completion runs in the service's own
+    # failure-contained shell; DEBIAN_FDE_FINALIZE_LOADED guards double-load
+    # (and provides the test seam). A completion failure is mapped to the loud
+    # advisory + attempt marker (written by fin_service_main) + exit 0.
+    if [ -z "${DEBIAN_FDE_FINALIZE_LOADED:-}" ]; then
+        if [ -r "$_aff_dir/finalize.sh" ]; then
+            # shellcheck disable=SC1090
+            . "$_aff_dir/finalize.sh"
+        else
+            command -v istate_attempt_write >/dev/null 2>&1 &&
+                istate_attempt_write "service: finalize.sh missing at $_aff_dir"
+            printf '%s\n' \
+                "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+                "The completion implementation is missing ($_aff_dir/finalize.sh) —" \
+                "the service will retry on the next boot, or run: alpine-fde finalize" \
+                >&2
+            return 0
+        fi
+    fi
+    if command -v fin_service_main >/dev/null 2>&1 && fin_service_main; then
+        return 0
     fi
     printf '%s\n' \
         "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
-        "Secure Boot: $_aff_sb" \
-        "The permanent recovery passphrase has not been set yet; the disk unlocks" \
-        "via the provisional seal. Run: alpine-fde finalize"
+        "First-boot finalization FAILED (see the messages above; details in" \
+        "$(command -v istate_attempt_read >/dev/null 2>&1 && istate_attempt_read 2>/dev/null || echo 'the finalize-attempt marker'))." \
+        "The volume stays safely locked under the provisional seal; the service will retry on the next boot," \
+        "or complete it manually with: alpine-fde finalize" \
+        >&2
     return 0
 }

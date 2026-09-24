@@ -75,6 +75,112 @@ if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     echo "run-e2e: invalid job count '$JOBS' (-j / DEBIAN_FDE_E2E_JOBS want an integer >= 1)" >&2
     exit 64
 fi
+# Duplicate ids on the command line are runner misuse, not a run mode: under
+# -j they fork twin boots of one scenario sharing a single "$id.out" capture
+# (silent log clobber — the aggregation JSON stays index-keyed and looks
+# fine), and sequentially they double-count rows. Reject loudly at the same
+# parse gate as -j (env-class exit 64), never mid-run.
+_reject_duplicate_ids() {
+    local -A _seen=()
+    local _id
+    for _id in "${REQUESTED[@]}"; do
+        if [[ -n "${_seen[$_id]:-}" ]]; then
+            echo "run-e2e: duplicate scenario id '$_id' (each id may be requested at most once)" >&2
+            exit 64
+        fi
+        _seen[$_id]=1
+    done
+}
+_reject_duplicate_ids
+
+# --- registry TMPDIR on disk-backed storage (tmpfs-full incident, 2026-09-22) ----
+# Each scenario's ukify intermediates are ~850 MB; under -j N a parallel wave
+# can need N x 850 MB of scratch, and a registry whose TMPDIR lands on a small
+# tmpfs (9.8 GB here) dies catastrophically mid-run when it fills. So the
+# registry pins TMPDIR to a disk-backed /var/tmp/dfde-e2e-<ts> dir it creates
+# and removes on EXIT. A pre-existing TMPDIR is honored ONLY if its filesystem
+# already has the floor free; otherwise it is overridden, loudly. Less than
+# the floor on the fallback filesystem is a fail-closed exit-64 (ADR-8: loud
+# environment failure, never a half-run).
+E2E_TMP_MIN_FREE_MB="${DEBIAN_FDE_E2E_TMP_MIN_FREE_MB:-8192}"
+E2E_TMPDIR_CREATED=""
+_e2e_tmpdir_free_mb() { df -Pm "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
+_registry_tmpdir_teardown() {
+    # EXIT pass: ONLY the dir this registry created — never a process sweep
+    # (at abnormal-exit time this registry's scenarios may still own live
+    # boots; stale-process hygiene belongs to the START sweep below).
+    [[ -n "$E2E_TMPDIR_CREATED" ]] || return 0
+    bash "$TESTS/lib/harness-cleanup.sh" registry-exit 2>/dev/null \
+        || rm -rf "$E2E_TMPDIR_CREATED"
+    E2E_TMPDIR_CREATED=""
+}
+
+# --- run-dir disk hygiene (registry-owned) -----------------------------------------
+# Per-scenario best-effort pruning cannot keep .runs small (it dies with the
+# scenario on SIGKILL and races under -j), so the REGISTRY prunes .runs itself:
+# after EVERY scenario completes, and once more on the abort path. The rule set
+# lives in harness-cleanup.sh `prune-runs` (newest 2 per scenario-prefix, 8 GB
+# total cap shrinking to 6 GB oldest-first); its 10-minute in-flight guard is
+# what makes both call sites safe against concurrent/agent runs.
+_registry_pruned=0
+_prune_runs_quiet() {
+    bash "$TESTS/lib/harness-cleanup.sh" prune-runs 2>/dev/null || true
+}
+_registry_final_pass() {
+    # Once-only (EXIT + INT/TERM can both fire): the in-flight guard makes the
+    # extra prune safe, but not free — run it exactly once.
+    ((_registry_pruned)) && { _registry_tmpdir_teardown; return 0; }
+    _registry_pruned=1
+    _prune_runs_quiet
+    _registry_tmpdir_teardown
+}
+trap '_registry_final_pass' EXIT
+trap '_registry_final_pass; trap - INT; kill -INT $$' INT
+trap '_registry_final_pass; trap - TERM; kill -TERM $$' TERM
+_registry_tmpdir_setup() {
+    local free cand
+    if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
+        free=$(_e2e_tmpdir_free_mb "$TMPDIR")
+        if [[ -n "$free" ]] && ((free >= E2E_TMP_MIN_FREE_MB)); then
+            echo "# run-e2e: honoring TMPDIR=$TMPDIR (${free} MB free >= ${E2E_TMP_MIN_FREE_MB})"
+            return 0
+        fi
+        echo "run-e2e: WARNING: TMPDIR=$TMPDIR has ${free:-unknown} MB free (< ${E2E_TMP_MIN_FREE_MB} MB) — overriding with a disk-backed registry TMPDIR" >&2
+    fi
+    cand="/var/tmp/dfde-e2e-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if ! mkdir -p "$cand" || [[ ! -w "$cand" ]]; then
+        echo "run-e2e: cannot create writable registry TMPDIR $cand" >&2
+        exit 64
+    fi
+    E2E_TMPDIR_CREATED="$cand"
+    free=$(_e2e_tmpdir_free_mb "$cand")
+    if [[ -z "$free" ]] || ((free < E2E_TMP_MIN_FREE_MB)); then
+        echo "run-e2e: registry TMPDIR $cand sits on a filesystem with ${free:-unknown} MB free — need >= ${E2E_TMP_MIN_FREE_MB} MB" >&2
+        echo "  (each parallel scenario's ukify intermediates are ~850 MB; free up /var/tmp" >&2
+        echo "   or lower the floor via DEBIAN_FDE_E2E_TMP_MIN_FREE_MB at your own risk)" >&2
+        E2E_TMPDIR_CREATED=""
+        rmdir "$cand" 2>/dev/null
+        exit 64
+    fi
+    export TMPDIR="$cand"
+    export DEBIAN_FDE_E2E_TMPDIR="$cand"   # consumed by harness-cleanup.sh registry-exit
+    echo "# run-e2e: registry TMPDIR=$TMPDIR (${free} MB free)"
+}
+_registry_tmpdir_setup
+
+# --- stale-process sweep (start of registry) --------------------------------------
+# A registry killed with SIGKILL leaks its whole tree (the traps never ran):
+# busy-loop spinners burning CPU for hours, orphaned swtpm/proxy/bridge sets.
+# Sweep harness leftovers BEFORE the first scenario (kill criteria in
+# tests/lib/harness-cleanup.sh; run dirs under tests/e2e/.runs younger than
+# 12 h are never touched, so a concurrent developer boot always survives).
+echo "== harness cleanup: stale-process sweep"
+if ! bash "$TESTS/lib/harness-cleanup.sh" sweep; then
+    echo "run-e2e: WARNING: stale-process sweep failed (continuing)" >&2
+fi
+# Disk state on the record BEFORE any scenario boots (.runs size is what the
+# per-scenario prune-runs pass keeps under the 8 GB cap).
+bash "$TESTS/lib/harness-cleanup.sh" disk-state
 
 # --- env gate ------------------------------------------------------------------
 if ! "$TESTS/env-check.sh"; then
@@ -124,6 +230,17 @@ if ! SWTPM_SMOKE_OUT=$(bash "$TESTS/unit/swtpm_fixture_smoke.sh" 2>&1); then
     exit 65
 fi
 printf '%s\n' "$SWTPM_SMOKE_OUT" | tail -1
+echo "== harness self-test: swtpm_proxy_data_plane"
+# G-E8b: the SIMPLIFIED direct-socket wiring — host commands, a live
+# qemu-style SET_DATAFD establishment straight into stock swtpm, and the
+# between-boots EOF-exit + restart discipline. A failure here means the
+# host-side TPM path or the between-boots reseeding contract is broken.
+if ! PROXY_PLANE_OUT=$(bash "$TESTS/unit/swtpm_proxy_data_plane.sh" 2>&1); then
+    printf '%s\n' "$PROXY_PLANE_OUT"
+    echo "run-e2e: HARNESS-FAILURE — swtpm proxy data-plane self-test failed (not a scenario failure)" >&2
+    exit 65
+fi
+printf '%s\n' "$PROXY_PLANE_OUT" | tail -1
 
 # --- scenario registry ----------------------------------------------------------
 # id <TAB> script-name <TAB> status-hint   (the RUNTIME status is derived from
@@ -215,7 +332,11 @@ _protect_all_runs() {
 
 # MD-05(b): outer wall-clock bound per scenario — one regression in a lib
 # must time the scenario out, never re-open the 8h-hang class for the run.
-SCENARIO_BUDGET="${DEBIAN_FDE_SCENARIO_BUDGET:-7200}"
+# Calibrated for the tpm-crb+kicker fast path: worst legitimate case is the
+# s00b from-scratch chain at ~907 s (build + 3 boots); 1500 s = ~1.6x margin.
+# (Consumers on the cached state run 40-260 s.) Was 7200 s from the slow
+# tpm-tis era — a hung scenario burned 2 h before the watchdog fired.
+SCENARIO_BUDGET="${DEBIAN_FDE_SCENARIO_BUDGET:-1500}"
 
 # --- selection -------------------------------------------------------------------
 # REQUESTED was built by _parse_args (ids only, -j stripped). Default: every
@@ -306,8 +427,17 @@ _run_one() {
     fi
     # MD-05(b): hard outer budget (status `timeout`); MD-05(a): an exit-0
     # scenario with zero assertions is a vacuous pass and fails here.
-    out=$(timeout --kill-after=30 "$SCENARIO_BUDGET" bash "$script" 2>&1)
+    # Output goes to a FILE, not a command-substitution pipe: scenarios spawn
+    # setsid-detached helpers (serial bridge, swtpm proxy, watchdog subshell)
+    # that inherit the pipe's write-end and can outlive the scenario — the
+    # registry would then block in anon_pipe_read forever waiting for an EOF
+    # that never comes (observed live: registry stuck after s19 2026-09-22).
+    # A file has no EOF semantics; we read it after the scenario settles.
+    out_log="$RESULTS.dir/$id.out"
+    mkdir -p "$RESULTS.dir"
+    timeout --kill-after=30 "$SCENARIO_BUDGET" bash "$script" >"$out_log" 2>&1
     rc=$?
+    out=$(cat "$out_log" 2>/dev/null)
     if (( rc == 124 )); then
         st=timeout
         # rc 124 is timeout(1)'s status, but the scenario ITSELF can also end
@@ -336,12 +466,14 @@ _run_one() {
 }
 
 # _print_done <index> — completion line for one scenario (its captured output
-# first, then the `== id: status (secs)` summary). Called on completion order
-# in parallel mode; the final JSON table below is REQUESTED-ordered.
+# first, then the `== id: status (secs)` summary), then the registry-owned
+# .runs prune. Called on completion order in parallel mode; the final JSON
+# table below is REQUESTED-ordered.
 _print_done() {
     local frag="${FRAG[$1]}"
     cat "${frag}.log"
     echo "== ${REQUESTED[$1]}: $(_frag_field status "$frag") ($(_frag_field seconds "$frag")s)"
+    _prune_runs_quiet   # in-flight guard in harness-cleanup.sh spares peers
 }
 
 # _run_seq <index> — sequential phase entry: launch line, run, completion line.
@@ -481,6 +613,19 @@ fi
     echo "  \"scenarios\": ["
     first=1
     for _i in "${!REQUESTED[@]}"; do
+        # A fragment a worker never wrote (subshell aborted before _frag_write,
+        # e.g. killed or hit ENOSPC) must NOT become an empty row: the comma at
+        # the previous iteration is already emitted, so silently `cat`ing an
+        # empty fragment produced a trailing comma + dropped row — malformed
+        # JSON (live: results-20260924T060251Z.RG7GyV.json, s22/s18). The
+        # schema's consumers parse this file; never write a malformed one.
+        # Loud internal error instead, and remove the zero-byte mktemp shell
+        # so no half artifact survives.
+        if [[ ! -s "${FRAG[$_i]}" ]] || ! grep -q '"id":' "${FRAG[$_i]}"; then
+            echo "run-e2e: internal error: missing/empty result fragment for ${REQUESTED[$_i]} (${FRAG[$_i]}) — refusing to write malformed JSON" >&2
+            rm -f "$RESULTS"
+            exit 70
+        fi
         ((first == 0)) && echo ","
         first=0
         row=$(cat "${FRAG[$_i]}")
