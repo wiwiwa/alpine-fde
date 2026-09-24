@@ -150,7 +150,17 @@ run_stage_impl() {
     local soft="$1" name="$2" tmo="$3"; shift 3
     _budget_check "$name"
     echo "# s20: stage $name (watchdog ${tmo}s)"
-    ( "$@" ) &
+    # Wave-2 2b overlay discipline (same hardening as s22): the stage
+    # subshell and its watchdog must NOT inherit the overlay lock fds
+    # (OVERLAY_LOCK_FDS) — a watchdog `sleep` orphan holding an inherited
+    # LOCK_SH copy deadlocks later host-side EXCLUSIVE ops on the base
+    # (live repro 2026-09-25 in s22). The MAIN shell alone carries the lock
+    # until overlay_discard; close the redundant forked copies first thing.
+    local _fd _close=""
+    for _fd in ${OVERLAY_LOCK_FDS[@]:-}; do
+        [[ -n "$_fd" ]] && _close="$_close exec ${_fd}<&-;"
+    done
+    ( eval "$_close" 2>/dev/null; "$@" ) &
     local pid=$! rc wrc
     # watchdog: fire ONLY if the stage's process is still the SAME one —
     # after a scenario/session death this subshell outlives its parent, pids
@@ -160,7 +170,7 @@ run_stage_impl() {
     # Identity = /proc/<pid>/stat field 22 (process start time): a recycled
     # pid has a different start time and the kill is skipped.
     local _st0; _st0=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
-    ( sleep "$tmo"; \
+    ( eval "$_close" 2>/dev/null; sleep "$tmo"; \
       [[ -n "$_st0" && "$_st0" == "$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" ]] \
         && kill -9 -"$pid" 2>/dev/null; exit 125 ) &
     local wpid=$!

@@ -75,6 +75,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 # the stale-d7 forge signs the §6.1.1 combined {7,11} policyDigest — the
 # product's own TPM-free policy math (host-side: openssl + awk only)
 # shellcheck source=../../lib/common.sh
@@ -178,7 +180,14 @@ else
     D11=$(cat "$RUN_ENROLLED/pcr11-enter-initrd.txt" 2>/dev/null)
     [[ -n "$D11" ]] || { echo "s18: no enter-initrd d11 prediction from the build"; exit 1; }
     for _attempt in 1 2 3; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the pristine
+        # base (LOCK_SH via overlay_create; discarded after the attempt) — the
+        # bootstrap boot cannot persist anything to the base before the
+        # HOST-SIDE enrollment below writes the standing token (the s12 idiom).
+        OVERLAY_BOOT="$RUN_ENROLLED/disk-bootstrap-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_BOOT" || {
+            echo "s18: overlay create failed (bootstrap attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_BOOT" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         # EARLY degradation gate (the same TPM-command-timeout class the
         # control boots gate on): the EFI stub logs its measurement failures
@@ -199,6 +208,7 @@ else
             echo "s18: bootstrap boot $_attempt lost firmware measurements (EFI stub 'Failed to measure') — discarding"
             if (( _attempt < 3 )); then
                 qemu_kill "$RUN_ENROLLED"
+                overlay_discard "$OVERLAY_BOOT"   # the discarded attempt's overlay is ephemeral
                 swtpm_reset "$RUN_ENROLLED/tpm" && swtpm_start "$RUN_ENROLLED/tpm" || exit 1
                 rm -f "$RUN_ENROLLED/console.log"
                 continue
@@ -211,6 +221,7 @@ else
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
+        overlay_discard "$OVERLAY_BOOT"   # the attempt's overlay is ephemeral
         # faithfulness: UNSEALED reached, no measurement-loss warnings, and
         # the postphase PCR 11 equals the build's enter-initrd prediction
         # (G-T13 — a mismatch means the register this state is enrolled
@@ -490,7 +501,23 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
     cp "$RUN/harness.efi" "$B/harness.efi"
     cp "$RUN/pcrsig-$VARIANT.img" "$B/pcrsig.img"
     cp "$RUN/esp.img" "$B/esp.img"
-    cp "$STATE/disk.img" "$B/disk.img"
+    # Wave-2 2b disk-leg classification:
+    #   tok11 — the boot disk carries a HOST-side cryptsetup tamper (token
+    #           export/import) and a post-build host-side recipe read
+    #           (_forge_recipe) — cryptsetup cannot operate on qcow2, so this
+    #           leg keeps its per-boot RAW copy (decision rule 3);
+    #   all other controls — read-mostly base boots (the hook refuses before
+    #           any unlock; the assertions are console-only), so each boot
+    #           attempt runs a fresh QCOW2 OVERLAY over the pristine $STATE
+    #           snapshot (decision rule 1; created per attempt in the boot
+    #           loop below, discarded after it — a degradation retry gets a
+    #           fresh overlay over the same pristine base).
+    if [[ "$VARIANT" == "tok11" ]]; then
+        cp "$STATE/disk.img" "$B/disk.img"
+        BOOTIMG="$B/disk.img"
+    else
+        BOOTIMG="$B/disk.qcow2"
+    fi
     # per-boot VARS copy: the vars pflash is WRITABLE, and a varstore mutated
     # by an earlier control boot's firmware pass must never leak into this
     # boot's Secure Boot policy measurement (every copy starts from the same
@@ -548,7 +575,11 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
     echo "# [$VARIANT] boot: release-signed UKI + forged .pcrsig (TCG, up to $QEMU_TIMEOUT s)"
     _attempt=1
     while :; do
-        qemu_run "$B" "$B/esp.img" "$B/disk.img" "$B/vars.fd" "$STATE/tpm" "$B/pcrsig.img"
+        if [[ "$VARIANT" != "tok11" ]]; then
+            overlay_create "$STATE/disk.img" "$BOOTIMG" || {
+                echo "s18: overlay create failed ([$VARIANT] boot $_attempt)"; exit 1; }
+        fi
+        qemu_run "$B" "$B/esp.img" "$BOOTIMG" "$B/vars.fd" "$STATE/tpm" "$B/pcrsig.img"
         # EARLY degradation gate: the hook prints the live PCRs BEFORE the
         # token line, the refusal and the recovery prompts — so a boot that
         # lost firmware measurements to TPM command timeouts (see
@@ -572,6 +603,9 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
                 echo "s18: [$VARIANT] boot $_attempt lost firmware measurements to host load" \
                      "(EFI stub 'Failed to measure' / PCR 0 off the enrolled value) — discarding and re-running"
                 qemu_kill "$B"
+                if [[ "$VARIANT" != "tok11" ]]; then
+                    overlay_discard "$BOOTIMG"   # the retry gets a FRESH overlay over the pristine base
+                fi
                 cp "$STATE/vars-enrolled.fd" "$B/vars.fd"
                 _reanchor_tpm "$STATE/tpm"
                 _attempt=$((_attempt + 1))
@@ -599,6 +633,9 @@ for VARIANT in foreign wrongsel staled7 pcrsig11only tok11; do
             fi
         done
         qemu_wait "$B" "$QEMU_TIMEOUT"
+        if [[ "$VARIANT" != "tok11" ]]; then
+            overlay_discard "$BOOTIMG"   # the control's overlay is ephemeral (console-only asserts)
+        fi
         break
     done
     for n in 1 2 3; do

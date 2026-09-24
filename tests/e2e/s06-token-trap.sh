@@ -60,6 +60,7 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s06-lite-$(date +%s)"
 mkdir -p "$RUN"
@@ -147,12 +148,20 @@ else
     # flow; the TPM must be RESET so PCR 11 carries only one phase extension,
     # else the .pcrsig never matches the later token unlock.
     for _attempt in 1 2; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the
+        # pristine base (LOCK_SH via overlay_create; discarded after the
+        # attempt) — the baseline boot persists nothing to the base, so the
+        # HOST-SIDE enrollment below stays its only writer
+        OVERLAY_BOOT="$RUN_ENROLLED/disk-baseline-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_BOOT" || {
+            echo "s06: overlay create failed (baseline attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_BOOT" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         _wedge_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
+        overlay_discard "$OVERLAY_BOOT"   # the attempt's overlay is ephemeral
         grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s06: baseline boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
@@ -218,7 +227,10 @@ STATE="$RUN/state"
 # --- host-side tamper: swap the token's tpm2-pubkey for a foreign RSA key -----
 # (verified empirically: a token assigned to an active keyslot is "in use" —
 # remove + re-import at the same id is the attacker's write primitive; both
-# are unprivileged metadata ops on a LUKS2 file.)
+# are unprivileged metadata ops on a LUKS2 file.) This tampered raw copy is
+# the trap boot's CANONICAL BASE (Wave-2 2b): cryptsetup cannot write a QCOW2,
+# so the tamper leg stays raw — the trap attempts themselves boot ephemeral
+# overlays over it.
 cp "$STATE/disk.img" "$RUN/disk.img"
 cryptsetup token export "$RUN/disk.img" --token-id 0 --json-file "$RUN/token-orig.json"
 assert_file_exists "token exported (original)" "$RUN/token-orig.json"
@@ -277,8 +289,15 @@ echo "# booting the trap: SB-off vars + pubkey-swapped token + valid .pcrsig, fe
 TRAP_OK=0
 for _att in 1 2; do
     swtpm_ensure "$STATE/tpm" || { echo "s06: swtpm not serving (trap boot attempt $_att)"; exit 1; }
-    qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img" || {
+    # Wave-2 2b: a fresh QCOW2 overlay per attempt over the tampered raw base —
+    # a wedged + killed attempt dies with its discarded overlay instead of
+    # leaving the tampered base half-written for the retry
+    OVERLAY_TRAP="$RUN/disk-trap-$_att.qcow2"
+    overlay_create "$RUN/disk.img" "$OVERLAY_TRAP" || {
+        echo "s06: overlay create failed (trap attempt $_att)"; exit 1; }
+    qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_TRAP" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img" || {
         echo "s06: qemu_run FAILED for the trap boot (rc=$?)" >&2
+        overlay_discard "$OVERLAY_TRAP"
         exit 1; }
     # the hook's bounded loop has NO read timeout: feed 3 WRONG answers through
     # the hook's OWN prompt (uki_wait_hook_prompt), else the boot could only end
@@ -295,6 +314,7 @@ for _att in 1 2; do
     done
     wrc=0
     _wedge_wait "$RUN" "$QEMU_TIMEOUT" || wrc=$?
+    overlay_discard "$OVERLAY_TRAP"   # the attempt's overlay is ephemeral
     if ((wrc == 43)); then
         echo "s06: trap boot wedged mid-boot (swtpm data-loop stall) — swtpm restarted fresh, retrying (attempt $_att/2)"
         continue

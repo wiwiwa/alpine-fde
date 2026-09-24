@@ -85,6 +85,7 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s09-da-locked-$(date +%s)"
 mkdir -p "$RUN"
@@ -137,12 +138,20 @@ else
     # has NO read timeout: the feed is prompt-synchronized
     # (uki_wait_hook_prompt).
     for _attempt in 1 2; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the
+        # pristine base (LOCK_SH via overlay_create; discarded after the
+        # attempt) — the baseline boot persists nothing to the base, so the
+        # HOST-SIDE enrollment below stays its only writer
+        OVERLAY_BOOT="$RUN_ENROLLED/disk-baseline-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_BOOT" || {
+            echo "s09: overlay create failed (baseline attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_BOOT" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
+        overlay_discard "$OVERLAY_BOOT"   # the attempt's overlay is ephemeral
         grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s09: baseline boot attempt $_attempt failed"
         ((_attempt < 2)) && { swtpm_reset "$RUN_ENROLLED/tpm" && swtpm_start "$RUN_ENROLLED/tpm" || exit 1; }
@@ -229,9 +238,13 @@ mkdir -p "$B"
 cp "$RUN/boot/harness.efi" "$B/harness.efi"
 cp "$RUN/boot/pcrsig.img" "$B/pcrsig.img"
 cp "$RUN/boot/esp.img" "$B/esp.img"
-cp "$STATE/disk.img" "$B/disk.img"
+# Wave-2 2b: the boot is read-mostly over the pristine state base (LOCK_SH via
+# overlay_create) — no per-boot disk copy, and the fail-closed boot's writes
+# die with the discarded overlay instead of landing on the protective snapshot
+overlay_create "$STATE/disk.img" "$B/disk.qcow2" || {
+    echo "s09: overlay create failed (boot 2)"; exit 1; }
 echo "# boot: DA-locked TPM, SB-off vars (TCG, up to $QEMU_TIMEOUT s)"
-qemu_run "$B" "$B/esp.img" "$B/disk.img" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
+qemu_run "$B" "$B/esp.img" "$B/disk.qcow2" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$B"; then
         _assert_result ok "hook awaiting recovery passphrase $n/3 (bounded loop armed after the refusal)" ""
@@ -243,6 +256,7 @@ for n in 1 2 3; do
     fi
 done
 qemu_wait "$B" "$QEMU_TIMEOUT"
+overlay_discard "$B/disk.qcow2"   # the boot's overlay is ephemeral
 LOG=$(cat "$B/console.log" 2>/dev/null || true)
 
 # --- assertions: locked TPM boots -> refusal -> bounded loop -> fail-closed ------

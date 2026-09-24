@@ -63,6 +63,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s07-lite-$(date +%s)"
 mkdir -p "$RUN"
@@ -107,12 +109,21 @@ else
     # (prompt-synchronized feed: the hook has NO read timeout); the TPM must
     # be RESET on retry so PCR 11 carries only one phase extension
     for _attempt in 1 2; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the
+        # pristine token-less base (LOCK_SH via overlay_create; discarded
+        # after the attempt) — the bootstrap boot cannot persist anything to
+        # the base before the HOST-SIDE enrollment below writes the standing
+        # token
+        OVERLAY_B1="$RUN_ENROLLED/disk-baseline-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_B1" || {
+            echo "s07: overlay create failed (baseline attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_B1" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
+        overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
         grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s07: baseline boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
@@ -176,7 +187,10 @@ cp "$STATE/tpm/tpm2-00.permall" "$RUN/state/tpm/" 2>/dev/null || true
 STATE="$RUN/state"
 
 swtpm_start "$STATE/tpm" || { echo "s07: swtpm restart failed"; exit 1; }
-cp "$STATE/disk.img" "$RUN/disk.img"
+# NB: no $RUN/disk.img copy — Wave-2 2b: the tamper boot runs on a QCOW2
+# OVERLAY over the protective $RUN/state snapshot base; the base is copied
+# into $RUN/state exactly once and never per boot, and the boot (a terminal
+# 3-strike fail-closed leg) persists nothing.
 cp "$STATE/vars-enrolled.fd" "$RUN/vars-enrolled.fd"
 assert_contains "enrolled vars in use: SecureBootEnable ON" \
     "$(keys_vars_get "$RUN/vars-enrolled.fd" SecureBootEnable)" "ON"
@@ -218,7 +232,12 @@ esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/harness.efi" || exit 1
 
 # --- boot the tampered-cmdline UKI (SB-enrolled vars) ---------------------------
 echo "# booting: tampered-cmdline UKI + stale .pcrsig drive, feeding 3 WRONG passphrases (TCG, up to $QEMU_TIMEOUT s) ..."
-qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img"
+# Wave-2 2b: the scenario boot consumes the enrolled base read-mostly — fresh
+# QCOW2 overlay (LOCK_SH via overlay_create), discarded after the boot
+OVERLAY_TAMPER="$RUN/disk-tamper.qcow2"
+overlay_create "$RUN/state/disk.img" "$OVERLAY_TAMPER" || {
+    echo "s07: overlay create failed (tamper boot)"; exit 1; }
+qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_TAMPER" "$RUN/vars-enrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img"
 # the hook's bounded loop has NO read timeout: feed 3 WRONG answers through
 # the hook's OWN prompt (uki_wait_hook_prompt), else the boot could only end
 # in a timeout-kill instead of the 3-strike poweroff
@@ -233,6 +252,7 @@ for n in 1 2 3; do
     fi
 done
 qemu_wait "$RUN" "$QEMU_TIMEOUT"
+overlay_discard "$OVERLAY_TAMPER"   # the boot's overlay is ephemeral
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
 
 # --- PCR forensics -------------------------------------------------------------

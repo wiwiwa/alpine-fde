@@ -103,6 +103,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 # the seal library closure for the host-side provisional enrollment (the
 # tests/unit/keys_rsa3072_chain.sh source set)
 # shellcheck source=../../lib/policy.sh
@@ -153,7 +155,21 @@ run_stage_impl() {
     local soft="$1" name="$2" tmo="$3"; shift 3
     _budget_check "$name"
     echo "# s22: stage $name (watchdog ${tmo}s)"
-    ( "$@" ) &
+    # Wave-2 2b overlay discipline: the stage subshell and its watchdog must
+    # NOT inherit the overlay lock fds (OVERLAY_LOCK_FDS). The watchdog
+    # subshell is killed after the stage, but its `sleep` child survives as
+    # an ORPHAN holding the inherited LOCK_SH copy on the base image — a
+    # later host-side EXCLUSIVE op (cryptsetup luksAddKey / token import)
+    # then deadlocks until the sleep expires (live 2026-09-25: boot 1's
+    # token_add_keyslot stalled ~19 min behind an orphaned `sleep 1260`).
+    # The MAIN shell alone carries the overlay lock — it holds the fds until
+    # overlay_discard — so the forked copies are redundant: close them
+    # first thing in both subshells.
+    local _fd _close=""
+    for _fd in ${OVERLAY_LOCK_FDS[@]:-}; do
+        [[ -n "$_fd" ]] && _close="$_close exec ${_fd}<&-;"
+    done
+    ( eval "$_close" 2>/dev/null; "$@" ) &
     local pid=$! rc wrc
     # watchdog: fire ONLY if the stage's process is still the SAME one —
     # after a scenario/session death this subshell outlives its parent, pids
@@ -163,7 +179,7 @@ run_stage_impl() {
     # Identity = /proc/<pid>/stat field 22 (process start time): a recycled
     # pid has a different start time and the kill is skipped.
     local _st0; _st0=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
-    ( sleep "$tmo"; \
+    ( eval "$_close" 2>/dev/null; sleep "$tmo"; \
       [[ -n "$_st0" && "$_st0" == "$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" ]] \
         && kill -9 -"$pid" 2>/dev/null; exit 125 ) &
     local wpid=$!
@@ -295,16 +311,25 @@ _boot_hook() {
     local bdir="$1" esp="$2" bimg="$3" vars="$4" payload="$5" uki="${6:-$RUN/harness.efi}"
     mkdir -p "$bdir"
     cp "$uki" "$bdir/harness.efi"
-    cp "$bimg" "$bdir/disk.img"
     cp "$vars" "$bdir/vars.fd"
+    # Wave-2 2b: every boot runs a fresh QCOW2 OVERLAY over the $bimg base
+    # (decision rule 1 — all three boots are read-mostly: boot 1 unlocks via
+    # the recovery passphrase with the root never mounted rw; boot 2 is the
+    # zero-input token auto-unseal; boot 3 is the refused tampered UKI — and
+    # the scenario's persistent chain runs through the RAW base: the host-side
+    # provisional seal after boot 1 and the completion leg after boot 2
+    # cryptsetup/finalize $RUN/disk.img directly, which is also why the boot's
+    # overlay MUST be discarded (lock released) before those host legs).
+    overlay_create "$bimg" "$bdir/disk.qcow2" || {
+        echo "s22: overlay create failed ($(basename "$bdir"))"; exit 1; }
     _reanchor_tpm "$RUN/tpm"
     CURRENT_QEMU_DIR="$bdir"
     if [[ -n "$payload" ]]; then
         run_stage "qemu_run:$(basename "$bdir")" 60 qemu_run "$bdir" "$esp" \
-            "$bdir/disk.img" "$bdir/vars.fd" "$RUN/tpm" "$payload"
+            "$bdir/disk.qcow2" "$bdir/vars.fd" "$RUN/tpm" "$payload"
     else
         run_stage "qemu_run:$(basename "$bdir")" 60 qemu_run "$bdir" "$esp" \
-            "$bdir/disk.img" "$bdir/vars.fd" "$RUN/tpm"
+            "$bdir/disk.qcow2" "$bdir/vars.fd" "$RUN/tpm"
     fi
     _qemu_alive "$bdir"
     _rearm_trap
@@ -314,9 +339,10 @@ _boot_hook() {
     # host load (the EFI stub then logs "Failed to measure data for event").
     # Such a boot would fail its own control — boot 2's provisional
     # auto-unseal NEEDS a faithful PCR 11 — so it is discarded and re-run ONCE
-    # per boot dir on the re-anchored register. The per-boot disk/vars copies
-    # are re-made by the recursive call; the PIN is per-UKI (PCR 0 measures
-    # the firmware, identical across boots of the same image).
+    # per boot dir on the re-anchored register. The per-boot vars copy and a
+    # FRESH QCOW2 overlay are re-made by the recursive call; the PIN is
+    # per-UKI (PCR 0 measures the firmware, identical across boots of the same
+    # image).
     local p0="" i=0 uki_name
     uki_name=$(basename "$uki")
     [[ "${S22_PIN_UKI:-}" != "$uki_name" ]] && S22_PCR0_PIN=""
@@ -340,7 +366,8 @@ _boot_hook() {
                  "(PCR 0 = ${p0:-<none>} vs pin ${S22_PCR0_PIN:-<unset>}) — discarding and re-running" \
                  "(attempt ${S22_RETRIES[$key]}/3)"
             qemu_kill "$bdir"
-            _boot_hook "$@"
+            overlay_discard "$bdir/disk.qcow2"   # the discarded attempt's overlay is ephemeral
+            _boot_hook "$@"   # the recursive call re-creates a FRESH overlay over the same base
             return 0
         fi
         echo "s22: $(basename "$bdir") still degraded after 3 re-runs — continuing (its control will fail loudly)"
@@ -483,7 +510,8 @@ for n in 2 3; do
 done
 wait_console "$RUN/boot1" "alpine-fde: UNSEALED" 300
 run_stage qemu_wait-boot1 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot1" "$QEMU_TIMEOUT"
-CURRENT_QEMU_DIR=""
+overlay_discard "$RUN/boot1/disk.qcow2"   # the boot's overlay is ephemeral — and the
+CURRENT_QEMU_DIR=""                       # host-side seal below needs the base UNLOCKED
 
 LOG_B1=$(cat "$RUN/boot1/console.log" 2>/dev/null || true)
 assert_contains "[boot 1] init ran" "$LOG_B1" "alpine-fde-harness: init started"
@@ -611,7 +639,8 @@ until grep -q "alpine-fde: UNSEALED" "$RUN/boot2/console.log" 2>/dev/null; do
 done
 wait_console "$RUN/boot2" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT"
 run_stage qemu_wait-boot2 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot2" "$QEMU_TIMEOUT"
-CURRENT_QEMU_DIR=""
+overlay_discard "$RUN/boot2/disk.qcow2"   # ephemeral — the completion leg below mutates
+CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
 
 LOG_B2=$(cat "$RUN/boot2/console.log" 2>/dev/null || true)
 assert_contains "[boot 2] init ran" "$LOG_B2" "alpine-fde-harness: init started"
@@ -821,6 +850,7 @@ for n in 1 2 3; do
 done
 wait_console "$RUN/boot3" "$(sentinel_of unseal_poweroff)" 300
 run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
+overlay_discard "$RUN/boot3/disk.qcow2"   # the tampered boot's overlay is ephemeral
 CURRENT_QEMU_DIR=""
 
 LOG_B3=$(cat "$RUN/boot3/console.log" 2>/dev/null || true)
@@ -851,13 +881,16 @@ else
         "qemu still running or qemu.pid missing"
 fi
 # the tampered boot mutated NOTHING: the finalized shape is intact (slot
-# number not pinned — see the window-exit note above; {0, EXIT_SLOT} holds)
-METAB3=$(disk_metadata "$RUN/boot3/disk.img")
-B3_SLOT=$(disk_token_json "$RUN/boot3/disk.img" | jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]')
-assert_eq "[boot 3] host(booted img): finalized shape intact — keyslots == {0, token slot}" \
+# number not pinned — see the window-exit note above; {0, EXIT_SLOT} holds).
+# Wave-2 2b: the boot ran on a discarded QCOW2 overlay, so the host-side
+# cryptsetup reads target the RAW base — the same invariant (the boot's writes
+# died with the overlay AND the base it read from is unchanged).
+METAB3=$(disk_metadata "$RUN/disk.img")
+B3_SLOT=$(disk_token_json "$RUN/disk.img" | jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]')
+assert_eq "[boot 3] host(base): finalized shape intact — keyslots == {0, token slot}" \
     "[\"0\",\"$B3_SLOT\"]" "$(jq -c '.keyslots | keys' <<<"$METAB3")"
-assert_eq "[boot 3] host(booted img): finalized shape intact — token pcrs [7,11]" "[7,11]" \
-    "$(disk_token_json "$RUN/boot3/disk.img" | jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]')"
+assert_eq "[boot 3] host(base): finalized shape intact — token pcrs [7,11]" "[7,11]" \
+    "$(disk_token_json "$RUN/disk.img" | jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]')"
 
 # NOTE: boot 3's payload drive carries the VALID {7,11} signature — the
 # refusal is the PCR session digest, never the signature gate

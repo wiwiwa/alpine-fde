@@ -47,6 +47,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 # _snap SRC DST — copy the console log (snapshots live in SNAPDIR under
 # ${TMPDIR:-/tmp} so sibling .runs housekeeping cannot take them down; see
@@ -121,13 +123,21 @@ disk_make_luks "$ENROLL/disk.img" 128 || exit 1
 BOOT_OK=0
 for _att in 1 2 3; do
     echo "# boot 1/2: baseline (TCG, attempt $_att, up to $QEMU_TIMEOUT s) ..."
-    qemu_run "$ENROLL" "$ENROLL/esp.img" "$ENROLL/disk.img" "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
+    # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the pristine
+    # token-less base (LOCK_SH via overlay_create; discarded after the
+    # attempt) — the baseline boot cannot persist anything to the base before
+    # the HOST-SIDE enrollment below writes the standing token
+    OVERLAY_B1="$ENROLL/disk-baseline-$_att.qcow2"
+    overlay_create "$ENROLL/disk.img" "$OVERLAY_B1" || {
+        echo "s10: overlay create failed (baseline attempt $_att)"; exit 1; }
+    qemu_run "$ENROLL" "$ENROLL/esp.img" "$OVERLAY_B1" "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
     if uki_wait_hook_prompt 1 300 "$ENROLL"; then
         feed_line "$ENROLL/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _snap_while_running "$(cat "$ENROLL/qemu.pid")" "$ENROLL/console.log" "$SNAPDIR/console-enroll.snap" &
     _snap_poller1=$!
     qemu_wait "$ENROLL" "$QEMU_TIMEOUT"
+    overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
     wait "$_snap_poller1"
     if grep -q "alpine-fde: UNSEALED" "$SNAPDIR/console-enroll.snap" 2>/dev/null; then
         BOOT_OK=1
@@ -186,11 +196,17 @@ echo "# enrollment boot reached UNSEALED + token enrolled — disk carries the f
 # timeout: three WRONG answers are fed prompt-synchronized so the boot ends in
 # the 3-strike fail-closed poweroff, never a timeout-kill.
 _ensure_run
-cp "$ENROLL/disk.img" "$RUN/disk.img"
+# NB: no per-boot disk copy — Wave-2 2b: the TPM-less boot consumes the
+# enrolled base read-mostly (a terminal 3-strike fail-closed leg), so every
+# attempt runs a fresh QCOW2 OVERLAY over $ENROLL/disk.img (LOCK_SH via
+# overlay_create, discarded after the attempt) and the base is never written.
 BOOT_OK=0
 for _att in 1 2 3; do
     echo "# boot 2/2: TPM-less machine (TCG, attempt $_att, up to $QEMU_TIMEOUT s) ..."
-    _no_tpm_qemu_run "$RUN" "$ENROLL/esp.img" "$RUN/disk.img" "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
+    OVERLAY_B2="$RUN/disk-tpmabsent-$_att.qcow2"
+    overlay_create "$ENROLL/disk.img" "$OVERLAY_B2" || {
+        echo "s10: overlay create failed (TPM-less attempt $_att)"; exit 1; }
+    _no_tpm_qemu_run "$RUN" "$ENROLL/esp.img" "$OVERLAY_B2" "$ENROLL/vars-enrolled.fd" "$ENROLL/tpm" "$ENROLL/pcrsig.img"
     _snap_while_running "$(cat "$RUN/qemu.pid")" "$CONSOLE" "$SNAPDIR/console-absent.snap" &
     _snap_poller2=$!
     _fed=0
@@ -203,6 +219,7 @@ for _att in 1 2 3; do
         fi
     done
     qemu_wait "$RUN" "$QEMU_TIMEOUT"
+    overlay_discard "$OVERLAY_B2"   # the attempt's overlay is ephemeral
     wait "$_snap_poller2"
     # DECISIVE SENTINEL SCOPE (2026-09-23): a 3-strike refusal boot powers off
     # from INSIDE the hook (_fdh_poweroff -> `poweroff -f` in the initrd), so

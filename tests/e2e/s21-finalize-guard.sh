@@ -111,6 +111,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
@@ -154,9 +156,20 @@ run_stage_impl() {   # <soft> <name> <timeout-s> <cmd...>
     local soft="$1" name="$2" tmo="$3"; shift 3
     _budget_check "$name"
     echo "# s21: stage $name (watchdog ${tmo}s)"
-    ( "$@" ) &
+    # Wave-2 2b overlay discipline: the stage subshell and its watchdog must
+    # NOT inherit the overlay lock fds (OVERLAY_LOCK_FDS) — the watchdog's
+    # `sleep` child survives run_stage's kill as an ORPHAN holding the
+    # inherited LOCK_SH copy on the base image, deadlocking any later
+    # host-side EXCLUSIVE op until the sleep expires (the s22 live repro
+    # 2026-09-25). The MAIN shell alone carries the overlay lock (fds held
+    # until overlay_discard), so the forked copies are redundant: close them.
+    local _fd _close=""
+    for _fd in ${OVERLAY_LOCK_FDS[@]:-}; do
+        [[ -n "$_fd" ]] && _close="$_close exec ${_fd}<&-;"
+    done
+    ( eval "$_close" 2>/dev/null; "$@" ) &
     local pid=$! rc wrc
-    ( sleep "$tmo"; kill -9 -"$pid" 2>/dev/null; exit 125 ) &
+    ( eval "$_close" 2>/dev/null; sleep "$tmo"; kill -9 -"$pid" 2>/dev/null; exit 125 ) &
     local wpid=$!
     wait "$pid"; rc=$?
     kill "$wpid" 2>/dev/null
@@ -545,12 +558,21 @@ _run_fed_boot() {
     mkdir -p "$bdir"
     cp "$RUN/harness-feed.efi" "$bdir/harness.efi"
     cp "$RUN/esp-feed.img" "$bdir/esp.img"
-    cp "$bimg" "$bdir/disk.img"
+    # Wave-2 2b: the caller either hands us a prepared QCOW2 OVERLAY (a
+    # read-mostly base boot, decision rule 1 — used as-is) or a raw image that
+    # must be copied per boot (the persistent-mutation leg, decision rule 2 —
+    # boot B's finalize writes MUST land in the bootable copy and are read
+    # back host-side with cryptsetup, which cannot operate on qcow2).
+    local DISKIMG
+    case "$bimg" in
+        *.qcow2) DISKIMG="$bimg" ;;
+        *) cp "$bimg" "$bdir/disk.img"; DISKIMG="$bdir/disk.img" ;;
+    esac
     _ensure_tpm "$RUN/tpm"
     _rearm_trap
     CURRENT_QEMU_DIR="$bdir"
     run_stage "qemu_run:$(basename "$bdir")" 60 qemu_run "$bdir" "$bdir/esp.img" \
-        "$bdir/disk.img" "$vars" "$RUN/tpm" "$RUN/pcrsig-feed-tooling.img"
+        "$DISKIMG" "$vars" "$RUN/tpm" "$RUN/pcrsig-feed-tooling.img"
     _qemu_alive "$bdir"
     _rearm_trap
     for n in 1 2 3; do
@@ -617,9 +639,15 @@ _feed_postcheck() {
     CURRENT_QEMU_DIR=""
 }
 
-# _await_rc <boot-dir> — wait out a `... ; echo P6-RC=$?` leg
+# _await_rc <boot-dir> — wait out a `... ; echo P6-RC=$RC` leg.
+# TCG serial corruption guard (the doubled-byte class — live 2026-09-25, run
+# s21-finalize-guard-1790281322: the guard's rc 64 landed as "P6-RC=644" and
+# the bare head -1 extraction asserted 644). $RC still lives in the fed shell,
+# so the value is RE-DERIVED from the LIVE variable in two short re-emissions
+# and the majority of {first, re1, re2} wins — every emission is
+# state-grounded, never a replay.
 _await_rc() {
-    local bdir="$1" i=0
+    local bdir="$1" i=0 rc re1 re2
     until grep -qE 'P6-RC=[0-9]+' "$bdir/console.log" 2>/dev/null; do
         _qemu_alive_or_die "$bdir" "console-wait:P6-RC"
         _budget_check "console-wait:P6-RC"
@@ -627,7 +655,34 @@ _await_rc() {
         sleep 1
         i=$((i + 1))
     done
-    grep -oE 'P6-RC=[0-9]+' "$bdir/console.log" | head -1 | cut -d= -f2
+    rc=$(grep -oE 'P6-RC=[0-9]+' "$bdir/console.log" | head -1 | cut -d= -f2)
+    feed_line "$bdir/serial.sock" 'echo "P6RC2=$RC"'
+    i=0
+    until grep -qE 'P6RC2=[0-9]+' "$bdir/console.log" 2>/dev/null; do
+        _qemu_alive_or_die "$bdir" "console-wait:P6RC2"
+        _budget_check "console-wait:P6RC2"
+        (( i < 60 )) || break
+        sleep 1
+        i=$((i + 1))
+    done
+    re1=$(grep -oE 'P6RC2=[0-9]+' "$bdir/console.log" | head -1 | cut -d= -f2)
+    feed_line "$bdir/serial.sock" 'echo "P6RC3=$RC"'
+    i=0
+    until grep -qE 'P6RC3=[0-9]+' "$bdir/console.log" 2>/dev/null; do
+        _qemu_alive_or_die "$bdir" "console-wait:P6RC3"
+        _budget_check "console-wait:P6RC3"
+        (( i < 60 )) || break
+        sleep 1
+        i=$((i + 1))
+    done
+    re2=$(grep -oE 'P6RC3=[0-9]+' "$bdir/console.log" | head -1 | cut -d= -f2)
+    if [[ "$re1" == "$rc" || "$re2" == "$rc" ]]; then
+        printf '%s\n' "$rc"
+    elif [[ -n "$re1" && "$re1" == "$re2" ]]; then
+        printf '%s\n' "$re1"   # both fresh emissions agree against one stale burst
+    else
+        printf '%s\n' "${re1:-$rc}"
+    fi
 }
 
 # ============================================================================
@@ -635,9 +690,20 @@ _await_rc() {
 # failure is contained to the retry marker, the guided guard HALTS (64).
 # ============================================================================
 A="$RUN/boot-a"
-cp "$RUN/disk.img" "$RUN/disk-a.img"
+# Wave-2 2b (decision rule 1): boot A is a READ-MOSTLY base boot — the SB-off
+# guard halts before any completion mutation, and the boot-session-local
+# writes (the keyslot-0 rekey stand-in + the ADR-8 retry marker) matter only
+# within THIS boot (boot B re-derives from the pristine fixture disk), so the
+# boot runs on a fresh QCOW2 overlay over the pristine fixture disk and the
+# overlay is discarded right after the boot. The post-boot host asserts are
+# re-pointed at the RAW fixture disk below (cryptsetup cannot read qcow2; the
+# invariant they pin — "the boot mutated no LUKS metadata structure" — now
+# holds structurally AND is asserted on the base the overlay backs onto).
+mkdir -p "$A"
+overlay_create "$RUN/disk.img" "$A/disk.qcow2" || {
+    echo "s21: overlay create failed (boot A)"; exit 1; }
 echo "# boot A: SB-off vars — advisory oneshot + contained service failure + fail-closed guard"
-_run_fed_boot "$A" "$RUN/disk-a.img" "$RUN/vars-unenrolled.fd"
+_run_fed_boot "$A" "$A/disk.qcow2" "$RUN/vars-unenrolled.fd"
 _feed_common "$A"
 _rekey_slot0 "$A"
 # leg (a): the ADVISORY oneshot — start() driven exactly as openrc-run would.
@@ -663,6 +729,7 @@ feed_line "$A/serial.sock" \
     'RC=0; timeout 300 /opt/alpine-fde/bin/alpine-fde finalize || RC=$?; echo P6-RC=$RC'
 CLI_RC_A=$(_await_rc "$A")
 _feed_postcheck "$A"
+overlay_discard "$A/disk.qcow2"   # boot A's overlay is ephemeral (console + base asserts below)
 
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
 assert_contains "[boot A] init ran" "$LOG_A" "alpine-fde-harness: init started"
@@ -741,14 +808,16 @@ assert_contains "[boot A] post: the retry-next-boot marker is ON DISK (service l
 assert_not_contains "[boot A] no interactive prompt ever appeared (sentinel table)" "$LOG_A" \
     "$(sentinel_of prompt_re)"
 assert_not_contains "[boot A] no emergency shell" "$LOG_A" "$(sentinel_of emergency_forbidden)"
-# post-boot HOST: the BOOTED image's LUKS metadata is unchanged: 1 keyslot,
-# 0 tokens. The pristine fixture copy never changed at all.
-META_A=$(disk_metadata "$A/disk.img")
-assert_eq "[boot A] host(booted img): metadata unchanged — 1 keyslot" "1" \
+# post-boot HOST (Wave-2 2b: boot A ran on a discarded QCOW2 overlay, so the
+# host-side cryptsetup reads target the RAW fixture disk — the same invariant,
+# stronger by construction: the boot's writes died with the overlay AND the
+# base it read from is structurally unchanged): 1 keyslot, 0 tokens.
+META_A=$(disk_metadata "$RUN/disk.img")
+assert_eq "[boot A] host(base): metadata unchanged — 1 keyslot" "1" \
     "$(jq -r '.keyslots | length' <<<"$META_A")"
-assert_eq "[boot A] host(booted img): metadata unchanged — ZERO tokens" "{}" \
-    "$(disk_token_json "$A/disk.img")"
-assert_eq "[boot A] host(booted img): keyslot 0 still argon2id" "argon2id" \
+assert_eq "[boot A] host(base): metadata unchanged — ZERO tokens" "{}" \
+    "$(disk_token_json "$RUN/disk.img")"
+assert_eq "[boot A] host(base): keyslot 0 still argon2id" "argon2id" \
     "$(jq -r '.keyslots["0"].kdf.type' <<<"$META_A")"
 assert_eq "[boot A] host(fixture img): untouched — ZERO tokens" "{}" \
     "$(disk_token_json "$RUN/disk.img")"

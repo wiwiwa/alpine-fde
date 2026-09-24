@@ -57,6 +57,7 @@ source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
 source "$TESTS/lib/prediction.sh"  # assert_pcr11_prediction (G-T13/G-E9)
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s13-lite-$(date +%s)"
 mkdir -p "$RUN"
@@ -146,12 +147,20 @@ else
     # bootstrap boot: token-less disk -> the hook's recovery-passphrase path
     # (prompt-synchronized feed: the hook has NO read timeout)
     for _attempt in 1 2; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the
+        # pristine base (LOCK_SH via overlay_create; discarded after the
+        # attempt) — the baseline boot persists nothing to the base, so the
+        # HOST-SIDE enrollment below stays its only writer
+        OVERLAY_BOOT="$RUN_ENROLLED/disk-baseline-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_BOOT" || {
+            echo "s13: overlay create failed (baseline attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_BOOT" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         _wedge_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
+        overlay_discard "$OVERLAY_BOOT"   # the attempt's overlay is ephemeral
         grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s13: bootstrap boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
@@ -317,6 +326,12 @@ run_variant() {
     local variant="$1" expect="${2:-}"
     local V="$RUN/boot-$variant"
     mkdir -p "$V"
+    # NB (Wave-2 2b): the variant leg stays a RAW per-variant cp on purpose —
+    # the host-side cryptsetup token tamper below is the attacker's write
+    # primitive ON that copy (cryptsetup cannot write a QCOW2 overlay), and
+    # each variant boots exactly once off its own copy, so there is no shared
+    # base to protect and no multi-attempt overlay win (rule 3 of the
+    # conversion decision rule)
     cp "$STATE/disk.img" "$V/disk.img"
     tamper_disk "$variant" "$V/disk.img" >/dev/null || {
         _assert_result not-ok "$variant: token import (host-side tamper)" "cryptsetup token import failed"
