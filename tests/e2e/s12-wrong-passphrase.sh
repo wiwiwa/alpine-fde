@@ -50,6 +50,7 @@ source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
 source "$TESTS/lib/prediction.sh"  # assert_pcr11_prediction (G-T13/G-E9)
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s12-lite-$(date +%s)"
 mkdir -p "$RUN"
@@ -130,12 +131,20 @@ else
     # has NO read timeout: the feed is prompt-synchronized
     # (uki_wait_hook_prompt).
     for _attempt in 1 2; do
-        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$RUN_ENROLLED/disk.img" \
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the
+        # pristine base (LOCK_SH via overlay_create; discarded after the
+        # attempt) — the bootstrap boot cannot persist anything to the base
+        # before the HOST-SIDE enrollment below writes the standing token
+        OVERLAY_BOOT="$RUN_ENROLLED/disk-bootstrap-$_attempt.qcow2"
+        overlay_create "$RUN_ENROLLED/disk.img" "$OVERLAY_BOOT" || {
+            echo "s12: overlay create failed (bootstrap attempt $_attempt)"; exit 1; }
+        qemu_run "$RUN_ENROLLED" "$RUN_ENROLLED/esp.img" "$OVERLAY_BOOT" \
             "$RUN_ENROLLED/vars-enrolled.fd" "$RUN_ENROLLED/tpm" "$RUN_ENROLLED/pcrsig.img"
         if uki_wait_hook_prompt 1 300 "$RUN_ENROLLED"; then
             feed_line "$RUN_ENROLLED/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
         fi
         qemu_wait "$RUN_ENROLLED" "$QEMU_TIMEOUT"
+        overlay_discard "$OVERLAY_BOOT"   # the attempt's overlay is ephemeral
         grep -q "alpine-fde: UNSEALED" "$RUN_ENROLLED/console.log" && break
         echo "s12: bootstrap boot attempt $_attempt failed"
         echo "--- console bytes: $(stat -c%s "$RUN_ENROLLED/console.log" 2>/dev/null || echo missing)"
@@ -213,7 +222,9 @@ swtpm_start "$STATE/tpm" || { echo "s12: swtpm restart failed"; exit 1; }
 [[ -f "$STATE/uki-pcrsig.json" ]] && cp "$STATE/uki-pcrsig.json" "$RUN/uki-pcrsig.json"
 cp "$STATE/harness.efi" "$RUN/harness.efi"
 cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"
-cp "$STATE/disk.img" "$RUN/disk.img"
+# NB: no $RUN/disk.img copy — Wave-2 2b: the boot disks are QCOW2 OVERLAYS over
+# the protective $STATE snapshot below; the base is copied into $RUN/state
+# exactly once and never per boot.
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 esp_make "$RUN/esp.img" $(( UKI_MIB * 2 + 8 )) "$RUN/harness.efi" || exit 1
 # negative fixture: SB off -> the hook's {7,11} policy refuses on the PCR 7
@@ -229,11 +240,15 @@ mkdir -p "$A"
 cp "$RUN/harness.efi" "$A/harness.efi"
 cp "$RUN/pcrsig.img" "$A/pcrsig.img"
 cp "$RUN/esp.img" "$A/esp.img"
-cp "$STATE/disk.img" "$A/disk.img"
+# Wave-2 2b: the boot runs on a fresh QCOW2 overlay over the pristine state
+# base (LOCK_SH via overlay_create) — no per-boot disk copy, and any boot-time
+# write dies with the discarded overlay instead of touching the shared base
+overlay_create "$STATE/disk.img" "$A/disk.qcow2" || {
+    echo "s12: overlay create failed (boot A)"; exit 1; }
 
 echo "# boot A: SB-off + finalized token, feeding 3 WRONG passphrases to the HOOK's prompt"
 _fresh_pcrs "$STATE/tpm" || { echo "s12: cannot zero the TPM PCRs for boot A"; exit 1; }
-qemu_run "$A" "$A/esp.img" "$A/disk.img" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$A/pcrsig.img"
+qemu_run "$A" "$A/esp.img" "$A/disk.qcow2" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$A/pcrsig.img"
 for n in 1 2 3; do
     if uki_wait_hook_prompt "$n" 300 "$A"; then
         _assert_result ok "boot A: hook awaiting recovery passphrase $n/3 (hook read path)" ""
@@ -245,6 +260,7 @@ for n in 1 2 3; do
     feed_line "$A/serial.sock" "alpine-fde-wrong-passphrase-$n"
 done
 qemu_wait "$A" "$QEMU_TIMEOUT"
+overlay_discard "$A/disk.qcow2"   # the attempt's overlay is ephemeral
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
 
 # ordering proof: the hook's refusal strictly precedes its first passphrase
@@ -296,11 +312,14 @@ mkdir -p "$B"
 cp "$RUN/harness.efi" "$B/harness.efi"
 cp "$RUN/pcrsig.img" "$B/pcrsig.img"
 cp "$RUN/esp.img" "$B/esp.img"
-cp "$STATE/disk.img" "$B/disk.img"   # fresh copy: header untouched by boot A
+# Wave-2 2b: fresh overlay over the SAME pristine base — boot A's writes (if
+# any) died with its discarded overlay, so B starts exactly where A started
+overlay_create "$STATE/disk.img" "$B/disk.qcow2" || {
+    echo "s12: overlay create failed (boot B)"; exit 1; }
 
 echo "# boot B: same fixtures, 2 wrong + 1 CORRECT passphrase (recovery positive)"
 _fresh_pcrs "$STATE/tpm" || { echo "s12: cannot zero the TPM PCRs for boot B"; exit 1; }
-qemu_run "$B" "$B/esp.img" "$B/disk.img" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
+qemu_run "$B" "$B/esp.img" "$B/disk.qcow2" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
 for n in 1 2; do
     if uki_wait_hook_prompt "$n" 300 "$B"; then
         _assert_result ok "boot B: hook awaiting recovery passphrase $n/3" ""
@@ -342,6 +361,7 @@ if [[ "$B_SHAPE" == "debugshell" ]]; then
     feed_line "$B/serial.sock" 'poweroff -f'
 fi
 qemu_wait "$B" "$QEMU_TIMEOUT"
+overlay_discard "$B/disk.qcow2"   # the attempt's overlay is ephemeral
 LOG_B=$(cat "$B/console.log" 2>/dev/null || true)
 
 assert_contains "boot B: hook refusal first (same tamper context)" "$LOG_B" \

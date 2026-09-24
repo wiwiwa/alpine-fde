@@ -110,6 +110,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"
 # shellcheck source=../lib/serial.sh
 source "$TESTS/lib/serial.sh"
+# shellcheck source=../lib/overlay-disk.sh
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
@@ -639,16 +641,26 @@ _feed_env() {
 # PHASE 1 — member lost: the harness initrd's login-stage mount FAILS CLOSED
 # ============================================================================
 P1="$RUN/phase1"
-cp "$RUN/disk-root1.img" "$RUN/p1-root1.img"   # carries the dead suppressor
+# Wave-2 2b: the working copy is a QCOW2 OVERLAY over the canonical member
+# (carries the dead suppressor; LOCK_SH via overlay_create) — the 1 GiB raw cp
+# becomes a sparse overlay, and the canonical base cannot be mutated by the
+# boot. EPHEMERAL by design: the phase's asserts are console-only, so the
+# overlay is discarded right after the boot; every later phase re-derives from
+# the canonical members (the persistence chain runs through the RAW canonical
+# images — bootstrap and phase 3a stay raw on purpose, their in-guest writes
+# MUST persist).
+overlay_create "$RUN/disk-root1.img" "$RUN/p1-root1.qcow2" || {
+    echo "s20: overlay create failed (phase 1)"; exit 1; }
 run_stage phase1-move-member 60 mv "$RUN/disk-root2.img" "$RUN/root2.lost.img"
 echo "# phase 1: member 2 MOVED AWAY — plain mount of the degraded pool must fail"
-_boot_fed "$P1" "$RUN/p1-root1.img"
+_boot_fed "$P1" "$RUN/p1-root1.qcow2"
 # byte-identical to the harness /init login_stage mount line (uki-build.sh)
 feed_line "$P1/serial.sock" \
     'mkdir -p /newroot && mount -t btrfs -o subvol=@ /dev/mapper/root /newroot 2>/tmp/p1.log; echo P1PLAIN=$?; head -3 /tmp/p1.log; echo P1-$((44+6))-DONE'
 wait_console "$P1" "P1-50-DONE" 300
 feed_line "$P1/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-phase1 "$((QEMU_TIMEOUT + 60))" qemu_wait "$P1" "$QEMU_TIMEOUT"
+overlay_discard "$RUN/p1-root1.qcow2"   # the phase's overlay is ephemeral
 CURRENT_QEMU_DIR=""
 
 LOG_P1=$(cat "$P1/console.log" 2>/dev/null || true)
@@ -684,10 +696,14 @@ fi
 # PHASE 2 — rescue: the ONLY way in is `mount -o degraded` (runbook leg 1)
 # ============================================================================
 P2="$RUN/phase2"
-cp "$RUN/disk-root1.img" "$RUN/p2-root1.img"   # carries the dead suppressor
+# Wave-2 2b: a FRESH overlay per phase over the pristine canonical member —
+# identical starting state to the old fresh cp (never reuse phase 1's overlay:
+# its boots may have dirtied the pool), discarded after the phase
+overlay_create "$RUN/disk-root1.img" "$RUN/p2-root1.qcow2" || {
+    echo "s20: overlay create failed (phase 2)"; exit 1; }
 # member 2 is STILL away (root2.lost.img from phase 1)
 echo "# phase 2: rescue session — degraded mount of the surviving member"
-_boot_fed "$P2" "$RUN/p2-root1.img"
+_boot_fed "$P2" "$RUN/p2-root1.qcow2"
 feed_line "$P2/serial.sock" \
     'mkdir -p /mnt && mount -t btrfs -o degraded,subvol=@ /dev/mapper/root /mnt 2>/tmp/p2m.log; echo P2MRC=$?; grep -qw degraded /proc/mounts && echo DEG-$((44+5))-OK || echo DEG-ABSENT-$((44+5))'
 wait_console "$P2" "P2MRC=0" 300
@@ -697,6 +713,7 @@ feed_line "$P2/serial.sock" \
 wait_console "$P2" "P2S-51-DONE" 300
 feed_line "$P2/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-phase2 "$((QEMU_TIMEOUT + 60))" qemu_wait "$P2" "$QEMU_TIMEOUT"
+overlay_discard "$RUN/p2-root1.qcow2"   # the phase's overlay is ephemeral
 CURRENT_QEMU_DIR=""
 
 LOG_P2=$(cat "$P2/console.log" 2>/dev/null || true)

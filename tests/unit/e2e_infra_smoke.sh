@@ -73,6 +73,16 @@ ARGV5=$(qemu_argv "$WORK/argv" "$WORK/argv/esp.img" "$WORK/argv/disk.img" \
 DRIVES5=$(sed -n 's/^file=\(.*\),format=raw,if=virtio$/\1/p' <<<"$ARGV5" | tr '\n' ' ')
 assert_eq "qemu_argv: legacy 5-arg contract == vda+vdb only" \
     "$WORK/argv/esp.img $WORK/argv/disk.img " "$DRIVES5"
+# Wave-2 2b: extra drives are per-extension format — a .qcow2 overlay leg
+# (raid member-2 rows in s19/s21/s22) must carry format=qcow2, raw names
+# stay format=raw
+ARGVQ=$(qemu_argv "$WORK/argv" "$WORK/argv/esp.img" "$WORK/argv/disk.img" \
+    "$WORK/argv/vars.fd" "$WORK/argv/tpm" "" \
+    "$(printf '%s\n%s\n' "$WORK/argv/x1.img" "$WORK/argv/x3.qcow2")")
+assert_contains "qemu_argv: qcow2 extra drive carries format=qcow2" "$ARGVQ" \
+    "file=$WORK/argv/x3.qcow2,format=qcow2,if=virtio"
+assert_contains "qemu_argv: raw extra drive stays format=raw" "$ARGVQ" \
+    "file=$WORK/argv/x1.img,format=raw,if=virtio"
 
 # --- UKI builder: guest tree, initramfs, ukify sections, pcrsig ------------------
 keys_create "$WORK/uki-keys"

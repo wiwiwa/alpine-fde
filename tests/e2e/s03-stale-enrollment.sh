@@ -47,6 +47,8 @@ source "$TESTS/lib/qemu.sh"
 source "$TESTS/lib/sentinels.sh"   # sentinel_of (MD-02: fails loudly on unknown names)
 # shellcheck disable=SC1091
 source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
+# shellcheck disable=SC1091
+source "$TESTS/lib/overlay-disk.sh"   # Wave-2 2b: per-boot QCOW2 overlays + base LOCK_SH
 
 RUN="$TESTS/e2e/.runs/s03-stale-enrollment-$(date +%s)"
 mkdir -p "$RUN"
@@ -237,12 +239,22 @@ boot_and_wait() { # <label> <esp> <disk> <vars> <pcrsig-img>
     local label="$1" att wrc
     for att in 1 2; do
         _ensure_tpm || { echo "swtpm not serving"; return 1; }
+        # Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the base
+        # ($3, LOCK_SH via overlay_create) — discarded after the attempt, so
+        # the guest can never persist anything to the base (the host-side
+        # enrollment/wipe between boots stay the ONLY writers to $3)
+        OVERLAY_RW="$RUN/disk-$label-$att.qcow2"
+        overlay_create "$3" "$OVERLAY_RW" || {
+            echo "s03: overlay create failed for $label"; return 1
+        }
         echo "# boot $label (TCG, up to $QEMU_TIMEOUT s) ..."
-        qemu_run "$RUN" "$2" "$3" "$4" "$RUN/tpm" "$5" || {
+        qemu_run "$RUN" "$2" "$OVERLAY_RW" "$4" "$RUN/tpm" "$5" || {
             echo "s03: qemu_run FAILED for $label; qemu.stderr: $(tail -3 "$RUN/qemu.stderr" 2>/dev/null | tr '\n' ' ')"
+            overlay_discard "$OVERLAY_RW"
             return 1
         }
         _wedge_wait "$RUN" "$QEMU_TIMEOUT"; wrc=$?
+        overlay_discard "$OVERLAY_RW"   # the attempt's overlay is ephemeral
         if ((wrc == 43)); then
             echo "s03: $label wedged mid-boot — swtpm restarted fresh, retrying (attempt $att/2)"
             continue
@@ -258,13 +270,20 @@ boot_feed_and_wait() { # <label> <esp> <disk> <vars> <pcrsig-img> — boot + fee
     local label="$1" att wrc
     for att in 1 2; do
         _ensure_tpm || { echo "swtpm not serving"; return 1; }
+        # Wave-2 2b: fresh overlay per attempt (see boot_and_wait)
+        OVERLAY_RW="$RUN/disk-$label-$att.qcow2"
+        overlay_create "$3" "$OVERLAY_RW" || {
+            echo "s03: overlay create failed for $label"; return 1
+        }
         echo "# boot $label: feeding 3 WRONG recovery passphrases (TCG, up to $QEMU_TIMEOUT s) ..."
-        qemu_run "$RUN" "$2" "$3" "$4" "$RUN/tpm" "$5" || {
+        qemu_run "$RUN" "$2" "$OVERLAY_RW" "$4" "$RUN/tpm" "$5" || {
             echo "s03: qemu_run FAILED for $label; qemu.stderr: $(tail -3 "$RUN/qemu.stderr" 2>/dev/null | tr '\n' ' ')"
+            overlay_discard "$OVERLAY_RW"
             return 1
         }
         _feed_3_strike "$RUN"
         _wedge_wait "$RUN" "$QEMU_TIMEOUT"; wrc=$?
+        overlay_discard "$OVERLAY_RW"   # the attempt's overlay is ephemeral
         if ((wrc == 43)); then
             echo "s03: $label wedged mid-boot — swtpm restarted fresh, retrying (attempt $att/2)"
             continue
@@ -296,18 +315,27 @@ disk_make_luks "$RUN/disk.img" 128 || exit 1
 # the HOST-SIDE finalized enrollment) -------------------------------------------
 _ensure_tpm || { echo "s03: swtpm not serving"; exit 1; }
 echo "# boot v1-enroll: token-less disk, feeding the slot-0 recovery passphrase (TCG, up to $QEMU_TIMEOUT s) ..."
-qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/uki-6.2.0.efi.pcrsig.img"
+# Wave-2 2b: every attempt boots a fresh QCOW2 overlay over the pristine base
+# (base LOCK_SH via overlay_create; the overlay is discarded after the attempt
+# — a retry is free and the base stays pristine for the HOST-SIDE enrollment
+# below, which remains the only writer between the boots)
+OVERLAY_B1="$RUN/disk-v1enroll-1.qcow2"
+overlay_create "$RUN/disk.img" "$OVERLAY_B1" || { echo "s03: overlay create failed"; exit 1; }
+qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_B1" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/uki-6.2.0.efi.pcrsig.img"
 for _attempt in 1 2; do
     if uki_wait_hook_prompt 1 300 "$RUN"; then
         feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
     fi
     _wedge_wait "$RUN" "$QEMU_TIMEOUT" || true   # 43: swtpm already restarted fresh
+    overlay_discard "$OVERLAY_B1"   # the attempt's overlay is ephemeral
     grep -q "alpine-fde: UNSEALED" "$CONSOLE" && break
     echo "s03: baseline boot attempt $_attempt failed"
     ((_attempt < 2)) && { swtpm_ensure "$RUN/tpm" || exit 1; }
     rm -f "$CONSOLE"
     _ensure_tpm || { echo "s03: swtpm restart (retry) failed"; exit 1; }
-    qemu_run "$RUN" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/uki-6.2.0.efi.pcrsig.img"
+    OVERLAY_B1="$RUN/disk-v1enroll-$((_attempt + 1)).qcow2"
+    overlay_create "$RUN/disk.img" "$OVERLAY_B1" || { echo "s03: overlay create failed"; exit 1; }
+    qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_B1" "$RUN/vars-enrolled.fd" "$RUN/tpm" "$RUN/uki-6.2.0.efi.pcrsig.img"
 done
 grep -q "alpine-fde: UNSEALED" "$CONSOLE" || { echo "s03: baseline boot did not reach UNSEALED"; exit 1; }
 cp "$CONSOLE" "$RUN/console-v1-enroll.log"

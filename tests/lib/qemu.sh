@@ -306,12 +306,14 @@ qemu_argv() {
         -qmp "unix:path=$run/qmp.sock,server=on,wait=off" \
         -serial chardev:ser0
     if [[ -n "$pcrsig" ]]; then
-        printf '%s\n' "-drive" "file=$pcrsig,format=raw,if=virtio"
+        printf '%s\n' "-drive" "file=$pcrsig,format=$(_qemu_disk_format "$pcrsig"),if=virtio"
     fi
     local d
     while IFS= read -r d; do
         [[ -z "$d" ]] && continue
-        printf '%s\n' "-drive" "file=$d,format=raw,if=virtio"
+        # per-extension format (Wave-2 2b): extra drives may be qcow2 overlays
+        # (e.g. raid member-2 legs in s19/s21/s22), not only raw images
+        printf '%s\n' "-drive" "file=$d,format=$(_qemu_disk_format "$d"),if=virtio"
     done <<<"$extra"
     return 0
 }
