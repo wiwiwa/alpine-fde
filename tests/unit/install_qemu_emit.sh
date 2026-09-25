@@ -281,7 +281,7 @@ assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir, custody 
 assert_contains "emitted: defer-custody — provision record defers release.pem encryption to ceremony 3/3 (release-key prompt may not precede the LUKS recovery)" \
     "$(grep -m1 'provision stage1' "$SCRIPT")" "--defer-custody"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
+    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
 assert_eq "guest: bootctl install (ESP layout)" "1" \
     "$(grep -cx 'bootctl install --esp-path=/efi --boot-path=/efi' "$SCRIPT")"
 assert_eq "guest: ukictl build (§9.1 step 5)" "1" \

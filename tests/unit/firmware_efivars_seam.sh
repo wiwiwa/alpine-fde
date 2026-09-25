@@ -257,6 +257,16 @@ mkdir -p "$FAKEYS"
 mkauth "$FAKEYS/db.auth" db "$DBXGUID" 'DB1'
 mkauth "$FAKEYS/kek.auth" KEK "$GUID" 'KEK1'
 mkauth "$FAKEYS/pk.auth" PK "$GUID" 'PK1'
+# the ESP fallback stages the .auth packets AND the .esl lists (KeyTool.efi
+# "enroll from file" consumes the signed .esl form)
+printf 'DB-ESL' >"$FAKEYS/db.esl"
+printf 'KEK-ESL' >"$FAKEYS/kek.esl"
+printf 'PK-ESL' >"$FAKEYS/pk.esl"
+# dbx variant: dbx.auth/dbx.esl are staged ONLY when present in KEYDIR
+FAKEYS_DBX="$tmp/fa-keys-dbx"
+cp -r "$FAKEYS" "$FAKEYS_DBX"
+printf 'DBX-AUTH' >"$FAKEYS_DBX/dbx.auth"
+printf 'DBX-ESL' >"$FAKEYS_DBX/dbx.esl"
 
 # (a) pre-existing vendor db/KEK/PK are removed before each authenticated write
 fa="$tmp/enroll-preexisting"
@@ -283,27 +293,61 @@ assert_eq "enroll: KEK re-created with auth attrs prefix" "07000100" \
 assert_eq "enroll: PK re-created with auth attrs prefix" "07000100" \
     "$(head -c 4 "$fa/PK-$GUID" | od -An -vtx1 | tr -d ' \n')"
 
-# (b) rm failure: warn (non-fatal), write still attempted, die names the
-# manual-USB remedy (fail-closed preserved, real error reported)
+# (b) write refusal -> NON-FATAL ESP fallback (queue 26 ext, user directive:
+# "write .esl to EFI partition, if write to efivars failed, and show
+# instruction to import the file into uefi bios"): the rm failure warns, the
+# refused db write warns WITHOUT dying, the KEK and PK writes are STILL
+# attempted (the same firmware will refuse them too — harmless and
+# diagnostic), all key material is staged under <ESP>/alpine-fde-keys, the
+# numbered manual-import instructions are printed, and the install CONTINUES.
 fb="$tmp/enroll-rm-fails"
 mkdir -p "$fb"
 mkvar_byte "$fb" SetupMode 1
 # a DIRECTORY at the variable path: rm -f fails (EISDIR) and the subsequent
 # write redirection fails too — models an unremovable stubborn variable
 mkdir "$fb/db-$DBXGUID"
+rm -rf "$tmp/esp-b"
 rc=0
-out=$(fw_auth_enroll "$fb" "$FAKEYS" 2>&1) || rc=$?
-assert_rc "enroll: rm failure -> still fail-closed 64" 64 "$rc"
+out=$(fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
+assert_rc "enroll: write refusal -> ESP fallback, install continues (rc 0)" 0 "$rc"
 assert_contains "enroll: rm failure warns (non-fatal)" "$out" \
     "could not remove pre-existing vendor db"
-assert_contains "enroll: write still attempted after rm failure" "$out" \
-    "cannot write"
-assert_contains "enroll: die names the manual USB stick remedy" "$out" \
-    "FAT USB stick"
-assert_contains "enroll: die names KeyTool.efi / firmware setup UI" "$out" \
+assert_contains "enroll: refused db write warns (non-fatal, no die)" "$out" \
+    "cannot write $fb/db-$DBXGUID"
+assert_contains "enroll: KEK write still attempted after the db refusal" "$out" \
+    "enrolled KEK"
+assert_contains "enroll: PK write still attempted after the db refusal" "$out" \
+    "enrolled PK"
+for _b_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl; do
+    assert_eq "enroll: fallback staged $_b_f under <esp>/alpine-fde-keys" "1" \
+        "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
+done
+assert_contains "enroll: fallback names the staging directory" "$out" \
+    "$tmp/esp-b/alpine-fde-keys"
+assert_contains "enroll: fallback per-file cp info line" "$out" \
+    "staged db.auth"
+assert_contains "enroll: instruction 1 — copy to a FAT USB stick (or use the ESP files)" \
+    "$out" "1. copy the alpine-fde-keys directory to a FAT USB stick"
+assert_contains "enroll: instruction 2 — reboot into firmware setup" "$out" \
+    "2. reboot into the firmware setup"
+assert_contains "enroll: instruction 3 — db.auth, kek.auth, pk.auth in that order" "$out" \
+    "3. under Secure Boot key management import, in this order: db.auth"
+assert_contains "enroll: instruction 3 — .esl via KeyTool.efi" "$out" \
     "KeyTool.efi"
+assert_contains "enroll: instruction 4 — administrator password" "$out" \
+    "4. while in firmware setup, set an administrator"
+assert_contains "enroll: instruction 5 — crash resume + guarded first boot" "$out" \
+    "5. boot the installed system"
+assert_contains "enroll: instruction 5 names the ADR-20 guarded first boot" "$out" \
+    "ADR-20"
+assert_contains "enroll: final WARN — first boot stays guarded" "$out" \
+    "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+# the fallback is NOT the old fail-closed die: no die text may leak through
+assert_eq "enroll: fallback path does not die" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'refusing to program')"
 
-# (c) absent variables -> no rm info noise (clean path unchanged)
+# (c) absent variables -> no rm info noise, NO fallback noise (clean path
+# unchanged; 2-arg call also pins the ESP_DIR default for old callers)
 fc="$tmp/enroll-clean"
 mkdir -p "$fc"
 mkvar_byte "$fc" SetupMode 1
@@ -312,6 +356,63 @@ out=$(fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
 assert_rc "enroll: clean path -> rc 0" 0 "$rc"
 assert_eq "enroll: clean path emits no rm info noise" "0" \
     "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"
+assert_eq "enroll: clean path emits ZERO fallback noise (no staging dir named)" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'alpine-fde-keys')"
+assert_eq "enroll: clean path prints no manual instructions" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'firmware enrollment incomplete')"
+
+# (d) failure injection: read-only efivars dir at write time -> ALL THREE
+# writes are attempted and refused (db first — the db failure does NOT stop
+# the KEK/PK attempts, same firmware refuses them identically; attempting is
+# harmless and diagnostic), then the fallback stages everything (including
+# the dbx pair when present) and the install continues rc 0
+fd="$tmp/enroll-readonly"
+mkdir -p "$fd"
+mkvar_byte "$fd" SetupMode 1
+chmod 555 "$fd"
+rm -rf "$tmp/esp-d"
+rc=0
+out=$(fw_auth_enroll "$fd" "$FAKEYS_DBX" "$tmp/esp-d" 2>&1) || rc=$?
+chmod 755 "$fd"
+assert_rc "enroll: read-only efivars -> fallback, install continues (rc 0)" 0 "$rc"
+assert_eq "enroll: ALL THREE write attempts made and refused" "3" \
+    "$(printf '%s\n' "$out" | grep -c 'cannot write')"
+assert_contains "enroll: db refusal warned first" "$out" \
+    "cannot write $fd/db-$DBXGUID"
+assert_contains "enroll: KEK refusal warned" "$out" \
+    "cannot write $fd/KEK-$GUID"
+assert_contains "enroll: PK refusal warned" "$out" \
+    "cannot write $fd/PK-$GUID"
+for _d_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl dbx.auth dbx.esl; do
+    assert_eq "enroll: fallback staged $_d_f (incl. dbx pair when present)" "1" \
+        "$([ -f "$tmp/esp-d/alpine-fde-keys/$_d_f" ] && echo 1 || echo 0)"
+done
+assert_eq "enroll: nothing was written to the read-only efivars dir" "0" \
+    "$([ -e "$fd/db-$DBXGUID" ] && echo 1 || echo 0)"
+assert_contains "enroll: numbered instructions present after total refusal" "$out" \
+    "1. copy the alpine-fde-keys directory to a FAT USB stick"
+assert_contains "enroll: final WARN after total refusal" "$out" \
+    "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+
+# (e) fw_var_write split: the TRY form returns rc 1 on a refused write (no
+# die — the identity preflight still dies), the wrapper keeps the die.
+fwro="$tmp/varwrite-ro"
+mkdir -p "$fwro"
+chmod 555 "$fwro"
+rc=0
+out=$(fw_var_write_try "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
+assert_rc "fw_var_write_try: refused write -> rc 1, no die" 1 "$rc"
+assert_eq "fw_var_write_try: nothing written to the read-only dir" "0" \
+    "$([ -e "$fwro/db-$DBXGUID" ] && echo 1 || echo 0)"
+rc=0
+out=$(fw_var_write "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
+assert_rc "fw_var_write wrapper: refused write -> fail-closed 64" 64 "$rc"
+assert_contains "fw_var_write wrapper: die names the variable path" "$out" \
+    "cannot write $fwro/db-$DBXGUID"
+assert_contains "fw_var_write wrapper: die keeps the manual-enrollment remedy" "$out" \
+    "FAT USB stick"
+assert_contains "fw_var_write wrapper: die names KeyTool.efi" "$out" \
+    "KeyTool.efi"
 
 # same hazard, decided call for the other direct writer: fw_osindications_set
 # removes a pre-existing OsIndications before rewriting (same-attrs overwrite

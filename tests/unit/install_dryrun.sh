@@ -261,7 +261,7 @@ assert_contains "plan: defer-custody — the provision record defers release.pem
 assert_not_contains "plan: defer-custody — NO plaintext-custody promise before the ceremony (stage1 in the install flow leaves release.pem plaintext for 3/3)" \
     "$DEFER_LINE" "keys_encrypt_release"
 assert_contains "plan: §9.1 step 4 — NVRAM enrollment db->KEK->PK via fw_auth_enroll" \
-    "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+    "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
 assert_contains "plan: §9.1 step 5 — in-chroot ukictl build (boot manager + UKI)" \
     "$INS_OUT" "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24/§9.1 step 6: provisional TPM enrollment guest line (Mechanism B, PCR 11)
@@ -736,7 +736,7 @@ assert_contains "keydir: staged key files locked to 0600" "$INS_OUT" "chmod 600 
 assert_not_contains "keydir: NO in-chroot keygen when the medium supplies the keys" \
     "$INS_OUT" "provision stage1 --mode in-chroot"
 assert_contains "keydir: NVRAM enrollment still consumes the staged packets" "$INS_OUT" \
-    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
 K_STAGE=$(line_no "$INS_OUT" "cp $KEYDIR/release.pem")
 K_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
 assert_eq "keydir: staging BEFORE NVRAM enrollment (plan order)" "1" \
@@ -766,6 +766,8 @@ assert_contains "esp: ESP mounted at the flag mount point" "$INS_OUT" \
     "mount $FAKEDISK"$(printf '%s' "1")" /mnt/boot/efi"
 assert_contains "esp: bootctl install targets the flag mount point" "$INS_OUT" \
     "bootctl install --esp-path=/boot/efi --boot-path=/boot/efi"
+assert_contains "esp: NVRAM enrollment record passes the flag ESP (fallback staging dir)" \
+    "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /boot/efi"
 assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
     "/boot/efi/EFI/Linux/alpine-fde-*.efi"
 # dispatcher global --esp (env ALPINE_FDE_ESP) is consumed too
@@ -786,6 +788,8 @@ run_install --disk "$FAKEDISK"
 assert_contains "esp: default stays /efi (fstab)" "$INS_OUT" \
     "PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2"
 assert_contains "esp: default stays /efi (ESP_PATH)" "$INS_OUT" "ESP_PATH=/efi"
+assert_contains "esp: default stays /efi (enrollment ESP_DIR)" "$INS_OUT" \
+    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
 
 # --- 10. package-list lint (§3.3, topology-conditional) ------------------------
 PKG_LIST=$(install_package_list)

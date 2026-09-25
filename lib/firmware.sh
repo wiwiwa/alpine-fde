@@ -138,13 +138,16 @@ fw_name_utf16_hex() {
     printf '%s\n' "$_fnu_out"
 }
 
-# fw_var_write DIR NAME GUID AUTHFILE — write an authenticated variable update
-# (the .auth packet from the key ceremony, provision stage1) into efivarfs as
-# a 4-byte u32le attributes header (NV+BS+RT = 7) followed by the packet.
-# The packet is identity-checked BEFORE any write: its embedded EFI_VARIABLE_DATA
-# GUID and UnicodeName must name exactly the target variable — an .auth packet
-# aimed at another variable must never be able to program this one (fail-closed).
-fw_var_write() {
+# fw_var_write_try DIR NAME GUID AUTHFILE — the try-form of fw_var_write: rc 0
+# on an enrolled variable, rc 1 when the kernel/firmware REFUSED the write
+# (no die). Queue 26 ext: real firmware refused the db SetVariable with EINVAL
+# even with correct attrs/SetupMode/no pre-existing vars, so the enroll flow
+# needs a non-fatal probe. The IDENTITY preflight still dies fail-closed: a
+# packet whose embedded GUID/UnicodeName does not name the target variable, a
+# truncated packet, a missing packet, or a missing efivars dir is a BUG (or a
+# custody error), never a firmware quirk — an .auth packet aimed at another
+# variable must never be able to program this one.
+fw_var_write_try() {
     _fwv_dir=$1
     _fwv_name=$2
     _fwv_guid=$3
@@ -176,25 +179,73 @@ fw_var_write() {
     # refuses an authenticated update outright; the value must match the attrs
     # signed into the packet descriptor (provision PROV_EFI_ATTRS).
     { printf '\007\000\001\000'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
-        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid (kernel/firmware refused the authenticated SetVariable) — if the variable re-appears or EINVAL persists, complete enrollment manually: copy the .auth files from the key directory to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi, then re-run install (completed steps skip via crash resume)"
+        return 1
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
     return 0
 }
 
-# fw_auth_enroll EFIVARS_DIR KEYDIR — the §9.1 Stage-1 step-4 enrollment:
-# authenticated updates into NVRAM in strict order db → KEK → PK (last) from
-# KEYDIR's .auth packets (db in the image-security database namespace, KEK/PK
-# in EFI_GLOBAL_VARIABLE). Gated: requires SetupMode==1 (fail-closed 64 —
-# authenticated writes outside setup mode fail or, worse, brick the boot
-# entry). Aborts on the first failure: a half-enrolled trust root (PK without
-# db/KEK) is never left behind.
+# fw_var_write DIR NAME GUID AUTHFILE — die-on-failure wrapper (compatibility
+# for direct callers and the pin in tests/unit/nvram_auth_enroll.sh): the
+# refused SetVariable is fatal here, with the full manual-enrollment remedy.
+fw_var_write() {
+    fw_var_write_try "$@" && return 0
+    die "firmware: cannot write $1/$2-$3 (kernel/firmware refused the authenticated SetVariable) — if the variable re-appears or EINVAL persists, complete enrollment manually: copy the .auth files from the key directory to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi, then re-run install (completed steps skip via crash resume)"
+}
+
+# fw_auth_esp_fallback ESP_DIR KEYDIR — the graceful degradation when the
+# firmware refuses NVRAM enrollment (queue 26 ext, user directive: "write
+# .esl to EFI partition, if write to efivars failed, and show instruction to
+# import the file into uefi bios"): stage the .auth packets and the signed
+# .esl lists under <ESP_DIR>/alpine-fde-keys on the already-mounted EFI
+# System Partition, then print the numbered manual-import instructions. The
+# install CONTINUES (rc 0) — first boot stays guarded (ADR-20) until the
+# operator completes the import in firmware setup.
+fw_auth_esp_fallback() {
+    _fef_esp=$1
+    _fef_keys=$2
+    _fef_dst=$_fef_esp/alpine-fde-keys
+    mkdir -p "$_fef_dst" ||
+        die "firmware: cannot create $_fef_dst to stage the Secure Boot key material (firmware refused NVRAM enrollment AND the ESP fallback is unavailable) — copy the .auth files from $_fef_keys to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi manually"
+    # .auth packets (fw_var_write input) + .esl lists (KeyTool "enroll from
+    # file"); dbx is staged only when the key ceremony produced one
+    for _fef_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl dbx.auth dbx.esl; do
+        [ -f "$_fef_keys/$_fef_f" ] || continue
+        cp "$_fef_keys/$_fef_f" "$_fef_dst/$_fef_f" ||
+            die "firmware: cannot stage $_fef_keys/$_fef_f -> $_fef_dst/$_fef_f (ESP fallback)"
+        info "firmware: staged $_fef_f into $_fef_dst (ESP fallback)"
+    done
+    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware; complete it manually:"
+    info "  1. copy the alpine-fde-keys directory to a FAT USB stick (or use the files directly from the EFI partition)"
+    info "  2. reboot into the firmware setup (BIOS/UEFI)"
+    info "  3. under Secure Boot key management import, in this order: db.auth (Key Database), kek.auth (Key Exchange Key), pk.auth (Platform Key) — or enroll the matching .esl files 'from file' with KeyTool.efi or the firmware's own key-management UI"
+    info "  4. while in firmware setup, set an administrator (supervisor) password"
+    info "  5. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot with Secure Boot unconfigured (that is the design, ADR-20), so finish the key import before expecting a passwordless boot"
+    warn "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+    return 0
+}
+
+# fw_auth_enroll EFIVARS_DIR KEYDIR [ESP_DIR] — the §9.1 Stage-1 step-4
+# enrollment: authenticated updates into NVRAM in strict order db → KEK → PK
+# (last) from KEYDIR's .auth packets (db in the image-security database
+# namespace, KEK/PK in EFI_GLOBAL_VARIABLE). Gated: requires SetupMode==1
+# (fail-closed 64 — authenticated writes outside setup mode fail or, worse,
+# brick the boot entry). A REFUSED write (firmware EINVAL even with correct
+# attrs, queue 26 ext) is no longer fatal: every remaining variable is still
+# attempted (same firmware refuses them identically — harmless and
+# diagnostic), then the key material is staged to ESP_DIR (default /efi, the
+# in-chroot ESP mount) via fw_auth_esp_fallback and the manual-import
+# instructions are printed; the install continues. A missing/mismatched
+# PACKET still dies fail-closed (fw_var_write_try preflight): that is a bug,
+# not a firmware quirk.
 fw_auth_enroll() {
     _fae_dir=$1
     _fae_keys=$2
+    _fae_esp=${3:-/efi}
     _fae_setup=$(fw_var_u8 "$_fae_dir" SetupMode) ||
         die "firmware: SetupMode state unknown at $_fae_dir — refusing to enroll (§9.1 preflight: clear the vendor PK in BIOS setup first)"
     [ "$_fae_setup" = "1" ] ||
         die "firmware: not in Setup Mode (setup_mode=$_fae_setup) — refusing to enroll (§9.1: clear the vendor PK in BIOS setup first)"
+    _fae_failed=''
     for _fae_v in db KEK PK; do
         _fae_guid=$FW_GUID_GLOBAL
         [ "$_fae_v" = "db" ] && _fae_guid=$FW_GUID_IMAGE_SECURITY
@@ -217,8 +268,16 @@ fw_auth_enroll() {
         fi
         # provision stage1 ships the packets as db.auth / kek.auth / pk.auth
         _fae_lc=$(printf '%s' "$_fae_v" | tr '[:upper:]' '[:lower:]')
-        fw_var_write "$_fae_dir" "$_fae_v" "$_fae_guid" "$_fae_keys/$_fae_lc.auth"
+        # Try-form: a refused SetVariable warns and remembers; it does NOT
+        # stop the loop — after a db refusal the KEK/PK attempts fail
+        # identically on the same firmware, but attempting them costs nothing
+        # and their warns are the diagnostic record of what was tried.
+        if ! fw_var_write_try "$_fae_dir" "$_fae_v" "$_fae_guid" "$_fae_keys/$_fae_lc.auth"; then
+            warn "firmware: cannot write $_fae_dir/$_fae_v-$_fae_guid (firmware refused the authenticated SetVariable) — staging the key material to the ESP for manual enrollment"
+            _fae_failed=1
+        fi
     done
+    [ -z "$_fae_failed" ] || fw_auth_esp_fallback "$_fae_esp" "$_fae_keys"
     return 0
 }
 

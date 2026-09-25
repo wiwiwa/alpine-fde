@@ -1526,8 +1526,13 @@ cmd_install_main() {
   inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
   inst_plan_run host "inst_ceremony_release_key $_im_keys # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400"
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
-  # efivars (SetupMode was gate-checked host-side in preflight)
-  inst_plan_run guest 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys'
+  # efivars (SetupMode was gate-checked host-side in preflight). The in-chroot
+  # ESP mount ($_im_esp_mnt, §8.1 --esp/env ALPINE_FDE_ESP/default /efi) is
+  # passed as the fallback staging dir (queue 26 ext): when the firmware
+  # refuses the SetVariable, fw_auth_enroll stages the .auth/.esl key material
+  # to <ESP>/alpine-fde-keys and prints manual-import instructions instead of
+  # dying — the install continues.
+  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
   # ESP layout for the in-chroot build (systemd-boot binaries from the apk
   # transaction; ukictl build signs them, §9.1 step 5)
   inst_plan_run guest "bootctl install --esp-path=$_im_esp_mnt --boot-path=$_im_esp_mnt"

@@ -487,7 +487,7 @@ assert_contains "defer-custody: the executed provision record defers release.pem
 assert_eq "defer-custody: NO release-key prompt before the ceremony (exactly ONE reusing-hint per derived prompt, both ceremony-owned)" "2" \
     "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
 assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
-    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+    "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
 assert_contains "ESP layout for the in-chroot build" "$LOG" \
     "bootctl install --esp-path=/efi --boot-path=/efi"
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
@@ -959,7 +959,7 @@ assert_contains "keydir: db.auth staged from the medium (host record)" "$OUT" \
 assert_eq "keydir: NO in-chroot keygen ceremony ran" "0" \
     "$(grep -c 'provision stage1' "$ALPINE_FDE_TEST_LOG")"
 assert_contains "keydir: NVRAM enrollment still consumes /etc/alpine-fde/keys" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
 assert_file_exists "keydir: release.pem on the encrypted root" "$MNT_ETC/alpine-fde/keys/release.pem"
 assert_eq "keydir: staged keys dir mode 0700" "700" "$(stat -c '%a' "$MNT_ETC/alpine-fde/keys")"
 assert_eq "keydir: staged key files mode 0600" "600" "$(stat -c '%a' "$MNT_ETC/alpine-fde/keys/kek.auth")"
