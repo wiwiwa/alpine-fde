@@ -473,8 +473,19 @@ assert_contains "§9.1 step 1: user account created in-guest (locked; password s
     "adduser -D -s /bin/ash admin"
 assert_contains "§9.1 step 1: OpenRC networking enabled in-guest" "$LOG" \
     "rc-update add networking boot"
-assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot" "$LOG" \
-    "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys"
+assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot (custody DEFERRED to ceremony 3/3)" "$LOG" \
+    "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody"
+# item 12/reorder close-out (user ruling: LUKS recovery is the FIRST password
+# asked, period): the executed guest record carries --defer-custody — provision
+# stage1's own keys_encrypt_release prompt would otherwise be the FIRST
+# password asked (no hint, recovery not yet asked). With the defer, the ONLY
+# release-key prompt in the whole run belongs to ceremony 3/3 (the "exactly 2
+# hints" pin above already proves its Enter-to-reuse default fired), and the
+# ceremony DOES encrypt the plaintext stage1 leaves (the pin below).
+assert_contains "defer-custody: the executed provision record defers release.pem encryption to ceremony 3/3" "$OUT" \
+    "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody"
+assert_eq "defer-custody: NO release-key prompt before the ceremony (exactly ONE reusing-hint per derived prompt, both ceremony-owned)" "2" \
+    "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
 assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
     "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
 assert_contains "ESP layout for the in-chroot build" "$LOG" \
@@ -550,6 +561,28 @@ if [ -f /etc/resolv.conf ]; then
     L_SEEDTXN=$(printf '%s\n' "$OUT" | grep -Fnm1 "guest: apk add --no-cache" | cut -d: -f1)
     assert_eq "26b: target DNS seed executed BEFORE the in-chroot apk transaction" "1" \
         "$(( L_SEEDCP > 0 && L_SEEDTXN > 0 && L_SEEDCP < L_SEEDTXN ? 1 : 0 ))"
+fi
+# =============================================================================
+# item 26 ext (real-install failure #5): target apk KEYRING seed. apk verifies
+# mirror indexes against the TARGET's <mnt>/etc/apk/keys ONLY — absent on a
+# fresh rootfs, and --initdb does NOT copy the host keyring — so the populate
+# dies `UNTRUSTED signature` on any real server (the repositories seeding alone
+# is half the fix). ONE guarded host record seeds the live keyring after the
+# repositories drop, BEFORE the populate.
+# =============================================================================
+L_KEYSEED=$(first_line_no "$OUT" "cp -a /etc/apk/keys $ALPINE_FDE_INSTALL_MNT/etc/apk/")
+L_HREPOS=$(first_line_no "$OUT" "etc/apk/repositories")
+L_HPOP=$(first_line_no "$OUT" "host: apk add --root $ALPINE_FDE_INSTALL_MNT --initdb alpine-base")
+assert_eq "26ext: keys-seed record is a host plan record" "1" "$(( L_KEYSEED > 0 ? 1 : 0 ))"
+assert_eq "26ext: order repositories drop -> keys seed -> apk populate" "1" \
+    "$(( L_HREPOS > 0 && L_KEYSEED > 0 && L_HPOP > 0 && L_HREPOS < L_KEYSEED && L_KEYSEED < L_HPOP ? 1 : 0 ))"
+assert_contains "26ext: guard carries the host-keydir-missing warn branch" "$OUT" \
+    "no keyring on the live env"
+if [ -d /etc/apk/keys ]; then
+    assert_file_exists "26ext: target keyring seeded from the live env" "$MNT_ETC/apk/keys"
+else
+    assert_eq "26ext: no live keyring -> warn branch executed, target keyring NOT faked" "1" \
+        "$([ ! -e "$MNT_ETC/apk/keys" ] && grep -qF 'alpine-fde: warn: no keyring on the live env' <<<"$OUT" && echo 1 || echo 0)"
 fi
 # G-C23/I1: the ephemeral key does NOT survive the run
 assert_eq "G-C23: ephemeral key-file scrubbed at teardown" "0" \

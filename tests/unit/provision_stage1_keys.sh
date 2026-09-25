@@ -79,7 +79,7 @@ auth_packet_build "$T/signer.key" "$T/signer.pem" db 'd719b2cb-3d3a-4596-a3bc-da
 # descriptor golden (what gets signed): name+guid+attrs+time+payload
 GOLDEN_DESC='64006200'
 GOLDEN_DESC+='cbb219d73a3d9645a3bcdad00e67656f'
-GOLDEN_DESC+='07000001'
+GOLDEN_DESC+='07000100'
 GOLDEN_DESC+='ea07090e010203000000000000000000'
 GOLDEN_DESC+='11223344'
 # packet = EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + EFI_VARIABLE_DATA
@@ -237,7 +237,7 @@ tail -c +53 "$T/keys/dbx.auth" >"$T/dbx.p7"
 # descriptor = name + guid + attrs + EFI_TIME (read from the packet header, as
 # a firmware/KeyTool verifier does) + payload
 TS_HEX=$(bin_to_hex <"$T/keys/dbx.auth" | cut -c 1-32)
-DESC_HEX=$(ascii_utf16le_hex 'dbx')$(guid_le_hex 'd719b2cb-3d3a-4596-a3bc-dad00e67656f')$(le32_hex 16777223)$TS_HEX$(bin_to_hex <"$T/keys/dbx.esl")
+DESC_HEX=$(ascii_utf16le_hex 'dbx')$(guid_le_hex 'd719b2cb-3d3a-4596-a3bc-dad00e67656f')$(le32_hex 65543)$TS_HEX$(bin_to_hex <"$T/keys/dbx.esl")
 printf '%s' "$DESC_HEX" | hex_to_bin >"$T/dbx-desc.bin"
 openssl smime -verify -inform DER -in "$T/dbx.p7" -content "$T/dbx-desc.bin" \
     -CAfile "$T/keys/kek.cert.pem" -out /dev/null 2>"$T/dbx-verify.err"
@@ -437,6 +437,32 @@ IC4="$T/inchroot-floor"
 IC4_RC=$(ALPINE_FDE_KEY_PASSPHRASE=short "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot --keydir "$IC4" >/dev/null 2>&1; echo $?)
 assert_eq "in-chroot floor-violating passphrase -> rc 2" "2" "$IC4_RC"
 assert_eq "in-chroot floor violation: no ciphertext written" "1" "$(enc_rc "$IC4/release.pem" 2>/dev/null || echo 1)"
+
+# --- item 12/reorder close-out: --defer-custody (the INSTALL-FLOW seam) --------
+# User ruling: LUKS recovery is the FIRST password asked, period. The install
+# plan invokes `provision stage1 --mode in-chroot --defer-custody`: stage1 must
+# NOT prompt for / encrypt the release key (its keys_encrypt_release prompt
+# would otherwise precede the §9.1 step 4 ceremony with no hint), leaving
+# release.pem PLAINTEXT for inst_ceremony_release_key (ceremony 3/3) — whose
+# keys_is_encrypted gate only SKIPS on an already-encrypted file, so the
+# natural flow re-encrypts. The priv-key scrub + post-asserts stay.
+IC5="$T/inchroot-defer"
+IC5_OUT=$(ALPINE_FDE_KEY_PASSPHRASE=$IC_PASS "$REPO/bin/alpine-fde" provision stage1 --mode in-chroot --defer-custody --keydir "$IC5" 2>&1)
+IC5_RC=$?
+assert_eq "defer-custody: stage1 --mode in-chroot --defer-custody rc 0 (NO release-key prompt, NO encryption here)" "0" "$IC5_RC"
+assert_not_contains "defer-custody: no encryption step ran (no PBES2 line)" "$IC5_OUT" "encrypting release.pem"
+assert_not_contains "defer-custody: no ENCRYPTED-confirmed checklist line" "$IC5_OUT" "confirmed (PBES2"
+assert_eq "defer-custody: release.pem stays PLAINTEXT for ceremony 3/3 (keys_is_encrypted gate only skips on already-encrypted)" "1" \
+    "$(enc_rc "$IC5/release.pem")"
+assert_eq "defer-custody: plaintext release.pem mode 600" "600" "$(stat -c %a "$IC5/release.pem")"
+for f in release.priv.pem pk.priv.pem kek.priv.pem db.priv.pem; do
+    assert_eq "defer-custody: priv-key scrub still ran (no $f on the target)" "0" "$([ -e "$IC5/$f" ] && echo 1 || echo 0)"
+done
+assert_contains "defer-custody: checklist says the encryption is DEFERRED to the ceremony" "$IC5_OUT" "DEFERRED"
+# misuse guard: the seam is install-flow-only — offline mode has nothing to defer
+IC6="$T/defer-offline"
+RC=$( ( "$REPO/bin/alpine-fde" provision stage1 --defer-custody --keydir "$IC6" ) >/dev/null 2>&1; echo $? )
+assert_eq "defer-custody without --mode in-chroot -> usage rc 2 (install-flow-only seam)" "2" "$RC"
 
 # explicit --mode offline (the documented default) is unchanged: plaintext on the medium
 OF3="$T/keys-offline-explicit"

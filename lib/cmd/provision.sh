@@ -120,7 +120,7 @@ PROV_GUID_X509_SHA256_HEX='92a4d23bc0967940b420fcf98ef103ed'
 # the image-security-database namespace)
 PROV_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'   # EFI_GLOBAL_VARIABLE
 PROV_GUID_DBASE='d719b2cb-3d3a-4596-a3bc-dad00e67656f'    # EFI_IMAGE_SECURITY_DATABASE
-PROV_EFI_ATTRS=16777223                                   # 0x01000007: NV + BS + RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS
+PROV_EFI_ATTRS=65543                                      # 0x00010007: NV + BS + RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS (bit 16; 0x01000000 is ENHANCED_AUTHENTICATED_ACCESS, refused with EINVAL by most firmware)
 
 # esl_build CERT-DER-FILE [OWNER-GUID-DASHED] — EFI_SIGNATURE_LIST on stdout:
 # SignatureType(16) + ListSize u32le + HeaderSize u32le(0) + SignatureSize u32le
@@ -306,6 +306,14 @@ stage1  key ceremony (ADR-18):
             the PK/KEK/db private keys are shredded — the target keeps certs +
             packets + the encrypted release.pem ONLY. Passphrase:
             ALPINE_FDE_KEY_PASSPHRASE or interactive prompt.
+        --defer-custody
+            INSTALL-FLOW seam (requires --mode in-chroot): skip the
+            release.pem encryption + its passphrase prompt here — the §9.1
+            step 4 credential ceremony (3/3, inst_ceremony_release_key) owns
+            the encryption (its keys_is_encrypted gate re-encrypts the
+            plaintext file), so the LUKS2 recovery passphrase is the FIRST
+            password asked (item 12). The private-key shred + post-asserts
+            still run. Standalone stage1 (no flag) is unchanged.
         --enroll-efivars [DIR]
             after the packet build, push the db/KEK/PK .auth packets into the
             efivarfs directory DIR via fw_auth_enroll (db -> KEK -> PK, PK
@@ -342,6 +350,16 @@ prov_stage1() {
     _s1_revoke=''
     _s1_enroll_efivars=0
     _s1_efivars_dir=''
+    # item 12/reorder close-out: the INSTALL-FLOW seam (--defer-custody). The
+    # install plan invokes stage1 in-chroot BEFORE the §9.1 step 4 credential
+    # ceremony; without this flag stage1's own keys_encrypt_release prompts for
+    # the release-key passphrase FIRST (no hint, recovery not yet asked) —
+    # against the user ruling that the LUKS2 recovery passphrase is the FIRST
+    # password asked, period. Deferred: stage1 leaves release.pem PLAINTEXT and
+    # inst_ceremony_release_key (ceremony 3/3) encrypts it — its
+    # keys_is_encrypted gate only SKIPS on an already-encrypted file, so the
+    # natural flow re-encrypts. The priv-key scrub + post-asserts stay.
+    _s1_defer_custody=0
     # ADR-18/RESOLVED-2: the ceremony defaults to the offline signing medium;
     # --mode in-chroot runs the §9.1 step-3 flow on the target's encrypted root
     _s1_mode=offline
@@ -383,6 +401,7 @@ prov_stage1() {
                 shift
                 ;;
             --force) _s1_force=1 ;;
+            --defer-custody) _s1_defer_custody=1 ;;
             *) die -r "$ALPINE_FDE_USAGE" "stage1: unknown argument: $1" ;;
         esac
         shift
@@ -405,6 +424,11 @@ prov_stage1() {
     # (§9.1 steps 3+6), so the guard does not apply to it.
     if [ "$_s1_mode" = "offline" ]; then
         keys_offline_guard "$_s1_keydir"
+    fi
+    # the defer seam is install-flow-only: offline mode has nothing to defer
+    # (release.pem stays plaintext on the medium by design) — misuse dies loud
+    if [ "$_s1_defer_custody" -eq 1 ] && [ "$_s1_mode" != "in-chroot" ]; then
+        die -r "$ALPINE_FDE_USAGE" "stage1: --defer-custody requires --mode in-chroot (it is the install-flow seam: ceremony 3/3 owns the release.pem encryption)"
     fi
     require_pkgs openssl:openssl
 
@@ -520,12 +544,22 @@ EOF
     # release.priv.pem duplicate + staging), then zeroize+rm the enrollment
     # private keys — the target keeps certs + packets + the encrypted
     # release.pem ONLY. Post-asserts fail closed (64) on any violation.
+    # --defer-custody (install flow, item 12/reorder close-out): the ENCRYPTION
+    # leg moves to the §9.1 step 4 credential ceremony (3/3,
+    # inst_ceremony_release_key) so the LUKS2 recovery passphrase is the FIRST
+    # password asked; the priv-key scrub + post-asserts stay here. Safe: the
+    # ceremony's keys_is_encrypted gate only skips on an ALREADY-encrypted
+    # file, so it re-encrypts the plaintext this mode leaves.
     if [ "$_s1_mode" = "in-chroot" ]; then
-        info "ADR-18 custody: encrypting release.pem on the target (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER) before reboot"
-        keys_encrypt_release "$_s1_keydir"
+        if [ "$_s1_defer_custody" -eq 1 ]; then
+            info "install-flow custody: release.pem encryption DEFERRED to the §9.1 step 4 credential ceremony (3/3) — no release-key passphrase is asked here (the LUKS2 recovery passphrase is the FIRST password asked, item 12)"
+        else
+            info "ADR-18 custody: encrypting release.pem on the target (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER) before reboot"
+            keys_encrypt_release "$_s1_keydir"
+        fi
         keys_scrub "$_s1_keydir/release.priv.pem" \
             "$_s1_keydir/pk.priv.pem" "$_s1_keydir/kek.priv.pem" "$_s1_keydir/db.priv.pem"
-        if ! keys_is_encrypted "$_s1_keydir/release.pem"; then
+        if [ "$_s1_defer_custody" -eq 0 ] && ! keys_is_encrypted "$_s1_keydir/release.pem"; then
             die "stage1: custody post-assert failed: $_s1_keydir/release.pem is not ADR-18-encrypted — refusing to finish (I4/ADR-18)"
         fi
         for _s1_p in release.priv.pem pk.priv.pem kek.priv.pem db.priv.pem; do
@@ -536,7 +570,11 @@ EOF
     fi
 
     if [ "$_s1_mode" = "in-chroot" ]; then
-        info "custody checklist (ADR-18): release.pem ENCRYPTED at $_s1_keydir/release.pem — confirmed (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER)"
+        if [ "$_s1_defer_custody" -eq 1 ]; then
+            info "custody checklist (ADR-18, DEFERRED): release.pem is intentionally PLAINTEXT at $_s1_keydir/release.pem — the §9.1 step 4 credential ceremony (3/3) encrypts it before reboot (install flow)"
+        else
+            info "custody checklist (ADR-18): release.pem ENCRYPTED at $_s1_keydir/release.pem — confirmed (PBES2 aes-256-cbc, hmacWithSHA256, iter $KEYS_PBKDF2_ITER)"
+        fi
         info "  pk/kek/db private keys shredded after the packet build — the target keeps certs +"
         info "  packets + the encrypted release.pem ONLY"
         info "  back up $_s1_keydir (certs + packets + encrypted release.pem) off-machine via scp (ADR-18)"

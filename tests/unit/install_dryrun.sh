@@ -246,8 +246,20 @@ assert_contains "plan: §9.1 step 2 — pending baseline ON TARGET (baseline wri
     "$INS_OUT" "inst_baseline_pending_write /mnt"
 assert_not_contains "plan: NO host-baseline copy anywhere (§9.1)" "$INS_OUT" \
     "cp /etc/alpine-fde/baseline.json"
-assert_contains "plan: §9.1 step 3 — in-chroot platform-key ceremony" "$INS_OUT" \
-    "/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot"
+assert_contains "plan: §9.1 step 3 — in-chroot platform-key ceremony (custody DEFERRED to ceremony 3/3)" "$INS_OUT" \
+    "/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody"
+# item 12/reorder close-out (user ruling: LUKS recovery is the FIRST password
+# asked, period): the install-flow provision record carries --defer-custody —
+# without it provision stage1's own keys_encrypt_release prompts for the
+# release-key passphrase BEFORE the ceremony (no hint, recovery not yet asked).
+# The deferred encryption is completed by inst_ceremony_release_key (3/3),
+# whose keys_is_encrypted gate only SKIPS on an already-encrypted file — the
+# natural flow re-encrypts the plaintext stage1 leaves behind.
+DEFER_LINE=$(grep -m1 'provision stage1' <<<"$INS_OUT")
+assert_contains "plan: defer-custody — the provision record defers release.pem encryption to ceremony 3/3" "$DEFER_LINE" \
+    "--defer-custody"
+assert_not_contains "plan: defer-custody — NO plaintext-custody promise before the ceremony (stage1 in the install flow leaves release.pem plaintext for 3/3)" \
+    "$DEFER_LINE" "keys_encrypt_release"
 assert_contains "plan: §9.1 step 4 — NVRAM enrollment db->KEK->PK via fw_auth_enroll" \
     "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys"
 assert_contains "plan: §9.1 step 5 — in-chroot ukictl build (boot manager + UKI)" \
@@ -367,6 +379,19 @@ assert_eq "26b: target DNS seed precedes the in-chroot apk transaction" "1" \
     "$(( I_SEED > 0 && I_TXN > 0 && I_SEED < I_TXN ? 1 : 0 ))"
 assert_eq "26b: target DNS seed also precedes the user-account guest step" "1" \
     "$(( I_SEED > 0 && I_SEED < "$(line_no "$INS_OUT" "adduser")" ? 1 : 0 ))"
+
+# --- 2b-item26ext. target apk KEYRING seed (real-install failure #5): apk ---
+#         verifies mirror indexes against the TARGET's <mnt>/etc/apk/keys only
+#         — absent on a fresh rootfs, and --initdb does NOT copy the host
+#         keyring — so the populate dies `UNTRUSTED signature` on any real
+#         server. ONE guarded host record seeds the live keyring after the
+#         repositories drop, BEFORE the populate; no-op + warn when the live
+#         env has no keyring.
+assert_contains "26ext: seeding record is a guarded host record (only-if-host-dir-exists, warn branch, || : tail)" "$INS_OUT" \
+    "mkdir -p /mnt/etc/apk && if [ -d /etc/apk/keys ]; then cp -a /etc/apk/keys /mnt/etc/apk/ && echo 'alpine-fde: info: apk keyring seeded from the live env (apk verifies the mirror indexes against the target keyring)'; else echo 'alpine-fde: warn: no keyring on the live env (/etc/apk/keys) — apk will not trust any mirror'; fi || :"
+I_KEYSEED=$(line_no "$INS_OUT" "cp -a /etc/apk/keys /mnt/etc/apk/")
+assert_eq "26ext: order repositories drop -> keys seed -> apk populate" "1" \
+    "$(( I_REPOS > 0 && I_KEYSEED > 0 && I_POPULATE > 0 && I_REPOS < I_KEYSEED && I_KEYSEED < I_POPULATE ? 1 : 0 ))"
 
 # --- 2a. RESET of a previous FAILED attempt (user report: "install show reset
 #         failed installation status, when install restarts again, so that new

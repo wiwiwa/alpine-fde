@@ -1373,6 +1373,13 @@ cmd_install_main() {
   # unable to select packages: alpine-base`. The drop is written exactly once,
   # here (NOT repeated in section 5).
   inst_plan_write /etc/apk/repositories $(inst_repo_lines)
+  # item 26 ext (real-install failure #5): apk verifies mirror indexes against
+  # the TARGET's <mnt>/etc/apk/keys ONLY — absent on a fresh rootfs, and
+  # --initdb does NOT copy the host keyring — so without this seed the populate
+  # dies `WARNING: ... APKINDEX.tar.gz: UNTRUSTED signature` on any real server
+  # (the repositories drop alone is half the fix). Guarded host record: no-op +
+  # warn when the live env has no keyring.
+  inst_plan_run host "mkdir -p $_im_mnt/etc/apk && if [ -d /etc/apk/keys ]; then cp -a /etc/apk/keys $_im_mnt/etc/apk/ && echo 'alpine-fde: info: apk keyring seeded from the live env (apk verifies the mirror indexes against the target keyring)'; else echo 'alpine-fde: warn: no keyring on the live env (/etc/apk/keys) — apk will not trust any mirror'; fi || : # item 26 ext: seed the target keyring before the populate"
   inst_plan_run host "apk add --root $_im_mnt --initdb alpine-base"
 
   # --- 5. config drops (host-side writes; guest printf lines under qemu) -----
@@ -1485,12 +1492,19 @@ cmd_install_main() {
   # material is staged FROM THE MEDIUM onto the encrypted root (restrictive
   # perms; NEVER anything under the ESP, I2) and the in-chroot keygen is
   # SKIPPED; without it the ceremony generates everything on the encrypted
-  # root (ADR-18) via the custody flow (CLI invoked in-chroot)
+  # root (ADR-18) via the custody flow (CLI invoked in-chroot).
+  # --defer-custody (item 12/reorder close-out, user ruling: the LUKS2
+  # recovery passphrase is the FIRST password asked, period): stage1 must NOT
+  # prompt for / encrypt the release key — its own keys_encrypt_release prompt
+  # would otherwise precede the ceremony below with no hint and no recovery
+  # context. stage1 leaves release.pem PLAINTEXT and ceremony 3/3
+  # (inst_ceremony_release_key) encrypts it — its keys_is_encrypted gate only
+  # skips on an ALREADY-encrypted file, so the natural flow completes custody.
   _im_keys=$_im_mnt/etc/alpine-fde/keys
   if [ -n "$_im_kd" ]; then
     inst_plan_run host "mkdir -p $_im_keys && cp $_im_kd/release.pem $_im_kd/release.pub $_im_kd/release.crt $_im_kd/db.cert.der $_im_kd/kek.cert.der $_im_kd/pk.cert.der $_im_kd/db.esl $_im_kd/kek.esl $_im_kd/pk.esl $_im_kd/db.auth $_im_kd/kek.auth $_im_kd/pk.auth $_im_keys/ && chmod 700 $_im_keys && chmod 600 $_im_keys/* # ADR-18/§8.1: operator-supplied key material staged from the signing medium (no in-chroot keygen)"
   else
-    inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys'
+    inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody'
   fi
   # step 4 (ADR-20 AMENDED, §9.1 step 4): the interactive CREDENTIAL CEREMONY —
   # three no-echo questions, the only interactive input of the whole lifecycle,

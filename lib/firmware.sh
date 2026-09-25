@@ -170,11 +170,12 @@ fw_var_write() {
     # on the first write to the file — writing the 4-byte attrs header and
     # then appending the packet would attempt to create the variable with an
     # EMPTY body and fail with EIO on real firmware (2026-09-20 live metal).
-    # Attrs 0x01000007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS:
-    # without the auth bit firmware refuses an authenticated update outright;
-    # the value must match the attrs signed into the packet descriptor
-    # (provision PROV_EFI_ATTRS).
-    { printf '\007\000\000\001'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
+    # Attrs 0x00010007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS
+    # (u32le, bit 16 — UEFI spec; 0x01000000 is ENHANCED_AUTHENTICATED_ACCESS,
+    # refused with EINVAL on most firmware): without the auth bit firmware
+    # refuses an authenticated update outright; the value must match the attrs
+    # signed into the packet descriptor (provision PROV_EFI_ATTRS).
+    { printf '\007\000\001\000'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
         die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid (kernel/firmware refused the authenticated SetVariable) — if the variable re-appears or EINVAL persists, complete enrollment manually: copy the .auth files from the key directory to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi, then re-run install (completed steps skip via crash resume)"
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
     return 0

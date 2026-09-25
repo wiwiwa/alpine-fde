@@ -179,6 +179,20 @@ S_APKPOP=$(grep -n '^# HOST: apk add --root' "$SCRIPT" | cut -d: -f1)
 assert_eq "emitted order: repositories drop BEFORE apk populate (real-install defect 6)" "1" \
     "$(( S_REPOS > 0 && S_APKPOP > 0 && S_REPOS < S_APKPOP ? 1 : 0 ))"
 
+# --- item 26 ext (real-install failure #5): target apk KEYRING seed ---------
+# apk verifies mirror indexes against the TARGET's <mnt>/etc/apk/keys only —
+# absent on a fresh rootfs, and --initdb does NOT copy the host keyring — so
+# the populate dies `UNTRUSTED signature` on any real server. The seed travels
+# as a guarded `# HOST:` comment record the CI harness executes between the
+# repositories drop and the apk populate.
+S_KEYSEED=$(grep -n 'cp -a /etc/apk/keys' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted: apk keyring seed as a guarded HOST comment (26ext: populate dies UNTRUSTED without the target keyring)" "1" \
+    "$(grep -c '^# HOST: mkdir -p .* && if \[ -d /etc/apk/keys \]; then cp -a /etc/apk/keys .* && echo .*apk keyring seeded from the live env' "$SCRIPT")"
+assert_contains "emitted: keys-seed guard carries the no-live-keyring warn branch" "$(cat "$SCRIPT")" \
+    "no keyring on the live env"
+assert_eq "emitted order: repositories drop BEFORE keys seed BEFORE apk populate (26ext)" "1" \
+    "$(( S_REPOS > 0 && S_KEYSEED > 0 && S_APKPOP > 0 && S_REPOS < S_KEYSEED && S_KEYSEED < S_APKPOP ? 1 : 0 ))"
+
 # --- RESET of a previous FAILED attempt (user report): emitted as HOST ------
 # comments (the reset runs host-side in every lane), runtime-guarded so a
 # pristine machine no-ops; ordering puts the reset block before partitioning.
@@ -255,8 +269,17 @@ assert_not_contains "G-C7: NO /opt/debian-fde anywhere in the emitted qemu scrip
     "$(cat "$SCRIPT")" "/opt/debian-fde"
 
 # --- §9.1 in-chroot provisioning sequence: EXECUTABLE guest lines ----------------
-assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir)" "1" \
-    "$(grep -cx '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys' "$SCRIPT")"
+assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir, custody DEFERRED)" "1" \
+    "$(grep -cx '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody' "$SCRIPT")"
+# item 12/reorder close-out (user ruling: LUKS recovery is the FIRST password
+# asked, period): the emitted provision record carries --defer-custody —
+# provision stage1's own keys_encrypt_release prompt would otherwise ask the
+# release-key passphrase BEFORE the ceremony (no hint, recovery not yet asked).
+# ceremony 3/3 (inst_ceremony_release_key) completes the encryption in-chroot;
+# its keys_is_encrypted gate only skips on an ALREADY-encrypted file, so the
+# plaintext stage1 leaves behind is naturally re-encrypted.
+assert_contains "emitted: defer-custody — provision record defers release.pem encryption to ceremony 3/3 (release-key prompt may not precede the LUKS recovery)" \
+    "$(grep -m1 'provision stage1' "$SCRIPT")" "--defer-custody"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
     "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys' "$SCRIPT")"
 assert_eq "guest: bootctl install (ESP layout)" "1" \

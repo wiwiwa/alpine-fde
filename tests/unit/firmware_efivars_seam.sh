@@ -276,11 +276,11 @@ assert_contains "enroll: info line for pre-existing vendor KEK" "$out" \
     "removing pre-existing vendor KEK"
 assert_contains "enroll: info line for pre-existing vendor PK" "$out" \
     "removing pre-existing vendor PK"
-assert_eq "enroll: db re-created with auth attrs prefix" "07000001" \
+assert_eq "enroll: db re-created with auth attrs prefix" "07000100" \
     "$(head -c 4 "$fa/db-$DBXGUID" | od -An -vtx1 | tr -d ' \n')"
-assert_eq "enroll: KEK re-created with auth attrs prefix" "07000001" \
+assert_eq "enroll: KEK re-created with auth attrs prefix" "07000100" \
     "$(head -c 4 "$fa/KEK-$GUID" | od -An -vtx1 | tr -d ' \n')"
-assert_eq "enroll: PK re-created with auth attrs prefix" "07000001" \
+assert_eq "enroll: PK re-created with auth attrs prefix" "07000100" \
     "$(head -c 4 "$fa/PK-$GUID" | od -An -vtx1 | tr -d ' \n')"
 
 # (b) rm failure: warn (non-fatal), write still attempted, die names the
