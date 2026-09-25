@@ -2,7 +2,9 @@
 # tests/run-e2e.sh — e2e orchestrator for the Alpine FDE harness (§12).
 #
 # Usage: tests/run-e2e.sh [-j N] [scenario-id ...]
-#   Runs named scenarios (default: every registered scenario), aggregates
+#   Runs named scenarios (default: the DEFAULT SET — every registered
+#   scenario whose status is `ready`; `retired` rows stay in the registry and
+#   are invocable by name but are not selected by default), aggregates
 #   results into a JSON summary (stdout + tests/e2e/.runs/results-<ts>.json).
 #
 #   -j N | -jN | --jobs=N   run up to N scenarios CONCURRENTLY (default 1 =
@@ -27,13 +29,16 @@
 #   exit 1  — one or more scenario-class failures (including registry ids
 #             whose scenario file is missing, and vacuous zero-scenario runs)
 #
-# Registry status (updated 2026-09-19, W2b): s00/s00b are the full §12
-# bootstrap chain; s01–s18 carry pinned/observed statuses in
-# tests/e2e/results-final.json. The W2b multi-drive rows s19–s22 (§10 BASE
-# matrix + §12 S-19..S-22) are LITERAL table rows now — they bootstrap
-# IN-SCENARIO (each builds its own fixtures and consumes no s00/s00b state),
-# so the -j scheduler's s00/s00b hoist cannot misorder them and they are NOT
-# in _STATE_CONSUMERS.
+# Registry status (updated 2026-09-25, retirement sweep): s00/s00b are the
+# full §12 bootstrap chain (the state producers — still in the default set);
+# s01–s18 carry pinned/observed statuses in tests/e2e/results-final.json.
+# The scenarios whose boots the two merged pipelines absorbed (s01/s02/s14/
+# s16 -> s01c; s15/s17 -> s15c) are RETIRED from the default selection —
+# status `retired`, still invocable by name (see the REGISTRY comment).
+# The W2b multi-drive rows s19–s22 (§10 BASE matrix + §12 S-19..S-22) are
+# LITERAL table rows — they bootstrap IN-SCENARIO (each builds its own
+# fixtures and consumes no s00/s00b state), so the -j scheduler's s00/s00b
+# hoist cannot misorder them and they are NOT in _STATE_CONSUMERS.
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -249,19 +254,30 @@ fi
 printf '%s\n' "$PROXY_PLANE_OUT" | tail -1
 
 # --- scenario registry ----------------------------------------------------------
-# id <TAB> script-name <TAB> status-hint   (the RUNTIME status is derived from
+# id <TAB> script-name <TAB> status   (the RUNTIME status is derived from
 # file existence: a scenario runs iff tests/e2e/s<nn>-*.sh matches; a registry
 # id with no matching file reports MISSING and FAILS the run — see the
-# tightened contract in tests/README.md). The full S-00..S-17 matrix lives in
-# docs/Architecture.md §12 and the T-bucket gap report; each row must resolve
-# to exactly one id (registry-completeness check in
-# tests/unit/e2e_infra_smoke.sh greps this literal table).
+# tightened contract in tests/README.md). The status column drives the
+# DEFAULT SELECTION only:
+#   ready    — in the default set (no-args invocation selects it)
+#   retired  — NOT in the default set; the scenario stays registered, its
+#              file stays in the tree, and it still runs when named explicitly
+#              (`tests/run-e2e.sh s15`). Retired = the merged pipelines
+#              absorbed this scenario's boots: s01/s02/s14/s16 -> s01c (the
+#              lifecycle pipeline), s15/s17 -> s15c (the recovery pipeline);
+#              the pipeline suites cover their invariants, so the default run
+#              no longer pays their standalone boots. The full S-00..S-17
+#              matrix lives in docs/Architecture.md §12 and the T-bucket gap
+#              report; each row must resolve to exactly one id
+#              (registry-completeness check in
+#              tests/unit/e2e_infra_smoke.sh greps this literal table —
+#              keep every row, retired or not).
 REGISTRY="
 s00	s00-bootstrap-lite.sh	ready
 s00b	s00b-enroll-cache.sh	ready
 s01c	s01-lifecycle-chain.sh	ready
-s01	s01-happy-lite.sh	ready
-s02	s02-rollback.sh	ready
+s01	s01-happy-lite.sh	retired
+s02	s02-rollback.sh	retired
 s03	s03-stale-enrollment.sh	ready
 s04	s04-unsigned-uki.sh	ready
 s05	s05-sb-off.sh	ready
@@ -273,10 +289,10 @@ s10	s10-tpm-absent.sh	ready
 s11	s11-disk-moved.sh	ready
 s12	s12-wrong-passphrase.sh	ready
 s13	s13-token-tamper.sh	ready
-s14	s14-kernel-update.sh	ready
-s15	s15-pcr7-drift.sh	ready
-s16	s16-key-rotation.sh	ready
-s17	s17-tpm-clear.sh	ready
+s14	s14-kernel-update.sh	retired
+s15	s15-pcr7-drift.sh	retired
+s16	s16-key-rotation.sh	retired
+s17	s17-tpm-clear.sh	retired
 s15c	s15-recovery-chain.sh	ready
 s19	s19-bcache-crash.sh	ready
 s20	s20-raid1-member-loss.sh	ready
@@ -317,8 +333,12 @@ _script_for() {
 # (s01c — the merged lifecycle pipeline — and s15c — the merged recovery
 # pipeline — are ALSO chain members: they hoist into the sequential phase
 # after s00b, but consume the ENROLLED state like any other consumer when one
-# exists, skipping their own producer legs)
-_STATE_CONSUMERS=" s01 s01c s15c s05 s06 s07 s09 s12 s13 s18 "
+# exists, skipping their own producer legs). The retired standalone scenarios
+# are NOT listed: retirement removes s01 from this set (s02/s14/s15/s16/s17
+# were never consumers — they bootstrap in-scenario); when invoked explicitly
+# a retired id simply runs without the chained enrolled state, exactly like
+# any other non-consumer.
+_STATE_CONSUMERS=" s01c s15c s05 s06 s07 s09 s12 s13 s18 "
 
 # CR-02/MD-03 prune contract: scenario prunes must never delete the state
 # dirs this invocation chains on (s00's populated state -> s00b -> the state
@@ -360,10 +380,12 @@ SCENARIO_BUDGET="${ALPINE_FDE_SCENARIO_BUDGET:-1500}"
 
 # --- selection -------------------------------------------------------------------
 # REQUESTED was built by _parse_args (ids only, -j stripped). Default: every
-# registered scenario in registry order (s00b rides the matrix ids via the
-# letter-suffix match).
+# registered scenario in registry order whose status is `ready` — the retired
+# pipeline-absorbed rows (s01/s02/s14/s15/s16/s17) are skipped here but stay
+# invocable by name, because a NON-EMPTY command line replaces this default
+# wholesale (s00b rides the matrix ids via the letter-suffix match).
 if ((${#REQUESTED[@]} == 0)); then
-    mapfile -t REQUESTED < <(awk -F '\t' '$1 ~ /^s[0-9][0-9][a-z]?$/ {print $1}' <<<"$REGISTRY")
+    mapfile -t REQUESTED < <(awk -F '\t' '$3 == "ready" && $1 ~ /^s[0-9][0-9][a-z]?$/ {print $1}' <<<"$REGISTRY")
 fi
 
 # --- run --------------------------------------------------------------------------
