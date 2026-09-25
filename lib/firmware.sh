@@ -175,7 +175,7 @@ fw_var_write() {
     # the value must match the attrs signed into the packet descriptor
     # (provision PROV_EFI_ATTRS).
     { printf '\007\000\000\001'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
-        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid (kernel/firmware refused the authenticated SetVariable)"
+        die "firmware: cannot write $_fwv_dir/$_fwv_name-$_fwv_guid (kernel/firmware refused the authenticated SetVariable) — if the variable re-appears or EINVAL persists, complete enrollment manually: copy the .auth files from the key directory to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi, then re-run install (completed steps skip via crash resume)"
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
     return 0
 }
@@ -197,6 +197,23 @@ fw_auth_enroll() {
     for _fae_v in db KEK PK; do
         _fae_guid=$FW_GUID_GLOBAL
         [ "$_fae_v" = "db" ] && _fae_guid=$FW_GUID_IMAGE_SECURITY
+        # Real firmware keeps the vendor db (and KEK/PK) variable after the
+        # vendor PK is cleared — Setup Mode does NOT imply empty variables on
+        # all firmwares — and efivarfs/firmware refuse a SetVariable that would
+        # CHANGE an existing variable's attributes (vendor db = plain
+        # NV+BS+RT; ours adds TIME_BASED_AUTHENTICATED_WRITE_ACCESS), dying
+        # with EINVAL (2026-09 bcache-multi live server, SetupMode==1 verified
+        # by the gate above). CI never hits this: it enrolls via offline
+        # virt-fw-vars on a fresh OVMF_VARS, where no variable pre-exists.
+        # Remove any pre-existing variable of the same name/GUID before the
+        # authenticated write. Safe by construction: SetupMode==1 is a
+        # fail-closed gate above, and the db -> KEK -> PK order protects the
+        # half-enrolled trust root.
+        if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
+            info "firmware: removing pre-existing vendor $_fae_v — Setup Mode permits it"
+            rm -f "$_fae_dir/$_fae_v-$_fae_guid" ||
+                warn "firmware: could not remove pre-existing vendor $_fae_v — attempting the authenticated write anyway (its failure will report the real error)"
+        fi
         # provision stage1 ships the packets as db.auth / kek.auth / pk.auth
         _fae_lc=$(printf '%s' "$_fae_v" | tr '[:upper:]' '[:lower:]')
         fw_var_write "$_fae_dir" "$_fae_v" "$_fae_guid" "$_fae_keys/$_fae_lc.auth"
@@ -211,6 +228,15 @@ fw_osindications_set() {
     _fod_dir=$1
     [ -d "$_fod_dir" ] ||
         die "firmware: no efivars directory $_fod_dir — cannot set OsIndications (UEFI boot required)"
+    # Same pre-existing-variable hazard fw_auth_enroll guards (see there): a
+    # stale OsIndications from a previous run carries the same attrs (plain 7),
+    # so an overwrite is legal — but rm-first is harmless and keeps the write
+    # shape uniform across both writers.
+    if [ -e "$_fod_dir/OsIndications-$FW_GUID_GLOBAL" ]; then
+        info "firmware: removing pre-existing OsIndications — rewriting it fresh"
+        rm -f "$_fod_dir/OsIndications-$FW_GUID_GLOBAL" ||
+            warn "firmware: could not remove pre-existing OsIndications — attempting the write anyway"
+    fi
     printf '\007\000\000\000\001\000\000\000\000\000\000\000' \
         >"$_fod_dir/OsIndications-$FW_GUID_GLOBAL" ||
         die "firmware: cannot write $_fod_dir/OsIndications-$FW_GUID_GLOBAL"

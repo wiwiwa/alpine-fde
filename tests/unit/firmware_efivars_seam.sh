@@ -215,4 +215,124 @@ KEK_SHA=$(printf 'KEKCANON' | sha256sum | cut -d' ' -f1)
 assert_eq "fw_var_sha256: sha256 of payload after attrs header" "$KEK_SHA" \
     "$(fw_var_sha256 KEK)"
 
+# --- fw_auth_enroll / fw_osindications_set: pre-existing variable clearing ---
+# Real-server blocker (bcache-multi live run, SetupMode==1 verified by the
+# function's own gate): `fw_var_write db` -> write error: Invalid argument.
+# The write shape was correct; the vendor db (and KEK/PK) variable still
+# existed after the vendor PK was cleared, and efivarfs/firmware refuse a
+# SetVariable that would CHANGE an existing variable's attributes (vendor db =
+# plain NV+BS+RT; ours adds TIME_BASED_AUTHENTICATED_WRITE_ACCESS) -> EINVAL.
+# The fix: fw_auth_enroll removes any pre-existing variable of the same
+# name/GUID immediately before each authenticated write (SetupMode==1 is a
+# fail-closed gate above, and db -> KEK -> PK order protects the half-enrolled
+# trust root). CI never hits this (offline virt-fw-vars on a fresh OVMF_VARS);
+# the seam's writes are plain file writes, so these pins observe the rm
+# contract through the info/warn lines and the re-created variable's attrs
+# header, plus the enriched die message's manual-enrollment remedy.
+
+# mkauth FILE NAME GUID PAYLOAD — minimal EFI_VARIABLE_AUTHENTICATION_2 packet
+# (EFI_TIME 16 zero bytes + EFI_VARIABLE_DATA{GUID, DataSize u32le,
+# UnicodeName UTF-16LE} + payload) that clears fw_var_write's identity
+# preflight, so fw_auth_enroll proceeds to the actual write in the seam.
+mkauth() {
+    _ma_file=$1
+    _ma_name=$2
+    _ma_guid=$3
+    _ma_payload=$4
+    _ma_size=$(( ${#_ma_name} * 2 + ${#_ma_payload} ))
+    _ma_hex=$(printf '%032d' 0)"$(fw_guid_le_hex "$_ma_guid")"
+    _ma_hex=$_ma_hex$(printf '%08x' "$_ma_size" | fold -w2 | tac | tr -d '\n')
+    _ma_hex=$_ma_hex$(fw_name_utf16_hex "$_ma_name")
+    _ma_hex=$_ma_hex$(printf '%s' "$_ma_payload" | od -An -vtx1 | tr -d ' \n')
+    _ma_out=''
+    for _ma_b in $(printf '%s\n' "$_ma_hex" | fold -w2); do
+        _ma_out=$_ma_out"\\$(printf '%03o' "0x$_ma_b")"
+    done
+    # shellcheck disable=SC2059  # the octal escapes ARE the packet bytes
+    printf "$_ma_out" >"$_ma_file"
+}
+
+FAKEYS="$tmp/fa-keys"
+mkdir -p "$FAKEYS"
+mkauth "$FAKEYS/db.auth" db "$DBXGUID" 'DB1'
+mkauth "$FAKEYS/kek.auth" KEK "$GUID" 'KEK1'
+mkauth "$FAKEYS/pk.auth" PK "$GUID" 'PK1'
+
+# (a) pre-existing vendor db/KEK/PK are removed before each authenticated write
+fa="$tmp/enroll-preexisting"
+mkdir -p "$fa"
+mkvar_byte "$fa" SetupMode 1
+# vendor-shaped variables: plain attrs 0x7, real firmware keeps db/KEK after
+# the vendor PK is cleared (Setup Mode permits removing them)
+printf '\007\000\000\000VENDORDB' >"$fa/db-$DBXGUID"
+printf '\007\000\000\000VENDORKEK' >"$fa/KEK-$GUID"
+printf '\007\000\000\000VENDORPK' >"$fa/PK-$GUID"
+rc=0
+out=$(fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
+assert_rc "enroll: pre-existing vendor vars -> rc 0" 0 "$rc"
+assert_contains "enroll: info line for pre-existing vendor db" "$out" \
+    "removing pre-existing vendor db"
+assert_contains "enroll: info line for pre-existing vendor KEK" "$out" \
+    "removing pre-existing vendor KEK"
+assert_contains "enroll: info line for pre-existing vendor PK" "$out" \
+    "removing pre-existing vendor PK"
+assert_eq "enroll: db re-created with auth attrs prefix" "07000001" \
+    "$(head -c 4 "$fa/db-$DBXGUID" | od -An -vtx1 | tr -d ' \n')"
+assert_eq "enroll: KEK re-created with auth attrs prefix" "07000001" \
+    "$(head -c 4 "$fa/KEK-$GUID" | od -An -vtx1 | tr -d ' \n')"
+assert_eq "enroll: PK re-created with auth attrs prefix" "07000001" \
+    "$(head -c 4 "$fa/PK-$GUID" | od -An -vtx1 | tr -d ' \n')"
+
+# (b) rm failure: warn (non-fatal), write still attempted, die names the
+# manual-USB remedy (fail-closed preserved, real error reported)
+fb="$tmp/enroll-rm-fails"
+mkdir -p "$fb"
+mkvar_byte "$fb" SetupMode 1
+# a DIRECTORY at the variable path: rm -f fails (EISDIR) and the subsequent
+# write redirection fails too — models an unremovable stubborn variable
+mkdir "$fb/db-$DBXGUID"
+rc=0
+out=$(fw_auth_enroll "$fb" "$FAKEYS" 2>&1) || rc=$?
+assert_rc "enroll: rm failure -> still fail-closed 64" 64 "$rc"
+assert_contains "enroll: rm failure warns (non-fatal)" "$out" \
+    "could not remove pre-existing vendor db"
+assert_contains "enroll: write still attempted after rm failure" "$out" \
+    "cannot write"
+assert_contains "enroll: die names the manual USB stick remedy" "$out" \
+    "FAT USB stick"
+assert_contains "enroll: die names KeyTool.efi / firmware setup UI" "$out" \
+    "KeyTool.efi"
+
+# (c) absent variables -> no rm info noise (clean path unchanged)
+fc="$tmp/enroll-clean"
+mkdir -p "$fc"
+mkvar_byte "$fc" SetupMode 1
+rc=0
+out=$(fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
+assert_rc "enroll: clean path -> rc 0" 0 "$rc"
+assert_eq "enroll: clean path emits no rm info noise" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"
+
+# same hazard, decided call for the other direct writer: fw_osindications_set
+# removes a pre-existing OsIndications before rewriting (same-attrs overwrite
+# is legal, but rm-first is harmless and keeps the write shape uniform)
+fo="$tmp/osind-preexisting"
+mkdir -p "$fo"
+printf '\007\000\000\000\001\000\000\000\000\000\000\000' >"$fo/OsIndications-$GUID"
+rc=0
+out=$(fw_osindications_set "$fo" 2>&1) || rc=$?
+assert_rc "osindications: pre-existing var -> rc 0" 0 "$rc"
+assert_contains "osindications: pre-existing var removed first" "$out" \
+    "removing pre-existing OsIndications"
+assert_eq "osindications: rewritten attrs 7 + payload u64le 1" \
+    "070000000100000000000000" \
+    "$(od -An -vtx1 <"$fo/OsIndications-$GUID" | tr -d ' \n')"
+fo2="$tmp/osind-clean"
+mkdir -p "$fo2"
+rc=0
+out=$(fw_osindications_set "$fo2" 2>&1) || rc=$?
+assert_rc "osindications: clean path -> rc 0" 0 "$rc"
+assert_eq "osindications: clean path emits no rm info noise" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"
+
 finish
