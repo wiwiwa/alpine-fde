@@ -29,11 +29,16 @@
 #     no-op; absent loud no-op; anything else fail-closed 64
 #   * completion chain (Stage 2 == Stage 3, fin_completion_steps): SB guard
 #     -> audit --init -> token upgrade {PCR 7, PCR 11} per member -> TEMPORARY
-#     ephemeral keyslot purge per member -> MOTD/issue banner clear ->
-#     state `finalized` LAST (ADR-8 attempt marker cleared, §8.4)
+#     ephemeral keyslot purge per member -> state `finalized` LAST (ADR-8
+#     attempt marker cleared, §8.4). ADR-20 amendment #4: the MOTD/issue
+#     provisional banner path is REMOVED — no banner is ever written and
+#     finalize never touches /etc/motd or /etc/issue.
 #   * SB-off / SetupMode=1 => 64 + the §9.1 instruction text; NO audit, NO
-#     token mutation, NO purge, NO MOTD clear, state stays provisional
-#     (§12 S-21: nothing at all happens under an unverified boot)
+#     token mutation, NO purge, state stays provisional (§12 S-21: nothing at
+#     all happens under an unverified boot). ADR-20 amendment #3: this guard
+#     is the SECOND blocking layer — the first is the initramfs pre-unseal
+#     guard (§8.2 step 1); both refuse the same contract: the volume is never
+#     finalized (nor unsealed) while Secure Boot is off.
 #   * guided Stage 3: recovery passphrase verified against keyslot 0; a WRONG
 #     passphrase is a BOUNDED retry (3 attempts) then die 64 + the ADR-8
 #     attempt marker; the §13 floor is enforced before ANY cryptsetup call
@@ -310,10 +315,12 @@ printf 'root1 UUID=%s none luks,tpm2-device=auto,discard\nroot2 UUID=%s none luk
     "$U1" "$U2" >"$T/root/etc/crypttab"
 BANNER_LINE='rootfs is ready — keep this line'
 fresh_banners() {
-    { fde_motd_banner; printf '%s\n' "$BANNER_LINE"; } >"$T/root/etc/motd"
-    { fde_motd_banner; printf '%s\n' "$BANNER_LINE"; } >"$T/root/etc/issue"
+    # ADR-20 amendment #4: NO unfinalized banner exists anymore — the fixture
+    # carries operator content only, and the completion must never touch it
+    printf '%s\n' "$BANNER_LINE" >"$T/root/etc/motd"
+    printf '%s\n' "$BANNER_LINE" >"$T/root/etc/issue"
 }
-fresh_stage() { # — full amended first-boot state: members + pending baseline + banners
+fresh_stage() { # — full amended first-boot state: members + pending baseline + motd/issue
     fresh_members
     pending_baseline
     rm -f "$(sp_last_audit_file)" 2>/dev/null || :
@@ -470,8 +477,8 @@ for _m in "$U1" "$U2"; do
     assert_eq "SB off: member $_m recovery slot 0 intact" "0" \
         "$(pass_verifies "$LUKS_DIR/$_m.img" "$RECOVERY_PASS")"
 done
-assert_contains "SB off: MOTD banner NOT cleared" "$(cat "$T/root/etc/motd")" \
-    "$(fde_motd_banner)"
+assert_contains "SB off: motd untouched (no banner was ever written; the banner path is removed)" \
+    "$(cat "$T/root/etc/motd")" "$BANNER_LINE"
 assert_rc "SB off: NO attempt marker (the guided path dies loud instead)" 1 "$(marker_rc)"
 keys_is_encrypted "$KEYDIR/release.pem"
 assert_rc "SB off: release.pem already encrypted (the Stage-1 ceremony did it)" 0 $?
@@ -518,12 +525,12 @@ for _m in "$U1" "$U2"; do
 done
 keys_is_encrypted "$KEYDIR/release.pem"
 assert_rc "happy: release.pem still ADR-18-encrypted (crash-skip, ceremony already did it)" 0 $?
-assert_not_contains "happy: MOTD banner cleared" "$(cat "$T/root/etc/motd")" \
-    "$(fde_motd_banner)"
-assert_not_contains "happy: issue banner cleared" "$(cat "$T/root/etc/issue")" \
-    "$(fde_motd_banner)"
-assert_eq "happy: MOTD operator content preserved" "$BANNER_LINE" "$(cat "$T/root/etc/motd")"
-assert_eq "happy: issue operator content preserved" "$BANNER_LINE" "$(cat "$T/root/etc/issue")"
+assert_not_contains "happy: NO banner writeback (the ADR-20 #4 banner path is removed; motd untouched)" \
+    "$(cat "$T/root/etc/motd")" "fde_motd_banner"
+assert_eq "happy: motd operator content preserved byte-exactly (finalize never touches it)" \
+    "$BANNER_LINE" "$(cat "$T/root/etc/motd")"
+assert_eq "happy: issue operator content preserved byte-exactly" \
+    "$BANNER_LINE" "$(cat "$T/root/etc/issue")"
 
 # --- 3b. re-run after success ⇒ loud no-op -----------------------------------------
 CP_CS=$(cat "$CS_LOG")
@@ -688,11 +695,13 @@ assert_rc "service: ADR-8 attempt marker cleared on success" 1 "$(marker_rc)"
 for _m in "$U1" "$U2"; do
     assert_member_final "service: member $_m" "$_m"
 done
-assert_not_contains "service: MOTD banner cleared" "$(cat "$T/root/etc/motd")" \
-    "$(fde_motd_banner)"
+assert_not_contains "service: NO banner writeback (motd untouched)" \
+    "$(cat "$T/root/etc/motd")" "fde_motd_banner"
 assert_eq "service: MOTD operator content preserved" "$BANNER_LINE" \
     "$(cat "$T/root/etc/motd")"
 assert_eq "service: ZERO cryptenroll invocations (ADR-19)" "0" "$(grep -c . "$CE_LOG")"
+assert_eq "service: motd untouched (no banner path, ADR-20 #4)" "$BANNER_LINE" \
+    "$(cat "$T/root/etc/motd")"
 
 # --- 6b. service: re-run with state finalized ⇒ silent rc 0 (idempotent) ---------
 reset_logs
@@ -721,8 +730,12 @@ assert_eq "service (SB off): ephemeral slot untouched" "0" \
     "$(pass_verifies "$LUKS_DIR/$U1.img" "$EPH_SECRET")"
 baseline_is_pending "$(sp_baseline_file)"
 assert_rc "service (SB off): baseline still pending" 0 $?
-assert_contains "service (SB off): MOTD banner NOT cleared" "$(cat "$T/root/etc/motd")" \
-    "$(fde_motd_banner)"
+assert_contains "service (SB off): the blocking guard refusal names Secure Boot (second blocking layer, ADR-20 #3)" \
+    "$SVC_OUT" "Secure Boot is not enabled with your custom keys"
+assert_contains "service (SB off): the refusal names the BIOS remedy" "$SVC_OUT" \
+    "Reboot into BIOS setup and toggle Secure Boot ON"
+assert_eq "service (SB off): motd untouched (no banner path, ADR-20 #4)" "$BANNER_LINE" \
+    "$(cat "$T/root/etc/motd")"
 
 # --- 6d. service: unseal failure (PCR drift / no .pcrsig) ⇒ marker + retry ------
 sb_state 1 0

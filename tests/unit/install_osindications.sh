@@ -31,6 +31,10 @@ trap cleanup EXIT
 
 export ALPINE_FDE_NO_INSTALL=1
 export ALPINE_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
+# The runner DEFAULT is chroot (real execution — the product); this file pins
+# the PLAN level (lanes/order/topology), so every early lane is pinned to
+# dry-run explicitly. The qemu lane below re-exports its own runner.
+export ALPINE_FDE_INSTALL_RUNNER=dry-run
 
 DISK=$T/disk.img
 : >"$DISK"

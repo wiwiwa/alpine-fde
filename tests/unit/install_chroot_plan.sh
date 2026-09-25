@@ -20,7 +20,8 @@
 #   * G-C1/C2/C3: apk populate + in-chroot apk additions txn + repositories
 #     drop (debootstrap/apt retired)
 #   * G-C24: provisional seal guest line runs after the in-chroot build
-#   * G-C25/C28: MOTD/issue banner on target, written BEFORE the state write
+#   * G-C25 (ADR-20 amendment #4): NO MOTD/issue banner — install never
+#     touches /etc/motd or /etc/issue; state `installed` is the last write
 #   * G-C26: NO OsIndications write; teardown scrubs the ephemeral key
 #
 # Topologies executed here: single-disk (deep) and Btrfs RAID1 (per-member
@@ -424,7 +425,7 @@ assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/alpine-f
     "Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0"
 
 # =============================================================================
-# §9.1 step 2/8/9: pending baseline + banner + install-state ON TARGET
+# §9.1 step 2/8/9: pending baseline + install-state ON TARGET
 # =============================================================================
 TGT_BL=$MNT_ETC/alpine-fde/baseline.json
 assert_file_exists "§9.1 step 2: pending baseline written ON TARGET" "$TGT_BL"
@@ -436,26 +437,24 @@ assert_eq "G-I4: target.esp_partuuid resolved" "$PARTUUID_CANON" \
     "$(baseline_get_in "$TGT_BL" target esp_partuuid)"
 assert_eq "§9.1: NO host-baseline copy anywhere" "0" \
     "$(grep -c 'cp .*baseline.json' "$ALPINE_FDE_TEST_LOG")"
-# G-C25: unfinalized banner on /etc/motd AND /etc/issue — the SHARED
-# single-source line (lib/install-state.sh fde_motd_banner; the ONLY banner
-# definition in the tree), dropped line-exactly so finalize's fde_motd_strip
-# removes exactly it
-assert_file_exists "G-C25: MOTD banner on target" "$MNT_ETC/motd"
-assert_eq "G-C25: MOTD banner IS the shared single-source line (fde_motd_banner)" \
-    "$(fde_motd_banner)" "$(cat "$MNT_ETC/motd")"
-assert_eq "G-C25: banner is ONE line (line-exact strip contract)" "1" \
-    "$(wc -l <"$MNT_ETC/motd")"
-assert_eq "G-C25: /etc/issue carries the SAME single line" \
-    "$(cat "$MNT_ETC/motd")" "$(cat "$MNT_ETC/issue")"
+# G-C25 (ADR-20 amendment #4): NO unfinalized banner is ever written — the
+# banner path is REMOVED; install creates neither /etc/motd nor /etc/issue on
+# the target and never synthesizes or touches operator content
+assert_eq "G-C25: NO /etc/motd written (banner path removed, ADR-20 #4)" "0" \
+    "$([ -e "$MNT_ETC/motd" ] && echo 1 || echo 0)"
+assert_eq "G-C25: NO /etc/issue written (banner path removed, ADR-20 #4)" "0" \
+    "$([ -e "$MNT_ETC/issue" ] && echo 1 || echo 0)"
+assert_eq "G-C25: NO banner helper invoked anywhere in the run" "0" \
+    "$(grep -c 'fde_motd_banner' <<<"$OUT")"
 assert_file_exists "§9.1 step 9: install-state written ON TARGET" \
     "$MNT_ETC/alpine-fde/install-state.json"
 assert_eq "install-state: state=installed" "installed" \
     "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
-# G-C28: banner BEFORE the state write (observed order of the host-step infos)
-L_MOTD=$(printf '%s\n' "$OUT" | grep -Fnm1 ">$ALPINE_FDE_INSTALL_MNT/etc/motd" | cut -d: -f1)
+# G-C28 (amended): `installed` is the LAST state write (the banner record it
+# used to follow was removed with the banner path, ADR-20 #4)
 L_STATE=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: inst_state_write installed" | cut -d: -f1)
-assert_eq "G-C28: MOTD banner drop runs BEFORE the state write" "1" \
-    "$(( L_MOTD > 0 && L_STATE > L_MOTD ? 1 : 0 ))"
+assert_eq "G-C28: inst_state_write installed is a host plan record" "1" \
+    "$(( L_STATE > 0 ? 1 : 0 ))"
 # G-C26: NO OsIndications write anywhere (firmware-trip flow retired)
 assert_eq "G-C26: efivars dir holds NO OsIndications variable" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
@@ -929,11 +928,13 @@ NEG_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 </dev/null)
 NEG_RC=$?
 assert_eq "ceremony: stdin closed -> fail-closed 64 (prompts are the only seam)" "64" "$NEG_RC"
 # item 12: recovery is asked FIRST, so the closed-stdin failure happens there
-# (3 bounded attempts, then die — the entropy floor stays as-is)
+# (the mismatch loop re-prompts unboundedly per the user directive — bounded
+# attempts are GONE; with scripted input EXHAUSTED the prompt read hits EOF
+# and dies fail-closed: the leg is bounded by INPUT, not by count)
 assert_contains "ceremony: the die names ceremony (1/3) recovery (item 12: asked first)" "$NEG_OUT" \
     "inst_ceremony_recovery"
-assert_contains "ceremony: the failure is the bounded-attempt rejection" "$NEG_OUT" \
-    "recovery passphrase rejected after 3 attempts"
+assert_contains "ceremony: the failure is the EOF fail-closed die (bounded by input, not by count)" "$NEG_OUT" \
+    "end of input while waiting for a credential prompt (EOF)"
 
 # =============================================================================
 # §8.1 provision row / ADR-18: `install --keydir` is CONSUMED — the
