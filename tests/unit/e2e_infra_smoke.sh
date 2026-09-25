@@ -58,6 +58,13 @@ ARGV=$(qemu_argv "$WORK/argv" "$WORK/argv/esp.img" "$WORK/argv/disk.img" \
     "$(printf '%s\n%s\n' "$WORK/argv/x1.img" "$WORK/argv/x2.img")")
 assert_contains "qemu_argv: OVMF code pflash (readonly)" "$ARGV" \
     "if=pflash,format=raw,readonly=on"
+# Wave-2 speed lever: guests default to 2 vCPUs (ALPINE_FDE_GUEST_SMP) — the
+# in-guest phases under test (systemd, finalize, recovery) are multi-process
+# and a single vCPU left them serial on a multi-core host. qemu_argv emits
+# one token per line, so the value is the line AFTER the -smp token.
+SMPV=$(awk '/^-smp$/{getline; print; exit}' <<<"$ARGV")
+assert_eq "qemu_argv: guest vCPU count defaults to 2 (ALPINE_FDE_GUEST_SMP)" \
+    "$SMPV" "2"
 assert_contains "qemu_argv: per-scenario vars pflash" "$ARGV" \
     "if=pflash,format=raw,file=$WORK/argv/vars.fd"
 assert_contains "qemu_argv: swtpm ctrl-socket tpmdev" "$ARGV" \

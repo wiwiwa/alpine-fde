@@ -20,8 +20,9 @@
 #   1b. Duplicate ids on the command line: rejected at the same parse gate
 #      with exit 64 (under -j they would fork twin boots sharing one .out
 #      capture — silent log clobber).
-#   2. Phase ordering: s00 -> s00b always run FIRST and sequentially, in chain
-#      order, whatever the requested order; the rest share up to N slots.
+#   2. Phase ordering: s00 -> s00b -> s01c (the merged lifecycle pipeline,
+#      Wave-2 task 5b) always run FIRST and sequentially, in chain order,
+#      whatever the requested order; the rest share up to N slots.
 #   3. Aggregation: one results-<ts>.json with the sequential schema
 #      (id/status/seconds rows, top-level accel/jobs), rows in INVOCATION
 #      order — never completion order (the slowest scenario is requested
@@ -89,6 +90,7 @@ _scenario_file() {
         s00)  echo s00-bootstrap-lite.sh ;;
         s00b) echo s00b-enroll-cache.sh ;;
         s01)  echo s01-happy-lite.sh ;;
+        s01c) echo s01-lifecycle-chain.sh ;;
         s02)  echo s02-rollback.sh ;;
         s03)  echo s03-stale-enrollment.sh ;;
         s04)  echo s04-unsigned-uki.sh ;;
@@ -104,7 +106,7 @@ apply_mutation() {
     case "$MUT" in
         "")                    return 0 ;;
         no-j-validation)       sed -i 's/^if \[\[ ! "\$JOBS" =~ .*\]\]; then/if false; then/' "$f" ;;
-        no-phase-hoist)        sed -i 's/for _canon in s00 s00b; do/for _canon in __hoist_disabled__; do/' "$f" ;;
+        no-phase-hoist)        sed -i 's/for _canon in s00 s00b s01c; do/for _canon in __hoist_disabled__; do/' "$f" ;;
         frag-index-collision)  sed -i 's/frag="\${FRAG\[\$idx\]}"/frag="${FRAG[0]}"/' "$f" ;;
         no-vacuous-guard)      sed -i 's/-lt 1 \]\]/-lt 0 ]]/' "$f" ;;
         timeout-as-fail)       sed -i 's/st=timeout/st=fail/' "$f" ;;
@@ -167,13 +169,17 @@ EOF
         "$sbx/unit/"swtpm_proxy_data_plane.sh \
         "$sbx/e2e/e2e_infra_smoke.sh"
 
-    for id in s00 s00b s01 s02 s03 s04 s07 s09; do
+    for id in s00 s00b s01 s01c s02 s03 s04 s07 s09; do
         _scenario_file "$id" >/dev/null || continue
         cat >"$sbx/e2e/$(_scenario_file "$id")" <<'STUB'
 #!/usr/bin/env bash
 # contract-test stub scenario: hermetic; behavior from PAR_CONTRACT_KIND_<id>
 set -u
 id=${0##*/}; id=${id%%-*}
+# the merged lifecycle pipeline's stub shares the s01- filename prefix with
+# s01's own stub — disambiguate by the file's full name (the real runner does
+# the same via the registry's script-name column)
+[[ "$0" == *lifecycle-chain* ]] && id=s01c
 ctl=${PAR_CONTRACT_DIR:?PAR_CONTRACT_DIR unset}
 kind_var="PAR_CONTRACT_KIND_${id}"
 kind=${!kind_var:-pass}
@@ -317,12 +323,13 @@ fi
 
 # --- part 2: contract points 2, 3, 4 (+ state-chain prune protection) -------------
 # Requested order is deliberately jumbled: s03 (slowest, timeout-class) FIRST,
-# the state chain in the middle — the runner must hoist s00 -> s00b ahead of
-# everything, run them sequentially, then share s01/s02/s03/s04 over 3 slots.
-export_kinds s00=state s00b=state s01=slowpass s02=fail s03=timeout s04=vacuous
+# the state chain in the middle — the runner must hoist s00 -> s00b -> s01c
+# ahead of everything, run them sequentially, then share s01/s02/s03/s04 over
+# 3 slots. (s01c = the merged lifecycle pipeline stub; Wave-2 task 5b.)
+export_kinds s00=state s00b=state s01=slowpass s02=fail s03=timeout s04=vacuous s01c=pass
 mkdir -p "$SBX_A/e2e/.runs/pre-existing-peer"
 ORDER_LOG="$CTL_A/order.log"
-run_registry "$SBX_A" "$CTL_A/out" "$CTL_A/err" -j 3 s03 s00 s01 s00b s02 s04
+run_registry "$SBX_A" "$CTL_A/out" "$CTL_A/err" -j 3 s03 s00 s01 s00b s02 s04 s01c
 RA_RC=$?
 assert_eq "run A (-j 3, mixed statuses): runner exit 1 (scenario-class failure)" "1" "$RA_RC"
 if (( RA_RC != 1 )); then
@@ -332,15 +339,18 @@ fi
 # point 2 — phase ordering
 b_s00=$(ev_line begin s00);  e_s00=$(ev_line end s00)
 b_s00b=$(ev_line begin s00b); e_s00b=$(ev_line end s00b)
+b_s01c=$(ev_line begin s01c); e_s01c=$(ev_line end s01c)
 check "s00 ran (began and ended)" b_s00 '> 0 &&' e_s00 '> 0'
 check "state chain order: s00 begin < s00 end < s00b begin < s00b end (sequential)" \
     b_s00 '> 0 &&' e_s00 '> b_s00 &&' b_s00b '> e_s00 &&' e_s00b '> b_s00b'
+check "hoisted pipeline: s01c begins after s00b ends and runs to completion (chain member)" \
+    b_s01c '> e_s00b &&' e_s01c '> b_s01c'
 par_before_chain=0
 for _p in s01 s02 s03 s04; do
-    (($(ev_line begin "$_p") > e_s00b)) || par_before_chain=1
+    (($(ev_line begin "$_p") > e_s01c)) || par_before_chain=1
 done
 unset _p
-assert_eq "state chain completes before ANY parallel-wave scenario begins" "0" "$par_before_chain"
+assert_eq "state chain (incl. the s01c pipeline) completes before ANY parallel-wave scenario begins" "0" "$par_before_chain"
 
 # point 2 — worker slots
 PEAK=$(cat "$CTL_A/peak" 2>/dev/null || echo 0)
@@ -353,20 +363,20 @@ assert_file_exists "run A aggregated into one results-<ts>.json" "$RESULT_JSON"
 assert_eq "run A results: top-level jobs == 3" "3" "$(jq -r '.jobs' "$RESULT_JSON" 2>/dev/null)"
 assert_eq "run A results: top-level accel/tcg_only schema preserved" "kvm false" \
     "$(jq -r '"\(.accel) \(.tcg_only)"' "$RESULT_JSON" 2>/dev/null)"
-assert_eq "run A results: 6 rows, one per requested scenario" "6" \
+assert_eq "run A results: 7 rows, one per requested scenario" "7" \
     "$(jq -r '.scenarios | length' "$RESULT_JSON" 2>/dev/null)"
 assert_eq "run A results: rows in INVOCATION order, never completion order" \
-    '["s03","s00","s01","s00b","s02","s04"]' \
+    '["s03","s00","s01","s00b","s02","s04","s01c"]' \
     "$(jq -c '[.scenarios[].id]' "$RESULT_JSON" 2>/dev/null)"
 assert_eq "run A results: sequential status classes (timeout/fail/pass)" \
-    '["timeout","pass","pass","pass","fail","fail"]' \
+    '["timeout","pass","pass","pass","fail","fail","pass"]' \
     "$(jq -c '[.scenarios[].status]' "$RESULT_JSON" 2>/dev/null)"
 assert_rc "run A results: every row has numeric seconds >= 0" 0 \
     jq -e '[.scenarios[].seconds] | all(type == "number" and . >= 0)' "$RESULT_JSON"
 assert_rc "run A results: JSON parses cleanly (schema consumers depend on it — never a trailing comma + dropped row)" 0 \
     jq -e '.scenarios | type == "array"' "$RESULT_JSON"
 assert_rc "run A results: every requested id yields exactly one row (no dropped/duplicate rows)" 0 \
-    jq -e '([.scenarios[].id] | length) == 6 and ([.scenarios[].id] | unique | length) == 6' "$RESULT_JSON"
+    jq -e '([.scenarios[].id] | length) == 7 and ([.scenarios[].id] | unique | length) == 7' "$RESULT_JSON"
 
 # point 4 — loud per-scenario diagnostics
 A_ERR=$(cat "$CTL_A/err" 2>/dev/null)
@@ -387,6 +397,12 @@ assert_contains "worker s01: protect set covers pre-existing .runs peer dir" \
     "$(cat "$CTL_A/protect-s01.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
 assert_contains "worker s04: protect set covers pre-existing .runs peer dir" \
     "$(cat "$CTL_A/protect-s04.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
+# the hoisted pipeline consumes the ENROLLED chain state — its protect set
+# must already cover the s00/s00b state dirs when it runs (Wave-2 task 5b)
+assert_contains "hoisted pipeline s01c: protect set covers s00's state dir" \
+    "$(cat "$CTL_A/protect-s01c.log" 2>/dev/null)" "$SBX_A/state/s00-state"
+assert_contains "hoisted pipeline s01c: protect set covers s00b's state dir" \
+    "$(cat "$CTL_A/protect-s01c.log" 2>/dev/null)" "$SBX_A/state/s00b-state"
 
 # --- part 3: contract point 5 — re-collected before EACH worker fork ---------------
 # -j 2 over [s09 slowpass 3s, s01 creator, s07 staged]: s01 (fast) finishes while

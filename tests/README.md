@@ -37,6 +37,7 @@ that observes no assertions at all (`1..0`) fails.
 
 Runner contract details:
 
+- **Guest shape**: every guest is `-machine q35 -m 2048 -smp $ALPINE_FDE_GUEST_SMP` (default 2): the in-guest phases under test (systemd, finalize, recovery drills) are multi-process, and a single vCPU serializes them on a multi-core host. Set `ALPINE_FDE_GUEST_SMP=1` for the historical shape.
 - **Accelerator (KVM autodetect)**: `tests/lib/qemu.sh` picks the QEMU
   accelerator from `ALPINE_FDE_ACCEL` (`kvm` | `tcg` | `auto`, default
   `auto`). `auto` uses KVM when `/dev/kvm` exists, is writable, AND a probe
@@ -309,32 +310,101 @@ Approach 1 consolidates sequential, non-destructive lifecycle stages into unifie
 
 ### Pipeline Specifications
 
-#### 1. Core Lifecycle Pipeline (`s01-lifecycle-chain`)
-Consolidates **`s00`**, **`s00b`**, **`s01`**, **`s14`**, **`s02`**, and **`s16`** into a continuous 4-boot end-to-end journey (reduced from 12+ boots):
+#### 1. Core Lifecycle Pipeline — **IMPLEMENTED** (Wave-2 task 5b pilot)
 
-* **Boot 1: Installation & Auto-Finalization (s00 + s00b + s01)**
-  - Execute Stage-1 unattended install.
-  - Reboot to disk; unseal via provisional TPM token (PCR 11).
-  - OpenRC service `alpine-fde-finalize` executes: captures `audit --init` baseline, upgrades token to `{PCR 7, PCR 11}`, purges ephemeral install keyslot 2, and cleans up service.
-  - Assert serial reaches `login:` with zero console keystrokes.
-* **Boot 2: In-Guest Kernel Upgrade (s14)**
-  - Inside the booted guest, run kernel upgrade trigger (`apk upgrade` / `alpine-fde ukictl build`).
-  - Enter release key passphrase to sign new UKI (`linux-lts` newer version) and update the TPM seal.
-  - Reboot to new kernel.
-  - Assert new UKI unseals passwordlessly under the updated `{PCR 7, PCR 11}` measurement.
-* **Boot 3: Kernel Rollback (s02)**
-  - Inside the guest, select the previous retained kernel (`alpine-fde bootnext <old-entry>`).
-  - Reboot to disk.
-  - Assert the older retained UKI boots and unseals passwordlessly via its own release-signed `.pcrsig` without re-enrollment.
-* **Boot 4: Release Key Rotation (s16)**
-  - Rotate release signing key to K2 (`alpine-fde rotate` / re-sign retained UKIs).
-  - Update UEFI NVRAM keys (`db += K2`, `dbx += K1`).
-  - Reboot to disk.
-  - Assert system boots and unseals cleanly under K2, confirming revocation of K1.
+**Status:** implemented and verified standalone in BOTH modes (2026-09-25,
+KVM, 2 vCPUs): full-from-install `s01c` PASS (157 assertions, 6 launches,
+~400 s wall) and from-cache PASS (122 assertions, 5 launches, ~275 s wall),
+plus the full `-j 2` registry with the pipeline hoisted (results in
+`tests/e2e/.runs/results-<ts>.json`).
 
----
+**Id / file:** registry id **`s01c`** -> `tests/e2e/s01-lifecycle-chain.sh`
+(the registry's script-name column resolves it; the `s01-` prefix itself
+still resolves to `s01-happy-lite.sh`). It consolidates the core of
+**`s00`**, **`s00b`**, **`s01`**, **`s14`**, **`s02`**, and **`s16`** into one
+progressive journey. Runner integration: `s01c` is a **chain member** — the
+`-j` hoist list is `s00 -> s00b -> s01c` (sequential phase), and `s01c` is
+also a state consumer (`ALPINE_FDE_E2E_STATE`): when the s00 -> s00b chain
+ran in the same invocation, the pipeline consumes that enrolled state and
+skips its install legs. The superseded scenarios STAY in the tree and in the
+default selection (retirement is a later decision).
 
-#### 2. Disaster Recovery & Drift Pipeline (`s15-recovery-chain`)
+**Boot map (as implemented — 4 logical stages, 6 physical launches):**
+
+* **Boot 1 (full mode: installer launch + login launch; skip mode: login
+  launch only)** — Stage-1 unattended install (embedded-kf0 passphrase
+  unlock, pinned-artifact rootfs populate, §9.1 btrfs subvolumes, §3.3 size
+  budget, G-T11b scans); host-side `audit --init` finalizes the baseline
+  (real CLI, G-R1-guarded efivars fixture); the production CLI
+  (`enroll-tpm`) seals the single finalized `{PCR 7, PCR 11}` Mechanism B
+  token (keyslot 1, recovery slot 0 untouched); then the release UKI boots
+  with stage=login on the payload drive and reaches `login:` with ZERO
+  console keystrokes.
+* **Boot 2 — kernel update (s14)** — UKI 6.4.0 built (the §8.3
+  apk-trigger/kernel-hook stand-in), combined `{7,11}` entry re-signed over
+  (same d7, new d11), `enroll-tpm` RETIRES the stale enrollment and stands
+  the fresh seal in one run, and the new UKI boots + unseals PASSWORDLESSLY
+  under the updated `{7,11}`. Plus the §10 "kernel update build failed" row:
+  a keyless rebuild fails loudly and ships nothing.
+* **Boot 3 — rollback (s02)** — an OLDER retained UKI (6.1.0, K1-signed,
+  never enrolled) is selected (mtools default swap = the harness stand-in
+  for bootnext) and boots + unseals passwordlessly via its OWN
+  release-signed combined `.pcrsig` with zero enrollment and zero prompts;
+  LUKS2 metadata is byte-identical across the boot. (The rollback target is
+  a scenario-built older variant rather than the enrolled release UKI
+  itself: the cached s00b release UKI carries the fed-session DEBUG SHELL
+  seam, so a non-login boot of it ends at the debug shell, not a clean
+  poweroff.)
+* **Boot 4 — release-key rotation (s16)** — K2 at the ADR-16 floor,
+  dual-sign append verified, NVRAM `db += K2` AND `dbx += K1` in one vars
+  edit; the K2-built UKI boots under the rotated vars with the standing
+  K1-signed entry -> the I3 gate refuses it -> bounded recovery loop (fed
+  slot-0) -> the recovery boot LANDS the rotated PCR 7 (the digest-anchored
+  K2 seal must be composed over the register the machine actually
+  reproduces); after the K2 re-seal (retire + stand, token pins the K2
+  public key) the final launch boots + unseals PASSWORDLESSLY under K2.
+
+**R1/R2/R3 semantics (user-confirmed, binding):**
+
+* **R1 progressive state** — ONE install at boot 1; the canonical state is
+  the run dir's own `disk.img`/`esp.img`/`tpm/`/`vars-enrolled.fd`, and each
+  positive leg boots a QCOW2 overlay that is COMMITTED back into the
+  canonical disk on success (`qemu-img commit`), so every leg advances THE
+  SAME disk in place.
+* **R2 from-cache fast path** — mode resolution, in order:
+  `ALPINE_FDE_PIPELINE_FULL=1` -> full-from-install (explicit opt);
+  else a valid `ALPINE_FDE_E2E_STATE` -> state-consume (install legs
+  skipped); else the SHA-verified `tests/e2e/.cache/pristine-s00b` ->
+  cache-reuse (install legs skipped); else cold full-from-install. The mode
+  is on the record in the log (`# pipeline mode: ...`) AND in the results
+  row's `stages` object: `install-leg` exists ONLY in full mode; skip mode
+  emits `cache-reuse`. The cache/state are consumed read-only (the base is
+  snapshotted into the run dir first).
+* **R3 overlay/LOCK_SH discipline** — every boot of every leg runs on a
+  fresh QCOW2 overlay over the canonical disk (`tests/lib/overlay-disk.sh`:
+  LOCK_SH on the whole backing chain for the boot's lifetime). Positive legs
+  commit; failed attempts and the legs that must not persist anything
+  (boot 3 rollback, boot 4's rotation-recovery) DISCARD the overlay.
+
+**Not merged (intentionally, with the superseded scenario still covering
+them):** s00b's dead-token I3-refusal fed-enroll session and drift-vote
+fixture mechanics (the pipeline enrolls via the same production CLI
+host-side; the dead-token recovery-path negative stays with s06/s13/s00b),
+s01-as-in-tree's SB-off 3-strike tamper boot and s16's post-revoke
+firmware-rejection boot (negative single-boot checks; the boot map has no
+negative launch slot — s01/s04/s16 remain in the tree and selection), and
+s14's stale-seal refusal boot (the pipeline re-seals BEFORE first boot of
+the new kernel; the refusal-mode invariant is exercised by b4's
+recovery-rejection leg instead).
+
+**Step timing:** leaf stage labels (the timing lib refuses nesting):
+`install-leg`, `finalize-baseline`, `enroll-leg` (full mode only),
+`cache-reuse` (skip modes), and `boot-<leg>` for every launch; host-side
+build steps are `timeout`-bounded under the scenario's overall budget
+(`ALPINE_FDE_PIPELINE_BUDGET`, default 5100 — set
+`ALPINE_FDE_SCENARIO_BUDGET` above it for registry runs).
+
+#### 2. Disaster Recovery & Drift Pipeline (`s15-recovery-chain`) — design (not implemented)
 Consolidates **`s15`** (PCR 7 drift) and **`s17`** (TPM cleared) into a 3-boot recovery drill (reduced from 6 boots):
 
 * **Boot 1: PCR 7 Drift Detection & Recovery**

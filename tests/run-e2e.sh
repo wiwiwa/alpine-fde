@@ -8,8 +8,10 @@
 #   -j N | -jN | --jobs=N   run up to N scenarios CONCURRENTLY (default 1 =
 #                           today's sequential behavior; env
 #                           ALPINE_FDE_E2E_JOBS presets it). The state chain
-#                           s00 -> s00b always runs first and alone; the
-#                           remaining requested scenarios are independent
+#                           s00 -> s00b -> s01c always runs first and alone
+#                           (s01c is the merged lifecycle pipeline,
+#                           tests/e2e/s01-lifecycle-chain.sh — Wave-2 task 5b);
+#                           the remaining requested scenarios are independent
 #                           state consumers (they snapshot their inputs) and
 #                           share up to N worker slots. See tests/README.md
 #                           "Runner contract details" for the parallel
@@ -255,6 +257,7 @@ printf '%s\n' "$PROXY_PLANE_OUT" | tail -1
 REGISTRY="
 s00	s00-bootstrap-lite.sh	ready
 s00b	s00b-enroll-cache.sh	ready
+s01c	s01-lifecycle-chain.sh	ready
 s01	s01-happy-lite.sh	ready
 s02	s02-rollback.sh	ready
 s03	s03-stale-enrollment.sh	ready
@@ -289,18 +292,28 @@ s22	s22-handoff-immunity.sh	ready
 REGISTRY="${REGISTRY}$(printf '\n%s\t%s\t%s\n' "s18" "s18-foreign-pcrsig.sh" "ready")"
 
 # _script_for <id> — resolve a scenario id by filename convention
-# (tests/e2e/s<nn>-*.sh; bash globs expand sorted, lowest name wins);
-# empty output = not implemented yet.
+# (tests/e2e/s<nn>-*.sh; bash globs expand sorted, lowest name wins), with a
+# fallback to the registry's script-name column for rows whose script does not
+# follow the id-prefix convention (the merged lifecycle pipeline: id s01c ->
+# s01-lifecycle-chain.sh — the s01- prefix must keep resolving to s01's own
+# scenario); empty output = not implemented yet.
 _script_for() {
-    local id="$1" hit
+    local id="$1" hit reg
     for hit in "$HERE/e2e/${id}-"*.sh; do
         [[ -f "$hit" ]] && { printf '%s\n' "$hit"; return 0; }
     done
+    reg=$(awk -F '\t' -v i="$id" '$1 == i {print $2; exit}' <<<"$REGISTRY")
+    if [[ -n "$reg" && -f "$HERE/e2e/$reg" ]]; then
+        printf '%s\n' "$HERE/e2e/$reg"
+    fi
     return 0
 }
 
 # scenarios that reuse the ENROLLED s00b artifacts via ALPINE_FDE_E2E_STATE
-_STATE_CONSUMERS=" s01 s05 s06 s07 s09 s12 s13 s18 "
+# (s01c — the merged lifecycle pipeline — is ALSO a chain member: it hoists
+# into the sequential phase after s00b, but consumes the ENROLLED state like
+# any other consumer when one exists, skipping its own install legs)
+_STATE_CONSUMERS=" s01 s01c s05 s06 s07 s09 s12 s13 s18 "
 
 # CR-02/MD-03 prune contract: scenario prunes must never delete the state
 # dirs this invocation chains on (s00's populated state -> s00b -> the state
@@ -533,13 +546,16 @@ if (( JOBS == 1 )); then
     done
     unset _i
 else
-    # Bounded parallel matrix. Dependency phases: the s00 -> s00b state chain
-    # runs FIRST and always sequentially (each snapshot feeds the next); every
-    # other requested scenario is an independent state consumer (it snapshots
-    # its inputs at start) and may run in parallel up to JOBS.
+    # Bounded parallel matrix. Dependency phases: the s00 -> s00b -> s01c state
+    # chain runs FIRST and always sequentially (each snapshot feeds the next;
+    # s01c — the merged lifecycle pipeline — advances the enrolled state
+    # progressively, so it can never share a worker slot with a consumer that
+    # snapshots from it); every other requested scenario is an independent
+    # state consumer (it snapshots its inputs at start) and may run in
+    # parallel up to JOBS.
     ORDER_SEQ=()
     ORDER_PAR=()
-    for _canon in s00 s00b; do
+    for _canon in s00 s00b s01c; do
         for _i in "${!REQUESTED[@]}"; do
             if [[ "${REQUESTED[$_i]}" == "$_canon" ]]; then
                 ORDER_SEQ+=("$_i")
@@ -547,7 +563,7 @@ else
         done
     done
     for _i in "${!REQUESTED[@]}"; do
-        case "${REQUESTED[$_i]}" in s00|s00b) continue ;; esac
+        case "${REQUESTED[$_i]}" in s00|s00b|s01c) continue ;; esac
         ORDER_PAR+=("$_i")
     done
     unset _canon _i

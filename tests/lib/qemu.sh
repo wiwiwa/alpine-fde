@@ -314,7 +314,8 @@ qemu_argv() {
     # side; scenarios only ever see the public <run>/serial.sock.
     local sock; sock=$(_qemu_serial_sock "$run")
     printf '%s\n' \
-        -machine q35 -m 2048
+        -machine q35 -m 2048 \
+        -smp "${ALPINE_FDE_GUEST_SMP:-2}"
     if [[ "$_qemu_accel" == "kvm" ]]; then
         printf '%s\n' -accel kvm
     fi
