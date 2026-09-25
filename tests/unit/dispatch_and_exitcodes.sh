@@ -109,10 +109,10 @@ assert_eq "stub sees clean env (no flags given)" \
 
 # --- global flags forwarded to the subcommand environment + arg passthrough ---
 rc=0
-out=$(sp --tcti swtpm --yes --dry-run --root /r --esp /e --disk /d --keydir /k status --init x) || rc=$?
+out=$(sp --tcti swtpm --yes --root /r --esp /e --disk /d --keydir /k status --init x) || rc=$?
 assert_rc "flags + subcommand + args accepted" "0" "$rc"
 assert_eq "global flags forwarded, extra args passed through" \
-    "STUB status|ROOT=/r|TCTI=swtpm|YES=1|DRY=1|ESP=/e|DISK=/d|KEYDIR=/k|ARGS=--init x" "$out"
+    "STUB status|ROOT=/r|TCTI=swtpm|YES=1|DRY=|ESP=/e|DISK=/d|KEYDIR=/k|ARGS=--init x" "$out"
 
 # --- subcommand exit status propagates ---
 rc=0

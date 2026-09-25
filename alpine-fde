@@ -34,7 +34,7 @@
 #   * Every expected-nonzero probe sits in an `if` guard (tty open test,
 #     command -v, fetch, unpack), so a future `set -e` -> `set -ex` sweep
 #     cannot abort before a diagnostic is printed.
-set -eu
+set -eux
 
 bootstrap_fail() { # MESSAGE [RC] — fail loud; keeps the payload dir (see trap)
     printf 'alpine-fde: bootstrap: %s\n' "$1" >&2

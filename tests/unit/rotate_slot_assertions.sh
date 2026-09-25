@@ -323,12 +323,11 @@ assert_eq "post-metadata re-read failure -> fail-closed" "64" "$ROT_RC"
 assert_contains "re-read failure message" "$ROT_OUT" "cannot re-read LUKS2 metadata"
 assert_contains "H-1: re-keyed warning on re-read failure" "$ROT_OUT" "WAS re-keyed"
 
-# --- 10. dry-run: no prompts, no execution ----------------------------------------------------------
+# --- 10. removed: user-facing --dry-run (task 8 — the flag is gone; rc 2 usage) ---------------------
 reset_state
 run_rotate --dry-run
-assert_eq "dry-run rc 0" "0" "$ROT_RC"
-assert_contains "dry-run prints the luksChangeKey plan" "$ROT_OUT" "luksChangeKey --key-slot 0"
-assert_eq "dry-run: cryptsetup not invoked" "0" "$(wc -l <"$CS_LOG")"
+assert_eq "--dry-run is no longer a rotate option -> usage rc 2" "2" "$ROT_RC"
+assert_eq "--dry-run: cryptsetup not invoked" "0" "$(wc -l <"$CS_LOG")"
 
 # --- 11. --reseat-tpm delegates to enroll-tpm (swtpm + stub cryptsetup: the
 # Mechanism B seal path, ADR-19/ADR-20 — no systemd-cryptenroll anywhere) ------

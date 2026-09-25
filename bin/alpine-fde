@@ -4,9 +4,15 @@
 # lib/cmd/<name>.sh and must define cmd_<name_with_underscores>_main.
 
 set -eu
+# sh -ex policy (.tasks.md): errexit is always on here and in every cmd main
+# (strict_mode); xtrace is OPT-IN via ALPINE_FDE_TRACE=1 — the CLI's console
+# output is a pinned contract (docs §5 console experiences, exact-output unit
+# pins), so default-on -x is reserved for the plumbing scripts (emitted guest
+# script, ./install bootstrap, hooks) where the operator IS the tracing audience.
+[ -n "${ALPINE_FDE_TRACE:-}" ] && set -x
 umask 077
 
-# Single product entrance since the debian-fde alias retirement (§8.1).
+# Single product entrance for the operator CLI (§8.1).
 PROG=alpine-fde
 ALPINE_FDE_VERSION='0.1.0'
 
@@ -44,7 +50,6 @@ Subcommands:
 Global flags (must precede the subcommand):
   --tcti <conf>   TCTI config for tpm2-tools (env: ALPINE_FDE_TCTI; empty = default discovery)
   --yes           answer yes to prompts
-  --dry-run       print actions without performing them
   --root <dir>    target root directory (env: ALPINE_FDE_ROOT)
    --esp <path>    ESP mount point or image file (env: ALPINE_FDE_ESP)
    --disk <dev>    target disk device or image file (env: ALPINE_FDE_DISK);
@@ -166,9 +171,6 @@ $2"
             ;;
         --yes)
             ALPINE_FDE_YES=1
-            ;;
-        --dry-run)
-            ALPINE_FDE_DRY_RUN=1
             ;;
         --)
             : # end-of-global-flags marker; parsing continues with the subcommand

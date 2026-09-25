@@ -141,7 +141,7 @@ enrl_policy_mode() {
 enroll_usage() {
     cat >&2 <<'EOF'
 Usage: alpine-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
-                             [--reseat] [--dry-run]
+                             [--reseat]
 
 Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 token;
 ADR-19). Preconditions: finalized baseline, Secure Boot on + SetupMode=0,
@@ -622,7 +622,6 @@ cmd_enroll_tpm_main() {
                 shift
                 ;;
             --reseat) _em_reseat=1 ;;
-            --dry-run) ALPINE_FDE_DRY_RUN=1 ;;
             -h | --help)
                 enroll_usage
                 return 0
@@ -642,30 +641,6 @@ cmd_enroll_tpm_main() {
     _em_uuid=$ENRL_PRE_UUID
     _em_pub=$ENRL_PRE_PUB
     _em_dev=$ENRL_PRE_DEV
-
-    # --dry-run: plan only — read the pre-state for the retire decision and the
-    # free slot, print the plan, touch nothing (no seal, no enrollment, no
-    # enrolled.json)
-    if [ -n "${ALPINE_FDE_DRY_RUN:-}" ]; then
-        _em_prej=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspre.XXXXXX") || die "enroll-tpm: mktemp failed"
-        enrl_cryptsetup luksDump --dump-json-metadata "$_em_dev" >"$_em_prej" 2>/dev/null ||
-            {
-                rm -f "$_em_prej"
-                die "enroll-tpm: cannot read LUKS2 metadata of $_em_dev"
-            }
-        _em_tok=$(luks_json_count_type "$_em_prej" systemd-tpm2)
-        _em_slot=$(token_free_slot "$_em_dev")
-        rm -f "$_em_prej"
-        _em_wipe=no
-        if [ "$_em_tok" -gt 0 ] || [ "$_em_reseat" -eq 1 ]; then
-            _em_wipe=yes
-        fi
-        _em_src=explicit
-        [ -n "$_em_pcrsig" ] || _em_src="in-process re-sign from the keydir release.pem"
-        info "enroll plan (policy_mode=$_em_mode): device=$_em_dev keydir_pub=$_em_pub pcrs=7,11 slot=$_em_slot retire=$_em_wipe pcrsig=$_em_src"
-        info "dry-run: enrollment not performed; enrolled.json not written"
-        return 0
-    fi
 
     # The single Mechanism B enrollment (shared core, G-R3) under the
     # enrollment lock (§8.3 serialization, HW-3); failures die fail-closed 64

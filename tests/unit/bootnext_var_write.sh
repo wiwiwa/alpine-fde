@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # tests/unit/bootnext_var_write.sh — `alpine-fde bootnext` LoaderEntryOneShot
 # mechanics (C-G11): var file = u32le attrs 0x7 + UTF-16LE entry id; write is
-# delete-then-write; no-arg prints current; dry-run writes nothing; invalid
-# entry ids -> usage rc 2.
+# delete-then-write; no-arg prints current; invalid entry ids -> usage rc 2.
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -82,15 +81,9 @@ fi
 run_bootnext a b
 assert_eq "two args -> rc 2" "2" "$BN_RC"
 
-# --- 7. dry-run: prints plan, writes nothing ---------------------------------------------------
+# --- 7. removed: user-facing --dry-run (task 8 — the flag is gone; rc 2 usage) ---------------
 run_bootnext --dry-run "$ENTRY"
-assert_eq "dry-run rc 0" "0" "$BN_RC"
-assert_contains "dry-run prints the entry" "$BN_OUT" "$ENTRY"
-if [ -e "$VARFILE" ]; then
-    assert_eq "dry-run wrote nothing" "absent" "present"
-else
-    assert_eq "dry-run wrote nothing" "absent" "absent"
-fi
+assert_eq "--dry-run is no longer a bootnext option -> usage rc 2" "2" "$BN_RC"
 
 # --- 8. no efivars dir on real write -> fail-closed ----------------------------------------------
 export ALPINE_FDE_EFIVARS_DIR=$T/nonexistent-efivars
