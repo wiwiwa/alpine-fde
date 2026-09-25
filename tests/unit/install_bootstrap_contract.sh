@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/unit/install_bootstrap_contract.sh — curl|sh bootstrap `install` script
-# (README Quick start: `curl -sSfL .../raw/main/install | sh -s -- install --disk ...`).
+# tests/unit/install_bootstrap_contract.sh — wget|sh bootstrap `install` script
+# (README Quick start: `wget -qO- .../raw/main/install | sh -s -- install --disk ...`).
 # The script is driven END-TO-END with mocked collaborators (E2E-mock rule: real
 # dispatcher, stubbed fetchers/payload, asserted argv/stdin/exit codes — never
 # source it and poke internal functions):
@@ -162,6 +162,13 @@ assert_eq "non-root -> fail-closed 64" "64" "$BOOT_RC"
 assert_contains "non-root diagnostic names root/uid" "$BOOT_OUT" "root"
 assert_not_contains "non-root: payload never runs" "$BOOT_OUT" "PAYLOAD-ARGS"
 assert_eq "non-root: nothing fetched" "" "$(cat "$FETCH_LOG")"
+
+# --- 4b. fetch preference: wget first (Alpine live ISO ships busybox wget, not curl)
+: >"$FETCH_LOG"
+run_piped install --disk /dev/nvme0n1
+assert_eq "wget-first happy path exits 0" "0" "$BOOT_RC"
+assert_contains "fetcher log records the wget attempt" "$(cat "$FETCH_LOG")" "wget"
+assert_not_contains "curl untouched when wget is available" "$(cat "$FETCH_LOG")" "curl"
 
 # --- 5. script hygiene pins ---------------------------------------------------------
 rc=0; sh -n "$INSTALL" 2>"$T/shn.err" || rc=$?

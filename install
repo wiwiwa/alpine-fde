@@ -1,14 +1,14 @@
 #!/bin/sh
 # install — remote bootstrap dispatcher for alpine-fde (README "Quick start"):
 #
-#   curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install \
+#   wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install \
 #       | sh -s -- install --disk /dev/nvme0n1
 #
 # The pipe carries THIS script, so the real installer's interactive credential
 # prompts (user password, recovery passphrase, release-key passphrase) would see
 # EOF on stdin. This dispatcher reconnects stdin to the terminal, fetches the
-# repo source tarball for a pinned ref (curl, falling back to busybox wget on
-# the Alpine live ISO), unpacks it into a fresh mktemp dir, and forwards all
+# repo source tarball for a pinned ref (busybox wget — what the Alpine live ISO
+# ships — falling back to curl), unpacks it into a fresh mktemp dir, and forwards all
 # arguments to the payload's bin/alpine-fde, propagating its exit code.
 #
 # Seams (ALPINE_FDE_* env namespace, Architecture.md §8.1):
@@ -78,17 +78,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$tarball" "$ALPINE_FDE_BOOTSTRAP_TARBALL_URL"; then
-        bootstrap_fail "download failed: $ALPINE_FDE_BOOTSTRAP_TARBALL_URL"
-    fi
-elif command -v wget >/dev/null 2>&1; then
-    # busybox wget on the Alpine live ISO: same -q -O <file> <url> shape
+if command -v wget >/dev/null 2>&1; then
+    # busybox wget — the Alpine live ISO ships it, not curl: -q -O <file> <url>
     if ! wget -q -O "$tarball" "$ALPINE_FDE_BOOTSTRAP_TARBALL_URL"; then
         bootstrap_fail "download failed: $ALPINE_FDE_BOOTSTRAP_TARBALL_URL"
     fi
+elif command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL -o "$tarball" "$ALPINE_FDE_BOOTSTRAP_TARBALL_URL"; then
+        bootstrap_fail "download failed: $ALPINE_FDE_BOOTSTRAP_TARBALL_URL"
+    fi
 else
-    bootstrap_fail "neither curl nor wget is available; install curl or busybox wget first"
+    bootstrap_fail "neither wget nor curl is available; install busybox wget or curl first"
 fi
 
 mkdir -p "$payload_root"
