@@ -134,6 +134,17 @@ assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "
 # the emitted guest script (no package entry, no conf.d drop, no rc-update)
 assert_eq "emitted: ZERO zram mentions anywhere (item 26a: zram removed from the install path)" "0" \
     "$(grep -ic 'zram' "$SCRIPT")"
+# item 26b lane placement (DNS preflight): the nslookup mirror probe is a
+# HOST-side preflight step — inst_preflight runs at plan-build/emit time in
+# every non-dry-run lane and is NEVER a plan record, so the emitted guest
+# script carries ZERO nslookup commands and a fixture guest needs NO resolver
+# to install. The target's DNS story still travels: the resolv.conf SEED is a
+# `# HOST:` comment record the CI harness executes before the in-chroot apk
+# transaction.
+assert_eq "emitted: ZERO nslookup records (26b: the DNS preflight is host-side in every lane, never guest work)" "0" \
+    "$(grep -c 'nslookup' "$SCRIPT")"
+assert_eq "emitted: target resolv.conf seed travels as a HOST comment (26b: in-chroot apk needs DNS)" "1" \
+    "$(grep -c '^# HOST: .*seeded target /etc/resolv.conf from the live env' "$SCRIPT")"
 
 # --- physical-media block sequence (real-install defects 1+2): the physical ---
 # boot environment does NOT auto-load the block modules and /dev is not settled

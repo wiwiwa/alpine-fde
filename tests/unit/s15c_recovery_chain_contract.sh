@@ -24,7 +24,9 @@
 #   5. COVERAGE TABLE — every assertion made by the absorbed scenarios
 #      (s15-pcr7-drift.sh, s17-tpm-clear.sh) is absorbed here or explicitly
 #      re-mapped (remaps named in the row). NONE silently dropped. The
-#      superseded scenarios STAY in the tree and in the default selection.
+#      superseded scenarios STAY in the tree and in the registry (status
+#      `retired` since the 2026-09-25 retirement sweep: NOT in the default
+#      selection, still invocable by name).
 #   6. Runner wiring: s15c is a CHAIN MEMBER — the -j hoist list is
 #      s00 -> s00b -> s01c -> s15c, s15c is a state consumer
 #      (_STATE_CONSUMERS), and the registry resolves id s15c to
@@ -155,19 +157,22 @@ assert_contains "wiring: hoist list is s00 -> s00b -> s01c -> s15c" "$RN" \
 assert_contains "wiring: parallel-wave skip covers s15c" "$RN" \
     's00|s00b|s01c|s15c'
 assert_contains "wiring: s15c is a state consumer (_STATE_CONSUMERS)" "$RN" \
-    ' s01 s01c s15c '
+    ' s01c s15c '
 assert_contains "wiring: chain-phase order puts s15c after s01c" "$RN" "s00b -> s01c -> s15c"
 assert_contains "wiring: usage header names the s15c chain member" "$RN" "s15-recovery-chain.sh"
 assert_contains "parallel contract: s15c phase pin present" "$(cat "$PAR_CONTRACT")" "s15c"
 
 # --- part 4: absorbed scenarios retained -------------------------------------------
-assert_file_exists "s15 stays in the tree (retirement deferred)" \
+# (retired 2026-09-25: the pipelines absorbed their boots — the files stay in
+# the tree and the ids stay registered, invocable by name, but the retired
+# rows are NOT in the default selection; see tests/run-e2e.sh REGISTRY)
+assert_file_exists "s15 stays in the tree (retired: absorbed by s15c)" \
     "$TESTS/e2e/s15-pcr7-drift.sh"
-assert_file_exists "s17 stays in the tree (retirement deferred)" \
+assert_file_exists "s17 stays in the tree (retired: absorbed by s15c)" \
     "$TESTS/e2e/s17-tpm-clear.sh"
-assert_contains "s15 stays in the default selection (registry)" "$RN" \
+assert_contains "s15 stays registered (retired — absent from the default selection)" "$RN" \
     "s15	s15-pcr7-drift.sh"
-assert_contains "s17 stays in the default selection (registry)" "$RN" \
+assert_contains "s17 stays registered (retired — absent from the default selection)" "$RN" \
     "s17	s17-tpm-clear.sh"
 
 # --- summary -----------------------------------------------------------------------

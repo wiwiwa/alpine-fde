@@ -82,9 +82,11 @@
 # build steps are bounded by `timeout` + the overall budget instead of their
 # own stage labels.
 #
-# Superseded scenarios (s00 s00b s01 s14 s02 s16) STAY in the tree and in the
-# default selection this pilot; this pipeline is a CHAIN member and runs in
-# the runner's SEQUENTIAL hoist phase (after s00 -> s00b), see tests/run-e2e.sh.
+# Superseded scenarios (s01 s14 s02 s16) STAY in the tree and in the registry
+# — status `retired` (2026-09-25 retirement sweep): NOT in the default
+# selection, still invocable by name. This pipeline is a CHAIN member and
+# runs in the runner's SEQUENTIAL hoist phase (s00 -> s00b -> this scenario),
+# see tests/run-e2e.sh.
 
 set -u
 
