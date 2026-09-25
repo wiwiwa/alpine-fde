@@ -16,8 +16,8 @@
 #     (ALPINE_FDE_PCRSIG unset — release.pem from the keydir via keys_unlock);
 #     tampered .pcrsig -> 64, no keyslot, no token, no record (G-B6)
 #   * compact LUKS2 wire shape (real cryptsetup dumps): parsers + reseat work
-#   * dry-run prints the plan, touches nothing; `ukictl enroll` alias: same
-#     surface
+#   * `ukictl enroll` alias: same surface (the retired --dry-run now rejects
+#     identically on both spellings)
 #   * function-level (enrl_run, seal ops stubbed): choreography order, retire
 #     on reseat, >1 standing tokens refuse loudly, post-assert failures record
 #     nothing, passphrase scrubbed, G-IL7/HW-3 ensure-once contract intact
@@ -384,26 +384,24 @@ ENROLL_RC=$?
 assert_eq "compact standing token: reseat rc 0" "0" "$ENROLL_RC"
 assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luksKillSlot "$CS_LOG")"
 
-# --- 12. dry-run: prints the plan, runs nothing ------------------------------------------------------
+# --- 12. removed: user-facing --dry-run (task 8 — the flag is gone; rc 2 usage) ----------------------
 make_baseline final
 sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
-assert_eq "dry-run rc 0" "0" "$ENROLL_RC"
-assert_contains "dry-run names the mode" "$ENROLL_OUT" "policy_mode=b"
-assert_contains "dry-run names the device" "$ENROLL_OUT" "$ALPINE_FDE_BY_UUID_DIR/$UUID"
-assert_eq "dry-run: no keyslot mutation" "0" "$(grep -c luksAddKey "$CS_LOG")"
-assert_eq "dry-run: no token import" "0" "$(grep -c 'token import' "$CS_LOG")"
-assert_absent "dry-run writes no enrolled.json" "$(sp_enrolled_file)"
+assert_eq "--dry-run is no longer an enroll-tpm option -> usage rc 2" "2" "$ENROLL_RC"
+assert_contains "rejection names the offending argument" "$ENROLL_OUT" "unknown argument: --dry-run"
+assert_eq "--dry-run: no keyslot mutation" "0" "$(grep -c luksAddKey "$CS_LOG")"
+assert_absent "--dry-run writes no enrolled.json" "$(sp_enrolled_file)"
 
 # --- 13. `ukictl enroll` alias: identical surface ------------------------------------------------------
 sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
-PLAN=$(printf '%s\n' "$ENROLL_OUT" | grep 'policy_mode=b')
+PLAN=$(printf '%s\n' "$ENROLL_OUT" | grep 'unknown argument')
 reset_state # fresh metadata counter — the alias must see the SAME pre-state
 ALIAS_OUT=$("$REPO/bin/alpine-fde" ukictl enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
 ALIAS_RC=$?
-assert_eq "ukictl enroll alias: same rc" "0" "$ALIAS_RC"
-assert_contains "ukictl enroll alias: same plan line" "$ALIAS_OUT" "$PLAN"
+assert_eq "ukictl enroll alias: same rc" "2" "$ALIAS_RC"
+assert_contains "ukictl enroll alias: same rejection" "$ALIAS_OUT" "$PLAN"
 
 # --- 14. function level: enrl_run with STUBBED seal ops -------------------------------------------------
 # shellcheck source=../../lib/token.sh

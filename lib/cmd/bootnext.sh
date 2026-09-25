@@ -64,7 +64,6 @@ bn_encode() {
 cmd_bootnext_main() {
     strict_mode
 
-    _bm_dry=0
     _bm_entry=''
     _bm_given=0
     while [ $# -gt 0 ]; do
@@ -73,7 +72,6 @@ cmd_bootnext_main() {
                 bootnext_usage
                 return 0
                 ;;
-            --dry-run) _bm_dry=1 ;;
             --)
                 shift
                 break
@@ -108,10 +106,6 @@ cmd_bootnext_main() {
     _bm_entry_set=$_bm_entry
     if ! bn_validate_entry "$_bm_entry"; then
         die -r "$ALPINE_FDE_USAGE" "bootnext: invalid entry id: '$_bm_entry' (alphanumerics, '.', '_', '-' only, <= 200 chars)"
-    fi
-    if [ "$_bm_dry" -eq 1 ]; then
-        info "dry-run: would write LoaderEntryOneShot = '$_bm_entry_set' (attrs 0x7) to $_bm_path"
-        return 0
     fi
     [ -d "$_bm_dir" ] || die "bootnext: efivarfs directory not found: $_bm_dir (booted without UEFI?)"
     [ -w "$_bm_dir" ] || die "bootnext: efivarfs not writable (need root?) — try sudo"

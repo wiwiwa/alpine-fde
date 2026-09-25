@@ -438,7 +438,7 @@ inst_execute_plan() {
   qemu)
     _ie_out=${ALPINE_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}
     {
-      printf '#!/bin/sh\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eu\n'
+      printf '#!/bin/sh -ex\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eux\n'
       printf '%s' "$SPC_PLAN" | while IFS='	' read -r _ie_kind _ie_cmd; do
         [ -n "$_ie_cmd" ] || continue
         if [ "$_ie_kind" = "guest" ]; then
@@ -1004,7 +1004,6 @@ cmd_install_main() {
       shift
       ;;
     -y | --yes) _im_yes=1 ;;
-    --dry-run) ALPINE_FDE_DRY_RUN=1 ;;
     -h | --help)
       install_usage
       return 0

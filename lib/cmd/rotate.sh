@@ -71,7 +71,7 @@ passphrase_floor_ok() {
 
 rotate_usage() {
     cat >&2 <<'EOF'
-Usage: alpine-fde rotate [--reseat-tpm] [--dry-run]
+Usage: alpine-fde rotate [--reseat-tpm]
 
 Change the keyslot-0 (recovery) passphrase: cryptsetup luksChangeKey on the
 baseline's LUKS device, Argon2id KDF pins preserved. The volume key and all
@@ -124,7 +124,6 @@ cmd_rotate_main() {
     while [ $# -gt 0 ]; do
         case $1 in
             --reseat-tpm) _rm_reseat=1 ;;
-            --dry-run) ALPINE_FDE_DRY_RUN=1 ;;  # consumed by enroll-tpm on --reseat-tpm
             -h | --help)
                 rotate_usage
                 return 0
@@ -136,14 +135,6 @@ cmd_rotate_main() {
 
     require_pkgs cryptsetup:cryptsetup jq:jq
     _rm_dev=$(rot_device)
-
-    if [ -n "${ALPINE_FDE_DRY_RUN:-}" ]; then
-        info "dry-run: would run: cryptsetup luksChangeKey --key-slot 0 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-file <old> $_rm_dev <new>"
-        if [ "$_rm_reseat" -eq 1 ]; then
-            info "dry-run: would then re-seat the TPM seal (enroll-tpm --reseat)"
-        fi
-        return 0
-    fi
 
     # Passphrase acquisition (env for CI, prompt otherwise)
     _rm_old=${ALPINE_FDE_OLD_PASSPHRASE:-}

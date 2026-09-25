@@ -111,9 +111,9 @@ assert_eq "qemu emit rc 0 (unattended)" "0" "$RC"
 assert_file_exists "guest script written" "$SCRIPT"
 assert_contains "stderr names the emitted script" "$OUT" "guest install script written: $SCRIPT"
 
-# --- header: shebang + repo standard guard --------------------------------------
-assert_eq "emitted script: shebang is first line" "#!/bin/sh" "$(head -n1 "$SCRIPT")"
-assert_contains "emitted script: set -eu guard" "$(cat "$SCRIPT")" 'set -eu'
+# --- header: shebang + repo standard guard (task 8: -ex adoption on the emitted guest script) ---
+assert_eq "emitted script: shebang is first line" "#!/bin/sh -ex" "$(head -n1 "$SCRIPT")"
+assert_contains "emitted script: set -eux guard" "$(cat "$SCRIPT")" 'set -eux'
 
 # --- guest config writes: verbatim single-quote-escaped printf lines ------------
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$SCRIPT" | head -1 | awk '{print $2}')

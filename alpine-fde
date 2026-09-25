@@ -1,5 +1,5 @@
 #!/bin/sh
-# install — remote bootstrap dispatcher for alpine-fde (README "Quick start"):
+# alpine-fde — remote bootstrap dispatcher (repo root; README "Quick start"):
 #
 #   wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install \
 #       | sh -s -- install --disk /dev/nvme0n1
@@ -34,7 +34,7 @@
 #   * Every expected-nonzero probe sits in an `if` guard (tty open test,
 #     command -v, fetch, unpack), so a future `set -e` -> `set -ex` sweep
 #     cannot abort before a diagnostic is printed.
-set -eu
+set -eux
 
 bootstrap_fail() { # MESSAGE [RC] — fail loud; keeps the payload dir (see trap)
     printf 'alpine-fde: bootstrap: %s\n' "$1" >&2
