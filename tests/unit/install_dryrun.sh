@@ -22,8 +22,9 @@
 #   * G-ST3: repeatable --disk without --bcache = Btrfs RAID1
 #   * G-C24/ADR-20 step 6: provisional TPM enrollment guest line after the
 #     in-chroot ukictl build (Mechanism B, PCR 11 only, keyslot 1)
-#   * G-C25/§9.1 step 8: unfinalized MOTD/issue banner; G-C28: banner BEFORE
-#     the `installed` state write
+#   * G-C25 (ADR-20 amendment #4): NO unfinalized MOTD/issue banner — no
+#     plan-write record touches /etc/motd or /etc/issue; `installed` is the
+#     last state write (G-C28 amended)
 #   * G-C26: NO OsIndications record anywhere — direct reboot to disk after
 #     unmount + ephemeral-key scrub
 #   * destructive runners gated behind --yes; §3.3 package-list lint;
@@ -278,14 +279,18 @@ assert_contains "plan: step 6 consumes the UKI .pcrsig (stage-1 build output)" \
     "$INS_OUT" "only-section=.pcrsig"
 assert_contains "plan: step 6 authorizes luksAddKey with the ephemeral key" \
     "$INS_OUT" "token_add_keyslot"
-# G-C25/§9.1 step 8: unfinalized banner to /etc/motd AND /etc/issue
-assert_contains "plan: §9.1 step 8 — MOTD banner drop" "$INS_OUT" "PLAN  write  /etc/motd"
-assert_contains "plan: §9.1 step 8 — issue banner drop" "$INS_OUT" "PLAN  write  /etc/issue"
-assert_contains "plan: banner says NOT finalized (G-C25)" "$INS_OUT" "NOT finalized"
-assert_contains "plan: banner directs to alpine-fde finalize" "$INS_OUT" "alpine-fde finalize"
-assert_contains "plan: banner names the pending permanent recovery passphrase" "$INS_OUT" \
-    "set your permanent recovery passphrase"
-# G-C28/§9.1 step 9: state `installed` — written AFTER the banner
+# G-C25 (ADR-20 amendment #4): NO unfinalized banner — ZERO plan-write
+# records for /etc/motd or /etc/issue, and none of the banner vocabulary
+# anywhere in the plan output
+assert_eq "plan: ZERO /etc/motd write records (banner path removed, ADR-20 #4)" "0" \
+    "$(grep -c 'PLAN  write  /etc/motd' <<<"$INS_OUT")"
+assert_eq "plan: ZERO /etc/issue write records (banner path removed, ADR-20 #4)" "0" \
+    "$(grep -c 'PLAN  write  /etc/issue' <<<"$INS_OUT")"
+assert_not_contains "plan: no NOT-finalized banner text (G-C25 removed)" "$INS_OUT" \
+    "NOT finalized"
+assert_not_contains "plan: no banner finalize directive" "$INS_OUT" \
+    "alpine-fde finalize"
+# G-C28/§9.1 step 9: state `installed` — the last state write
 assert_contains "plan: §9.1 step 9 — state installed via istate_write" "$INS_OUT" \
     "inst_state_write installed"
 # G-C26: NO OsIndications anywhere (firmware-trip flow retired)
@@ -313,7 +318,8 @@ assert_eq "plan: release.pem named ONLY by the ceremony record" "1" \
 # plan-order discipline (§9.1): baseline pending BEFORE the key ceremony; the
 # CREDENTIAL ceremony (§9.1 step 4, ADR-20 amended) after the platform keys and
 # BEFORE NVRAM enrollment; enrollment BEFORE the build; build BEFORE the
-# provisional seal; banner BEFORE the state write (§9.1 step 8/9); teardown
+# provisional seal; seal BEFORE the state write (the banner record it used to
+# precede was removed with the banner path, ADR-20 #4); teardown
 # BEFORE the scrub; scrub BEFORE the reboot (G-C26)
 line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 I_BASE=$(line_no "$INS_OUT" "inst_baseline_pending_write")
@@ -324,7 +330,6 @@ I_CERK=$(line_no "$INS_OUT" "inst_ceremony_release_key")
 I_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
 I_BUILD=$(line_no "$INS_OUT" "ukictl build")
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
-I_BANNER=$(line_no "$INS_OUT" "PLAN  write  /etc/motd")
 I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
 # anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the
 # reset block also carries a bare `umount -R /mnt` (earlier in the plan)
@@ -344,9 +349,8 @@ assert_eq "order: key ceremony before NVRAM enrollment" "1" "$(( I_KEYGEN < I_EN
 assert_eq "order: enrollment before ukictl build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
     "$(( I_BUILD < I_SEAL ? 1 : 0 ))"
-assert_eq "order: provisional seal before banner" "1" "$(( I_SEAL < I_BANNER ? 1 : 0 ))"
-assert_eq "order: G-C28 — banner BEFORE state write (§9.1 step 8/9)" "1" \
-    "$(( I_BANNER < I_STATE ? 1 : 0 ))"
+assert_eq "order: provisional seal before the state write (no banner record, ADR-20 #4)" "1" \
+    "$(( I_SEAL < I_STATE ? 1 : 0 ))"
 assert_eq "order: state write before teardown" "1" "$(( I_STATE < I_TEARDOWN ? 1 : 0 ))"
 assert_eq "order: G-C26 — teardown before the ephemeral scrub" "1" \
     "$(( I_TEARDOWN < I_SCRUB ? 1 : 0 ))"

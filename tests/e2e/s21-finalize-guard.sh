@@ -18,45 +18,36 @@
 #     (member UUID), the REAL advisory oneshot hooks/openrc/alpine-fde-finalize
 #     at /etc/init.d/alpine-fde-finalize + the rc-update enable symlink
 #     /etc/runlevels/default/alpine-fde-finalize (byte-for-byte the installer's
-#     Stage-1 step 7 record, lib/cmd/install.sh), an unfinalized /etc/motd
-#     carrying the fde_motd_banner line, and the /opt/alpine-fde tooling tree.
+#     Stage-1 step 7 record, lib/cmd/install.sh), a plain operator /etc/motd
+#     (ADR-20 #4: the unfinalized banner path is REMOVED — no banner is ever
+#     written), and the /opt/alpine-fde tooling tree.
 #     NO systemd unit, NO /etc/systemd — the residue guard hard-denies those
 #     patterns and the amended ADR-20 lifecycle has no such artifact.
 #
-# Both boots are FED sessions on the SHIPPED §8.2 mkinitfs unseal hook (the
-# unlock of record): the disk carries NO token, so the hook reports
-# unseal_token_missing and arms its bounded keyslot-0 recovery loop; the fed
-# slot-0 passphrase unseals the volume and the DEBUG SHELL seam hosts the legs.
-#
 #   boot A (§10 first-boot row / S-21 negative): SB-OFF vars (stock vars
-#           copy). Three legs, in order, all advisory-or-fail-closed:
-#             a) the ADVISORY oneshot: start() sourced from
-#                /etc/init.d/alpine-fde-finalize — rc 0 ALWAYS, prints the
-#                not-finalized WARNING + the SB-off fw_sb_state reading + the
-#                finalize guidance, mutates NOTHING;
-#             b) the SERVICE completion (fin_service_main — the guarded steps
-#                the oneshot family owns): the provisional token re-unseal
-#                cannot stand (no token, no ESP .pcrsig) -> failure-contained
-#                nonzero + the ADR-8 retry-next-boot marker on the DISK; ZERO
-#                baseline capture, ZERO token operations, ZERO state flip;
-#             c) the GUIDED CLI (`alpine-fde finalize`, recovery-passphrase
-#                seam): step 1 verifies the floored recovery passphrase against
-#                keyslot 0 (the Stage-1 stand-in rekey), step 2 encrypts
-#                release.pem, step 3 the fw_sb_state gate HALTS fail-closed
-#                (rc 64) with the §9.1 instruction text — no enrollment, no
-#                baseline capture, no token upgrade, state still `installed`.
+#           copy). The ADR-20 amended PRE-UNSEAL SECURE BOOT GUARD blocks at
+#           the hook's FIRST step: refusal notice + "Press Enter to reboot" +
+#           OsIndications boot-to-firmware-setup + reboot. The disk is NEVER
+#           unlocked, so no fed session is possible — the advisory-oneshot /
+#           service / guided-CLI trio under SB off stays unit-pinned. The
+#           hook parks on its Enter read; the scenario waits for the guard
+#           sentinel and hard-kills qemu BY PID.
 #           Post-boot host: LUKS metadata UNCHANGED (1 argon2id keyslot, 0
 #           tokens).
-#   boot B (Stage-3 happy proof / positive control): same image fresh copy,
-#           SB-ON enrolled vars -> the guided finalize PROCEEDS through the
-#           shared completion chain: recovery passphrase verified -> release.pem
-#           encrypted (ADR-18) -> audit --init finalizes the pending baseline
-#           from live values -> seal_upgrade_token binds {PCR 7, PCR 11} (the
-#           release-key-signed policy rides the payload drive) -> the temporary
-#           ephemeral keyslot purge crash-skips -> the unfinalized MOTD banner
-#           is stripped line-exactly -> the ADR-8 marker stays clear -> state
-#           `finalized` written LAST. Console: the per-member upgrade marker +
-#           rc 0. Post-boot host: exactly 1 systemd-tpm2 token bound to
+#   boot B (Stage-3 happy proof / positive control): fed session on the
+#           SHIPPED §8.2 hook (the disk carries NO token, so the hook reports
+#           unseal_token_missing and arms its bounded keyslot-0 recovery
+#           loop; the fed slot-0 passphrase unseals the volume and the DEBUG
+#           SHELL seam hosts the legs), SB-ON enrolled vars -> the guided
+#           finalize PROCEEDS through the shared completion chain: recovery
+#           passphrase verified -> release.pem encrypted (ADR-18) ->
+#           audit --init finalizes the pending baseline from live values ->
+#           seal_upgrade_token binds {PCR 7, PCR 11} (the release-key-signed
+#           policy rides the payload drive) -> the temporary ephemeral
+#           keyslot purge crash-skips -> the ADR-8 marker stays clear ->
+#           state `finalized` written LAST (NO banner step — ADR-20 #4; motd
+#           untouched). Console: the per-member upgrade marker + rc 0.
+#           Post-boot host: exactly 1 systemd-tpm2 token bound to
 #           {PCR 7, PCR 11} on keyslot 1 (recovery slot 0 untouched),
 #           state/baseline finalized read back from the mounted disk BEFORE
 #           poweroff.
@@ -424,14 +415,12 @@ run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine
 # db/release identity is ONE key, ADR-11)
 run_stage tooling-release-pem 60 cp "$RUN/keys/db.key" "$TOOLING/etc/alpine-fde/keys/release.pem"
 printf 'root UUID=%s none luks,tpm2-device=auto,discard\n' "$DISK_UUID" >"$TOOLING/etc/crypttab"
-# an unfinalized /etc/motd: one operator line + the EXACT banner line from the
-# product's single source (fde_motd_banner) — boot B's completion chain strips
-# the banner line-exactly and must preserve the operator line
-_BANNER=$(ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" . "$REPO/lib/install-state.sh" 2>/dev/null; fde_motd_banner)
-{ printf 'Welcome to the Alpine FDE harness fixture — operator content stays.\n'; printf '%s\n' "$_BANNER"; } \
+# /etc/motd: ONE operator line. ADR-20 amendment #4: the unfinalized warning
+# banner path is REMOVED — no banner is ever written by install, and the
+# completion chain must never touch motd (the operator line survives both
+# boots byte-exactly).
+printf 'Welcome to the Alpine FDE harness fixture — operator content stays.\n' \
     >"$TOOLING/etc/motd"
-grep -c "NOT finalized" "$TOOLING/etc/motd" >/dev/null || {
-    echo "s21: fixture motd banner missing — fde_motd_banner source failed"; exit 1; }
 
 run_stage tooling-tar 300 tar -C "$TOOLING" -czf "$RUN/tooling.tar.gz" opt etc usr
 tar -tzf "$RUN/tooling.tar.gz" >"$RUN/tooling.listing"
@@ -632,7 +621,7 @@ _rekey_slot0() {
 _feed_postcheck() {
     local bdir="$1"
     feed_line "$bdir/serial.sock" \
-        'echo "P7STATE $(grep -o "\"state\": \"[a-z-]*\"" /mnt/etc/alpine-fde/install-state.json | head -1)"; echo "P7TOK $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq "[.tokens[] | select(.type==\"systemd-tpm2\")] | length")"; echo "P7SLOTS $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq -c ".keyslots | keys")"; grep expected_pcr7 /mnt/etc/alpine-fde/baseline.json; echo "P7ATT $(cat /mnt/etc/alpine-fde/finalize-attempt.txt 2>/dev/null | grep -o "will retry next boot" || echo none)"; echo "P7BANNER $(grep -c "NOT finalized" /mnt/etc/motd)"; echo P7-$((41+4))-DONE'
+        'echo "P7STATE $(grep -o "\"state\": \"[a-z-]*\"" /mnt/etc/alpine-fde/install-state.json | head -1)"; echo "P7TOK $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq "[.tokens[] | select(.type==\"systemd-tpm2\")] | length")"; echo "P7SLOTS $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq -c ".keyslots | keys")"; grep expected_pcr7 /mnt/etc/alpine-fde/baseline.json; echo "P7ATT $(cat /mnt/etc/alpine-fde/finalize-attempt.txt 2>/dev/null | grep -o "will retry next boot" || echo none)"; echo "P7MOTD $(cat /mnt/etc/motd)"; echo P7-$((41+4))-DONE'
     wait_console "$bdir" "P7-45-DONE" 300
     feed_line "$bdir/serial.sock" 'sync; poweroff -f'
     run_stage "qemu_wait:$(basename "$bdir")" "$((QEMU_TIMEOUT + 60))" qemu_wait "$bdir" "$QEMU_TIMEOUT"
@@ -686,132 +675,104 @@ _await_rc() {
 }
 
 # ============================================================================
-# BOOT A — §10 first-boot row: SB OFF -> advisory stays advisory, the service
-# failure is contained to the retry marker, the guided guard HALTS (64).
+# BOOT A — §10 first-boot row: SB OFF -> the ADR-20 amended PRE-UNSEAL GUARD
+# blocks at the hook's FIRST step: refusal notice + "Press Enter to reboot" +
+# OsIndications boot-to-firmware-setup + reboot. The disk is NEVER unlocked,
+# so the fed session (advisory oneshot / service / guided CLI legs) is
+# UNREACHABLE under SB off — that in-guest trio stays unit-pinned
+# (tests/unit/openrc_finalize_advisory.sh + finalize_service_guard.sh). The
+# hook parks on its Enter read; the scenario waits for the guard sentinel and
+# hard-kills qemu BY PID.
 # ============================================================================
 A="$RUN/boot-a"
-# Wave-2 2b (decision rule 1): boot A is a READ-MOSTLY base boot — the SB-off
-# guard halts before any completion mutation, and the boot-session-local
-# writes (the keyslot-0 rekey stand-in + the ADR-8 retry marker) matter only
-# within THIS boot (boot B re-derives from the pristine fixture disk), so the
-# boot runs on a fresh QCOW2 overlay over the pristine fixture disk and the
-# overlay is discarded right after the boot. The post-boot host asserts are
-# re-pointed at the RAW fixture disk below (cryptsetup cannot read qcow2; the
-# invariant they pin — "the boot mutated no LUKS metadata structure" — now
-# holds structurally AND is asserted on the base the overlay backs onto).
+# Wave-2 2b (decision rule 1): boot A is a READ-MOSTLY base boot — the guard
+# blocks before ANY mutation, and the boot runs on a fresh QCOW2 overlay over
+# the pristine fixture disk; the overlay is discarded right after the kill.
+# The post-boot host asserts below read the RAW fixture disk (cryptsetup
+# cannot read qcow2): 1 keyslot, 0 tokens, structurally unchanged.
 mkdir -p "$A"
 overlay_create "$RUN/disk.img" "$A/disk.qcow2" || {
     echo "s21: overlay create failed (boot A)"; exit 1; }
-echo "# boot A: SB-off vars — advisory oneshot + contained service failure + fail-closed guard"
-_run_fed_boot "$A" "$A/disk.qcow2" "$RUN/vars-unenrolled.fd"
-_feed_common "$A"
-_rekey_slot0 "$A"
-# leg (a): the ADVISORY oneshot — start() driven exactly as openrc-run would.
-# Every leg captures the rc through a tested list (`|| RC=$?`): fin_service_main
-# arms the lib's strict_mode inside the shell it is sourced into, and a bare
-# failing command under `set -e` would kill the fed shell before the echo.
-feed_line "$A/serial.sock" \
-    'RC=0; . /etc/init.d/alpine-fde-finalize; start || RC=$?; echo ADVRC=$RC'
+echo "# boot A: SB-off vars — the initramfs pre-unseal guard must BLOCK (no unlock, no fed session)"
+_ensure_tpm "$RUN/tpm"
+_rearm_trap
+CURRENT_QEMU_DIR="$A"
+run_stage "qemu_run:boot-a" 60 qemu_run "$A" "$RUN/esp-feed.img" "$A/disk.qcow2" \
+    "$RUN/vars-unenrolled.fd" "$RUN/tpm" "$RUN/pcrsig-feed-tooling.img"
+_qemu_alive "$A"
+_rearm_trap
+# wait for the guard sentinel with a qemu-liveness poll, feed the operator's
+# Enter confirmation, wait for the reboot sentinel, then kill BY PID
 i=0
-until grep -q "ADVRC=" "$A/console.log" 2>/dev/null; do
-    _qemu_alive_or_die "$A" "console-wait:ADVRC"; _budget_check "console-wait:ADVRC"; (( i < 120 )) || _hang_fail CONSOLE-WAIT ADVRC advisory; sleep 1; i=$((i + 1))
+until grep -qF "$(sentinel_of unseal_sb_guard_enter)" "$A/console.log" 2>/dev/null; do
+    _qemu_alive_or_die "$A" "console-wait:guard"
+    _budget_check "console-wait:guard"
+    (( i < 300 )) || _hang_fail CONSOLE-WAIT "pre-unseal guard" "never armed"
+    sleep 1
+    i=$((i + 1))
 done
-# leg (b): the SERVICE completion — fin_service_main, failure-contained; the
-# subshell keeps strict_mode (set -eu) from leaking into the fed shell
-feed_line "$A/serial.sock" \
-    'RC=0; ( . /opt/alpine-fde/lib/cmd/finalize.sh; fin_service_main ) || RC=$?; echo SVCRC=$RC'
+feed_line "$A/serial.sock" ""   # the operator's Enter confirmation
 i=0
-until grep -q "SVCRC=" "$A/console.log" 2>/dev/null; do
-    _qemu_alive_or_die "$A" "console-wait:SVCRC"; _budget_check "console-wait:SVCRC"; (( i < 300 )) || _hang_fail CONSOLE-WAIT SVCRC service; sleep 1; i=$((i + 1))
+until grep -qF "$(sentinel_of unseal_sb_guard_reboot)" "$A/console.log" 2>/dev/null; do
+    _qemu_alive_or_die "$A" "console-wait:guard-reboot"
+    _budget_check "console-wait:guard-reboot"
+    (( i < 60 )) || _hang_fail CONSOLE-WAIT "pre-unseal guard reboot" "never rebooted after Enter"
+    sleep 1
+    i=$((i + 1))
 done
-# leg (c): the GUIDED CLI — the fw_sb_state gate must halt fail-closed (64)
-feed_line "$A/serial.sock" \
-    'RC=0; timeout 300 /opt/alpine-fde/bin/alpine-fde finalize || RC=$?; echo P6-RC=$RC'
-CLI_RC_A=$(_await_rc "$A")
-_feed_postcheck "$A"
+qemu_kill "$A"   # BY PID (tests/lib/qemu.sh); the guest cannot exit itself here
+CURRENT_QEMU_DIR=""
 overlay_discard "$A/disk.qcow2"   # boot A's overlay is ephemeral (console + base asserts below)
 
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
 assert_contains "[boot A] init ran" "$LOG_A" "alpine-fde-harness: init started"
-assert_contains "[boot A] the shipped §8.2 hook ran the enter-initrd extend" "$LOG_A" \
+assert_contains "[boot A] the shipped §8.2 hook executed (guard context)" "$LOG_A" \
+    "invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
+# ordering proof: the guard fired BEFORE any TPM work — no enter-initrd extend
+_guard_line=$(grep -nm1 -F "$(sentinel_of unseal_sb_guard)" "$A/console.log" 2>/dev/null | cut -d: -f1)
+_exta_line=$(grep -nm1 -F "$(sentinel_of unseal_pcrextend_ok)" "$A/console.log" 2>/dev/null | cut -d: -f1)
+if [[ -n "${_guard_line:-}" && -z "${_exta_line:-}" ]]; then
+    _assert_result ok "[boot A] the guard fired BEFORE any TPM work (line $_guard_line, no extend)" ""
+else
+    _assert_result not-ok "[boot A] the guard fired BEFORE any TPM work" \
+        "guard=$_guard_line pcrextend=$_exta_line"
+fi
+assert_contains "[boot A] guard: the blocking refusal names the pre-unseal guard" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard)"
+assert_contains "[boot A] guard: the refusal carries the LIVE secureboot=0 reading" "$LOG_A" \
+    "secureboot=0"
+assert_contains "[boot A] guard: Press-Enter confirmation prompt" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_enter)"
+assert_contains "[boot A] guard: OsIndications boot-to-firmware-setup requested" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_osind)"
+assert_contains "[boot A] guard: reboot into the firmware setup" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_reboot)"
+assert_not_contains "[boot A] NO enter-initrd extend (the guard precedes §8.2 step 2)" "$LOG_A" \
     "$(sentinel_of unseal_pcrextend_ok)"
-assert_contains "[boot A] hook found NO token (handoff window shape)" "$LOG_A" \
-    "$(sentinel_of unseal_token_missing)"
-assert_contains "[boot A] fed slot-0 recovery passphrase unsealed the volume (§10 way out)" "$LOG_A" \
+assert_not_contains "[boot A] NO token discovery (NEVER unsealed with SB off)" "$LOG_A" \
+    "$(sentinel_of unseal_token_info)"
+assert_not_contains "[boot A] NO recovery-passphrase prompt (the fallback is RETRACTED under SB off)" "$LOG_A" \
+    "$(sentinel_of unseal_prompt_re)"
+assert_not_contains "[boot A] NO 3-strike path" "$LOG_A" "$(sentinel_of unseal_3strike)"
+assert_not_contains "[boot A] NO fail-closed poweroff (the terminal action is the REBOOT)" "$LOG_A" \
+    "$(sentinel_of unseal_poweroff)"
+assert_not_contains "[boot A] never unlocked (token)" "$LOG_A" "$(sentinel_of unseal_unlocked)"
+assert_not_contains "[boot A] never unlocked (recovery passphrase)" "$LOG_A" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[boot A] UNSEALED" "$LOG_A" "alpine-fde: UNSEALED"
-assert_contains "[boot A] tooling extracted in-guest" "$LOG_A" "P2B-42-OK"
-assert_contains "[boot A] installed-state fixture on disk: state=installed" "$LOG_A" '"state": "installed"'
-assert_contains "[boot A] the advisory oneshot is staged + enabled (init.d + runlevels/default)" "$LOG_A" \
-    "alpine-fde-finalize -> /etc/init.d/alpine-fde-finalize"
-assert_contains "[boot A] crypttab member resolved (root UUID= line, not the seam echo)" "$LOG_A" \
-    "root UUID=$DISK_UUID none luks"
-assert_contains "[boot A] Stage-1 stand-in: recovery passphrase rekeyed into keyslot 0" "$LOG_A" "RK-45-OK"
-# --- leg (a): the advisory oneshot stays ADVISORY under SB-off ---------------
-assert_eq "[boot A] advisory oneshot rc 0 (NEVER blocks boot, ADR-20 amended)" "0" \
-    "$(grep -oE 'ADVRC=[0-9]+' "$A/console.log" | head -1 | cut -d= -f2)"
-assert_contains "[boot A] advisory: the not-finalized WARNING with the live state" "$LOG_A" \
-    "WARNING: Alpine FDE trust is NOT finalized (install state: installed)."
-assert_contains "[boot A] advisory: the SB-off fw_sb_state reading (the amended guard text)" "$LOG_A" \
-    "Secure Boot guard failed: secureboot=0 setup_mode=1 pk=0"
-assert_contains "[boot A] advisory: the finalize guidance (the amended manual-completion line)" "$LOG_A" \
-    "or complete it manually with: alpine-fde finalize"
-# --- leg (b): the service failure is contained (marker, no mutations) --------
-assert_ne "[boot A] service completion FAILED contained (rc != 0, never an OpenRC failure)" "0" \
-    "$(grep -oE 'SVCRC=[0-9]+' "$A/console.log" | head -1 | cut -d= -f2)"
-assert_contains "[boot A] ADR-8 marker: retry-next-boot reason on the DISK doc" "$LOG_A" \
-    "will retry next boot"
-# --- leg (c): the guided guard halts fail-closed ------------------------------
-assert_eq "[boot A] guided finalize halted fail-closed (rc 64)" "64" "$CLI_RC_A"
-assert_contains "[boot A] recovery passphrase VERIFIED first (guard is step 3, not step 1)" "$LOG_A" \
-    "recovery passphrase verified against keyslot 0 (attempt 1)"
-assert_contains "[boot A] fw_sb_state guard saw Secure Boot OFF" "$LOG_A" \
-    "fw_sb_state: secureboot=0"
-assert_contains "[boot A] the §9.1 instruction text (enable SB in BIOS setup)" "$LOG_A" \
-    "Secure Boot is not enabled with your custom keys"
-# Needle note (registry 2026-09-23): the guard's die() text reached the serial
-# console with ONE DUPLICATED byte ("the volume rremains safely locked") — a
-# UART burst artifact under registry load, in exactly this flood-phase line.
-# Match the corruption-surviving tail of the sentence instead of the full
-# phrase (the ordering proof below still pins the guard text itself).
-assert_contains "[boot A] the volume remains safely locked (no enrollment, no purge)" "$LOG_A" \
-    "safely locked"
-# ordering: the guard halt PRECEDES every completion mutation — the audit and
-# the token upgrade never run (line-number proof against the post-state)
-_guard_line=$(grep -nm1 -F "Secure Boot is not enabled with your custom keys" "$A/console.log" | cut -d: -f1)
-_audit_line=$(grep -nm1 -F "finalizing the baseline from live values" "$A/console.log" | cut -d: -f1)
-_upgr_line=$(grep -nm1 -F "token upgraded to Mechanism B" "$A/console.log" | cut -d: -f1)
-if [[ -n "$_guard_line" && -z "$_audit_line" && -z "$_upgr_line" ]]; then
-    _assert_result ok "[boot A] ZERO baseline capture, ZERO token upgrade after the guard" ""
-else
-    _assert_result not-ok "[boot A] ZERO baseline capture, ZERO token upgrade after the guard" \
-        "guard=$_guard_line audit=$_audit_line upgrade=$_upgr_line"
-fi
-assert_not_contains "[boot A] no baseline finalization anywhere (SB-off)" "$LOG_A" \
-    "finalizing the baseline from live values"
-assert_not_contains "[boot A] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG_A" \
-    "$(sentinel_of cryptenroll_enrolled)"
-_p7a_line=$(grep -nm1 -F "P7STATE" "$A/console.log" | cut -d: -f1)
-if [[ -n "$_guard_line" && -n "$_p7a_line" ]] && (( _guard_line < _p7a_line )); then
-    _assert_result ok "[boot A] state evidence printed AFTER the halt (halt really stopped the flow)" ""
-else
-    _assert_result not-ok "[boot A] state evidence printed AFTER the halt" "guard=$_guard_line p7=$_p7a_line"
-fi
-assert_contains "[boot A] post: install state STILL installed (istate_write never ran)" "$LOG_A" \
-    "P7STATE \"state\": \"installed\""
-assert_contains "[boot A] post: baseline STILL pending (audit --init never ran)" "$LOG_A" \
-    '"expected_pcr7": "pending"'
-assert_contains "[boot A] post: ZERO tokens in the LUKS2 metadata" "$LOG_A" "P7TOK 0"
-assert_contains "[boot A] post: keyslots unchanged ([\"0\"] only)" "$LOG_A" 'P7SLOTS ["0"]'
-assert_contains "[boot A] post: the retry-next-boot marker is ON DISK (service leg)" "$LOG_A" \
-    "P7ATT will retry next boot"
-assert_not_contains "[boot A] no interactive prompt ever appeared (sentinel table)" "$LOG_A" \
-    "$(sentinel_of prompt_re)"
+assert_not_contains "[boot A] never UNSEALED (the fed session is unreachable under SB off)" "$LOG_A" \
+    "alpine-fde: UNSEALED"
 assert_not_contains "[boot A] no emergency shell" "$LOG_A" "$(sentinel_of emergency_forbidden)"
+# the scenario hard-killed the parked guest (BY PID)
+if [[ -f "$A/qemu.pid" ]] && ! kill -0 "$(cat "$A/qemu.pid" 2>/dev/null)" 2>/dev/null; then
+    _assert_result ok "[boot A] guest torn down (qemu_kill BY PID after the guard sentinel)" ""
+else
+    _assert_result not-ok "[boot A] guest torn down (qemu_kill BY PID after the guard sentinel)" \
+        "qemu still running or qemu.pid missing"
+fi
 # post-boot HOST (Wave-2 2b: boot A ran on a discarded QCOW2 overlay, so the
-# host-side cryptsetup reads target the RAW fixture disk — the same invariant,
-# stronger by construction: the boot's writes died with the overlay AND the
-# base it read from is structurally unchanged): 1 keyslot, 0 tokens.
+# host-side cryptsetup reads target the RAW fixture disk — the invariant they
+# pin — "the boot mutated no LUKS metadata structure" — holds structurally AND
+# on the base the overlay backs onto): 1 keyslot, 0 tokens.
 META_A=$(disk_metadata "$RUN/disk.img")
 assert_eq "[boot A] host(base): metadata unchanged — 1 keyslot" "1" \
     "$(jq -r '.keyslots | length' <<<"$META_A")"
@@ -857,7 +818,7 @@ assert_contains "[boot B] the member upgraded to Mechanism B {PCR 7, PCR 11}" "$
     "alpine-fde: member $DISK_UUID: token upgraded to Mechanism B {PCR 7, PCR 11}"
 assert_contains "[boot B] no ephemeral keyslot remained (crash-skip of the purge)" "$LOG_B" \
     "no temporary ephemeral keyslot remains — skipping the purge"
-assert_contains "[boot B] the unfinalized MOTD banner cleared" "$LOG_B" \
+assert_not_contains "[boot B] NO banner step in the completion (ADR-20 #4: the banner path is removed)" "$LOG_B" \
     "unfinalized MOTD/issue banner cleared"
 assert_contains "[boot B] install finalized marker (§9.1 Stage 3)" "$LOG_B" \
     "alpine-fde: install finalized"
@@ -893,8 +854,8 @@ assert_contains "[boot B] post: exactly ONE systemd-tpm2 token" "$LOG_B" "P7TOK 
 assert_contains "[boot B] post: token on a fresh keyslot (0+1)" "$LOG_B" 'P7SLOTS ["0","1"]'
 assert_contains "[boot B] post: NO attempt marker stands after the completion (clean exit, istate_attempt_clear)" "$LOG_B" \
     "P7ATT none"
-assert_contains "[boot B] post: the motd banner line is GONE (stripped line-exactly)" "$LOG_B" \
-    "P7BANNER 0"
+assert_contains "[boot B] post: motd carries the operator line byte-exactly (finalize never touches it, ADR-20 #4)" "$LOG_B" \
+    "P7MOTD Welcome to the Alpine FDE harness fixture — operator content stays."
 assert_not_contains "[boot B] no interactive prompt ever appeared (sentinel table)" "$LOG_B" \
     "$(sentinel_of prompt_re)"
 assert_not_contains "[boot B] no emergency shell" "$LOG_B" "$(sentinel_of emergency_forbidden)"

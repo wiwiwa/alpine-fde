@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 # alpine-fde-finalize — first-boot AUTO-FINALIZER oneshot (§9.1 Stage 2 step 1-5;
-# ADR-20 amended).
+# ADR-20 amended, user amendments #3+#4).
 #
 # ADR-20 amended makes the first boot complete trust finalization AUTOMATICALLY
 # (never the operator): when the install state is provisional
@@ -12,14 +12,21 @@
 #      RE-UNSEALING the standing provisional token in userspace — never a
 #      stored credential)
 #   -> temporary ephemeral install keyslot purge per member
-#   -> MOTD/issue banner clear -> state `finalized` written LAST.
+#   -> state `finalized` written LAST (ADR-20 #4: there is NO MOTD/issue
+#      banner step — the provisional banner path is removed).
 #
-# NEVER blocks boot: on the SB-guard failing, on ANY completion step failing, or
-# on any missing/corrupt state or library, it prints the ADR-8 advisory warning
-# (when unfinalized), leaves the state untouched and exits 0 — the next boot
-# retries (§9.1: "any step failure => stay provisional, warn loudly, exit 0,
-# retry next boot"). state `finalized` is silent and idempotent. The GUIDED
-# crash-resume entry point remains `alpine-fde finalize` (Stage 3).
+# The SB guard here is the SECOND BLOCKING LAYER (ADR-20 #3): the first is the
+# initramfs pre-unseal guard (§8.2 step 0 — an SB-off machine reboots into
+# firmware setup before anything is unsealed). Under an unverified boot this
+# service BLOCKS finalization: nothing is enrolled, captured, upgraded or
+# purged — the loud BLOCKED notice is printed, the state stays provisional and
+# the next boot retries (§12 S-21). Boot itself is never failed by this
+# service: on any NON-guard completion step failing, or on any missing/corrupt
+# state or library, it prints the ADR-8 advisory warning (when unfinalized),
+# leaves the state untouched and exits 0 — the next boot retries (§9.1: "any
+# step failure => stay provisional, warn loudly, exit 0, retry next boot").
+# state `finalized` is silent and idempotent. The GUIDED crash-resume entry
+# point remains `alpine-fde finalize` (Stage 3).
 #
 # Install: copied to /etc/init.d/ and enabled via
 # `rc-update add alpine-fde-finalize default` (Stage 1 step 7).
@@ -47,9 +54,12 @@ start() {
         *) return 0 ;;                      # missing/corrupt: degrade safe
     esac
 
-    # --- read-only final Secure Boot guard (§9.1 Stage 2 step 1) ---------------
-    # Under an unverified boot NOTHING is enrolled, captured, upgraded or
-    # purged: stay provisional, warn, retry next boot (§12 S-21).
+    # --- read-only final Secure Boot guard (§9.1 Stage 2 step 1; ADR-20 #3) ---
+    # The SECOND BLOCKING LAYER (the first is the initramfs pre-unseal guard,
+    # §8.2 step 0). Under an unverified boot NOTHING is enrolled, captured,
+    # upgraded or purged: finalization is BLOCKED loudly, the state stays
+    # provisional and the next boot retries (§12 S-21). Boot itself proceeds —
+    # this service never fails the boot.
     _aff_sb='unreadable'
     if command -v fw_sb_state >/dev/null 2>&1; then
         _aff_sb=$(fw_sb_state 2>/dev/null || true)
@@ -60,10 +70,11 @@ start() {
             command -v istate_attempt_write >/dev/null 2>&1 &&
                 istate_attempt_write "service: SB guard failed ($_aff_sb) — staying provisional, retry next boot"
             printf '%s\n' \
-                "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+                "BLOCKED: Alpine FDE trust finalization is NOT permitted (install state: $_aff_state)." \
                 "Secure Boot guard failed: $_aff_sb" \
-                "Enable Secure Boot in BIOS setup; the first-boot service will retry on the next boot," \
-                "or complete it manually with: alpine-fde finalize" \
+                "The initramfs pre-unseal guard reboots Secure-Boot-off machines into firmware setup (ADR-20, §8.2);" \
+                "enable Secure Boot with this machine's platform keys in BIOS setup — this service will" \
+                "finalize on a Secure-Boot-verified boot and stays provisional otherwise (retry next boot)." \
                 >&2
             return 0
             ;;

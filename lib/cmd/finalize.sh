@@ -29,8 +29,10 @@
 #   The purge runs FIRST because the re-unsealed provisional credential
 #   authorizes both keyslot mutations and stops verifying once the upgrade
 #   retires the provisional keyslot — see the ORDER CONSTRAINT at the loop.
-#   Afterwards: unfinalized MOTD/issue banner clear -> ADR-8 marker clear ->
-#   state `finalized` written LAST (I1's two-keyslot at-rest state holds).
+#   Afterwards: ADR-8 marker clear -> state `finalized` written LAST (I1's
+#   two-keyslot at-rest state holds). ADR-20 #4: there is NO MOTD/issue
+#   banner step — the unfinalized-banner path is removed (no banners, no
+#   manual commands; install no longer writes one either).
 #   Every step is crash-idempotent (§9.1: interrupted runs converge on the
 #   next boot / invocation).
 #
@@ -105,8 +107,8 @@ Guided steps, in order:
       verifies — see the ORDER CONSTRAINT in fin_completion_steps)
   6. upgrade every crypttab member's token to Mechanism B {PCR 7, PCR 11}
       (I1's two-keyslot at-rest state)
-  7. clear the unfinalized MOTD/issue banner
-  8. write install state `finalized` and print the backup reminder
+  7. write install state `finalized` and print the backup reminder
+      (ADR-20 #4: no banner step — /etc/motd and /etc/issue are never touched)
 Interrupted runs converge on the next invocation (crash idempotency, §9.1).
 EOF
 }
@@ -307,8 +309,8 @@ fin_provisional_unseal() {
 # fin_completion_steps AUTHFILE — the §9.1 Stage 2 == Stage 3 completion chain,
 # shared verbatim by the guided command and the first-boot service (ADR-20
 # amended): Secure Boot guard -> audit --init -> token upgrade {PCR 7, PCR 11}
-# per member -> temporary ephemeral keyslot purge per member -> MOTD/issue
-# banner clear -> ADR-8 marker clear -> state `finalized` LAST.
+# per member -> temporary ephemeral keyslot purge per member -> ADR-8 marker
+# clear -> state `finalized` LAST (no banner step, ADR-20 #4).
 # AUTHFILE is an existing valid volume credential (guided: the verified
 # recovery passfile at keyslot 0; service: the re-unsealed provisional
 # passfile) authorizing the upgrade's luksAddKey and the ephemeral kill.
@@ -431,11 +433,9 @@ fin_completion_steps() {
     rm -rf "$_fcs_stage"
     unset ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || :
 
-    # --- clear the unfinalized MOTD/issue banner (§9.1 Stage 2/3) --------------
-    _fcs_root=${ALPINE_FDE_ROOT:-}
-    fde_motd_strip "${_fcs_root}/etc/motd"
-    fde_motd_strip "${_fcs_root}/etc/issue"
-    info "finalize: unfinalized MOTD/issue banner cleared"
+    # ADR-20 amendment #4: the unfinalized MOTD/issue banner path is REMOVED —
+    # nothing is written to /etc/motd or /etc/issue here (install no longer
+    # drops a banner either; the operator's own content is never touched).
 
     # --- the state transition is the LAST mutation (§9.1); the ADR-8 marker ---
     # is cleared first: a successful completion means NO pending failure
@@ -590,7 +590,7 @@ cmd_finalize_main() {
 
     # --- STEP 3..8: the shared completion chain (§9.1 Stage 2 == Stage 3) ------
     # SB guard -> audit --init -> token upgrade {PCR 7, PCR 11} per member ->
-    # ephemeral keyslot purge per member -> banner clear -> state finalized.
+    # ephemeral keyslot purge per member -> state finalized.
     # The in-process re-sign fallback (§9.4) re-uses the release-key
     # passphrase staged above (same process, no new exposure).
     if [ -n "$_fm_keypass" ] && [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then

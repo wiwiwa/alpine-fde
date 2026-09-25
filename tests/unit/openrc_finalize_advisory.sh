@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# tests/unit/openrc_finalize_advisory.sh — ADR-20 AMENDED (§9.1 Stage 2): the
-# first-boot OpenRC service hooks/openrc/alpine-fde-finalize is the
-# AUTO-FINALIZER: when the state is provisional (installed/provisional-booted)
-# AND the final Secure Boot state holds (secureboot=1 && setup_mode=0) it
-# INVOKES the non-interactive completion (fin_service_main, lib/cmd/finalize.sh
-# — guard -> audit --init -> token upgrade {PCR 7, PCR 11} -> ephemeral purge
-# -> MOTD clear -> state finalized). On SB-guard failure or ANY completion
-# failure it prints the ADR-8 advisory warning, exits 0 (NEVER blocks boot) and
-# retries on the next boot. finalized / missing / corrupt state / missing
+# tests/unit/openrc_finalize_advisory.sh — ADR-20 AMENDED (§9.1 Stage 2, user
+# amendments #3+#4): the first-boot OpenRC service hooks/openrc/
+# alpine-fde-finalize is the AUTO-FINALIZER and its SB guard is the SECOND
+# BLOCKING LAYER (the first is the initramfs pre-unseal guard, §8.2 step 1):
+# when the state is provisional (installed/provisional-booted) AND the final
+# Secure Boot state holds (secureboot=1 && setup_mode=0) it INVOKES the
+# non-interactive completion (fin_service_main, lib/cmd/finalize.sh — guard ->
+# audit --init -> token upgrade {PCR 7, PCR 11} -> ephemeral purge -> state
+# finalized; the MOTD banner path is REMOVED). On SB-guard failure the service
+# BLOCKS finalization loudly (no chain invocation, no mutation) and exits 0
+# for OpenRC — boot proceeds, finalization does NOT, retry next boot. On any
+# NON-guard completion failure it prints the ADR-8 advisory warning, exits 0
+# and retries on the next boot. finalized / missing / corrupt state / missing
 # libraries => silent degrade-safe exit 0.
 #
 # The REAL hook script is exercised (sourced; start() invoked) against the REAL
@@ -17,10 +21,11 @@
 # early, so the stub stands in for the whole completion chain). The full
 # REAL-chain service simulation lives in tests/unit/finalize_service_guard.sh.
 #
-# Pinned invariants (rc 0 ALWAYS — never blocks boot):
+# Pinned invariants (rc 0 ALWAYS — the service never fails the boot itself):
 #   * provisional + SB final          => completion chain INVOKED once, silent
-#   * provisional + SB guard failure  => completion chain NOT invoked, loud
-#                                       advisory, retry-next-boot text, rc 0
+#   * provisional + SB guard failure  => completion chain NOT invoked (guard
+#                                       BLOCKS finalization), loud blocking
+#                                       notice, retry-next-boot text, rc 0
 #   * completion failure (stub rc 1)  => rc 0, loud advisory (ADR-8), rc 0
 #   * finalized                        => silent rc 0, chain NOT invoked
 #   * missing / corrupt state          => silent rc 0 (degrade safe), not invoked
@@ -135,6 +140,8 @@ assert_contains "static: reads the install state (finalized is a no-op)" "$HOOK_
     "istate_state"
 assert_contains "static: read-only final SB guard before the completion" "$HOOK_TXT" \
     "fw_sb_state"
+assert_contains "static: the guard branch names the initramfs pre-unseal guard (second-layer framing)" \
+    "$HOOK_TXT" "pre-unseal"
 assert_contains "static: failure path writes the ADR-8 attempt marker" "$HOOK_TXT" \
     "istate_attempt_write"
 assert_contains "static: advisory names the retry contract" "$HOOK_TXT" "next boot"
@@ -156,21 +163,26 @@ assert_eq "provisional+SB-final: completion chain invoked exactly once" "1" "$SV
 assert_eq "provisional+SB-final: silent on success (no advisory)" "" "$ADV_OUT"
 
 # =================================================================================
-# 2. SB guard failure (secureboot=0) ⇒ the completion chain is NOT invoked;
-# loud advisory, retry-next-boot, rc 0 (§9.1 Stage 2 step 1 / §12 S-21).
+# 2. SB guard failure (secureboot=0) ⇒ the SECOND BLOCKING LAYER (ADR-20 #3):
+# the completion chain is NOT invoked, the BLOCKED notice is loud, rc 0 for
+# OpenRC (boot proceeds; finalization does NOT) — §9.1 Stage 2 / §12 S-21.
 sb_state 0 0
 write_state provisional-booted
 run_hook 0
-assert_eq "SB-off: rc 0 (advisory never blocks or fails boot)" "0" "$ADV_RC"
-assert_eq "SB-off: completion chain NOT invoked (guard fails closed first)" "0" \
+assert_eq "SB-off: rc 0 (the service never fails the boot itself)" "0" "$ADV_RC"
+assert_eq "SB-off: completion chain NOT invoked (the guard blocks finalization)" "0" \
     "$SVC_CALLS"
-assert_contains "SB-off: advisory prints the read-only SB state" "$ADV_OUT" \
+assert_contains "SB-off: BLOCKED notice (guard, not a soft advisory)" "$ADV_OUT" \
+    "BLOCKED"
+assert_contains "SB-off: notice prints the read-only SB state" "$ADV_OUT" \
     "secureboot=0"
-assert_contains "SB-off: advisory names the not-finalized state" "$ADV_OUT" \
+assert_contains "SB-off: notice names the not-finalized state" "$ADV_OUT" \
     "provisional-booted"
-assert_contains "SB-off: advisory names the retry contract" "$ADV_OUT" "next boot"
-assert_contains "SB-off: advisory still names the guided entry point" "$ADV_OUT" \
-    "alpine-fde finalize"
+assert_contains "SB-off: notice names the initramfs pre-unseal guard (the first layer)" \
+    "$ADV_OUT" "pre-unseal"
+assert_contains "SB-off: notice names the retry contract" "$ADV_OUT" "next boot"
+assert_not_contains "SB-off: NO manual-command guidance on the guard branch (SB-off finalize dies 64 anyway)" \
+    "$ADV_OUT" "alpine-fde finalize"
 
 # --- 2b. SetupMode=1 is equally a guard failure (keys not in final state) --------
 sb_state 1 1
@@ -178,7 +190,7 @@ write_state provisional-booted
 run_hook 0
 assert_eq "SetupMode=1: rc 0" "0" "$ADV_RC"
 assert_eq "SetupMode=1: completion chain NOT invoked" "0" "$SVC_CALLS"
-assert_contains "SetupMode=1: advisory prints the setup-mode state" "$ADV_OUT" \
+assert_contains "SetupMode=1: BLOCKED notice prints the setup-mode state" "$ADV_OUT" \
     "setup_mode=1"
 
 # =================================================================================

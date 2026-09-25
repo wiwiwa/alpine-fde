@@ -241,7 +241,7 @@ release.pem via keys_encrypt_release; there is no flag and no environment
 seam for any credential), firmware NVRAM enrollment db -> KEK -> PK, bootctl
 install + signed boot manager and UKI via `ukictl build`, PROVISIONAL TPM
 token sealed into keyslot 1 (Mechanism B, PCR 11 only, from the UKI's
-.pcrsig), unfinalized MOTD/issue banner, install-state=installed — then
+.pcrsig), install-state=installed — then
 teardown (unmount + ephemeral-key scrub) and a direct reboot to disk (no
 firmware trip): the first boot unlocks via the provisional token and
 alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
@@ -874,11 +874,9 @@ inst_ceremony_release_key() {
   return 0
 }
 
-# G-C25 (§9.1 step 8): the unfinalized warning banner dropped to /etc/motd AND
-# /etc/issue on the target is the SHARED SINGLE-SOURCE line from
-# lib/install-state.sh (fde_motd_banner — consumed below at step 8 and stripped
-# line-exactly by finalize's fde_motd_strip). Exactly ONE banner definition
-# exists in the tree; install writes it, finalize strips it.
+# G-C25 (ADR-20 amendment #4): the unfinalized warning banner path is REMOVED
+# — install writes NO banner to /etc/motd or /etc/issue (the operator's own
+# content is never synthesized or touched), and finalize never strips one.
 
 # inst_provisional_enroll_line EPHEMERAL_KEYFILE CONTAINER_DEV... — G-C24
 # (§9.1 step 6): the single-line GUEST command performing the provisional TPM
@@ -1573,23 +1571,11 @@ cmd_install_main() {
   else
     inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid"
   fi
-  # step 8 (G-C25): unfinalized warning banner to /etc/motd AND /etc/issue —
-  # the shared single-source line (fde_motd_banner, lib/install-state.sh;
-  # fail closed if the module did not load). The banner is expanded LINE BY
-  # LINE into separate plan-write args — the plan file is line-oriented, so
-  # embedded newlines would corrupt it (the shared banner is exactly one line).
-  command -v fde_motd_banner >/dev/null 2>&1 ||
-    die "install: banner helper fde_motd_banner missing (lib/install-state.sh not loaded?)"
-  set --
-  while IFS= read -r _im_bl; do
-    set -- "$@" "$_im_bl"
-  done <<EOF
-$(fde_motd_banner)
-EOF
-  inst_plan_write /etc/motd "$@"
-  inst_plan_write /etc/issue "$@"
-  # step 9 (G-C28): ceremony state machine — `installed` (AFTER the banner;
-  # the provisional-booted middle state is written by the first-boot service)
+  # step 8 (G-C25, ADR-20 #4): NO unfinalized banner is written — /etc/motd
+  # and /etc/issue stay untouched (the banner path is removed).
+  # step 9 (G-C28): ceremony state machine — `installed` (the last state
+  # write; the provisional-booted middle state is written by the first-boot
+  # service)
   inst_plan_run host "inst_state_write installed"
 
   # --- 8. teardown + scrub + DIRECT reboot (§9.1 Teardown; G-C26) -----------

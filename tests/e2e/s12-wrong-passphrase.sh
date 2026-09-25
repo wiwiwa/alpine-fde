@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
-# tests/e2e/s12-wrong-passphrase.sh — §10 row "SB disabled -> way out:
-# passphrase", i.e. the §10 "Passphrase forgotten + TPM refuses" negative and
-# its positive control (the §6.1 recovery fallback), driven through the
-# SHIPPED mkinitfs unseal hook (§8.2; ADR-13 — the harness DEFAULT unlock,
-# tests/lib/uki-build.sh).
+# tests/e2e/s12-wrong-passphrase.sh — the §6.1 recovery-passphrase way out,
+# driven through the SHIPPED mkinitfs unseal hook (§8.2; ADR-13 + ADR-20
+# amended — the harness DEFAULT unlock, tests/lib/uki-build.sh).
 #
-# Boot A (negative, the scenario of record): SB-off vars -> PCR 7 drift ->
-# the hook's PolicyPCR({7,11}) session no longer matches the sealed policy ->
-# tpm2_unseal refuses ("the TPM refused the sealed blob...") -> the hook's
-# BOUNDED keyslot-0 recovery-passphrase loop reads lines from /dev/console
-# with its OWN prompt (unseal_prompt_re — no harness-side shortcut; the fed
-# lines go to the hook's `read`). Three wrong answers -> 3-strike fail-closed
-# `poweroff -f` (NO shell is ever offered). No emergency shell.
+# Boot A (negative, the scenario of record): SB-off vars -> the ADR-20 amended
+# PRE-UNSEAL SECURE BOOT GUARD blocks at the hook's FIRST step: refusal notice
+# + "Press Enter to reboot" + OsIndications boot-to-firmware-setup + reboot.
+# The container is NEVER unsealed with SB off — NO token path, NO recovery
+# passphrase fallback (the old PCR-drift 3-strike leg is RETRACTED here). The
+# hook parks on its Enter read; the scenario waits for the guard sentinel and
+# hard-kills qemu BY PID. No emergency shell.
 #
-# Boot B (positive control): same fixtures, wrong, wrong, CORRECT (slot-0)
-# passphrase -> the hook's plain `cryptsetup open --key-file` attach
+# Boot B (positive control, SB-ON DRIFT CONTEXT — the recovery fallback only
+# exists under a verified boot): enrolled vars + a dbx update (s15's idiom)
+# keep SecureBoot=1 while the firmware measures a NEW PCR 7 -> the guard
+# PASSES -> the {7,11} token's PolicyPCR refuses the stale seal term ->
+# the hook's BOUNDED keyslot-0 recovery-passphrase loop reads lines from
+# /dev/console with its OWN prompt (unseal_prompt_re). Wrong, wrong, CORRECT
+# (slot-0) passphrase -> the hook's plain `cryptsetup open --key-file` attach
 # activates the volume -> unseal_pass_unlocked -> UNSEALED via the recovery
 # slot. Proves the hook's rejections are real passphrase verification and
-# closes the §6.1 recovery way out end-to-end.
+# closes the §9.4 drift-recovery way out end-to-end.
 #
-# NB (G-T13): NO assert_pcr11_prediction on boot A — the hook fails closed
-# INSIDE its own invocation, so /init never reaches its post-hook postphase
-# PCR 11 reading; the PCR 11 unchanged-equality vs the enrolled console is
-# the equivalent tamper-scoping evidence (the drift is PCR 7 only). Boot B
-# unlocks, so the postphase reading appears and the signed prediction IS
-# asserted there.
+# NB (G-T13): NO assert_pcr11_prediction on boot A — the guard blocks INSIDE
+# its own invocation before any extend, so /init never reaches its post-hook
+# postphase PCR 11 reading; the boot's raw-zero PCR 11 vs the enrolled
+# post-extend value is the equivalent scoping evidence. Boot B unlocks, so
+# the postphase reading appears and the signed prediction IS asserted there.
 #
 # Reuses s00 state when ALPINE_FDE_E2E_STATE points at the s00 run dir
 # (run-e2e.sh sets it); otherwise builds + boots the enrolled state itself
@@ -227,9 +229,9 @@ cp "$STATE/pcrsig.img" "$RUN/pcrsig.img"
 # exactly once and never per boot.
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 esp_make "$RUN/esp.img" $(( UKI_MIB * 2 + 8 )) "$RUN/harness.efi" || exit 1
-# negative fixture: SB off -> the hook's {7,11} policy refuses on the PCR 7
-# drift; the recovery slot (keyslot 0) is PCR-independent and remains the way
-# out (§10)
+# negative fixture: SB off -> the ADR-20 pre-unseal guard blocks the boot
+# before ANY unlock attempt (boot A); boot B builds the SB-on drift context
+# from the enrolled vars instead (dbx update — see the boot B block below)
 keys_vars_unenrolled "$STATE/keys" "$RUN/vars-unenrolled.fd"
 assert_not_contains "unenrolled vars: no SecureBootEnable" \
     "$(keys_vars_get "$RUN/vars-unenrolled.fd" SecureBootEnable)" "ON"
@@ -246,43 +248,63 @@ cp "$RUN/esp.img" "$A/esp.img"
 overlay_create "$STATE/disk.img" "$A/disk.qcow2" || {
     echo "s12: overlay create failed (boot A)"; exit 1; }
 
-echo "# boot A: SB-off + finalized token, feeding 3 WRONG passphrases to the HOOK's prompt"
+echo "# boot A: SB-off vars — the ADR-20 pre-unseal guard must BLOCK (no prompts, no TPM ops)"
 _fresh_pcrs "$STATE/tpm" || { echo "s12: cannot zero the TPM PCRs for boot A"; exit 1; }
 qemu_run "$A" "$A/esp.img" "$A/disk.qcow2" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$A/pcrsig.img"
-for n in 1 2 3; do
-    if uki_wait_hook_prompt "$n" 300 "$A"; then
-        _assert_result ok "boot A: hook awaiting recovery passphrase $n/3 (hook read path)" ""
-    else
-        _assert_result not-ok "boot A: hook awaiting recovery passphrase $n/3" \
-            "no prompt $n in console"
-        break
-    fi
-    feed_line "$A/serial.sock" "alpine-fde-wrong-passphrase-$n"
+# The guard BLOCKS and parks on its "Press Enter" read — the only input is
+# the Enter confirmation. Wait for the sentinel with a qemu-liveness poll,
+# feed the Enter, wait for the reboot sentinel, then hard-kill qemu BY PID
+# (a reboot loop would otherwise run to the timeout).
+i=0
+until grep -qF "$(sentinel_of unseal_sb_guard_enter)" "$A/console.log" 2>/dev/null; do
+    qpid=$(cat "$A/qemu.pid" 2>/dev/null || true)
+    [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null && break   # self-exited
+    (( i < 300 )) || { echo "s12: the pre-unseal guard never armed (boot A)"; exit 1; }
+    sleep 1
+    i=$((i + 1))
 done
-qemu_wait "$A" "$QEMU_TIMEOUT"
+feed_line "$A/serial.sock" ""   # the operator's Enter confirmation
+i=0
+until grep -qF "$(sentinel_of unseal_sb_guard_reboot)" "$A/console.log" 2>/dev/null; do
+    qpid=$(cat "$A/qemu.pid" 2>/dev/null || true)
+    [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null && break   # self-exited
+    (( i < 60 )) || { echo "s12: the guard never rebooted after Enter (boot A)"; exit 1; }
+    sleep 1
+    i=$((i + 1))
+done
+qemu_kill "$A"   # BY PID (tests/lib/qemu.sh)
 overlay_discard "$A/disk.qcow2"   # the attempt's overlay is ephemeral
 LOG_A=$(cat "$A/console.log" 2>/dev/null || true)
 
-# ordering proof: the hook's refusal strictly precedes its first passphrase
-# prompt (the recovery loop may only arm AFTER the token path failed)
-_ref_line=$(grep -nm1 -F "$(sentinel_of unseal_seal_refused)" "$A/console.log" 2>/dev/null | cut -d: -f1)
-_p1_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$A/console.log" 2>/dev/null | cut -d: -f1)
-if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line )); then
-    _assert_result ok "boot A: hook refusal FIRST (line $_ref_line < first prompt line $_p1_line)" ""
+# ordering proof: the guard fired BEFORE any TPM work — no enter-initrd extend
+_guard_line=$(grep -nm1 -F "$(sentinel_of unseal_sb_guard)" "$A/console.log" 2>/dev/null | cut -d: -f1)
+_ext_line=$(grep -nm1 -F "$(sentinel_of unseal_pcrextend_ok)" "$A/console.log" 2>/dev/null | cut -d: -f1)
+if [[ -n "${_guard_line:-}" && -z "${_ext_line:-}" ]]; then
+    _assert_result ok "boot A: the guard fired BEFORE any TPM work (line $_guard_line, no extend)" ""
 else
-    _assert_result not-ok "boot A: hook refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
+    _assert_result not-ok "boot A: the guard fired BEFORE any TPM work" \
+        "guard=$_guard_line pcrextend=$_ext_line"
 fi
 
-assert_contains "boot A: hook ran the enter-initrd extend" "$LOG_A" \
+assert_contains "boot A: guard blocking refusal names the pre-unseal guard" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard)"
+assert_contains "boot A: the refusal carries the LIVE secureboot=0 reading" "$LOG_A" \
+    "secureboot=0"
+assert_contains "boot A: Press-Enter confirmation prompt" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_enter)"
+assert_contains "boot A: OsIndications boot-to-firmware-setup requested" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_osind)"
+assert_contains "boot A: reboot into the firmware setup" "$LOG_A" \
+    "$(sentinel_of unseal_sb_guard_reboot)"
+assert_not_contains "boot A: NO enter-initrd extend (the guard precedes §8.2 step 2)" "$LOG_A" \
     "$(sentinel_of unseal_pcrextend_ok)"
-assert_contains "boot A: hook discovered the {7,11} token" "$LOG_A" \
-    "$(sentinel_of unseal_token_info)7,11]"
-assert_contains "boot A: hook refusal (PCR 7 drift) before any prompt" "$LOG_A" \
-    "$(sentinel_of unseal_seal_refused)"
-PROMPTS_A=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_A" || true)
-assert_eq "boot A: exactly 3 recovery-passphrase prompts (bounded loop)" "3" "$PROMPTS_A"
-assert_contains "boot A: 3-strike give-up (§8.2 fail-closed)" "$LOG_A" "$(sentinel_of unseal_3strike)"
-assert_contains "boot A: fail-closed poweroff (no shell is offered)" "$LOG_A" \
+assert_not_contains "boot A: NO token discovery (NEVER unsealed with SB off)" "$LOG_A" \
+    "$(sentinel_of unseal_token_info)"
+assert_not_contains "boot A: NO recovery-passphrase prompt (the fallback is RETRACTED under SB off)" "$LOG_A" \
+    "$(sentinel_of unseal_prompt_re)"
+assert_not_contains "boot A: NO 3-strike path (nothing to strike)" "$LOG_A" \
+    "$(sentinel_of unseal_3strike)"
+assert_not_contains "boot A: NO fail-closed poweroff (the terminal action is the REBOOT)" "$LOG_A" \
     "$(sentinel_of unseal_poweroff)"
 assert_not_contains "boot A: never unlocked via the TPM token" "$LOG_A" \
     "$(sentinel_of unseal_unlocked)"
@@ -290,23 +312,35 @@ assert_not_contains "boot A: never unlocked via the recovery passphrase" "$LOG_A
     "$(sentinel_of unseal_pass_unlocked)"
 assert_not_contains "boot A: never UNSEALED" "$LOG_A" "alpine-fde: UNSEALED"
 assert_not_contains "boot A: no emergency shell" "$LOG_A" "$(sentinel_of emergency_forbidden)"
-# tamper scoping: the hook extended PCR 11 exactly as at enroll (same UKI, same
-# stub measurement) — the refusal is purely the PCR 7 drift
+# tamper scoping: the hook NEVER extended any PCR — the boot's printed PCR 11
+# is the raw pre-extend register, IDENTICAL to the enrolled console's print
+# (the harness prints PCRs BEFORE invoking the hook; the extend never ran)
 PCR11_ENROLLED=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$STATE/console.log" | head -1 | cut -d= -f2)
 PCR11_A=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$A/console.log" | head -1 | cut -d= -f2)
-assert_eq "boot A: PCR 11 unchanged vs the enrolled boot (drift is PCR 7 only)" \
+assert_eq "boot A: boot PCR 11 is the raw pre-extend register (no extend ran)" \
     "$PCR11_ENROLLED" "$PCR11_A"
-# IN-08: honest in both directions (missing pid file is not a clean exit)
+# the scenario hard-killed the parked guest (BY PID)
 if [[ -f "$A/qemu.pid" ]] && ! kill -0 "$(cat "$A/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-    _assert_result ok "boot A: guest exited (hook poweroff -f, not timeout-kill)" ""
+    _assert_result ok "boot A: guest torn down (qemu_kill BY PID after the guard sentinel)" ""
 else
-    _assert_result not-ok "boot A: guest exited (hook poweroff -f, not timeout-kill)" \
+    _assert_result not-ok "boot A: guest torn down (qemu_kill BY PID after the guard sentinel)" \
         "qemu still running or qemu.pid missing"
 fi
 
-# === BOOT B: wrong, wrong, CORRECT -> the recovery slot unlocks ================
+# === BOOT B: SB-ON DRIFT CONTEXT — wrong, wrong, CORRECT -> recovery unlocks ===
+# ADR-20 amended: the recovery-passphrase demo must run under a VERIFIED boot
+# (the fallback only exists with Secure Boot on). Drift context = the enrolled
+# vars + a dbx update (s15's idiom): the firmware measures a NEW PCR 7 while
+# SecureBoot stays 1, so the PRE-UNSEAL GUARD PASSES, the {7,11} token's
+# PolicyPCR refuses on the stale seal term, and the bounded recovery loop is
+# the way out — exactly §9.4's drift-recovery drill, minus the re-enroll.
 swtpm_stop "$STATE/tpm"   # free the state dir; boot B needs the same SRK
 swtpm_start "$STATE/tpm" || { echo "s12: swtpm start (boot B) failed"; exit 1; }
+[[ -f "$STATE/vars-enrolled.fd" ]] || { echo "s12: no enrolled vars in the state snapshot"; exit 1; }
+cp "$STATE/vars-enrolled.fd" "$RUN/vars-drifted.fd"
+assert_rc "virt-fw-vars: dbx += throwaway cert (SB stays ON, PCR 7 will drift)" 0 \
+    virt-fw-vars -i "$RUN/vars-drifted.fd" -o "$RUN/vars-drifted.fd" \
+        --add-dbx-cert "$ALPINE_FDE_TEST_GUID" "$STATE/keys/KEK.crt"
 B="$RUN/boot-b"
 mkdir -p "$B"
 cp "$RUN/harness.efi" "$B/harness.efi"
@@ -317,9 +351,9 @@ cp "$RUN/esp.img" "$B/esp.img"
 overlay_create "$STATE/disk.img" "$B/disk.qcow2" || {
     echo "s12: overlay create failed (boot B)"; exit 1; }
 
-echo "# boot B: same fixtures, 2 wrong + 1 CORRECT passphrase (recovery positive)"
+echo "# boot B: SB-on drifted vars, 2 wrong + 1 CORRECT passphrase (recovery positive)"
 _fresh_pcrs "$STATE/tpm" || { echo "s12: cannot zero the TPM PCRs for boot B"; exit 1; }
-qemu_run "$B" "$B/esp.img" "$B/disk.qcow2" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$B/pcrsig.img"
+qemu_run "$B" "$B/esp.img" "$B/disk.qcow2" "$RUN/vars-drifted.fd" "$STATE/tpm" "$B/pcrsig.img"
 for n in 1 2; do
     if uki_wait_hook_prompt "$n" 300 "$B"; then
         _assert_result ok "boot B: hook awaiting recovery passphrase $n/3" ""
@@ -364,14 +398,29 @@ qemu_wait "$B" "$QEMU_TIMEOUT"
 overlay_discard "$B/disk.qcow2"   # the attempt's overlay is ephemeral
 LOG_B=$(cat "$B/console.log" 2>/dev/null || true)
 
-assert_contains "boot B: hook refusal first (same tamper context)" "$LOG_B" \
+assert_contains "boot B: the pre-unseal guard PASSED (SB on — verified boot confirmed)" "$LOG_B" \
+    "secureboot=1 setup_mode=0"
+assert_contains "boot B: hook ran the enter-initrd extend (the guard let the boot proceed)" "$LOG_B" \
+    "$(sentinel_of unseal_pcrextend_ok)"
+assert_contains "boot B: hook discovered the {7,11} token" "$LOG_B" \
+    "$(sentinel_of unseal_token_info)7,11]"
+assert_contains "boot B: hook seal refusal on the SB-on PCR 7 drift (the tamper context)" "$LOG_B" \
     "$(sentinel_of unseal_seal_refused)"
+# the refusal strictly precedes the first passphrase prompt (the recovery loop
+# may only arm AFTER the token path failed)
+_refb_line=$(grep -nm1 -F "$(sentinel_of unseal_seal_refused)" "$B/console.log" 2>/dev/null | cut -d: -f1)
+_p1b_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$B/console.log" 2>/dev/null | cut -d: -f1)
+if [[ -n "${_refb_line:-}" && -n "${_p1b_line:-}" ]] && (( _refb_line < _p1b_line )); then
+    _assert_result ok "boot B: hook refusal FIRST (line $_refb_line < first prompt line $_p1b_line)" ""
+else
+    _assert_result not-ok "boot B: hook refusal FIRST" "ref=$_refb_line prompt1=$_p1b_line"
+fi
 PROMPTS_B=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_B" || true)
 assert_eq "boot B: exactly 3 prompts (2 wrong + 1 correct, no 4th)" "3" "$PROMPTS_B"
 assert_contains "boot B: correct slot-0 passphrase UNLOCKED via the recovery path" "$LOG_B" \
     "$(sentinel_of unseal_pass_unlocked)"
 assert_contains "boot B: hook UNSEALED sentinel" "$LOG_B" "alpine-fde: UNSEALED"
-assert_not_contains "boot B: never unlocked via the TPM token (SB-off PCR drift)" "$LOG_B" \
+assert_not_contains "boot B: never unlocked via the TPM token (PCR 7 drift refused the seal)" "$LOG_B" \
     "$(sentinel_of unseal_unlocked)"
 assert_not_contains "boot B: no emergency shell" "$LOG_B" "$(sentinel_of emergency_forbidden)"
 # Clean-exit assertion, shape-aware (see the B_SHAPE detection above): the

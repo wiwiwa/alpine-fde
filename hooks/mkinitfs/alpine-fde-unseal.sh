@@ -3,7 +3,17 @@
 # §8.2 + §9.1 Stage 2; ADR-13/ADR-20, gap G-C8). ONE POSIX-sh script, shipped
 # into the initramfs via hooks/mkinitfs/features.d/alpine-fde.files.
 #
-# Boot-time flow (§8.2 steps 1-4):
+# Boot-time flow (§8.2 steps 1-5; ADR-20 amended):
+#   0. PRE-UNSEAL SECURE BOOT GUARD — the FIRST action (ADR-20 amendments
+#      #3+#4): read SecureBoot/SetupMode from efivarfs (initrd-safe form of
+#      lib/firmware.sh fw_sb_state). Secure Boot OFF (`secureboot != 1 ||
+#      setup_mode != 0`, or unreadable — fail closed) is a HARD refusal:
+#      blocking notice + "Press Enter to reboot" + OsIndications
+#      boot-to-firmware-setup (best-effort) + `reboot -f`. The container is
+#      NEVER unsealed with Secure Boot off — NO token path, NO recovery
+#      passphrase fallback. The provisional PCR-11-only token is only ever
+#      usable with Secure Boot on (the OpenRC finalize guard is the SECOND
+#      blocking layer, §9.1 Stage 2).
 #   1. tpm2_pcrextend the ukify --measure phase string ("enter-initrd", the
 #      exact value lib/cmd/pcrsign.sh pins via --phases=enter-initrd) into
 #      PCR 11, aligning the live PCR state with the signed prediction.
@@ -59,6 +69,73 @@ _fdh_poweroff() {
     poweroff -f
     exit 1
 }
+
+# --- §8.2 step 0: PRE-UNSEAL SECURE BOOT GUARD (ADR-20 amended, FIRST) --------
+# efivarfs read in the initrd-safe form of lib/firmware.sh fw_sb_state: the
+# canonical EFI_GLOBAL_VARIABLE namespace only (a same-named variable in any
+# other namespace is NOT the firmware's SB state, S-M5), 4-byte u32 attrs
+# header + payload byte 0. Fail CLOSED: unreadable == not a verified boot.
+FDE_EFIVARS_DIR=${FDE_EFIVARS_DIR:-/sys/firmware/efi/efivars}
+FW_GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
+
+# _fdh_efivar_u8 NAME — print the variable's payload byte 0 as od hex, rc 1
+# when absent/unreadable (the caller maps that to "unreadable" and blocks).
+# shellcheck disable=SC2120  # stdin consumer by design
+_fdh_efivar_u8() {
+    _fde_f="$FDE_EFIVARS_DIR/$1-$FW_GUID_GLOBAL"
+    [ -f "$_fde_f" ] || return 1
+    _fde_h=$(dd if="$_fde_f" bs=1 skip=4 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+    [ -n "$_fde_h" ] || return 1
+    printf '%s\n' "$_fde_h"
+}
+
+# best-effort efivarfs mount (the real initrd usually mounts it in /init;
+# a bare environment may not have it yet — never fatal, the read decides)
+if [ ! -d "$FDE_EFIVARS_DIR" ]; then
+    mkdir -p "$FDE_EFIVARS_DIR" 2>/dev/null || :
+    mount -t efivarfs efivarfs "$FDE_EFIVARS_DIR" >/dev/null 2>&1 || :
+fi
+
+_fdh_sb=$(_fdh_efivar_u8 SecureBoot) || _fdh_sb=''
+_fdh_sm=$(_fdh_efivar_u8 SetupMode) || _fdh_sm=''
+case $_fdh_sb in
+    01) _fdh_sb=1 ;;
+    00) _fdh_sb=0 ;;
+    *) _fdh_sb=unreadable ;;
+esac
+case $_fdh_sm in
+    00) _fdh_sm=0 ;;
+    01) _fdh_sm=1 ;;
+    *) _fdh_sm=unreadable ;;
+esac
+
+if [ "$_fdh_sb" != "1" ] || [ "$_fdh_sm" != "0" ]; then
+    # ADR-20 amendments #3+#4: the container is NEVER unsealed with Secure
+    # Boot off — no token path, no passphrase fallback. Block, ask for the
+    # operator's confirmation, request the next boot into the firmware setup
+    # (OsIndications bit 1, EFI_OS_INDICATIONS_BOOT_TO_FW_UI, best-effort
+    # because some firmware refuses plain SetVariable), and reboot.
+    _msg "Secure Boot guard: secureboot=$_fdh_sb setup_mode=$_fdh_sm — Secure Boot is OFF — refusing to unlock (pre-unseal guard, ADR-20)"
+    _msg "the container will NOT be unlocked: no token path, no recovery passphrase — enable Secure Boot with this machine's platform keys in the firmware setup (UEFI)"
+    _fdh_osind="$FDE_EFIVARS_DIR/OsIndications-$FW_GUID_GLOBAL"
+    rm -f "$_fdh_osind" 2>/dev/null || :
+    if printf '\007\000\000\000\002\000\000\000\000\000\000\000' >"$_fdh_osind" 2>/dev/null; then
+        _msg "OsIndications: boot-to-firmware-setup requested"
+    else
+        _msg "OsIndications: could not be written — enter the firmware setup manually on the next boot"
+    fi
+    _msg "Press Enter to reboot into the firmware setup (the container was NOT unlocked; no passphrase was requested)"
+    IFS= read -r _fdh_enter || _fdh_enter=''
+    _msg "rebooting into the firmware setup (Secure Boot must be enabled)"
+    if reboot -f; then
+        # not reached on real firmware: the machine resets under the hook
+        exit 0
+    fi
+    # a refused reboot must never fall through into an unauthenticated boot
+    _fdh_poweroff "reboot refused — fail-closed poweroff (Secure Boot is OFF; §8.2)"
+fi
+_msg "Secure Boot guard: secureboot=1 setup_mode=0 — verified boot confirmed (pre-unseal guard, ADR-20)"
+
 
 # _fdh_hex2bin HEX — hex string -> raw bytes on stdout. Pure busybox awk (no
 # xxd in the initramfs).

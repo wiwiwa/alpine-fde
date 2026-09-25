@@ -51,6 +51,15 @@ unseal_3strike	failed recovery passphrase attempts — giving up
 unseal_poweroff	fail-closed: forcing poweroff (no shell is offered
 unseal_no_crypttab	no root/root<N> entry in
 unseal_state_flip	install-state: installed -> provisional-booted
+# ADR-20 amended pre-unseal Secure Boot guard (§8.2 step 1; the hook's FIRST
+# action): emitted only on the SB-off/Setup-Mode/unreadable-efivars refusal
+# path — the container is NEVER unsealed with Secure Boot off (no token path,
+# no passphrase fallback), the guard requests boot-to-firmware-setup via
+# OsIndications (best-effort), waits for Enter, and reboots.
+unseal_sb_guard	Secure Boot is OFF — refusing to unlock (pre-unseal guard, ADR-20)
+unseal_sb_guard_enter	Press Enter to reboot into the firmware setup
+unseal_sb_guard_osind	OsIndications: boot-to-firmware-setup requested
+unseal_sb_guard_reboot	rebooting into the firmware setup (Secure Boot must be enabled)
 #
 # ===========================================================================
 # Section 2 — systemd-boot 260.2 console anchors (ADR-1: Alpine ≥ 3.24 ships

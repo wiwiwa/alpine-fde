@@ -10,6 +10,14 @@
 #   initramfs per hooks/mkinitfs/features.d/alpine-fde.files).
 #
 # Pinned behavior (docs/Architecture.md §8.2, §9.1 Stage 2, ADR-20):
+#   0. ADR-20 amended PRE-UNSEAL SECURE BOOT GUARD — the hook's FIRST action:
+#      reads SecureBoot/SetupMode from efivarfs (canonical EFI_GLOBAL_VARIABLE
+#      namespace; fail-closed on unreadable/missing). SB off (secureboot != 1
+#      || setup_mode != 0) is a HARD refusal: notice + "Press Enter to reboot"
+#      + OsIndications boot-to-firmware-setup (best-effort) + `reboot -f`. The
+#      container is NEVER unsealed with SB off — no token path, NO recovery
+#      passphrase fallback, no pcrextend, no cryptsetup, no poweroff prompt
+#      loop. The provisional PCR-11-only token is only ever usable with SB on.
 #   1. extends sha256("enter-initrd") into PCR 11 (ukify --measure phase
 #      string, lib/cmd/pcrsign.sh --phases=enter-initrd)
 #   2. consumes the §7.2 dash-form systemd-tpm2 token (lib/token.sh schema)
@@ -48,6 +56,8 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
+# shellcheck source=../lib/sentinels.sh
+source "$HERE/../lib/sentinels.sh"   # sentinel_of (MD-02: single promoted table)
 
 assert_not_contains() {
     if [ -z "$3" ]; then
@@ -175,6 +185,20 @@ mkdir -p "$TMP/extra-missing-entry"
 cp "$KEYDIR/release.pub" "$TMP/extra-missing-entry/tpm2-pcr-public-key.pem"
 printf '{"sha256":[]}\n' >"$TMP/extra-missing-entry/tpm2-pcr-signature.json"
 
+# --- efivarfs fixtures (the ADR-20 pre-unseal SB guard's input; the canonical
+# EFI_GLOBAL_VARIABLE namespace, 4-byte attrs header + payload byte, the same
+# shape lib/firmware.sh fw_var_u8 reads) -----------------------------------------
+FW_GUID='8be4df61-93ca-11d2-aa0d-00e098032b8c'
+mk_efivars() { # <dir> <secureboot-byte> <setupmode-byte>
+    mkdir -p "$1"
+    printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$1/SecureBoot-$FW_GUID"
+    printf '\007\000\000\000'"$(printf '\%03o' "$3")" >"$1/SetupMode-$FW_GUID"
+}
+mk_efivars "$TMP/efivars" 1 0        # DEFAULT: SB on, keys final (guard passes)
+mk_efivars "$TMP/efivars-sb-off" 0 0 # SecureBoot=0 -> guard blocks
+mk_efivars "$TMP/efivars-setupmode" 1 1 # SetupMode=1 -> guard blocks (keys not final)
+mkdir -p "$TMP/efivars-empty"        # no variables -> unreadable -> guard blocks
+
 UUID1=22222222-2222-2222-2222-222222222222
 UUID2=33333333-3333-3333-3333-333333333333
 printf '%s\n' "root UUID=$UUID1 none luks,tpm2-device=auto,discard" >"$TMP/crypttab"
@@ -260,12 +284,31 @@ exit 0
 EOF
 chmod +x "$BIN/poweroff"
 
+# ADR-20 guard terminal action: `reboot -f` into the firmware setup. The stub
+# RECORDS argv and exits 0 (the hook must `exit 0` after an accepted reboot —
+# on real firmware the machine resets and the hook never returns).
+cat >"$BIN/reboot" <<EOF
+#!/bin/sh
+printf 'reboot %s\n' "\$*" >>'$LOG'
+exit 0
+EOF
+chmod +x "$BIN/reboot"
+# only attempted when the efivars dir is absent (best-effort mount); fails in
+# the sandbox so the fail-closed guard path stays the one under test
+cat >"$BIN/mount" <<EOF
+#!/bin/sh
+printf 'mount %s\n' "\$*" >>'$LOG'
+exit 1
+EOF
+chmod +x "$BIN/mount"
+
 # --- driver --------------------------------------------------------------------
 run_hook() { # <stdin-file> [VAR=VAL ...]
     local stdin=$1
     shift
     env PATH="$BIN:$PATH" FDE_NEWROOT="$TMP/newroot" FDE_EXTRA_DIR="$TMP/extra" \
         FDE_CRYPTTAB="$TMP/crypttab" FDE_TMPDIR="$TMP/tmp" \
+        FDE_EFIVARS_DIR="$TMP/efivars" \
         FDE_TEST_TOKEN_FILE="$TMP/token.json" "$@" \
         sh "$HOOK" <"$stdin" >"$TMP/out.log" 2>&1
     echo $?
@@ -639,6 +682,99 @@ else
 fi
 
 # =============================================================================
+# 10b. ADR-20 amended PRE-UNSEAL SECURE BOOT GUARD (§8.2 step 1) — the guard
+#      runs FIRST: SB off / SetupMode=1 / unreadable efivarfs each BLOCK the
+#      boot before ANY TPM op, ANY token work, ANY passphrase prompt. The
+#      container is NEVER unsealed with Secure Boot off. The refusal prints
+#      the notice + "Press Enter to reboot", requests boot-to-firmware-setup
+#      via OsIndications (best-effort), and reboots (reboot -f exactly once,
+#      NO poweroff, NO state write). Every other leg below runs under the
+#      SB-on default fixture — the provisional PCR-11-only token is only ever
+#      usable with Secure Boot on.
+# =============================================================================
+
+# --- 10b-1. SecureBoot=0 -> guard block + reboot into firmware setup ---------
+reset_leg
+write_state installed
+printf 'unused\n' >"$TMP/stdin-guard"
+rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-sb-off")
+assert_rc "SB guard: hook exits 0 after the accepted reboot" 0 "$rc"
+assert_contains "SB guard: refusal sentinel names the pre-unseal guard" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard)"
+assert_contains "SB guard: the live efivarfs reading is printed" \
+    "$(cat "$TMP/out.log")" "secureboot=0"
+assert_contains "SB guard: Press-Enter confirmation prompt" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard_enter)"
+assert_contains "SB guard: the container was NOT unlocked (no passphrase requested)" \
+    "$(cat "$TMP/out.log")" "the container was NOT unlocked"
+assert_contains "SB guard: reboot sentinel" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard_reboot)"
+assert_eq "SB guard: reboot -f exactly once (into the firmware setup)" "1" \
+    "$(argv_count '^reboot ')"
+assert_contains "SB guard: reboot is forced" "$(grep '^reboot ' "$LOG")" "-f"
+assert_eq "SB guard: OsIndications boot-to-firmware-setup requested" "1" \
+    "$(grep -c 'OsIndications: boot-to-firmware-setup requested' "$TMP/out.log" || true)"
+assert_eq "SB guard: OsIndications var written (u64 LE bit-1 payload)" "02" \
+    "$(dd if="$TMP/efivars-sb-off/OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c" \
+        bs=1 skip=4 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+assert_eq "SB guard: NO pcrextend (the guard precedes §8.2 step 2)" "0" \
+    "$(argv_count '^tpm2_pcrextend')"
+assert_eq "SB guard: NO token export, NO open, NO unseal — the container is NEVER unsealed" \
+    "0 0 0" "$(argv_count 'token export') $(argv_count '^cryptsetup open') $(argv_count '^tpm2_unseal')"
+assert_eq "SB guard: NO poweroff (the terminal action is the reboot)" "0" \
+    "$(argv_count '^poweroff')"
+assert_eq "SB guard: NO passphrase prompt (the fallback is RETRACTED under SB off)" \
+    "0" "$(grep -c 'enter the recovery passphrase' "$TMP/out.log" || true)"
+assert_eq "SB guard: state file NOT rewritten" "installed" \
+    "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
+
+# --- 10b-2. SecureBoot=1 but SetupMode=1 (keys not in final state) -> block ---
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-setupmode")
+assert_rc "SB guard (setup mode): hook exits 0 after the accepted reboot" 0 "$rc"
+assert_contains "SB guard (setup mode): refusal sentinel" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard)"
+assert_contains "SB guard (setup mode): the live reading names setup_mode=1" \
+    "$(cat "$TMP/out.log")" "setup_mode=1"
+assert_eq "SB guard (setup mode): reboot -f exactly once" "1" "$(argv_count '^reboot ')"
+assert_eq "SB guard (setup mode): NO unseal work" "0" "$(argv_count '^tpm2_pcrextend')"
+
+# --- 10b-3. unreadable efivarfs (no variables) -> fail CLOSED ----------------
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-empty")
+assert_rc "SB guard (unreadable): hook exits 0 after the accepted reboot" 0 "$rc"
+assert_contains "SB guard (unreadable): refusal sentinel (fail-closed)" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard)"
+assert_contains "SB guard (unreadable): the reading is reported unreadable" \
+    "$(cat "$TMP/out.log")" "unreadable"
+assert_eq "SB guard (unreadable): NO unseal work" "0" "$(argv_count '^tpm2_pcrextend')"
+
+# --- 10b-4. efivars dir absent entirely -> best-effort mount, still closed ---
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-absent")
+assert_rc "SB guard (absent dir): hook exits 0 after the accepted reboot" 0 "$rc"
+assert_contains "SB guard (absent dir): the efivarfs mount was attempted (best-effort)" \
+    "$(cat "$LOG")" "mount -t efivarfs"
+assert_contains "SB guard (absent dir): refusal sentinel (fail-closed)" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_sb_guard)"
+assert_eq "SB guard (absent dir): NO unseal work" "0" "$(argv_count '^tpm2_pcrextend')"
+
+# --- 10b-5. SecureBoot=1 + SetupMode=0 -> the guard PASSES and boot proceeds --
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin1")
+assert_rc "SB guard pass: hook rc 0 (verified boot confirmed)" 0 "$rc"
+assert_contains "SB guard pass: the pass line is printed" \
+    "$(cat "$TMP/out.log")" "secureboot=1 setup_mode=0"
+assert_eq "SB guard pass: NO reboot" "0" "$(argv_count '^reboot ')"
+assert_eq "SB guard pass: the pcrextend (§8.2 step 2) runs after the guard" "1" \
+    "$(argv_count '^tpm2_pcrextend')"
+assert_eq "SB guard pass: the token path unseals" "1" "$(argv_count '^tpm2_unseal')"
+
+# =============================================================================
 # 11. REAL-TPM regression: the unseal session chain must complete against a
 #     REAL TPM (tpm2-tools 5.8 / swtpm). Root cause of the s15 boot-3 token
 #     unlock failure: `tpm2_loadexternal -C n` loaded the verifying key into
@@ -724,6 +860,9 @@ run_live_leg() {
     BLOBB64=$(cat "$LIVE/seal.priv" "$LIVE/seal.pub" | openssl base64 -A)
 
     cp "$KEYDIR/release.pub" "$LIVE/extra/tpm2-pcr-public-key.pem"
+    # the guard's efivarfs seam is pinned to the SB-on fixture — the HOST's
+    # real efivarfs state must never decide a unit leg's outcome
+    mk_efivars "$LIVE/efivars" 1 0
     printf '{"sha256":[{"pcrs":[7,11],"pkfp":"live","pol":"%s","sig":"%s"}]}\n' \
         "$POLHEX" "$SIGB64LIVE" >"$LIVE/extra/tpm2-pcr-signature.json"
     printf '{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"%s","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-signature":"%s"}' \
@@ -749,6 +888,7 @@ EOF
     env PATH="$LIVEBIN:$PATH" TPM2TOOLS_TCTI="$SWTPM_TCTI" \
         FDE_NEWROOT="$LIVE/newroot" FDE_EXTRA_DIR="$LIVE/extra" \
         FDE_CRYPTTAB="$LIVE/crypttab" FDE_TMPDIR="$LIVE/tmp" \
+        FDE_EFIVARS_DIR="$LIVE/efivars" \
         sh "$HOOK" </dev/null >"$LIVE/hook.out" 2>&1
     LIVE_RC=$?
     assert_rc "live swtpm: hook rc 0" 0 "$LIVE_RC"

@@ -12,7 +12,8 @@
 #   * the §9.1 in-chroot provisioning sequence appears as EXECUTABLE guest
 #     lines (apk additions txn, user account, platform-key ceremony, NVRAM
 #     enrollment, bootctl, ukictl build, G-C24 provisional seal)
-#   * G-C25: the MOTD/issue banner is emitted as guest printf lines
+#   * G-C25 (ADR-20 amendment #4): NO MOTD/issue banner — no guest printf
+#     drop to /etc/motd or /etc/issue and none of the banner vocabulary
 #   * G-C26: NO OsIndications record in either lane; the direct reboot is
 #     suppressed by the CI seam (the harness reboots itself)
 #   * the script is NOT executed (stub log stays empty) and is chmod 700
@@ -328,17 +329,19 @@ assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL
 assert_eq "emitted order: enrollment before build" "1" "$(( S_ENROLL < S_BUILD ? 1 : 0 ))"
 assert_eq "emitted order: build before the provisional seal" "1" "$(( S_BUILD < S_SEAL ? 1 : 0 ))"
 
-# --- G-C25: the unfinalized banner is emitted as guest printf lines ---------------
-assert_contains "banner: /etc/motd printf drop" "$(cat "$SCRIPT")" ">/etc/motd"
-assert_contains "banner: /etc/issue printf drop" "$(cat "$SCRIPT")" ">/etc/issue"
-assert_contains "banner: NOT finalized text emitted" "$(cat "$SCRIPT")" "NOT finalized"
-assert_contains "banner: finalize directive emitted" "$(cat "$SCRIPT")" "alpine-fde finalize"
-assert_contains "banner: pending-recovery-passphrase notice emitted" "$(cat "$SCRIPT")" \
+# --- G-C25 (ADR-20 amendment #4): NO unfinalized banner is emitted ----------------
+assert_eq "banner: ZERO /etc/motd printf drops (banner path removed, ADR-20 #4)" "0" \
+    "$(grep -c '>/etc/motd' "$SCRIPT" || true)"
+assert_eq "banner: ZERO /etc/issue printf drops (banner path removed, ADR-20 #4)" "0" \
+    "$(grep -c '>/etc/issue' "$SCRIPT" || true)"
+assert_not_contains "banner: NO not-finalized text emitted" "$(cat "$SCRIPT")" "NOT finalized"
+assert_not_contains "banner: NO finalize directive emitted" "$(cat "$SCRIPT")" \
+    "alpine-fde finalize"
+assert_not_contains "banner: NO pending-recovery-passphrase notice emitted" "$(cat "$SCRIPT")" \
     "set your permanent recovery passphrase"
-S_MOTD=$(grep -n '>/etc/motd' "$SCRIPT" | cut -d: -f1)
 S_STATE=$(grep -n 'inst_state_write installed' "$SCRIPT" | cut -d: -f1)
-assert_eq "emitted order: banner BEFORE the state write (G-C28)" "1" \
-    "$(( S_MOTD > 0 && S_STATE > S_MOTD ? 1 : 0 ))"
+assert_eq "emitted order: the state write still stands (G-C28 amended, no banner record)" "1" \
+    "$(( S_STATE > 0 ? 1 : 0 ))"
 
 # --- emitted script is sound but NEVER executed -----------------------------------
 assert_rc "emitted script parses (escape loop sound)" 0 sh -n "$SCRIPT"

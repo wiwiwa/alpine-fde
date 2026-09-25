@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
 # tests/e2e/s05-sb-off.sh — §10 row "SB disabled / firmware keys changed",
-# against the SHIPPED mkinitfs unseal hook (§8.2; ADR-13):
+# against the SHIPPED mkinitfs unseal hook (§8.2; ADR-13 + ADR-20 amended
+# pre-unseal guard):
 #   Boots? ✅ (SB off -> firmware boots the unsigned-for-it UKI)
-#   Auto-unlock? ❌ — PCR 7 carries the firmware-measured SB state; with the
-#   platform in setup mode / custom keys gone, PCR 7 drifts away from the
-#   value the FINALIZED {PCR 7, PCR 11} Mechanism B token was enrolled under
-#   -> the hook's PolicyPCR({7,11}) session digest no longer matches the
-#   sealed policy -> tpm2_unseal refuses ("the TPM refused the sealed blob
-#   under the current PCR state") -> the hook's BOUNDED recovery-passphrase
-#   loop reads keyslot-0 lines from /dev/console -> three wrong answers ->
-#   3-strike fail-closed `poweroff -f` (NO shell is ever offered).
+#   Auto-unlock? ❌ — STRICTLY, at the hook's FIRST step: the ADR-20 amended
+#   PRE-UNSEAL SECURE BOOT GUARD reads SecureBoot/SetupMode from efivarfs and
+#   on `secureboot != 1 || setup_mode != 0` REFUSES: prints the blocking
+#   notice + "Press Enter to reboot", requests boot-to-firmware-setup via
+#   OsIndications (best-effort), and reboots into the firmware setup. The
+#   container is NEVER unsealed with SB off — NO token path, NO recovery
+#   passphrase fallback (the old PCR-drift refusal + 3-strike loop is
+#   RETRACTED for the SB-off case; the PCR 7 seal drift still refuses the
+#   token under SB ON — s12 boot B / s15 cover that vector). The guest never
+#   powers itself off here: the scenario waits for the guard sentinel and
+#   hard-kills qemu BY PID (the hook is parked on its Enter read).
 #
 # REQUIRED (hook sentinels, tests/sentinels-260.2.txt Section 1): PCRs
-#           printed (7 non-zero: SB-off state is measured too), PCR 7
-#           differs from the enrolled boot's PCR 7, PCR 11 UNCHANGED (the
-#           refusal is purely the PCR 7 drift), unseal_token_info
-#           (pcrs=[7,11]), unseal_seal_refused, exactly 3 prompts fed,
-#           unseal_3strike, unseal_poweroff; unseal_unlocked / UNSEALED /
-#           emergency shell NEVER; guest exited by its own poweroff.
+#           printed by /init BEFORE the hook (7 non-zero: SB-off state is
+#           measured too), PCR 7 differs from the enrolled boot's PCR 7,
+#           PCR 11 UNCHANGED; unseal_sb_guard (the blocking notice with the
+#           live secureboot=0 reading), unseal_sb_guard_enter,
+#           unseal_sb_guard_osind, unseal_sb_guard_reboot; unseal_pcrextend_ok /
+#           unseal_token_info / unseal_prompt_re / unseal_3strike /
+#           unseal_poweroff / unseal_unlocked / UNSEALED / emergency shell
+#           NEVER.
 #
-# NB (G-T13): NO assert_pcr11_prediction on this boot — the hook fails closed
-# INSIDE its own invocation, so /init never reaches its post-hook postphase
-# PCR 11 reading. The PCR 11 unchanged-equality vs the enrolled console below
-# is the equivalent tamper-scoping evidence (the drift is PCR 7 only).
+# NB (G-T13): NO assert_pcr11_prediction on this boot — the hook blocks INSIDE
+# its own invocation before any extend, so /init never reaches its post-hook
+# postphase PCR 11 reading. The PCR 11 unchanged-equality vs the enrolled
+# console below is the equivalent tamper-scoping evidence (no measurement
+# happened at all).
 #
 # Self-bootstrap when ALPINE_FDE_E2E_STATE is absent: baseline boot (token-less
 # disk -> the hook's recovery-passphrase path, the positive control) + the
@@ -204,24 +211,36 @@ ESP_MIB=$(( UKI_MIB * 2 + 8 ))
 esp_make "$RUN/esp.img" "$ESP_MIB" "$RUN/harness.efi" || exit 1
 
 # --- boot with SB OFF ----------------------------------------------------------
-echo "# booting: SB-off vars + finalized-token disk, feeding 3 WRONG passphrases (TCG, up to $QEMU_TIMEOUT s) ..."
+echo "# booting: SB-off vars + finalized-token disk — the ADR-20 pre-unseal guard must BLOCK (TCG, up to $QEMU_TIMEOUT s) ..."
 # Wave-2 2b: the scenario boot consumes the enrolled base read-mostly — fresh
 # QCOW2 overlay (LOCK_SH via overlay_create), discarded after the boot
 OVERLAY_SB_OFF="$RUN/disk-sboff.qcow2"
 overlay_create "$RUN/state/disk.img" "$OVERLAY_SB_OFF" || {
     echo "s05: overlay create failed (SB-off boot)"; exit 1; }
 qemu_run "$RUN" "$RUN/esp.img" "$OVERLAY_SB_OFF" "$RUN/vars-unenrolled.fd" "$STATE/tpm" "$RUN/pcrsig.img"
-for n in 1 2 3; do
-    if uki_wait_hook_prompt "$n" 300 "$RUN"; then
-        _assert_result ok "guest awaiting recovery passphrase $n/3 (hook read path)" ""
-        feed_line "$RUN/serial.sock" "alpine-fde-wrong-passphrase-$n"
-    else
-        _assert_result not-ok "guest awaiting recovery passphrase $n/3 (hook read path)" \
-            "no prompt $n in console"
-        break
-    fi
+# The guard BLOCKS: notice + "Press Enter to reboot" + reboot. It NEVER asks
+# for a passphrase — the only input is the Enter confirmation. Wait for the
+# guard sentinel (QEMU-LIVENESS: every poll iteration checks the boot's qemu
+# pid), feed the Enter, wait for the reboot sentinel, then hard-kill qemu BY
+# PID: the guest would otherwise loop boot -> guard -> reboot forever.
+i=0
+until grep -qF "$(sentinel_of unseal_sb_guard_enter)" "$CONSOLE" 2>/dev/null; do
+    qpid=$(cat "$RUN/qemu.pid" 2>/dev/null || true)
+    [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null && break   # self-exited
+    (( i < 300 )) || { echo "s05: the pre-unseal guard never armed"; exit 1; }
+    sleep 1
+    i=$((i + 1))
 done
-qemu_wait "$RUN" "$QEMU_TIMEOUT"
+feed_line "$RUN/serial.sock" ""   # the operator's Enter confirmation
+i=0
+until grep -qF "$(sentinel_of unseal_sb_guard_reboot)" "$CONSOLE" 2>/dev/null; do
+    qpid=$(cat "$RUN/qemu.pid" 2>/dev/null || true)
+    [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null && break   # self-exited
+    (( i < 60 )) || { echo "s05: the guard never rebooted after Enter"; exit 1; }
+    sleep 1
+    i=$((i + 1))
+done
+qemu_kill "$RUN"   # BY PID (tests/lib/qemu.sh); the guest cannot exit itself here
 overlay_discard "$OVERLAY_SB_OFF"   # the boot's overlay is ephemeral
 LOG=$(cat "$CONSOLE" 2>/dev/null || true)
 
@@ -250,32 +269,45 @@ else
 fi
 assert_eq "PCR 11 unchanged (refusal is purely PCR 7 drift)" "$PCR11_ENROLLED" "$PCR11"
 
-# --- the hook's refusal, prompts, and 3-strike fail-closed (§8.2) ---------------
-assert_contains "hook ran the enter-initrd extend" "$LOG" "$(sentinel_of unseal_pcrextend_ok)"
-assert_contains "hook discovered the {7,11} token" "$LOG" "$(sentinel_of unseal_token_info)7,11]"
-_ref_line=$(grep -nm1 -F "$(sentinel_of unseal_seal_refused)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
-_p1_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
-if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line )); then
-    _assert_result ok "hook refused the sealed blob BEFORE any passphrase prompt (line $_ref_line < $_p1_line)" ""
+# --- the hook's PRE-UNSEAL GUARD block (§8.2 step 1; ADR-20 amended) -----------
+_guard_line=$(grep -nm1 -F "$(sentinel_of unseal_sb_guard)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
+_ext_line=$(grep -nm1 -F "$(sentinel_of unseal_pcrextend_ok)" "$CONSOLE" 2>/dev/null | cut -d: -f1)
+if [[ -n "${_guard_line:-}" && -z "${_ext_line:-}" ]]; then
+    _assert_result ok "the guard fired BEFORE any TPM work (no enter-initrd extend, line $_guard_line)" ""
 else
-    _assert_result not-ok "hook refused the sealed blob BEFORE any passphrase prompt" \
-        "ref=$_ref_line prompt1=$_p1_line"
+    _assert_result not-ok "the guard fired BEFORE any TPM work" \
+        "guard=$_guard_line pcrextend=$_ext_line"
 fi
-assert_contains "hook refusal sentinel (PCR 7 drift)" "$LOG" "$(sentinel_of unseal_seal_refused)"
-PROMPTS=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
-assert_eq "exactly 3 recovery-passphrase prompts (bounded loop)" "3" "$PROMPTS"
-assert_contains "3-strike give-up (§8.2 fail-closed)" "$LOG" "$(sentinel_of unseal_3strike)"
-assert_contains "fail-closed poweroff (no shell is offered)" "$LOG" "$(sentinel_of unseal_poweroff)"
+assert_contains "guard: the blocking refusal names the pre-unseal guard" "$LOG" \
+    "$(sentinel_of unseal_sb_guard)"
+assert_contains "guard: the refusal carries the LIVE secureboot=0 reading" "$LOG" \
+    "secureboot=0"
+assert_contains "guard: Press-Enter confirmation prompt" "$LOG" \
+    "$(sentinel_of unseal_sb_guard_enter)"
+assert_contains "guard: OsIndications boot-to-firmware-setup requested" "$LOG" \
+    "$(sentinel_of unseal_sb_guard_osind)"
+assert_contains "guard: reboot into the firmware setup" "$LOG" \
+    "$(sentinel_of unseal_sb_guard_reboot)"
+assert_not_contains "NO enter-initrd extend (the guard precedes §8.2 step 2)" "$LOG" \
+    "$(sentinel_of unseal_pcrextend_ok)"
+assert_not_contains "NO token discovery (the container is NEVER unsealed with SB off)" "$LOG" \
+    "$(sentinel_of unseal_token_info)"
+assert_not_contains "NO recovery-passphrase prompt (the fallback is RETRACTED under SB off)" "$LOG" \
+    "$(sentinel_of unseal_prompt_re)"
+assert_not_contains "NO 3-strike path (nothing to strike — the guard blocked first)" "$LOG" \
+    "$(sentinel_of unseal_3strike)"
+assert_not_contains "NO fail-closed poweroff (the terminal action is the REBOOT)" "$LOG" \
+    "$(sentinel_of unseal_poweroff)"
 assert_not_contains "never unlocked via the TPM token" "$LOG" "$(sentinel_of unseal_unlocked)"
 assert_not_contains "never unlocked via the recovery passphrase" "$LOG" "$(sentinel_of unseal_pass_unlocked)"
 assert_not_contains "never UNSEALED (harness sentinel)" "$LOG" "alpine-fde: UNSEALED"
 assert_not_contains "no emergency shell" "$LOG" "$(sentinel_of emergency_forbidden)"
-# IN-08: an absent pid file (qemu_run failed outright) must not read as a
-# clean "guest exited" — the check is honest in both directions
+# the scenario hard-killed the parked guest (BY PID): the pid file exists and
+# the process is GONE only because qemu_kill reaped it
 if [[ -f "$RUN/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-    _assert_result ok "guest exited (hook poweroff -f, not timeout-kill)" ""
+    _assert_result ok "guest torn down (qemu_kill BY PID after the guard sentinel)" ""
 else
-    _assert_result not-ok "guest exited (hook poweroff -f, not timeout-kill)" \
+    _assert_result not-ok "guest torn down (qemu_kill BY PID after the guard sentinel)" \
         "qemu still running or qemu.pid missing"
 fi
 
