@@ -118,17 +118,24 @@ assert_not_contains "plan: debootstrap retired" "$INS_OUT" "debootstrap"
 assert_contains "plan: in-chroot apk additions txn (--no-cache)" "$INS_OUT" "apk add --no-cache"
 assert_not_contains "plan: apt retired" "$INS_OUT" "apt-get"
 # §3.1/§3.3/ADR-16 delivery + §8.3/ADR-19: the additions txn carries the
-# mkinitfs/ukify/zram/doas set verbatim
+# mkinitfs/ukify/doas set verbatim
 APK_TXN=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
-for want in mkinitfs py3-pefile zram-init doas ukify-kernel-hook; do
+for want in mkinitfs py3-pefile doas ukify-kernel-hook; do
     assert_contains "plan: apk txn includes $want (§3.1)" "$APK_TXN" "$want"
 done
-# §3.1/ADR-7: swap is zram-only — the zram-init boot config is dropped and the
-# service enabled; NO disk swap line may appear in fstab anywhere
-assert_contains "plan: zram swap config drop (§3.1 zram-init, ADR-7)" "$INS_OUT" \
+# item 26a (ADR-7 AMENDED — zram removed from the design; --swap partition is
+# the queued task-4 feature): zram-init is REMOVED from the install path — NOT
+# reordered. Zero zram residue in the whole plan: no package entry, no conf.d
+# drop, no rc-update enable (the enable ran BEFORE the txn that installed the
+# package — real-server failure #2, "service zram-init does not exist").
+assert_not_contains "plan: NO zram-init in the apk txn (item 26a: zram removed, ADR-7 amended)" \
+    "$APK_TXN" "zram-init"
+assert_not_contains "plan: NO zram-init conf.d drop anywhere (item 26a)" "$INS_OUT" \
     "etc/conf.d/zram-init"
-assert_contains "plan: zram-init service enabled for boot" "$INS_OUT" \
-    "rc-update add zram-init boot"
+assert_not_contains "plan: NO zram-init rc-update record anywhere (item 26a)" "$INS_OUT" \
+    "rc-update add zram-init"
+assert_eq "plan: ZERO zram mentions anywhere in the plan (item 26a: design has zero zram)" "0" \
+    "$(grep -ic 'zram' <<<"$INS_OUT")"
 assert_eq "plan: fstab carries NO swap line (ADR-7: no disk swap)" "0" \
     "$(grep -Ec 'UUID=.*swap' <<<"$INS_OUT")"
 # §3.3: /etc/apk/repositories drop replaces apt sources + dpkg trims
@@ -158,6 +165,14 @@ assert_contains "plan: ceremony recovery record pins Argon2id" "$INS_OUT" \
     "KDF pinned: Argon2id"
 assert_contains "plan: §13 entropy-floor retry record (re-prompt until met)" "$INS_OUT" \
     "re-prompt until met"
+# item 12 (AMENDED, user ruling 2026-09-25): the ceremony asks the DISK
+# RECOVERY PASSPHRASE FIRST; the user password and the release-key passphrase
+# DEFAULT to it on bare Enter, each prompted with an explicit hint.
+assert_contains "plan: item 12 — user-password record carries the Enter-to-reuse hint (empty = reuse recovery)" "$INS_OUT" \
+    "press Enter to reuse the recovery passphrase"
+CER_REL_LINE=$(grep -m1 'inst_ceremony_release_key' <<<"$INS_OUT")
+assert_contains "plan: item 12 — release-key record carries the Enter-to-reuse hint (empty = reuse recovery)" "$CER_REL_LINE" \
+    "press Enter to reuse the recovery passphrase"
 assert_contains "plan: ceremony (3/3) release-key record (keys_encrypt_release, ADR-18)" \
     "$INS_OUT" "inst_ceremony_release_key"
 assert_contains "plan: ceremony release record pins keys_encrypt_release" "$INS_OUT" \
@@ -166,6 +181,24 @@ assert_contains "plan: ceremony release record pins AES-256 PBKDF2 (ADR-18)" "$I
     "AES-256 PBKDF2"
 assert_eq "plan: exactly three ceremony records" "3" \
     "$(grep -c 'credential ceremony ([123]/3)' <<<"$INS_OUT")"
+# item 27 (real-server failure #4, "Device /dev/mapper/root1 is not a valid
+# LUKS device" at ceremony 2/3): the ceremony targets the LUKS CONTAINER
+# devices (the luksFormat targets) — the /dev/mapper/* nodes are the DECRYPTED
+# views and container-ops against them fail. e2e is BLIND to this class: the
+# fixture pre-seeds keyslot 0 and the host ceremony path is never really
+# executed there — these plan-level pins are the harness guard.
+CER_REC_LINE=$(grep -m1 'inst_ceremony_recovery' <<<"$INS_OUT")
+assert_contains "item 27: ceremony recovery record targets the PRIMARY LUKS CONTAINER dev (the luksFormat target)" \
+    "$CER_REC_LINE" "inst_ceremony_recovery <ephemeral-keyfile> ${FAKEDISK}2"
+assert_not_contains "item 27: ceremony recovery record NEVER names /dev/mapper (mapper = decrypted view)" \
+    "$CER_REC_LINE" "/dev/mapper/"
+assert_eq "item 27 lint: ZERO cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) target /dev/mapper anywhere in the plan" "0" \
+    "$(grep 'cryptsetup' <<<"$INS_OUT" | grep -E 'luksFormat|luksAddKey|luksRemoveKey' | grep -c '/dev/mapper/')"
+assert_eq "item 27 lint (extended, class-killer): ZERO seal_provisional/token_* choreography calls receive /dev/mapper anywhere in the plan (token_free_slot/luksAddKey/token import consume the LUKS2 HEADER = container)" "0" \
+    "$(grep -E 'seal_provisional|token_(add_keyslot|import|next_id|free_slot)' <<<"$INS_OUT" | grep -c '/dev/mapper/')"
+# the mapper stays the right address for the DECRYPTED-VIEW ops (mkfs/mount)
+assert_eq "item 27 sanity: mkfs still targets the MAPPER (decrypted view — correct)" "1" \
+    "$(grep -Ec 'mkfs\.btrfs -U [0-9a-f-]{36} /dev/mapper/root-crypt' <<<"$INS_OUT")"
 assert_not_contains "plan: NO credential env seam in the plan (ADR-20 amended)" "$INS_OUT" \
     "ALPINE_FDE_RECOVERY_PASSPHRASE"
 assert_not_contains "plan: NO release-key passphrase env in the plan" "$INS_OUT" \
@@ -220,8 +253,13 @@ assert_contains "plan: §9.1 step 4 — NVRAM enrollment db->KEK->PK via fw_auth
 assert_contains "plan: §9.1 step 5 — in-chroot ukictl build (boot manager + UKI)" \
     "$INS_OUT" "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24/§9.1 step 6: provisional TPM enrollment guest line (Mechanism B, PCR 11)
-assert_contains "plan: §9.1 step 6 — provisional seal guest line (seal_provisional)" \
-    "$INS_OUT" 'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
+# item 27 extended (class-killer lint): the seal/token choreography consumes
+# the LUKS2 HEADER (token_free_slot luksDump, luksAddKey, token import) — it
+# must address the CONTAINER dev, never the decrypted mapper view
+assert_contains "plan: §9.1 step 6 — provisional seal guest line (seal_provisional) targets the CONTAINER dev" \
+    "$INS_OUT" 'seal_provisional /etc/alpine-fde/keys $d'
+assert_contains "plan: §9.1 step 6 — provisional seal loop covers the PRIMARY CONTAINER dev" \
+    "$INS_OUT" "for d in ${FAKEDISK}2; do"
 assert_contains "plan: step 6 pin — provisional Mechanism B (PCR 11) -> keyslot 1" \
     "$INS_OUT" "provisional Mechanism B seal (PCR 11) -> keyslot 1"
 assert_contains "plan: step 6 consumes the UKI .pcrsig (stage-1 build output)" \
@@ -276,16 +314,18 @@ I_BUILD=$(line_no "$INS_OUT" "ukictl build")
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
 I_BANNER=$(line_no "$INS_OUT" "PLAN  write  /etc/motd")
 I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
-I_TEARDOWN=$(line_no "$INS_OUT" "umount -R /mnt")
+# anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the
+# reset block also carries a bare `umount -R /mnt` (earlier in the plan)
+I_TEARDOWN=$(line_no "$INS_OUT" "&& umount -R /mnt")
 I_SCRUB=$(line_no "$INS_OUT" "rm -f <ephemeral-keyfile>")
 I_REBOOT=$(line_no "$INS_OUT" "reboot #")
 assert_eq "order: baseline pending before key ceremony" "1" "$(( I_BASE < I_KEYGEN ? 1 : 0 ))"
 assert_eq "order: §9.1 step 4 — platform keys BEFORE the credential ceremony" "1" \
-    "$(( I_KEYGEN > 0 && I_KEYGEN < I_CERU ? 1 : 0 ))"
-assert_eq "order: ceremony (1/3) user password before (2/3) recovery" "1" \
-    "$(( I_CERU > 0 && I_CERU < I_CERR ? 1 : 0 ))"
-assert_eq "order: ceremony (2/3) recovery before (3/3) release key" "1" \
-    "$(( I_CERR > 0 && I_CERR < I_CERK ? 1 : 0 ))"
+    "$(( I_KEYGEN > 0 && I_KEYGEN < I_CERR ? 1 : 0 ))"
+assert_eq "order: item 12 — ceremony asks the recovery passphrase FIRST (1/3)" "1" \
+    "$(( I_CERR > 0 && I_CERR < I_CERU ? 1 : 0 ))"
+assert_eq "order: item 12 — user password (2/3) before release key (3/3)" "1" \
+    "$(( I_CERU > 0 && I_CERU < I_CERK ? 1 : 0 ))"
 assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
     "$(( I_CERK > 0 && I_CERK < I_ENROLL ? 1 : 0 ))"
 assert_eq "order: key ceremony before NVRAM enrollment" "1" "$(( I_KEYGEN < I_ENROLL ? 1 : 0 ))"
@@ -314,31 +354,45 @@ assert_eq "order: repositories drop BEFORE apk populate (real-install defect 6: 
     "$(( I_REPOS > 0 && I_REPOS < I_POPULATE ? 1 : 0 ))"
 assert_eq "order: apk populate before the additions txn" "1" "$(( I_POPULATE < I_TXN ? 1 : 0 ))"
 
+# --- 2b-item26b. target DNS seed (real-install failure #3): the in-chroot apk
+#         transaction resolves the mirror via the TARGET's /etc/resolv.conf —
+#         absent on a fresh rootfs (the installer had ZERO resolv.conf
+#         handling). A guarded host record copies the live env's resolver into
+#         the target BEFORE the transaction; no-op + warn when the live env has
+#         no resolv.conf.
+assert_contains "26b: seeding record is a guarded host record (only-if-host-file-exists, warn branch, || : tail)" "$INS_OUT" \
+    "if [ -f /etc/resolv.conf ]; then mkdir -p /mnt/etc && cp /etc/resolv.conf /mnt/etc/resolv.conf && echo 'alpine-fde: info: seeded target /etc/resolv.conf from the live env (in-chroot apk needs DNS)'; else echo 'alpine-fde: warn: live env has no /etc/resolv.conf — target DNS seed skipped (in-chroot apk may fail to resolve the mirror)'; fi || :"
+I_SEED=$(line_no "$INS_OUT" "cp /etc/resolv.conf /mnt/etc/resolv.conf")
+assert_eq "26b: target DNS seed precedes the in-chroot apk transaction" "1" \
+    "$(( I_SEED > 0 && I_TXN > 0 && I_SEED < I_TXN ? 1 : 0 ))"
+assert_eq "26b: target DNS seed also precedes the user-account guest step" "1" \
+    "$(( I_SEED > 0 && I_SEED < "$(line_no "$INS_OUT" "adduser")" ? 1 : 0 ))"
+
 # --- 2a. RESET of a previous FAILED attempt (user report: "install show reset
 #         failed installation status, when install restarts again, so that new
 #         install is able to continue") — runtime-guarded plan records at the
 #         START of the disk-prep section, BEFORE partitioning; on a pristine
 #         machine every guard is a no-op (busybox/ash, set -eu-safe).
+# item 26d (user-directed): the mount teardown is ONE guarded RECURSIVE
+# `umount -R <mnt>` — the old FIXED list (home/.snapshots/esp/root) missed the
+# stale chroot binds an attempt that died mid-chroot leaves behind (/mnt/proc,
+# /mnt/sys, /mnt/dev, /mnt/sys/firmware/efi/efivars); the installer's own
+# teardown already relies on `umount -R` (accepted busybox dependency).
 R_STATUS=$(line_no "$INS_OUT" "previous failed install detected")
-R_HOME=$(line_no "$INS_OUT" "unmounted stale mount /mnt/home'")
-R_SNAP=$(line_no "$INS_OUT" "unmounted stale mount /mnt/.snapshots'")
-R_ESP=$(line_no "$INS_OUT" "unmounted stale mount /mnt/efi'")
-R_ROOT=$(line_no "$INS_OUT" "unmounted stale mount /mnt'")
+R_REC=$(line_no "$INS_OUT" "recursively unmounted stale target tree /mnt'")
 R_MAP=$(line_no "$INS_OUT" "closed stale mapper")
 R_BCS=$(line_no "$INS_OUT" "stopped live bcache set")
 O_SFD=$(line_no "$INS_OUT" "| sfdisk $FAKEDISK")
 assert_eq "reset: guarded status record states a previous failed install is being reset" "1" \
     "$(( R_STATUS > 0 ? 1 : 0 ))"
-assert_eq "reset: status record comes FIRST (before the per-item teardown records)" "1" \
-    "$(( R_STATUS > 0 && R_STATUS < R_HOME ? 1 : 0 ))"
-assert_eq "reset: stale subvol mounts (home, .snapshots) have umount records" "1" \
-    "$(( R_HOME > 0 && R_SNAP > 0 ? 1 : 0 ))"
-assert_eq "reset: stale ESP + root mounts have umount records" "1" \
-    "$(( R_ESP > 0 && R_ROOT > 0 ? 1 : 0 ))"
-assert_eq "reset: deep-to-first umount order (home -> .snapshots -> esp -> root)" "1" \
-    "$(( R_HOME < R_SNAP && R_SNAP < R_ESP && R_ESP < R_ROOT ? 1 : 0 ))"
-assert_eq "reset: stale mapper close record after the umounts" "1" \
-    "$(( R_ROOT < R_MAP ? 1 : 0 ))"
+assert_eq "reset: status record comes FIRST (before the teardown records)" "1" \
+    "$(( R_STATUS > 0 && R_STATUS < R_REC ? 1 : 0 ))"
+assert_eq "reset: ONE guarded RECURSIVE stale-tree umount record (item 26d — covers stale chroot binds the fixed list missed)" "1" \
+    "$(( R_REC > 0 ? 1 : 0 ))"
+assert_eq "reset: zero FIXED-list stale-mount umount records remain (item 26d: folded into the -R line)" "0" \
+    "$(grep -c "unmounted stale mount /mnt" <<<"$INS_OUT")"
+assert_eq "reset: recursive umount BEFORE the mapper closes" "1" \
+    "$(( R_REC < R_MAP ? 1 : 0 ))"
 assert_eq "reset: live-bcache STOP record after the mapper closes (bcache teardown IS in scope: a stale live set must release the devices before the dd wipe)" "1" \
     "$(( R_MAP < R_BCS ? 1 : 0 ))"
 assert_eq "reset: the WHOLE reset block precedes partitioning (a re-run can continue)" "1" \
@@ -347,8 +401,8 @@ assert_eq "reset: the WHOLE reset block precedes partitioning (a re-run can cont
 # `|| :` no-op tail (expected-nonzero probes are guarded, never bare, under
 # the repo's set -eu norm); records survive BOTH the host eval path and the
 # emitted ash guest script
-assert_contains "reset: umount item is runtime-guarded + no-op-safe (mountpoint probe, warn branch, || : tail)" "$INS_OUT" \
-    "if mountpoint -q /mnt/home 2>/dev/null; then umount /mnt/home && echo 'alpine-fde: info: reset: unmounted stale mount /mnt/home' || echo 'alpine-fde: warn: reset: could not unmount stale mount /mnt/home'; fi || :"
+assert_contains "reset: recursive umount is runtime-guarded + no-op-safe (mountpoint probe, warn branch, || : tail; -R primary teardown, item 26d)" "$INS_OUT" \
+    "if mountpoint -q /mnt 2>/dev/null; then umount -R /mnt && echo 'alpine-fde: info: reset: recursively unmounted stale target tree /mnt' || echo 'alpine-fde: warn: reset: could not recursively unmount stale target tree /mnt'; fi || :"
 assert_contains "reset: status record guard probes mounts AND mapper nodes AND live bcache sets" "$INS_OUT" \
     "if mountpoint -q /mnt 2>/dev/null || ls /dev/mapper/root[0-9]* >/dev/null 2>&1 || [ -e /dev/mapper/root-crypt ] || ls /sys/fs/bcache/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected"
 assert_contains "reset: mapper loop globs stale rootN + root-crypt, name-stripped, existence-guarded" "$INS_OUT" \
@@ -394,13 +448,10 @@ assert_contains "ext4: conf records ROOT_FS=ext4" "$INS_OUT" "ROOT_FS=ext4"
 APK_TXN_EXT4=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "ext4: apk txn includes e2fsprogs" "$APK_TXN_EXT4" "e2fsprogs"
 assert_not_contains "ext4: apk txn has no btrfs-progs" "$APK_TXN_EXT4" "btrfs-progs"
-# reset records follow the ext4 mount topology (root + ESP only — no subvol mounts)
-assert_not_contains "ext4: reset has NO stale /home umount item (ext4 mounts only root + ESP)" "$INS_OUT" \
-    "unmounted stale mount /mnt/home'"
-assert_not_contains "ext4: reset has NO stale .snapshots umount item" "$INS_OUT" \
-    "unmounted stale mount /mnt/.snapshots'"
-assert_contains "ext4: reset covers the stale ESP + root mounts" "$INS_OUT" \
-    "unmounted stale mount /mnt/efi'"
+# item 26d: the reset mount teardown is topology-independent now — ONE
+# recursive record covers ext4 exactly as it covers btrfs subvols
+assert_contains "ext4: reset keeps the single guarded recursive umount (item 26d)" "$INS_OUT" \
+    "recursively unmounted stale target tree /mnt'"
 
 # --- 4. G-ST2/ADR-17: --bcache single-backing hybrid topology ------------------------
 CACHEDEV=$T/cache.img
@@ -476,10 +527,11 @@ assert_contains "bcache: crypttab is a single root entry (NO password-cache)" "$
 assert_not_contains "bcache: crypttab has no password-cache (verbatim §8.2)" "$BC_CRYPTTAB" "password-cache"
 assert_not_contains "bcache: no RAID1 mkfs" "$INS_OUT" "\-d raid1"
 # G-C24: single-mapper provisional seal line follows the build
-assert_contains "bcache: provisional seal addresses the root-crypt mapper" "$INS_OUT" \
-    'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
-assert_contains "bcache: provisional seal loop covers root-crypt" "$INS_OUT" \
-    "for m in root-crypt"
+# item 27 extended: the seal addresses the CONTAINER (/dev/bcache0), not the mapper
+assert_contains "bcache: provisional seal addresses the CONTAINER via the loop var (loop list carries /dev/bcache0 — item 27)" "$INS_OUT" \
+    'seal_provisional /etc/alpine-fde/keys $d'
+assert_contains "bcache: provisional seal loop covers the single container (/dev/bcache0 — item 27)" "$INS_OUT" \
+    "for d in /dev/bcache0; do"
 
 # --- 4b. G-C27/§4.1 topology 4: MULTI-BACKING bcache (2 backings) --------------------
 DISKB=$T/diskb.img
@@ -541,8 +593,8 @@ assert_eq "bcache-multi: target metadata carries BOTH member uuids" "1" \
     "$(grep -Ec 'inst_resolve_target_metadata \S+ /mnt [0-9a-f-]{36} [0-9a-f-]{36}$' <<<"$INS_OUT")"
 assert_contains "bcache-multi: teardown closes both members" "$INS_OUT" \
     "cryptsetup close root1 && cryptsetup close root2"
-assert_contains "bcache-multi: provisional seal loop covers both members" "$INS_OUT" \
-    "for m in root1 root2"
+assert_contains "bcache-multi: provisional seal loop covers both member CONTAINERS (bcache0+bcache1, item 27)" "$INS_OUT" \
+    "for d in /dev/bcache0 /dev/bcache1; do"
 assert_contains "bcache-multi: conf records BCACHE=1" "$INS_OUT" "BCACHE=1"
 
 # --- 5. G-ST3: repeatable --disk (no bcache) = Btrfs RAID1 ---------------------------
@@ -574,8 +626,8 @@ assert_contains "raid1: teardown closes both members" "$INS_OUT" \
     "cryptsetup close root1 && cryptsetup close root2"
 assert_eq "raid1: single topology crypttab entry (root, no suffix) absent" "0" \
     "$(grep -Ec 'PLAN    \| root UUID=' <<<"$INS_OUT")"
-assert_contains "raid1: provisional seal loop covers both members" "$INS_OUT" \
-    "for m in root1 root2"
+assert_contains "raid1: provisional seal loop covers both member CONTAINERS (primary p2 + secondary p1, item 27)" "$INS_OUT" \
+    "for d in ${FAKEDISK}2 ${DISK2}1; do"
 
 # --- 6. dry-run has no side effects -----------------------------------------------------
 CSUM_BEFORE=$(sha256sum <"$FAKEDISK")
@@ -712,7 +764,7 @@ assert_contains "esp: default stays /efi (ESP_PATH)" "$INS_OUT" "ESP_PATH=/efi"
 
 # --- 10. package-list lint (§3.3, topology-conditional) ------------------------
 PKG_LIST=$(install_package_list)
-REQUIRED="cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq zram-init doas btrfs-progs"
+REQUIRED="cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas btrfs-progs"
 for want in $REQUIRED; do
     FOUND=0
     for w in $PKG_LIST; do
@@ -721,7 +773,7 @@ for want in $REQUIRED; do
     assert_eq "package list (default) contains $want" "1" "$FOUND"
 done
 for bad in debootstrap apt apt-get dpkg systemd-cryptsetup dracut linux-image-amd64 \
-    e2fsprogs bcache-tools grub shim-signed initramfs-tools clevis sudo; do
+    e2fsprogs bcache-tools grub shim-signed initramfs-tools clevis sudo zram-init; do
     case " $PKG_LIST " in
         *" $bad "*) assert_eq "package list (default) must NOT contain $bad" "absent" "present" ;;
         *) assert_eq "package list (default) must NOT contain $bad" "absent" "absent" ;;
