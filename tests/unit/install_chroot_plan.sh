@@ -79,7 +79,7 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
-    rc-update bootctl btrfs reboot chroot modprobe mdev; do
+    rc-update bootctl btrfs reboot chroot modprobe mdev nslookup; do
     make_stub "$s"
 done
 
@@ -189,6 +189,11 @@ case "\$*" in
         printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
             >"$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
         ;;
+    *"/usr/sbin/chpasswd"*)
+        # item 12: snapshot the piped user:password line so the test can prove
+        # the empty-Enter default REALLY reused the recovery passphrase
+        cat >"\$CHPASSWD_CAPTURE"
+        ;;
 esac
 exit 0
 EOF
@@ -213,18 +218,19 @@ mkdir -p "$ALPINE_FDE_EFIVARS_DIR"
 mkvar SetupMode 1   # §9.1 preflight: Stage 1 runs with the vendor PK cleared
 
 # §9.1 step 4 credential-ceremony answers (the documented test/CI seam: the
-# three no-echo prompts read stdin; six lines = confirm-typed pairs for the
-# account password, the recovery passphrase and the release-key passphrase —
-# every value passes the §13 entropy floor and none is blocklisted)
+# no-echo prompts read stdin). item 12 (AMENDED): the ceremony asks the
+# RECOVERY PASSPHRASE FIRST (confirm-typed pair); the user password and the
+# release-key passphrase DEFAULT to it on bare Enter — the S-24 empty-line
+# convention now applies to BOTH optional fields (empty line = reuse recovery):
+# 4 lines = recovery pair + one empty Enter per derived prompt.
 ANSWERS=$T/answers
 cat >"$ANSWERS" <<'EOF'
-U5er-P4ss-X9k2-!qmwjpz
-U5er-P4ss-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
-R3lease-K3ypass-X7!qmz
-R3lease-K3ypass-X7!qmz
+
+
 EOF
+export CHPASSWD_CAPTURE=$T/chpasswd.stdin   # the chroot stub snapshots chpasswd stdin here
 
 first_line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 
@@ -299,9 +305,28 @@ assert_contains "ceremony (1/3): user password set in-chroot via chpasswd" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "chroot $ALPINE_FDE_INSTALL_MNT /usr/sbin/chpasswd"
 assert_eq "ceremony: NO interactive passwd(1) step anywhere" "0" \
     "$(grep -Ec '[/:]passwd( |$)' <<<"$(cat "$ALPINE_FDE_TEST_LOG")")"
-assert_contains "ceremony (2/3): recovery passphrase enrolled into keyslot 0 via luksAddKey" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" \
-    "cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --key-file $EPHKEY /dev/mapper/root-crypt"
+# item 12: recovery FIRST; the two derived prompts defaulted to it on bare Enter
+assert_contains "item 12: recovery prompt hint shown (press Enter to reuse)" "$OUT" \
+    "press Enter to reuse the recovery passphrase"
+assert_eq "item 12: the empty-Enter user password REALLY was the recovery passphrase (chpasswd stdin snapshot)" \
+    "admin:Fin4l-Rec0very-X9k2-!qmwjpz" "$(cat "$CHPASSWD_CAPTURE")"
+assert_eq "item 12: release-key prompt ALSO defaulted (exactly 2 hints: user password + release key)" "2" \
+    "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
+# item 27 (real-server failure #4): the recovery enrollment targets the LUKS
+# CONTAINER devices (the luksFormat targets) — a /dev/mapper/* node is the
+# DECRYPTED view and luksAddKey against it fails "not a valid LUKS device".
+# e2e is BLIND to this class: the fixture pre-seeds keyslot 0 and the host
+# ceremony path is never really executed there — these execution-level pins
+# are the harness guard.
+ADDKEY=$(grep -m1 'luksAddKey' "$ALPINE_FDE_TEST_LOG")
+assert_contains "item 27: recovery luksAddKey targets the PRIMARY LUKS CONTAINER dev (${DISK}2)" "$ADDKEY" \
+    "cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --key-file $EPHKEY ${DISK}2"
+assert_not_contains "item 27: recovery luksAddKey NEVER targets /dev/mapper (mapper = decrypted view)" "$ADDKEY" "/dev/mapper/"
+LUKSDUMP_CER=$(grep -m1 'luksDump' "$ALPINE_FDE_TEST_LOG")
+assert_not_contains "item 27: ceremony crash-resume luksDump also targets the CONTAINER (not the mapper)" "$LUKSDUMP_CER" "/dev/mapper/"
+assert_contains "item 27: ceremony crash-resume luksDump probes the container dev" "$LUKSDUMP_CER" "luksDump ${DISK}2"
+assert_eq "item 27 lint: ZERO executed cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) targeted /dev/mapper" "0" \
+    "$(grep 'cryptsetup' "$ALPINE_FDE_TEST_LOG" | grep -E 'luksFormat|luksAddKey|luksRemoveKey' | grep -c '/dev/mapper/')"
 assert_contains "ceremony (3/3): release.pem encrypted via keys_encrypt_release (ADR-18 pkcs8)" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" \
     "openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256"
@@ -317,16 +342,17 @@ assert_eq "ceremony (3/3): release.pem on target IS the encrypted form" "1" \
     "$(grep -qc 'fake-pbes2-encrypted-ADR18' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem" && echo 1 || echo 0)"
 assert_eq "ceremony (3/3): encrypted release.pem locked 0400" "400" \
     "$(stat -c '%a' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem")"
-# ceremony order: AFTER the platform keys, BEFORE NVRAM enrollment (§9.1)
+# ceremony order: AFTER the platform keys, BEFORE NVRAM enrollment (§9.1);
+# item 12: recovery passphrase asked FIRST
 O_KEYGEN=$(first_line_no "$OUT" "provision stage1 --mode in-chroot")
 O_CERU=$(first_line_no "$OUT" "host: inst_ceremony_user_password")
 O_CERR=$(first_line_no "$OUT" "host: inst_ceremony_recovery")
 O_CERK=$(first_line_no "$OUT" "host: inst_ceremony_release_key")
 O_ENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
 assert_eq "order: platform keys BEFORE the ceremony (release.pem must exist)" "1" \
-    "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERU ? 1 : 0 ))"
-assert_eq "order: ceremony (1/3) before (2/3) before (3/3)" "1" \
-    "$(( O_CERU > 0 && O_CERU < O_CERR && O_CERR < O_CERK ? 1 : 0 ))"
+    "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERR ? 1 : 0 ))"
+assert_eq "order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
+    "$(( O_CERR > 0 && O_CERR < O_CERU && O_CERU < O_CERK ? 1 : 0 ))"
 assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
     "$(( O_CERK > 0 && O_CERK < O_ENROLL ? 1 : 0 ))"
 
@@ -367,20 +393,22 @@ assert_contains "fstab: real ESP PARTUUID (placeholder resolved)" "$(cat "$MNT_E
 assert_not_contains "fstab: no unresolved placeholder" "$(cat "$MNT_ETC/fstab")" "<esp-partuuid>"
 assert_file_exists "target: network interfaces drop (OpenRC)" "$MNT_ETC/network/interfaces"
 assert_contains "interfaces: dhcp" "$(cat "$MNT_ETC/network/interfaces")" "dhcp"
-# §3.1/ADR-7: swap is zram-only — zram-init config dropped + service enabled;
-# the target fstab carries NO swap line (no disk swap anywhere)
-assert_file_exists "target: zram-init boot config dropped (§3.1, ADR-7)" "$MNT_ETC/conf.d/zram-init"
-assert_contains "zram-init config: swap device pinned (type0=0)" \
-    "$(cat "$MNT_ETC/conf.d/zram-init")" "type0=0"
-assert_contains "target: zram-init service enabled for boot" "$(cat "$ALPINE_FDE_TEST_LOG")" \
-    "rc-update add zram-init boot"
+# item 26a (ADR-7 AMENDED — zram removed from the design): NO zram-init
+# anywhere in the install path — no conf.d drop on the target, no rc-update
+# enable (which ran BEFORE the txn installing the package: real-server failure
+# #2, "service zram-init does not exist"), no package entry. NOT a reorder.
+assert_eq "target: NO zram-init conf.d drop (item 26a, ADR-7 amended)" "0" \
+    "$([ -e "$MNT_ETC/conf.d/zram-init" ] && echo 1 || echo 0)"
+assert_eq "target: NO zram-init rc-update record executed (item 26a)" "0" \
+    "$(grep -c 'rc-update add zram-init' "$ALPINE_FDE_TEST_LOG")"
 assert_eq "fstab: zero swap lines (ADR-7: no disk swap)" "0" \
     "$(grep -c 'swap' "$MNT_ETC/fstab")"
 # §3.1 additions set lands in the in-guest apk transaction
 CHROOT_TXN=$(grep -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG")
-for want in mkinitfs py3-pefile zram-init doas ukify-kernel-hook; do
+for want in mkinitfs py3-pefile doas ukify-kernel-hook; do
     assert_contains "apk txn includes $want (§3.1, executed)" "$CHROOT_TXN" "$want"
 done
+assert_not_contains "apk txn has NO zram-init (item 26a, ADR-7 amended)" "$CHROOT_TXN" "zram-init"
 # ADR-13: dracut is REJECTED on Alpine (mkinitfs, G-C8) — no dracut config
 # residue may land on the target in ANY topology
 assert_eq "target: NO dracut.conf.d directory (ADR-13)" "0" \
@@ -454,8 +482,14 @@ assert_contains "ESP layout for the in-chroot build" "$LOG" \
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
     "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24: provisional seal guest line after the build
-assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot" "$LOG" \
-    'seal_provisional /etc/alpine-fde/keys /dev/mapper/$m'
+# item 27 extended: the seal/token choreography consumes the LUKS2 HEADER —
+# it must address the CONTAINER dev (${DISK}2), never the mapper
+assert_contains "§9.1 step 6: provisional seal guest line ran in-chroot against the CONTAINER dev" "$LOG" \
+    "seal_provisional /etc/alpine-fde/keys \$d /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\${d##*/}.json"
+assert_contains "§9.1 step 6: the seal loop list carries the PRIMARY CONTAINER dev" "$LOG" \
+    "for d in ${DISK}2; do"
+assert_eq "item 27 lint (extended): the seal/token choreography record NEVER receives /dev/mapper" "0" \
+    "$(grep -m1 'seal_provisional' "$ALPINE_FDE_TEST_LOG" | grep -c '/dev/mapper/')"
 assert_contains "§9.1 step 6: guest line pins the provisional slot contract" "$LOG" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
 # ADR-20 AMENDED: release.pem is encrypted IN STAGE 1 by the §9.1 step 4
@@ -493,6 +527,30 @@ assert_eq "order: build before the provisional seal (.pcrsig source)" "1" \
     "$(( L_BUILD < L_SEAL ? 1 : 0 ))"
 assert_eq "order: teardown before the ephemeral-key scrub (G-C26/I1)" "1" \
     "$(( L_UMNTR > 0 && L_SCRUB > L_UMNTR ? 1 : 0 ))"
+
+# =============================================================================
+# item 26b (real-install failure #3): DNS preflight + target resolv.conf seed.
+# The apk populate resolves the mirror via the LIVE env resolver; the in-chroot
+# transaction resolves via the TARGET's /etc/resolv.conf (absent on a fresh
+# rootfs). Preflight probes the mirror host with a busybox-safe nslookup (the
+# probe FAILS CLOSED before any mutation when resolution fails); a guarded
+# host record seeds the live resolver into the target before the transaction.
+# =============================================================================
+LOG=$(cat "$ALPINE_FDE_TEST_LOG")
+assert_contains "26b: DNS preflight probed the mirror host (busybox nslookup)" "$LOG" \
+    "nslookup dl-cdn.alpinelinux.org"
+L_DNSPROBE=$(first_line_no "$LOG" "nslookup dl-cdn")
+assert_eq "26b: DNS preflight runs BEFORE any disk mutation (before partitioning)" "1" \
+    "$(( L_DNSPROBE > 0 && L_DNSPROBE < L_HSFD ? 1 : 0 ))"
+if [ -f /etc/resolv.conf ]; then
+    assert_file_exists "26b: target /etc/resolv.conf seeded from the live env" "$MNT_ETC/resolv.conf"
+    # cp is a real host command (not a stub) — order via the runner's own
+    # host/guest info lines in OUT
+    L_SEEDCP=$(printf '%s\n' "$OUT" | grep -Fnm1 "cp /etc/resolv.conf $ALPINE_FDE_INSTALL_MNT/etc/resolv.conf" | cut -d: -f1)
+    L_SEEDTXN=$(printf '%s\n' "$OUT" | grep -Fnm1 "guest: apk add --no-cache" | cut -d: -f1)
+    assert_eq "26b: target DNS seed executed BEFORE the in-chroot apk transaction" "1" \
+        "$(( L_SEEDCP > 0 && L_SEEDTXN > 0 && L_SEEDCP < L_SEEDTXN ? 1 : 0 ))"
+fi
 # G-C23/I1: the ephemeral key does NOT survive the run
 assert_eq "G-C23: ephemeral key-file scrubbed at teardown" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ephkey.*' 2>/dev/null | wc -l)"
@@ -571,9 +629,14 @@ assert_contains "L-04b: chroot invocation strips the passphrase variable" \
 # =============================================================================
 MAIN_LOG=$(cat "$ALPINE_FDE_TEST_LOG")
 assert_contains "reset: pristine run — the runtime probe RAN (records evaluated, not skipped)" "$MAIN_LOG" \
-    "mountpoint -q $ALPINE_FDE_INSTALL_MNT/home"
-assert_eq "reset: pristine run — ZERO stale umounts fired" "0" \
-    "$(grep -cx "umount $ALPINE_FDE_INSTALL_MNT/home" <<<"$MAIN_LOG")"
+    "mountpoint -q $ALPINE_FDE_INSTALL_MNT"
+# the reset umount did NOT fire in the pristine run: no `umount -R <mnt>` line
+# BEFORE partitioning (the plan TEARDOWN later fires the same argv — scope by
+# line order, not by count)
+O_RESET_UM=$(grep -nx "umount -R $ALPINE_FDE_INSTALL_MNT" <<<"$MAIN_LOG" | cut -d: -f1 | head -1)
+O_MAIN_SFD=$(first_line_no "$MAIN_LOG" "sfdisk")
+assert_eq "reset: pristine run — the recursive stale-tree umount did NOT fire before partitioning" "1" \
+    "$(( O_RESET_UM == 0 || O_RESET_UM > O_MAIN_SFD ? 1 : 0 ))"
 # anchor on line START: the host record echo (`info "host: ...echo 'alpine-fde:
 # info: reset: previous...'") also CONTAINS the phrase; only the FIRED echo
 # output begins the line with it
@@ -603,32 +666,24 @@ ALPINE_FDE_INSTALL_MAPPER_DIR=$T/fake-mapper \
 assert_eq "reset (faked stale state): install rc 0 with the reset armed" "0" "$RC"
 FAKED_LOG=$(cat "$ALPINE_FDE_TEST_LOG")
 L_RSFD=$(first_line_no "$FAKED_LOG" "sfdisk")
-L_RHOME=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/home")
-L_RSNAP=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/.snapshots")
-L_RESP=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/efi")
-L_RROOT=$(grep -nx "umount $ALPINE_FDE_INSTALL_MNT" <<<"$FAKED_LOG" | cut -d: -f1 | head -1)
+# item 26d: the mount teardown is ONE guarded RECURSIVE umount (a failed
+# attempt that died mid-chroot leaves stale binds — /mnt/proc, /mnt/sys,
+# /mnt/dev, efivars — a fixed list misses)
+L_RREC=$(grep -nx "umount -R $ALPINE_FDE_INSTALL_MNT" <<<"$FAKED_LOG" | cut -d: -f1 | head -1)
 L_RCLOSE1=$(first_line_no "$FAKED_LOG" "cryptsetup close root1")
 L_RCLOSE=$(first_line_no "$FAKED_LOG" "cryptsetup close root-crypt")
-assert_eq "reset (faked): stale /home unmounted BEFORE partitioning" "1" \
-    "$(( L_RHOME > 0 && L_RHOME < L_RSFD ? 1 : 0 ))"
-assert_eq "reset (faked): stale .snapshots unmounted BEFORE partitioning" "1" \
-    "$(( L_RSNAP > 0 && L_RSNAP < L_RSFD ? 1 : 0 ))"
-assert_eq "reset (faked): stale ESP unmounted BEFORE partitioning" "1" \
-    "$(( L_RESP > 0 && L_RESP < L_RSFD ? 1 : 0 ))"
-assert_eq "reset (faked): stale root mount unmounted BEFORE partitioning" "1" \
-    "$(( L_RROOT > 0 && L_RROOT < L_RSFD ? 1 : 0 ))"
-assert_eq "reset (faked): deep-to-first umount order (home -> .snapshots -> esp -> root)" "1" \
-    "$(( L_RHOME < L_RSNAP && L_RSNAP < L_RESP && L_RESP < L_RROOT ? 1 : 0 ))"
+assert_eq "reset (faked): stale target tree RECURSIVELY unmounted BEFORE partitioning (item 26d)" "1" \
+    "$(( L_RREC > 0 && L_RREC < L_RSFD ? 1 : 0 ))"
 assert_eq "reset (faked): stale root1 mapping closed (rootN glob, seam dir) BEFORE partitioning" "1" \
     "$(( L_RCLOSE1 > 0 && L_RCLOSE1 < L_RSFD ? 1 : 0 ))"
 assert_eq "reset (faked): stale root-crypt mapping closed BEFORE partitioning" "1" \
     "$(( L_RCLOSE > 0 && L_RCLOSE < L_RSFD ? 1 : 0 ))"
-assert_eq "reset (faked): mapper closes after the umounts" "1" \
-    "$(( L_RROOT < L_RCLOSE1 && L_RCLOSE1 < L_RCLOSE ? 1 : 0 ))"
+assert_eq "reset (faked): mapper closes after the recursive umount" "1" \
+    "$(( L_RREC < L_RCLOSE1 && L_RCLOSE1 < L_RCLOSE ? 1 : 0 ))"
 assert_contains "reset (faked): status — previous failed install detected (the user's visibility ask)" \
     "$OUT" "previous failed install detected"
-assert_contains "reset (faked): per-item status — stale /home unmounted" "$OUT" \
-    "unmounted stale mount $ALPINE_FDE_INSTALL_MNT/home"
+assert_contains "reset (faked): per-item status — stale tree recursively unmounted (item 26d)" "$OUT" \
+    "recursively unmounted stale target tree $ALPINE_FDE_INSTALL_MNT"
 assert_contains "reset (faked): per-item status — stale mapper closed" "$OUT" \
     "closed stale mapper $T/fake-mapper/root-crypt"
 assert_eq "reset (faked): live bcache set STOPPED — set UUID echoed into its own stop file" \
@@ -684,10 +739,13 @@ assert_eq "raid1: baseline target.member_uuids (additive schema)" "$MEM1_UUID $M
     "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target member_uuids)"
 assert_contains "raid1: cmdline rootflags pins verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
-# G-C24: the provisional seal loop covers BOTH members in raid1
+# G-C24: the provisional seal loop covers BOTH member CONTAINERS in raid1
+# (item 27: primary p2 + secondary p1 — the luksFormat targets)
 SEAL_LINE2=$(grep -m1 'seal_provisional' <<<"$LOG2")
-assert_contains "raid1: provisional seal loop covers root1 and root2" "$SEAL_LINE2" \
-    "for m in root1 root2"
+assert_contains "raid1: provisional seal loop covers both member CONTAINERS (item 27)" "$SEAL_LINE2" \
+    "for d in ${DISK}2 ${DISK2}1; do"
+assert_eq "raid1/item 27: the seal choreography record NEVER receives /dev/mapper" "0" \
+    "$(grep -c '/dev/mapper/' <<<"$SEAL_LINE2")"
 L_CLOSE1=$(first_line_no "$LOG2" "cryptsetup close root1")
 L_CLOSE2=$(first_line_no "$LOG2" "cryptsetup close root2")
 assert_eq "raid1: teardown closes both members (primary first)" "1" \
@@ -695,6 +753,16 @@ assert_eq "raid1: teardown closes both members (primary first)" "1" \
 EPHKEY2=$(grep -oE "$T/alpine-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
 assert_eq "raid1: ephemeral key scrubbed at teardown" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ephkey.*' 2>/dev/null | wc -l)"
+# item 27: in raid1 the ceremony enrolls BOTH member CONTAINERS (primary p2 +
+# secondary p1 — the luksFormat targets), never the mappers
+assert_eq "raid1/item 27: exactly 2 recovery luksAddKey records (one per member container)" "2" \
+    "$(grep -c 'luksAddKey' "$ALPINE_FDE_TEST_LOG")"
+assert_contains "raid1/item 27: primary container enrolled (${DISK}2)" "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG")" \
+    "--key-slot 0 --key-file $EPHKEY2 ${DISK}2"
+assert_contains "raid1/item 27: secondary container enrolled (${DISK2}1)" "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG")" \
+    "--key-slot 0 --key-file $EPHKEY2 ${DISK2}1"
+assert_eq "raid1/item 27: zero luksAddKey records target /dev/mapper" "0" \
+    "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG" | grep -c '/dev/mapper/')"
 
 # =============================================================================
 # G4/F-1 (§8.1/§3.3): the tooling copy into /opt/alpine-fde ships ONLY the
@@ -786,6 +854,38 @@ RC=$?
 assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$RC"
 
 # =============================================================================
+# item 26b: DNS preflight FAILS CLOSED — with an unresolvable mirror the
+# install dies 64 with an actionable error BEFORE any disk mutation (a live
+# ISO without DNS died later at apk populate; the preflight moves the failure
+# in front of every destructive step).
+# =============================================================================
+cat >"$T/stub/nslookup" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "nslookup" "$*" >>"$ALPINE_FDE_TEST_LOG"
+exit 1
+EOF
+chmod +x "$T/stub/nslookup"
+DNS_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
+DNS_RC=$?
+assert_eq "26b: unresolvable mirror -> fail-closed 64 (preflight, before disk-prep)" "64" "$DNS_RC"
+assert_contains "26b: the error names the unresolvable mirror host" "$DNS_OUT" \
+    "live env cannot resolve dl-cdn.alpinelinux.org"
+assert_contains "26b: the error says what to fix (configure networking first)" "$DNS_OUT" \
+    "configure networking (DHCP/DNS) before installing"
+# the failed run's log was truncated by run start — re-prove "nothing
+# destructive executed" on a fresh run with a clean log
+: >"$ALPINE_FDE_TEST_LOG"
+DNS_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
+DNS_RC=$?
+assert_eq "26b: repeat (fresh log): unresolvable mirror -> fail-closed 64" "64" "$DNS_RC"
+assert_eq "26b: repeat (fresh log): the ONLY stubbed command that ran is the nslookup probe" "1" \
+    "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
+assert_contains "26b: repeat (fresh log): that one command IS the mirror probe" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "nslookup dl-cdn.alpinelinux.org"
+# restore the succeeding probe
+make_stub nslookup
+
+# =============================================================================
 # §9.1 step 4 negative seam proof: with stdin CLOSED the ceremony fails
 # closed — the prompts are the ONLY credential seam (no flag, no env var).
 # Runs LAST against the main-run fixtures: it mutates the target before it
@@ -795,10 +895,12 @@ assert_eq "M-02: clean run still rc 0 (validation does not over-reject)" "0" "$R
 NEG_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 </dev/null)
 NEG_RC=$?
 assert_eq "ceremony: stdin closed -> fail-closed 64 (prompts are the only seam)" "64" "$NEG_RC"
-assert_contains "ceremony: the failure names the empty/unequal answers" "$NEG_OUT" \
-    "did not match"
-assert_contains "ceremony: the die names ceremony (1/3) (fail happens at the FIRST prompt pair)" \
-    "$NEG_OUT" "inst_ceremony_user_password"
+# item 12: recovery is asked FIRST, so the closed-stdin failure happens there
+# (3 bounded attempts, then die — the entropy floor stays as-is)
+assert_contains "ceremony: the die names ceremony (1/3) recovery (item 12: asked first)" "$NEG_OUT" \
+    "inst_ceremony_recovery"
+assert_contains "ceremony: the failure is the bounded-attempt rejection" "$NEG_OUT" \
+    "recovery passphrase rejected after 3 attempts"
 
 # =============================================================================
 # §8.1 provision row / ADR-18: `install --keydir` is CONSUMED — the

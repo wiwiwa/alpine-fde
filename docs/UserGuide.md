@@ -120,10 +120,10 @@ The installer executes all heavy system, package, and firmware setup operations 
 
 ### Step 2: Credential Ceremony (Final Step Before Reboot)
 
-Once all installation, firmware enrollment, and build steps succeed, the installer prompts for exactly three credentials (no-echo, entropy floors enforced):
-1. **User account password:** Sets up your local administrative user account for login.
-2. **LUKS2 recovery passphrase:** Enrolled into keyslot 0 as your emergency fallback passphrase.
-3. **Release signing key passphrase:** Encrypts `/etc/alpine-fde/keys/release.pem` at rest with AES-256 (PBKDF2 HMAC-SHA256, ≥ 600,000 iterations).
+Once all installation, firmware enrollment, and build steps succeed, the installer prompts for exactly three credentials (no-echo), in this order:
+1. **LUKS2 recovery passphrase:** Enrolled into keyslot 0 as your emergency fallback passphrase. Entropy floors are enforced; you are re-prompted until they are met.
+2. **User account password:** Sets up your local administrative user account for login. **Press Enter to reuse the recovery passphrase** instead of typing a new one.
+3. **Release signing key passphrase:** Encrypts `/etc/alpine-fde/keys/release.pem` at rest with AES-256 (PBKDF2 HMAC-SHA256, ≥ 600,000 iterations). **Press Enter to reuse the recovery passphrase** instead of typing a new one.
 
 The installer then scrubs temporary keys from memory, unmounts the filesystems, and reboots directly into the target disk.
 

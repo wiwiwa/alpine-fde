@@ -67,6 +67,13 @@ for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update
     bootctl lsblk btrfs cryptsetup reboot; do
     make_stub "$s"
 done
+# nslookup — preflight-only DNS probe (host-side, never a plan step): succeed
+# silently like the id stub, keep the "stub log empty" no-exec assert intact
+cat >"$T/stub/nslookup" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T/stub/nslookup"
 # openssl — deterministic 256-bit hex body (the staged ephemeral key, G-C23)
 cat >"$T/stub/openssl" <<'EOF'
 #!/bin/sh
@@ -123,6 +130,10 @@ assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
     "$(grep -c 'dracut' "$SCRIPT")"
 assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+# item 26a (ADR-7 AMENDED — zram removed from the design): zero zram residue in
+# the emitted guest script (no package entry, no conf.d drop, no rc-update)
+assert_eq "emitted: ZERO zram mentions anywhere (item 26a: zram removed from the install path)" "0" \
+    "$(grep -ic 'zram' "$SCRIPT")"
 
 # --- physical-media block sequence (real-install defects 1+2): the physical ---
 # boot environment does NOT auto-load the block modules and /dev is not settled
@@ -162,8 +173,13 @@ assert_eq "emitted order: repositories drop BEFORE apk populate (real-install de
 # pristine machine no-ops; ordering puts the reset block before partitioning.
 assert_eq "emitted: reset status record (guarded: previous failed install detected)" "1" \
     "$(grep -c "^# HOST: if mountpoint -q $ALPINE_FDE_INSTALL_MNT 2>/dev/null || ls " "$SCRIPT")"
-assert_eq "emitted: 4 guarded stale-mount umount records (btrfs default: home .snapshots esp root)" "4" \
-    "$(grep -c '^# HOST: if mountpoint -q .*; then umount ' "$SCRIPT")"
+# item 26d: ONE guarded RECURSIVE stale-tree umount record (covers the stale
+# chroot binds — /mnt/proc /mnt/sys /mnt/dev /mnt/.../efivars — a fixed list
+# misses); the fixed-list records are gone
+assert_eq "emitted: 1 guarded RECURSIVE stale-tree umount record (item 26d)" "1" \
+    "$(grep -c '^# HOST: if mountpoint -q .*; then umount -R ' "$SCRIPT")"
+assert_eq "emitted: zero FIXED-list stale-mount umount records remain (item 26d)" "0" \
+    "$(grep -c 'unmounted stale mount' "$SCRIPT")"
 assert_eq "emitted: guarded stale-mapper close record (rootN glob + root-crypt, name-stripped)" "1" \
     "$(grep -c '^# HOST: for m in /dev/mapper/root\[0-9\]\* /dev/mapper/root-crypt; do \[ -e "\$m" \] || continue; cryptsetup close "\${m#/dev/mapper/}"' "$SCRIPT")"
 assert_eq "emitted: guarded live-bcache STOP record (set dirs only, register file skipped)" "1" \
@@ -173,7 +189,7 @@ S_BCSTOP=$(grep -n 'stopped live bcache set' "$SCRIPT" | cut -d: -f1)
 assert_eq "emitted order: reset records BEFORE partitioning" "1" \
     "$(( S_RESET > 0 && S_BCSTOP > 0 && S_BCSTOP < S_HSFD ? 1 : 0 ))"
 assert_contains "emitted: reset records no-op-safe under set -eu (guarded warn branches)" \
-    "$(cat "$SCRIPT")" "could not unmount stale mount"
+    "$(cat "$SCRIPT")" "could not recursively unmount stale target tree"
 
 # --- host steps are comments ------------------------------------------------------
 assert_eq "host step emitted as comment: apk populate (§3.3, replaces debootstrap)" "1" \
@@ -244,10 +260,36 @@ assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRI
 assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
 # order inside the emitted script: ceremony -> enrollment -> build -> seal
+# item 12: the ceremony records run recovery FIRST, then user password, then
+# release key
+S_CERR=$(grep -n 'inst_ceremony_recovery' "$SCRIPT" | cut -d: -f1)
+S_CERU=$(grep -n 'inst_ceremony_user_password' "$SCRIPT" | cut -d: -f1)
+S_CERK=$(grep -n 'inst_ceremony_release_key' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
+    "$(( S_CERR > 0 && S_CERR < S_CERU && S_CERU < S_CERK ? 1 : 0 ))"
+# item 27: the emitted ceremony record targets the LUKS CONTAINER dev (the
+# luksFormat target), never the mapper — e2e is blind to this class (the
+# fixture pre-seeds keyslot 0 and never really executes the host ceremony).
+# The qemu runner is a REAL runner: the record carries the staged key path,
+# not the dry-run placeholder.
+CER_REC_EMIT=$(grep -m1 'inst_ceremony_recovery' "$SCRIPT")
+assert_contains "item 27: emitted ceremony record targets the PRIMARY LUKS CONTAINER dev" "$CER_REC_EMIT" \
+    " ${DISK}2 # §9.1 step 4 credential ceremony (1/3)"
+assert_not_contains "item 27: emitted ceremony record NEVER names /dev/mapper" "$CER_REC_EMIT" "/dev/mapper/"
+assert_eq "item 27 lint: ZERO cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) target /dev/mapper in the emitted script" "0" \
+    "$(grep 'cryptsetup' "$SCRIPT" | grep -E 'luksFormat|luksAddKey|luksRemoveKey' | grep -c '/dev/mapper/')"
+S_SEAL=$(grep -n 'seal_provisional' "$SCRIPT" | cut -d: -f1)
+# item 27 extended: the emitted seal/token choreography addresses the CONTAINER
+# dev (token_free_slot/luksAddKey/token import consume the LUKS2 HEADER)
+assert_contains "item 27: emitted seal record targets the CONTAINER via the loop var (loop list carries the dev)" "$(grep -m1 'seal_provisional' "$SCRIPT")" \
+    "seal_provisional /etc/alpine-fde/keys \$d /run/alpine-fde/pcrsig.json"
+assert_contains "item 27: emitted seal loop list carries the PRIMARY CONTAINER dev" "$(grep -m1 'seal_provisional' "$SCRIPT")" \
+    "for d in ${DISK}2; do"
+assert_eq "item 27 lint (extended): the emitted seal/token choreography NEVER receives /dev/mapper" "0" \
+    "$(grep -m1 'seal_provisional' "$SCRIPT" | grep -c '/dev/mapper/')"
 S_KEYGEN=$(grep -n 'provision stage1 --mode in-chroot' "$SCRIPT" | cut -d: -f1)
 S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
 S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
-S_SEAL=$(grep -n 'seal_provisional' "$SCRIPT" | cut -d: -f1)
 assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL ? 1 : 0 ))"
 assert_eq "emitted order: enrollment before build" "1" "$(( S_ENROLL < S_BUILD ? 1 : 0 ))"
 assert_eq "emitted order: build before the provisional seal" "1" "$(( S_BUILD < S_SEAL ? 1 : 0 ))"

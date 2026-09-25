@@ -67,7 +67,7 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.vfat mount umount adduser addgroup \
-    rc-update bootctl btrfs reboot; do
+    rc-update bootctl btrfs reboot nslookup; do
     make_stub "$s"
 done
 
@@ -182,18 +182,16 @@ FEATURES=$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.files
 HOOK_DST=$(awk '!done && $0 !~ /^#/ && $0 != "" {print; done=1}' "$REPO/hooks/mkinitfs/features.d/alpine-fde.files")
 
 # §9.1 step 4 credential-ceremony answers (ADR-20 amended): the ONLY credential
-# seam is stdin — three no-echo prompt pairs (account password, recovery
-# passphrase, release-key passphrase) read from an answers file; no flag and no
-# env var exists (S-24). Same values as install_chroot_plan.sh; every value
-# passes the §13 entropy floor and none is blocklisted.
+# seam is stdin; no flag and no env var exists (S-24). item 12 (AMENDED): the
+# ceremony asks the RECOVERY PASSPHRASE FIRST; the user password and the
+# release-key passphrase DEFAULT to it on bare Enter — the empty-line
+# convention now applies to BOTH optional fields (empty = reuse recovery).
 ANSWERS=$T/answers
 cat >"$ANSWERS" <<'EOF'
-U5er-P4ss-X9k2-!qmwjpz
-U5er-P4ss-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
-R3lease-K3ypass-X7!qmz
-R3lease-K3ypass-X7!qmz
+
+
 EOF
 
 run_install() {
