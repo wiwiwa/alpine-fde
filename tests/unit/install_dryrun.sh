@@ -299,12 +299,73 @@ assert_eq "order: state write before teardown" "1" "$(( I_STATE < I_TEARDOWN ? 1
 assert_eq "order: G-C26 — teardown before the ephemeral scrub" "1" \
     "$(( I_TEARDOWN < I_SCRUB ? 1 : 0 ))"
 assert_eq "order: scrub before the direct reboot" "1" "$(( I_SCRUB < I_REBOOT ? 1 : 0 ))"
-# apk populate order: rootfs populate before the repositories drop before the txn
+# apk order (REAL-INSTALL DEFECT 6, e2e-invisible class): the
+# /etc/apk/repositories drop MUST PRECEDE the populate — apk resolves against
+# the TARGET's <mnt>/etc/apk/repositories, so a populate-first plan sees zero
+# repos and dies on a real server with `unable to select packages:
+# alpine-base`. The real apk populate path is NOT exercised by local e2e (the
+# harness stamps a pinned rootfs payload), so this ordering pin is the
+# harness-level guard (mirrors the item-23 lint approach). The populate still
+# precedes the in-chroot additions txn.
 I_POPULATE=$(line_no "$INS_OUT" "apk add --root /mnt --initdb")
 I_REPOS=$(line_no "$INS_OUT" "etc/apk/repositories")
 I_TXN=$(line_no "$INS_OUT" "apk add --no-cache")
-assert_eq "order: apk populate before repositories drop" "1" "$(( I_POPULATE < I_REPOS ? 1 : 0 ))"
-assert_eq "order: repositories drop before the additions txn" "1" "$(( I_REPOS < I_TXN ? 1 : 0 ))"
+assert_eq "order: repositories drop BEFORE apk populate (real-install defect 6: apk resolves against the TARGET's repositories — populate-first dies 'unable to select packages: alpine-base'; real apk path is e2e-invisible, this pin is the harness-level guard)" "1" \
+    "$(( I_REPOS > 0 && I_REPOS < I_POPULATE ? 1 : 0 ))"
+assert_eq "order: apk populate before the additions txn" "1" "$(( I_POPULATE < I_TXN ? 1 : 0 ))"
+
+# --- 2a. RESET of a previous FAILED attempt (user report: "install show reset
+#         failed installation status, when install restarts again, so that new
+#         install is able to continue") — runtime-guarded plan records at the
+#         START of the disk-prep section, BEFORE partitioning; on a pristine
+#         machine every guard is a no-op (busybox/ash, set -eu-safe).
+R_STATUS=$(line_no "$INS_OUT" "previous failed install detected")
+R_HOME=$(line_no "$INS_OUT" "unmounted stale mount /mnt/home'")
+R_SNAP=$(line_no "$INS_OUT" "unmounted stale mount /mnt/.snapshots'")
+R_ESP=$(line_no "$INS_OUT" "unmounted stale mount /mnt/efi'")
+R_ROOT=$(line_no "$INS_OUT" "unmounted stale mount /mnt'")
+R_MAP=$(line_no "$INS_OUT" "closed stale mapper")
+R_BCS=$(line_no "$INS_OUT" "stopped live bcache set")
+O_SFD=$(line_no "$INS_OUT" "| sfdisk $FAKEDISK")
+assert_eq "reset: guarded status record states a previous failed install is being reset" "1" \
+    "$(( R_STATUS > 0 ? 1 : 0 ))"
+assert_eq "reset: status record comes FIRST (before the per-item teardown records)" "1" \
+    "$(( R_STATUS > 0 && R_STATUS < R_HOME ? 1 : 0 ))"
+assert_eq "reset: stale subvol mounts (home, .snapshots) have umount records" "1" \
+    "$(( R_HOME > 0 && R_SNAP > 0 ? 1 : 0 ))"
+assert_eq "reset: stale ESP + root mounts have umount records" "1" \
+    "$(( R_ESP > 0 && R_ROOT > 0 ? 1 : 0 ))"
+assert_eq "reset: deep-to-first umount order (home -> .snapshots -> esp -> root)" "1" \
+    "$(( R_HOME < R_SNAP && R_SNAP < R_ESP && R_ESP < R_ROOT ? 1 : 0 ))"
+assert_eq "reset: stale mapper close record after the umounts" "1" \
+    "$(( R_ROOT < R_MAP ? 1 : 0 ))"
+assert_eq "reset: live-bcache STOP record after the mapper closes (bcache teardown IS in scope: a stale live set must release the devices before the dd wipe)" "1" \
+    "$(( R_MAP < R_BCS ? 1 : 0 ))"
+assert_eq "reset: the WHOLE reset block precedes partitioning (a re-run can continue)" "1" \
+    "$(( R_STATUS > 0 && R_BCS > 0 && R_BCS < O_SFD ? 1 : 0 ))"
+# guard text pinned verbatim: runtime `mountpoint` probe + warn-branch + the
+# `|| :` no-op tail (expected-nonzero probes are guarded, never bare, under
+# the repo's set -eu norm); records survive BOTH the host eval path and the
+# emitted ash guest script
+assert_contains "reset: umount item is runtime-guarded + no-op-safe (mountpoint probe, warn branch, || : tail)" "$INS_OUT" \
+    "if mountpoint -q /mnt/home 2>/dev/null; then umount /mnt/home && echo 'alpine-fde: info: reset: unmounted stale mount /mnt/home' || echo 'alpine-fde: warn: reset: could not unmount stale mount /mnt/home'; fi || :"
+assert_contains "reset: status record guard probes mounts AND mapper nodes AND live bcache sets" "$INS_OUT" \
+    "if mountpoint -q /mnt 2>/dev/null || ls /dev/mapper/root[0-9]* >/dev/null 2>&1 || [ -e /dev/mapper/root-crypt ] || ls /sys/fs/bcache/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected"
+assert_contains "reset: mapper loop globs stale rootN + root-crypt, name-stripped, existence-guarded" "$INS_OUT" \
+    'for m in /dev/mapper/root[0-9]* /dev/mapper/root-crypt; do [ -e "$m" ] || continue; cryptsetup close "${m#/dev/mapper/}"'
+assert_contains "reset: mapper close carries the warn branch + || : no-op tail" "$INS_OUT" \
+    "could not close stale mapper"
+# live bcache sets from the failed attempt MUST be stopped in the reset block
+# (before partitioning), NOT inside the bcache flow: echoing the set UUID into
+# /sys/fs/bcache/<uuid>/stop releases the backing device — wiping a CLAIMED
+# backing device leaves the in-kernel set diverged, and the stale set can
+# re-register the device mid-install. The dd head+tail superblock wipe in
+# front of make-bcache (7619960) then operates on a RELEASED device.
+assert_contains "reset: bcache-stop loop writes each set UUID into its own stop file (dirs only — the register control file is skipped)" "$INS_OUT" \
+    'for d in /sys/fs/bcache/*/; do [ -f "${d}stop" ] || continue; u="${d%/}"; echo "${u##*/}" > "$u/stop"'
+assert_contains "reset: bcache-stop reports what it stopped" "$INS_OUT" "stopped live bcache set"
+assert_contains "reset: bcache-stop carries the warn branch + || : no-op tail" "$INS_OUT" \
+    "could not stop bcache set"
 
 # --- 2c. NO_REBOOT seam (CI) ---------------------------------------------------------
 ALPINE_FDE_INSTALL_NO_REBOOT=1 run_install --disk "$FAKEDISK"
@@ -333,6 +394,13 @@ assert_contains "ext4: conf records ROOT_FS=ext4" "$INS_OUT" "ROOT_FS=ext4"
 APK_TXN_EXT4=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "ext4: apk txn includes e2fsprogs" "$APK_TXN_EXT4" "e2fsprogs"
 assert_not_contains "ext4: apk txn has no btrfs-progs" "$APK_TXN_EXT4" "btrfs-progs"
+# reset records follow the ext4 mount topology (root + ESP only — no subvol mounts)
+assert_not_contains "ext4: reset has NO stale /home umount item (ext4 mounts only root + ESP)" "$INS_OUT" \
+    "unmounted stale mount /mnt/home'"
+assert_not_contains "ext4: reset has NO stale .snapshots umount item" "$INS_OUT" \
+    "unmounted stale mount /mnt/.snapshots'"
+assert_contains "ext4: reset covers the stale ESP + root mounts" "$INS_OUT" \
+    "unmounted stale mount /mnt/efi'"
 
 # --- 4. G-ST2/ADR-17: --bcache single-backing hybrid topology ------------------------
 CACHEDEV=$T/cache.img
@@ -366,6 +434,12 @@ assert_eq "bcache: order — post-sfdisk coldplug BEFORE the superblock wipe" "1
     "$(( O_CSFD > 0 && O_CSFD < O_COLD2 && O_COLD2 < O_WIPEC ? 1 : 0 ))"
 assert_eq "bcache: order — superblock wipes BEFORE make-bcache (defect 3)" "1" \
     "$(( O_WIPEC > 0 && O_WIPEB > 0 && O_WIPEB < O_MAKEC && O_WIPEC < O_MAKEC ? 1 : 0 ))"
+# reset-block bcache stop precedes the dd wipe: a stale LIVE set must release
+# the backing device first (wiping a claimed device leaves the in-kernel set
+# diverged; the stale set can re-register the device mid-install)
+O_BCSTOP=$(line_no "$INS_OUT" "stopped live bcache set")
+assert_eq "bcache: order — stale-set STOP (reset block) BEFORE the superblock wipe" "1" \
+    "$(( O_BCSTOP > 0 && O_BCSTOP < O_WIPEC ? 1 : 0 ))"
 assert_contains "bcache: stale-superblock wipe covers the cache p2 TAIL" "$INS_OUT" \
     "dd if=/dev/zero of=${CACHEDEV}2 bs=1M count=1 seek="
 assert_contains "bcache: stale-superblock wipe (head) on the WHOLE backing disk" "$INS_OUT" \

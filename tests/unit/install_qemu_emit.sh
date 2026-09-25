@@ -146,6 +146,35 @@ assert_eq "guest step emitted executable: OpenRC networking" "1" \
 assert_eq "guest: finalize advisory enabled for the default runlevel (§9.1 step 7)" "1" \
     "$(grep -cx 'rc-update add alpine-fde-finalize default' "$SCRIPT")"
 
+# --- REAL-INSTALL DEFECT 6 (e2e-invisible): the repositories drop MUST land
+# BEFORE the apk populate in the emitted plan — apk resolves against the
+# TARGET's /etc/apk/repositories, so a populate-first run dies on a real
+# server (`unable to select packages: alpine-base`). The real apk populate
+# path is NOT exercised by local e2e (the harness stamps a pinned rootfs
+# payload) — this ordering pin is the harness-level guard.
+S_REPOS=$(grep -n '>/etc/apk/repositories' "$SCRIPT" | cut -d: -f1)
+S_APKPOP=$(grep -n '^# HOST: apk add --root' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted order: repositories drop BEFORE apk populate (real-install defect 6)" "1" \
+    "$(( S_REPOS > 0 && S_APKPOP > 0 && S_REPOS < S_APKPOP ? 1 : 0 ))"
+
+# --- RESET of a previous FAILED attempt (user report): emitted as HOST ------
+# comments (the reset runs host-side in every lane), runtime-guarded so a
+# pristine machine no-ops; ordering puts the reset block before partitioning.
+assert_eq "emitted: reset status record (guarded: previous failed install detected)" "1" \
+    "$(grep -c "^# HOST: if mountpoint -q $ALPINE_FDE_INSTALL_MNT 2>/dev/null || ls " "$SCRIPT")"
+assert_eq "emitted: 4 guarded stale-mount umount records (btrfs default: home .snapshots esp root)" "4" \
+    "$(grep -c '^# HOST: if mountpoint -q .*; then umount ' "$SCRIPT")"
+assert_eq "emitted: guarded stale-mapper close record (rootN glob + root-crypt, name-stripped)" "1" \
+    "$(grep -c '^# HOST: for m in /dev/mapper/root\[0-9\]\* /dev/mapper/root-crypt; do \[ -e "\$m" \] || continue; cryptsetup close "\${m#/dev/mapper/}"' "$SCRIPT")"
+assert_eq "emitted: guarded live-bcache STOP record (set dirs only, register file skipped)" "1" \
+    "$(grep -c '^# HOST: for d in /sys/fs/bcache/\*/; do \[ -f "\${d}stop" \] || continue; u="\${d%/}"; echo "\${u##\*/}" > "\$u/stop"' "$SCRIPT")"
+S_RESET=$(grep -n 'previous failed install detected' "$SCRIPT" | cut -d: -f1)
+S_BCSTOP=$(grep -n 'stopped live bcache set' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted order: reset records BEFORE partitioning" "1" \
+    "$(( S_RESET > 0 && S_BCSTOP > 0 && S_BCSTOP < S_HSFD ? 1 : 0 ))"
+assert_contains "emitted: reset records no-op-safe under set -eu (guarded warn branches)" \
+    "$(cat "$SCRIPT")" "could not unmount stale mount"
+
 # --- host steps are comments ------------------------------------------------------
 assert_eq "host step emitted as comment: apk populate (§3.3, replaces debootstrap)" "1" \
     "$(grep -c '^# HOST: apk add --root .* --initdb alpine-base' "$SCRIPT")"

@@ -166,6 +166,16 @@ EOF
 
 chmod +x "$T/stub/cryptsetup" "$T/stub/id" "$T/stub/lsblk" "$T/stub/openssl"
 
+# mountpoint — the reset records' runtime probe for stale target mounts: log
+# argv and report NOT-a-mountpoint (pristine semantics, exit 1) so the reset
+# guards no-op on this sandbox; the faked-state run below flips it to exit 0.
+cat >"$T/stub/mountpoint" <<'EOF'
+#!/bin/sh
+printf 'mountpoint %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
+exit 1
+EOF
+chmod +x "$T/stub/mountpoint"
+
 # chroot — log argv; when the guest line is the §9.1 step 3 platform-key
 # ceremony, simulate its OUTPUT on the target (the in-chroot keygen leaves an
 # UNencrypted release.pem in /etc/alpine-fde/keys — the input the §9.1 step 4
@@ -550,6 +560,92 @@ assert_contains "H-02: teardown umounts the efivars bind" "$LOG" \
 # L-04b: guest steps never see ALPINE_FDE_DISK_PASSPHRASE (defensive strip stays)
 assert_contains "L-04b: chroot invocation strips the passphrase variable" \
     "$LOG" "-u ALPINE_FDE_DISK_PASSPHRASE"
+
+# =============================================================================
+# RESET of a previous FAILED attempt (user report: "install show reset failed
+# installation status, when install restarts again, so that new install is
+# able to continue"). E2E-mock: REAL records, PATH-stubbed collaborators,
+# observed argv/effects. The pristine main run above: the guards no-op'd
+# (nothing under the target root is a mountpoint; no mapper-dir seam set, so
+# the records glob the real /dev/mapper, which carries no root* nodes here).
+# =============================================================================
+MAIN_LOG=$(cat "$ALPINE_FDE_TEST_LOG")
+assert_contains "reset: pristine run — the runtime probe RAN (records evaluated, not skipped)" "$MAIN_LOG" \
+    "mountpoint -q $ALPINE_FDE_INSTALL_MNT/home"
+assert_eq "reset: pristine run — ZERO stale umounts fired" "0" \
+    "$(grep -cx "umount $ALPINE_FDE_INSTALL_MNT/home" <<<"$MAIN_LOG")"
+# anchor on line START: the host record echo (`info "host: ...echo 'alpine-fde:
+# info: reset: previous...'") also CONTAINS the phrase; only the FIRED echo
+# output begins the line with it
+assert_eq "reset: pristine run — the guarded status echo did NOT fire" "0" \
+    "$(grep -c '^alpine-fde: info: reset: previous failed install detected' <<<"$OUT")"
+O_RESET=$(first_line_no "$OUT" "if mountpoint -q $ALPINE_FDE_INSTALL_MNT ")
+O_HSFD=$(first_line_no "$OUT" "| sfdisk $DISK")
+assert_eq "reset: records precede partitioning (a re-run can continue)" "1" \
+    "$(( O_RESET > 0 && O_RESET < O_HSFD ? 1 : 0 ))"
+
+# FAKED stale state: mountpoint reports "is a mountpoint", the mapper-dir seam
+# (ALPINE_FDE_INSTALL_MAPPER_DIR) points at a sandbox dir holding fake stale
+# nodes, and a fake sysfs bcache set dir holds a stop file — every reset
+# action must FIRE, in order, BEFORE partitioning, each with a status line.
+mkdir -p "$T/fake-mapper" "$T/fake-bcache/1111aaaa-2b3c-4d5e-6f70-8192a3b4c5d6"
+: >"$T/fake-mapper/root-crypt"
+: >"$T/fake-mapper/root1"
+: >"$T/fake-bcache/1111aaaa-2b3c-4d5e-6f70-8192a3b4c5d6/stop"  # real set dirs carry a stop file
+cat >"$T/stub/mountpoint" <<'EOF'
+#!/bin/sh
+printf 'mountpoint %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
+exit 0
+EOF
+chmod +x "$T/stub/mountpoint"
+ALPINE_FDE_INSTALL_MAPPER_DIR=$T/fake-mapper \
+    ALPINE_FDE_INSTALL_BCACHE_SYSFS=$T/fake-bcache run_install
+assert_eq "reset (faked stale state): install rc 0 with the reset armed" "0" "$RC"
+FAKED_LOG=$(cat "$ALPINE_FDE_TEST_LOG")
+L_RSFD=$(first_line_no "$FAKED_LOG" "sfdisk")
+L_RHOME=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/home")
+L_RSNAP=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/.snapshots")
+L_RESP=$(first_line_no "$FAKED_LOG" "umount $ALPINE_FDE_INSTALL_MNT/efi")
+L_RROOT=$(grep -nx "umount $ALPINE_FDE_INSTALL_MNT" <<<"$FAKED_LOG" | cut -d: -f1 | head -1)
+L_RCLOSE1=$(first_line_no "$FAKED_LOG" "cryptsetup close root1")
+L_RCLOSE=$(first_line_no "$FAKED_LOG" "cryptsetup close root-crypt")
+assert_eq "reset (faked): stale /home unmounted BEFORE partitioning" "1" \
+    "$(( L_RHOME > 0 && L_RHOME < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): stale .snapshots unmounted BEFORE partitioning" "1" \
+    "$(( L_RSNAP > 0 && L_RSNAP < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): stale ESP unmounted BEFORE partitioning" "1" \
+    "$(( L_RESP > 0 && L_RESP < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): stale root mount unmounted BEFORE partitioning" "1" \
+    "$(( L_RROOT > 0 && L_RROOT < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): deep-to-first umount order (home -> .snapshots -> esp -> root)" "1" \
+    "$(( L_RHOME < L_RSNAP && L_RSNAP < L_RESP && L_RESP < L_RROOT ? 1 : 0 ))"
+assert_eq "reset (faked): stale root1 mapping closed (rootN glob, seam dir) BEFORE partitioning" "1" \
+    "$(( L_RCLOSE1 > 0 && L_RCLOSE1 < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): stale root-crypt mapping closed BEFORE partitioning" "1" \
+    "$(( L_RCLOSE > 0 && L_RCLOSE < L_RSFD ? 1 : 0 ))"
+assert_eq "reset (faked): mapper closes after the umounts" "1" \
+    "$(( L_RROOT < L_RCLOSE1 && L_RCLOSE1 < L_RCLOSE ? 1 : 0 ))"
+assert_contains "reset (faked): status — previous failed install detected (the user's visibility ask)" \
+    "$OUT" "previous failed install detected"
+assert_contains "reset (faked): per-item status — stale /home unmounted" "$OUT" \
+    "unmounted stale mount $ALPINE_FDE_INSTALL_MNT/home"
+assert_contains "reset (faked): per-item status — stale mapper closed" "$OUT" \
+    "closed stale mapper $T/fake-mapper/root-crypt"
+assert_eq "reset (faked): live bcache set STOPPED — set UUID echoed into its own stop file" \
+    "1111aaaa-2b3c-4d5e-6f70-8192a3b4c5d6" \
+    "$(cat "$T/fake-bcache/1111aaaa-2b3c-4d5e-6f70-8192a3b4c5d6/stop")"
+L_BCSTOP=$(first_line_no "$OUT" "stopped live bcache set")
+L_RSFD_OUT=$(first_line_no "$OUT" "| sfdisk $DISK")   # same capture as L_BCSTOP (OUT, not the argv log)
+assert_eq "reset (faked): bcache stop reported BEFORE partitioning" "1" \
+    "$(( L_BCSTOP > 0 && L_RSFD_OUT > 0 && L_BCSTOP < L_RSFD_OUT ? 1 : 0 ))"
+# restore pristine semantics for the later sections
+cat >"$T/stub/mountpoint" <<'EOF'
+#!/bin/sh
+printf 'mountpoint %s\n' "$*" >>"$ALPINE_FDE_TEST_LOG"
+exit 1
+EOF
+chmod +x "$T/stub/mountpoint"
+unset ALPINE_FDE_INSTALL_MAPPER_DIR ALPINE_FDE_INSTALL_BCACHE_SYSFS
 
 # =============================================================================
 # G-ST3: RAID1 execution — per-role partitioning, per-member LUKS2 (ephemeral

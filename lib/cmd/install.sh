@@ -88,6 +88,11 @@ SPC_INSTALL_RUNNERS='dry-run chroot qemu'
 
 inst_runner() { printf '%s\n' "${ALPINE_FDE_INSTALL_RUNNER:-dry-run}"; }
 inst_mnt() { printf '%s\n' "${ALPINE_FDE_INSTALL_MNT:-/mnt}"; }
+# reset-record seams (unit-testable only; a real run never sets these): the
+# device-mapper directory the reset records glob for stale rootN/root-crypt
+# mappings, and the sysfs bcache root the reset records scan for live sets.
+inst_mapper_dir() { printf '%s\n' "${ALPINE_FDE_INSTALL_MAPPER_DIR:-/dev/mapper}"; }
+inst_bcache_sysfs() { printf '%s\n' "${ALPINE_FDE_INSTALL_BCACHE_SYSFS:-/sys/fs/bcache}"; }
 inst_mirror() { printf '%s\n' "${ALPINE_FDE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/v3.24/main}"; }
 # --- resolved topology (§4.1): fs + bcache flags ------------------------------
 # ROOT_FS: btrfs (default) | ext4. BCACHE: 0 | 1. Recorded into the target's
@@ -280,6 +285,48 @@ inst_wipe_superblocks_line() {
   printf '%s\n' "dd if=/dev/zero of=$1 bs=1M count=1 && dd if=/dev/zero of=$1 bs=1M count=1 seek=\$(( \$(blockdev --getsize64 $1) / 1048576 - 1 )) # wipe stale superblocks (head+tail): bcache refuses devices with leftover signatures"
 }
 
+# --- reset records (a previous FAILED attempt) -------------------------------
+# A failed install leaves the target mounted under <mnt> (subvol mounts + the
+# ESP), stale /dev/mapper/rootN|root-crypt mappings open, LUKS superblocks on
+# the members and (bcache topologies) a LIVE bcache set claiming the devices;
+# a re-run would die on the busy mount / busy mapper name / claimed device.
+# User requirement: "install show reset failed installation status, when
+# install restarts again, so that new install is able to continue" — the
+# records below tear the stale state down BEFORE partitioning and SAY what
+# they reset. The records are RUNTIME-conditional inside the record text
+# (generate-time cannot know machine state): every probe is guarded with a
+# one-line busybox/ash form so the records are NO-OPS on a pristine machine
+# and survive BOTH the host `eval` path and the emitted guest script under
+# the repo's set -eu norm (expected-nonzero probes are guarded, never bare;
+# the `|| :` tails keep a failed teardown from killing the eval'd plan).
+# WHY stop-then-wipe for bcache: echoing the set UUID into its own
+# /sys/fs/bcache/<uuid>/stop RELEASES the backing devices — wiping a CLAIMED
+# backing device leaves the in-kernel set diverged, and the stale set can
+# re-register a device mid-install. The dd head+tail superblock wipe in front
+# of make-bcache (7619960) then operates on a released device.
+
+# inst_reset_umount_line DIR — one guarded umount of one stale target mount
+# (deep-to-first order at the call site): mountpoint probe + warn branch +
+# `|| :` no-op tail, single line, ash/busybox compatible.
+inst_reset_umount_line() {
+  printf '%s\n' "if mountpoint -q $1 2>/dev/null; then umount $1 && echo 'alpine-fde: info: reset: unmounted stale mount $1' || echo 'alpine-fde: warn: reset: could not unmount stale mount $1'; fi || :"
+}
+
+# inst_reset_mapper_line MAPPER_DIR — guarded cryptsetup close of the stale
+# rootN mappings (glob — the bcache-multi/raid1 naming) AND root-crypt (the
+# single/bcache primary); the mapper NAME is stripped from the node path
+# before close. Unmatched glob entries fail the [ -e ] guard (no-op).
+inst_reset_mapper_line() {
+  printf '%s\n' "for m in $1/root[0-9]* $1/root-crypt; do [ -e \"\$m\" ] || continue; cryptsetup close \"\${m#$1/}\" && echo \"alpine-fde: info: reset: closed stale mapper \$m\" || echo \"alpine-fde: warn: reset: could not close stale mapper \$m\"; done || :"
+}
+
+# inst_reset_bcache_line SYSFS_BCACHE — guarded stop of every LIVE bcache
+# set: the glob matches set DIRECTORIES only (the `register` control file is
+# skipped); each set's own UUID is echoed into ITS stop file.
+inst_reset_bcache_line() {
+  printf '%s\n' "for d in $1/*/; do [ -f \"\${d}stop\" ] || continue; u=\"\${d%/}\"; echo \"\${u##*/}\" > \"\$u/stop\" && echo \"alpine-fde: info: reset: stopped live bcache set \${u##*/}\" || echo \"alpine-fde: warn: reset: could not stop bcache set \${u##*/}\"; done || :"
+}
+
 # --- plan records -----------------------------------------------------------
 # SPC_PLAN holds "KIND<TAB>CMD" lines (guest cmds must be single-line shell);
 # file drops are executed/emitted at plan-build time (order-independent).
@@ -298,10 +345,12 @@ inst_plan_add() {
 }
 
 # inst_plan_write RELPATH LINE... — drop a file into the target root.
-# Config drops execute IN PLAN ORDER (§3.3: after mount + apk populate,
-# before the first in-guest apk use): the chroot runner defers them as host
-# plan records (eager writes would land before the target is mounted, G-I1);
-# dry-run prints them; qemu emits guest printf lines.
+# Config drops execute IN PLAN ORDER (§3.3: after mount, before the first
+# in-guest apk use; EXCEPTION — the /etc/apk/repositories drop deliberately
+# PRECEDES the apk populate, real-install defect 6: apk resolves against the
+# TARGET's repositories): the chroot runner defers them as host plan records
+# (eager writes would land before the target is mounted, G-I1); dry-run
+# prints them; qemu emits guest printf lines.
 inst_plan_write() {
   _ipw_p=$1
   shift
@@ -1095,6 +1144,25 @@ cmd_install_main() {
   _im_lukskey_disp=${_im_lukskey:-'<ephemeral-keyfile>'}
 
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
+  # 1a. RESET a previous FAILED attempt (user-reported, e2e-invisible class):
+  #     emitted BEFORE partitioning in every lane so a re-run continues; see
+  #     the reset-record block comment above inst_reset_umount_line for the
+  #     guard/no-op/status contract. The bcache set STOP is deliberately in
+  #     this block, NOT in the bcache flow: the stale live set must release
+  #     the devices before the dd head+tail wipe (which then operates on a
+  #     released device — 7619960).
+  _im_mdir=$(inst_mapper_dir)
+  _im_bsys=$(inst_bcache_sysfs)
+  inst_plan_run host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
+  if [ "$(inst_root_fs)" = "btrfs" ]; then
+    inst_plan_run host "$(inst_reset_umount_line $_im_mnt/home)"
+    inst_plan_run host "$(inst_reset_umount_line $_im_mnt/.snapshots)"
+  fi
+  inst_plan_run host "$(inst_reset_umount_line $_im_mnt$_im_esp_mnt)"
+  inst_plan_run host "$(inst_reset_umount_line $_im_mnt)"
+  inst_plan_run host "$(inst_reset_mapper_line "$_im_mdir")"
+  inst_plan_run host "$(inst_reset_bcache_line "$_im_bsys")"
+
   # PHYSICAL-MEDIA preconditions (real-install defects 1+2): a physical boot
   # does NOT auto-load the block modules and /dev is not necessarily settled —
   # load bcache/btrfs explicitly, then coldplug, BEFORE any bcache/btrfs work.
@@ -1220,11 +1288,18 @@ cmd_install_main() {
   fi
 
   # --- 4. minimal rootfs (§3.3): apk populate (self-authored bootstrap) -------
+  # REAL-INSTALL DEFECT 6 (user-reported on a real server; e2e-invisible — the
+  # harness stamps a pinned rootfs payload): apk resolves against the TARGET's
+  # <mnt>/etc/apk/repositories, so the repositories drop MUST precede the
+  # populate record — populate-first sees zero repos and dies with `ERROR:
+  # unable to select packages: alpine-base`. The drop is written exactly once,
+  # here (NOT repeated in section 5).
+  inst_plan_write /etc/apk/repositories $(inst_repo_lines)
   inst_plan_run host "apk add --root $_im_mnt --initdb alpine-base"
 
   # --- 5. config drops (host-side writes; guest printf lines under qemu) -----
-  # §3.3: /etc/apk/repositories replaces the legacy distro package-source drops
-  inst_plan_write /etc/apk/repositories $(inst_repo_lines)
+  # (the §3.3 /etc/apk/repositories drop now precedes the populate above —
+  # real-install defect 6)
   # §8.2 crypttab contract: single entry (single/bcache) has NO
   # password-cache; multi-member topologies (raid1, bcache-multi) get one
   # entry PER MEMBER with password-cache=yes.
