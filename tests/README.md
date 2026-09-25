@@ -323,7 +323,8 @@ plus the full `-j 2` registry with the pipeline hoisted (results in
 still resolves to `s01-happy-lite.sh`). It consolidates the core of
 **`s00`**, **`s00b`**, **`s01`**, **`s14`**, **`s02`**, and **`s16`** into one
 progressive journey. Runner integration: `s01c` is a **chain member** — the
-`-j` hoist list is `s00 -> s00b -> s01c` (sequential phase), and `s01c` is
+`-j` hoist list is `s00 -> s00b -> s01c` (sequential phase; later extended
+to `s00 -> s00b -> s01c -> s15c` by pipeline 2), and `s01c` is
 also a state consumer (`ALPINE_FDE_E2E_STATE`): when the s00 -> s00b chain
 ran in the same invocation, the pipeline consumes that enrolled state and
 skips its install legs. The superseded scenarios STAY in the tree and in the
@@ -404,21 +405,94 @@ build steps are `timeout`-bounded under the scenario's overall budget
 (`ALPINE_FDE_PIPELINE_BUDGET`, default 5100 — set
 `ALPINE_FDE_SCENARIO_BUDGET` above it for registry runs).
 
-#### 2. Disaster Recovery & Drift Pipeline (`s15-recovery-chain`) — design (not implemented)
-Consolidates **`s15`** (PCR 7 drift) and **`s17`** (TPM cleared) into a 3-boot recovery drill (reduced from 6 boots):
+#### 2. Disaster Recovery & Drift Pipeline — **IMPLEMENTED** (Wave-2 task 5b)
 
-* **Boot 1: PCR 7 Drift Detection & Recovery**
-  - Update firmware variables (`dbx` update) to induce PCR 7 drift.
-  - Boot guest: assert TPM unseal is refused and drops to bounded recovery prompt.
-  - Enter recovery passphrase (keyslot 0) to unlock volume.
-  - In-guest: run `alpine-fde audit --accept` and `alpine-fde enroll-tpm` to re-baseline and update the token.
-* **Boot 2: Verified Passwordless Recovery Boot**
-  - Reboot system.
-  - Assert disk unlocks automatically with zero keystrokes under the re-baselined PCR 7 state.
-* **Boot 3: TPM Reset / Motherboard Replacement Drill**
-  - Trigger `swtpm_reset` (simulate hardware TPM replacement/clear).
-  - Boot guest: assert unseal refused under foreign/empty SRK → enter recovery passphrase → re-enroll TPM token.
-  - Reboot: assert passwordless unseal restored.
+**Id / file:** registry id **`s15c`** -> `tests/e2e/s15-recovery-chain.sh`
+(the registry's script-name column resolves it; the `s15-` prefix itself
+still resolves to `s15`'s own scenario). It consolidates **`s15`** (PCR 7
+drift) and **`s17`** (TPM cleared) into one progressive recovery drill.
+Runner integration: `s15c` is a **chain member** — the `-j` hoist list is
+`s00 -> s00b -> s01c -> s15c` (sequential phase), and `s15c` is also a state
+consumer (`ALPINE_FDE_E2E_STATE`): when the chain ran in the same invocation
+(or the SHA-verified `pristine-s00b` cache is valid), the producer legs are
+skipped and the drill replays against the standing enrolled seal. The
+superseded scenarios STAY in the tree and in the default selection
+(retirement is a later decision). Contract suite:
+`tests/unit/s15c_recovery_chain_contract.sh` (coverage table + wiring +
+structure pins); the runner-side phase pins live in
+`tests/unit/run_e2e_parallel_contract.sh`.
+
+**Boot map (as implemented — 5 physical launches, 4 in the skip modes):**
+
+* **b0-producer (full mode only)** — baseline boot against a token-less
+  volume: the §8.2 hook's bounded recovery loop is the only way in, the
+  CORRECT slot-0 passphrase is fed prompt-synchronized -> UNSEALED
+  (s15/s17's boot 1); host-side the finalized baseline is stamped and the
+  production CLI (`enroll-tpm`) seals the combined `{PCR 7, PCR 11}` token
+  (keyslot 1, recovery slot 0 untouched).
+* **host: §9.4 detection drill** — live PCR 7 drift synthesized host-side
+  (`swtpm_pcrextend`); the real CLI `audit` exits 1 with a `pcr7 DRIFT`
+  line, `audit --accept --yes` re-baselines, a follow-up audit is clean and
+  `last-audit.json` records `result: ok`.
+* **b1-pcr7-drift (refusal; overlay discarded)** — dbx-updated vars
+  (`virt-fw-vars --add-dbx-cert`, the §9.4 boot-layer drift): the firmware
+  measures a different PCR 7, the stale seal refuses (`unseal_seal_refused`,
+  I3 gate passes — the signature is NOT the defect), the bounded loop reads
+  3 WRONG answers -> 3-strike fail-closed `poweroff -f`, never unlocked, no
+  emergency shell, PCR 11 untouched (tamper scoping), guest exits by hook
+  poweroff (IN-08). Tamper scoping remap: in the skip modes the refusal boot
+  is the CACHED UKI (no baseline console exists), so the full mode's
+  producer-console PCR 11 equality is carried by the b3-vs-b2 pair instead,
+  and b1 asserts the early PCR 11 reading present + non-zero.
+* **host: recovery-reseal-1** — wipe the stale enrollment (token +
+  luksKillSlot), re-stamp the baseline to the DRIFTED boot-layer d7, re-seal
+  over (drifted d7, UNCHANGED enter-initrd d11) via the production CLI — no
+  volume-key re-encryption. Skip mode builds the seam-free release UKI here
+  (the cached release UKI carries the fed-session DEBUG SHELL seam, so it
+  can only serve the refusal leg, whose hook powers off inside its own
+  invocation) and swaps the ESP default to it.
+* **b2-rebaselined (passwordless; overlay committed)** — zero-input token
+  unlock under the re-sealed token on the drifted-but-real PCR 7; the
+  booted PCR 7 equals the drifted d7 the seal was composed over; G-T13
+  signed prediction asserted.
+* **b3-tpm-clear (refusal; overlay discarded)** — `swtpm_reset` wipes ALL
+  TPM state (fresh SRK, PCR 7 asserted zero): the firmware re-measures the
+  same vars, the I3 gate passes, but the sealed blob cannot load under the
+  fresh SRK -> the same fail-closed 3-strike refusal drill; PCR 7
+  re-measured to the same value and PCR 11 unchanged vs b2 (same UKI, same
+  phase extend). The reset is the pipeline's ONE deliberate persistent TPM
+  mutation (it is the scenario's subject); recovery-reseal-2 restores a
+  working enrollment under the new SRK (fresh SRK, same d11, no
+  re-encryption) before the final leg.
+* **b4-restored (passwordless; overlay committed)** — zero-input unseal
+  restored on the fresh SRK under the re-measured PCR 7; G-T13 prediction
+  asserted; the pipeline ends on a healthy re-enrolled state.
+
+**Recovery-drill shape (deliberate deviation from the 3-boot sketch):** the
+sketch collapsed the two refusal legs into one in-guest recovery unlock
+("enter recovery passphrase, run `audit --accept` + `enroll-tpm` in-guest").
+The absorbed scenarios' recovery drill is FAIL-CLOSED in-guest (3 WRONG
+answers -> 3-strike `poweroff -f`) with the recovery as a HOST-side operator
+step, and collapsing the refusal legs would drop the 3-strike / fail-closed
+assertions — so the implemented plan keeps both refusal boots and folds the
+in-guest correct-passphrase recovery unlock into b0-producer (exactly where
+s15/s17 exercise it). Cost: 5 launches (4 from-cache) vs the standalone
+s15 + s17's 6 boots + duplicated fixture/enroll/audit work.
+
+**R1/R2/R3 semantics:** as pipeline 1 (one canonical disk advanced in place
+via committed overlays; refusal legs and failed attempts discard their
+overlays; `ALPINE_FDE_PIPELINE_FULL=1` / `ALPINE_FDE_E2E_STATE` /
+`pristine-s00b` / cold mode resolution recorded in the log and the `stages`
+object). The §9.4 drill's `pcrextend` mutates only the fixture TPM's
+volatile PCRs — every boot re-anchors to a zeroed register first
+(`_reanchor_tpm`), so nothing of it leaks into any boot.
+
+**Step timing:** leaf stage labels — full mode emits `producer-leg`,
+`finalize-baseline`, `drift-detect`, `recovery-reseal-1`, `tpm-clear`,
+`recovery-reseal-2`; skip mode emits `cache-reuse` instead of the first two;
+every launch emits `boot-<leg>`; `ALPINE_FDE_PIPELINE_BUDGET` (default
+2400) bounds the scenario internally — set `ALPINE_FDE_SCENARIO_BUDGET`
+above it (recommend 2700) for full-from-install registry runs.
 
 ---
 

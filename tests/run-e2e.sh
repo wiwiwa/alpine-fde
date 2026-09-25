@@ -8,9 +8,11 @@
 #   -j N | -jN | --jobs=N   run up to N scenarios CONCURRENTLY (default 1 =
 #                           today's sequential behavior; env
 #                           ALPINE_FDE_E2E_JOBS presets it). The state chain
-#                           s00 -> s00b -> s01c always runs first and alone
-#                           (s01c is the merged lifecycle pipeline,
-#                           tests/e2e/s01-lifecycle-chain.sh — Wave-2 task 5b);
+#                           s00 -> s00b -> s01c -> s15c always runs first and
+#                           alone (s01c is the merged lifecycle pipeline,
+#                           tests/e2e/s01-lifecycle-chain.sh; s15c is the
+#                           merged recovery pipeline,
+#                           tests/e2e/s15-recovery-chain.sh — Wave-2 task 5b);
 #                           the remaining requested scenarios are independent
 #                           state consumers (they snapshot their inputs) and
 #                           share up to N worker slots. See tests/README.md
@@ -275,6 +277,7 @@ s14	s14-kernel-update.sh	ready
 s15	s15-pcr7-drift.sh	ready
 s16	s16-key-rotation.sh	ready
 s17	s17-tpm-clear.sh	ready
+s15c	s15-recovery-chain.sh	ready
 s19	s19-bcache-crash.sh	ready
 s20	s20-raid1-member-loss.sh	ready
 s21	s21-finalize-guard.sh	ready
@@ -294,9 +297,10 @@ REGISTRY="${REGISTRY}$(printf '\n%s\t%s\t%s\n' "s18" "s18-foreign-pcrsig.sh" "re
 # _script_for <id> — resolve a scenario id by filename convention
 # (tests/e2e/s<nn>-*.sh; bash globs expand sorted, lowest name wins), with a
 # fallback to the registry's script-name column for rows whose script does not
-# follow the id-prefix convention (the merged lifecycle pipeline: id s01c ->
-# s01-lifecycle-chain.sh — the s01- prefix must keep resolving to s01's own
-# scenario); empty output = not implemented yet.
+# follow the id-prefix convention (the merged pipelines: id s01c ->
+# s01-lifecycle-chain.sh, id s15c -> s15-recovery-chain.sh — the s01-/s15-
+# prefixes must keep resolving to s01's/s15's own scenarios); empty output =
+# not implemented yet.
 _script_for() {
     local id="$1" hit reg
     for hit in "$HERE/e2e/${id}-"*.sh; do
@@ -310,10 +314,11 @@ _script_for() {
 }
 
 # scenarios that reuse the ENROLLED s00b artifacts via ALPINE_FDE_E2E_STATE
-# (s01c — the merged lifecycle pipeline — is ALSO a chain member: it hoists
-# into the sequential phase after s00b, but consumes the ENROLLED state like
-# any other consumer when one exists, skipping its own install legs)
-_STATE_CONSUMERS=" s01 s01c s05 s06 s07 s09 s12 s13 s18 "
+# (s01c — the merged lifecycle pipeline — and s15c — the merged recovery
+# pipeline — are ALSO chain members: they hoist into the sequential phase
+# after s00b, but consume the ENROLLED state like any other consumer when one
+# exists, skipping their own producer legs)
+_STATE_CONSUMERS=" s01 s01c s15c s05 s06 s07 s09 s12 s13 s18 "
 
 # CR-02/MD-03 prune contract: scenario prunes must never delete the state
 # dirs this invocation chains on (s00's populated state -> s00b -> the state
@@ -546,16 +551,16 @@ if (( JOBS == 1 )); then
     done
     unset _i
 else
-    # Bounded parallel matrix. Dependency phases: the s00 -> s00b -> s01c state
-    # chain runs FIRST and always sequentially (each snapshot feeds the next;
-    # s01c — the merged lifecycle pipeline — advances the enrolled state
-    # progressively, so it can never share a worker slot with a consumer that
-    # snapshots from it); every other requested scenario is an independent
-    # state consumer (it snapshots its inputs at start) and may run in
-    # parallel up to JOBS.
+    # Bounded parallel matrix. Dependency phases: the s00 -> s00b -> s01c ->
+    # s15c state chain runs FIRST and always sequentially (each snapshot feeds
+    # the next; the merged pipelines advance the enrolled state progressively,
+    # so they can never share a worker slot with a consumer that snapshots
+    # from it); every other requested scenario is an independent state
+    # consumer (it snapshots its inputs at start) and may run in parallel up
+    # to JOBS.
     ORDER_SEQ=()
     ORDER_PAR=()
-    for _canon in s00 s00b s01c; do
+    for _canon in s00 s00b s01c s15c; do
         for _i in "${!REQUESTED[@]}"; do
             if [[ "${REQUESTED[$_i]}" == "$_canon" ]]; then
                 ORDER_SEQ+=("$_i")
@@ -563,7 +568,7 @@ else
         done
     done
     for _i in "${!REQUESTED[@]}"; do
-        case "${REQUESTED[$_i]}" in s00|s00b|s01c) continue ;; esac
+        case "${REQUESTED[$_i]}" in s00|s00b|s01c|s15c) continue ;; esac
         ORDER_PAR+=("$_i")
     done
     unset _canon _i
