@@ -418,15 +418,18 @@ feed_line "$RUN/bootstrap/serial.sock" \
     'mkdir -p /btop && mount -t btrfs /dev/mapper/root /btop && btrfs subvolume create /btop/@ && echo B4-$((41+3))-OK'
 wait_console "$RUN/bootstrap" "B4-44-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
-    'printf "s20-canary raid1 member-loss\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && echo "FSID $(btrfs filesystem show /dev/mapper/root 2>/dev/null | grep -m1 -o "uuid: [0-9a-f-]*")" && echo "UUID1 $(cryptsetup luksUUID /dev/vdb)" && echo "UUID2 $(cryptsetup luksUUID /dev/vdc)" && umount /btop && echo B5-$((44+1))-OK'
+    'printf "s20-canary raid1 member-loss\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && sha256sum /btop/@/canary.txt | cut -d" " -f1 && echo "FSID $(btrfs filesystem show /dev/mapper/root 2>/dev/null | grep -m1 -o "uuid: [0-9a-f-]*")" && echo "UUID1 $(cryptsetup luksUUID /dev/vdb)" && echo "UUID2 $(cryptsetup luksUUID /dev/vdc)" && umount /btop && echo B5-$((44+1))-OK'
 wait_console "$RUN/bootstrap" "B5-45-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-bootstrap "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/bootstrap" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
 
-CANARY_SHA=$(grep -oE 'CANARY-SHA [0-9a-f]{64}' "$RUN/bootstrap/console.log" | head -1 | awk '{print $2}')
+# The EXPECTED hash is HOST ground truth: the canary content is deterministic,
+# so the host computes it — a lossy console capture must never define the
+# expectation (the registry's results-20260925T063641Z run captured a mid-hash
+# doubled byte into the expectation slot).
+CANARY_SHA=$(printf 's20-canary raid1 member-loss\n' | sha256sum | cut -d' ' -f1)
 FSID=$(grep -oE 'FSID uuid: [0-9a-f-]{36}' "$RUN/bootstrap/console.log" | head -1 | awk '{print $3}')
-[[ -n "$CANARY_SHA" ]] || { echo "s20: canary sha missing from bootstrap console"; exit 1; }
 [[ -n "$FSID" ]] || { echo "s20: btrfs fsid missing from bootstrap console"; exit 1; }
 # Console-UUID evidence (re-pinned 2026-09-24): the registry's first pass lost
 # this assertion to a serial burst artifact — the guest's "UUID2 6d604a4d-…"
@@ -440,6 +443,13 @@ CON_UUIDS=$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
     "$RUN/bootstrap/console.log" | sort -u)
 assert_contains "bootstrap: member 1 console UUID == host LUKS UUID" "$CON_UUIDS" "$UUID1"
 assert_contains "bootstrap: member 2 console UUID == host LUKS UUID" "$CON_UUIDS" "$UUID2"
+# Corroboration (not derivation): the guest's own sha emission — labeled OR
+# bare, whichever landed intact — must contain the host ground truth, proving
+# the write leg ran as intended (a doubled-byte label like run 1790321112's
+# "CANARY-SHAA …" doesn't matter; the hash text does).
+LOG_BOOT=$(cat "$RUN/bootstrap/console.log" 2>/dev/null || true)
+assert_contains "bootstrap: canary written as intended (guest sha corroborates host ground truth)" \
+    "$LOG_BOOT" "$CANARY_SHA"
 assert_eq "bootstrap: member 1 tokens == 1 (the dead suppressor only)" "1" \
     "$(disk_token_json "$RUN/disk-root1.img" | jq '[.[] | select(.type == "systemd-tpm2")] | length')"
 assert_eq "bootstrap: member 2 still ZERO tokens (pool built pre-finalization)" "0" \
@@ -719,15 +729,26 @@ feed_line "$P2/serial.sock" \
 wait_console "$P2" "P2MRC=0" 300
 wait_console "$P2" "DEG-49-OK" 120
 feed_line "$P2/serial.sock" \
-    'cat /mnt/canary.txt >/dev/null && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && btrfs filesystem show /dev/mapper/root; echo P2S-$((44+7))-DONE'
+    'cat /mnt/canary.txt >/dev/null && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && sha256sum /mnt/canary.txt | cut -d" " -f1 && btrfs filesystem show /dev/mapper/root; echo P2S-$((44+7))-DONE'
 wait_console "$P2" "P2S-51-DONE" 300
+# TCG serial corruption guard (solo run 1790321112: the labeled emission
+# landed as "CANARY-SHAA 80fc…" — doubled-byte class — and the labeled-only
+# parse returned []). The re-derivation emits a BARE 64-hex line (no label to
+# garble) from the LIVE file; the parse below accepts either texture.
+feed_line "$P2/serial.sock" 'sha256sum /mnt/canary.txt | cut -d" " -f1; echo P2C-$((44+8))-DONE'
+wait_console_soft "$P2" "P2C-52-DONE" 120 || true
 feed_line "$P2/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-phase2 "$((QEMU_TIMEOUT + 60))" qemu_wait "$P2" "$QEMU_TIMEOUT"
 overlay_discard "$RUN/p2-root1.qcow2"   # the phase's overlay is ephemeral
 CURRENT_QEMU_DIR=""
 
 LOG_P2=$(cat "$P2/console.log" 2>/dev/null || true)
-P2_CANARY=$(grep -oE 'CANARY-SHA [0-9a-f]{64}' "$P2/console.log" | head -1 | awk '{print $2}')
+# Corruption-tolerant candidates: every BARE 64-hex line (the re-derivation's
+# compact payload) plus every 64-hex token on a CANARY-labeled line (tolerates
+# a garbled label). The assertion matches the host ground truth against the
+# set — some well-formed LIVE read must equal it.
+P2_CANARY_CANDS=$({ tr -d '\r' < "$P2/console.log" | grep -E '^[0-9a-f]{64}$'
+                    grep 'CANARY' "$P2/console.log" | grep -oE '[0-9a-f]{64}'; })
 assert_contains "[phase 2] stand-in OUT of the loop" "$LOG_P2" \
     "alpine-fde-harness: systemd-tpm2 token present — skipping enrollment"
 assert_contains "[phase 2] fed unlock of the surviving member" "$LOG_P2" "alpine-fde: UNSEALED"
@@ -735,8 +756,8 @@ assert_contains "[phase 2] degraded mount SUCCEEDED (the explicit -o degraded ru
     "$LOG_P2" "P2MRC=0"
 assert_contains "[phase 2] the mount option degraded is IN EFFECT (/proc/mounts)" "$LOG_P2" \
     "DEG-49-OK"
-assert_eq "[phase 2] canary intact on the degraded pool (raid1 data readable)" \
-    "$CANARY_SHA" "$P2_CANARY"
+assert_contains "[phase 2] canary intact on the degraded pool (raid1 data readable)" \
+    "$P2_CANARY_CANDS" "$CANARY_SHA"
 assert_contains "[phase 2] btrfs filesystem show reports the pool fsid" "$LOG_P2" "$FSID"
 assert_contains "[phase 2] btrfs filesystem show reports total devices 2" "$LOG_P2" \
     "Total devices 2"
@@ -956,15 +977,29 @@ feed_line "$P3B/serial.sock" \
     'grep -qs " /mnt btrfs" /proc/mounts && { grep -qw degraded /proc/mounts || echo NG-$((45))-OK; }; echo RDG-$((45+2))-DONE'
 wait_console_soft "$P3B" "RDG-47-DONE" 120 || true
 feed_line "$P3B/serial.sock" \
-    'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-$((44+2))-OK && (grep -qw degraded /proc/mounts && echo DEG-STILL-$((44+9)) || echo NG-$((45))-OK); echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)"; echo P3B-$((45+1))-DONE'
+    'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-$((44+2))-OK && (grep -qw degraded /proc/mounts && echo DEG-STILL-$((44+9)) || echo NG-$((45))-OK); echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)"; sha256sum /mnt/canary.txt | cut -d" " -f1; echo P3B-$((45+1))-DONE'
 wait_console "$P3B" "P3B-46-DONE" 300
+# TCG serial corruption guard for the canary read-back (registry run
+# results-20260925T063641Z: a doubled byte INSIDE the hash — "…c66f44f4663…",
+# final char lost — sliced by the {64} parse into shifted garbage; solo run
+# 1790321112: the label doubled — "CANARY-SHAA …" — and the labeled-only
+# parse returned []). The re-derivation emits a BARE 64-hex line (no label to
+# garble) from the LIVE file; the assertion reads whichever well-formed
+# emission landed (state-grounded, never a replay).
+feed_line "$P3B/serial.sock" 'sha256sum /mnt/canary.txt | cut -d" " -f1; echo C3B-$((45+5))-DONE'
+wait_console_soft "$P3B" "C3B-50-DONE" 120 || true
 feed_line "$P3B/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-phase3b "$((QEMU_TIMEOUT + 60))" qemu_wait "$P3B" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
 
 LOG_3B=$(cat "$P3B/console.log" 2>/dev/null || true)
 R2_RC=$(grep -oE 'R2RC=[0-9]+' "$P3B/console.log" | head -1 | cut -d= -f2)
-P3B_CANARY=$(grep -oE 'CANARY-SHA [0-9a-f]{64}' "$P3B/console.log" | tail -1 | awk '{print $2}')
+# Corruption-tolerant candidates: every BARE 64-hex line (the re-derivation's
+# compact payload) plus every 64-hex token on a CANARY-labeled line (tolerates
+# a garbled label AND a mid-hash doubled byte in one texture when the other
+# landed intact). The assertion matches the host ground truth against the set.
+P3B_CANARY_CANDS=$({ tr -d '\r' < "$P3B/console.log" | grep -E '^[0-9a-f]{64}$'
+                     grep 'CANARY' "$P3B/console.log" | grep -oE '[0-9a-f]{64}'; })
 assert_contains "[phase 3b] standing token discovered by the real unlock path" "$LOG_3B" \
     "$(sentinel_of token_discovered)"
 assert_contains "[phase 3b] the UKI's own .pcrsig consumed (signed policy)" "$LOG_3B" \
@@ -983,8 +1018,8 @@ assert_contains "[phase 3b] full pool assembled + @ mounted" "$LOG_3B" "MNT-46-O
 # the re-derivation leg's emission proves the LIVE pool mounted non-degraded
 assert_contains "[phase 3b] pool is NOT degraded (both members live)" "$LOG_3B" "NG-45-OK"
 assert_not_contains "[phase 3b] no degraded mount option anywhere" "$LOG_3B" "DEG-STILL-53"
-assert_eq "[phase 3b] canary intact end-to-end (raid1 rebuild acceptance check)" \
-    "$CANARY_SHA" "$P3B_CANARY"
+assert_contains "[phase 3b] canary intact end-to-end (raid1 rebuild acceptance check)" \
+    "$P3B_CANARY_CANDS" "$CANARY_SHA"
 assert_not_contains "[phase 3b] no emergency shell" "$LOG_3B" "$(sentinel_of emergency_forbidden)"
 if [[ -f "$P3B/qemu.pid" ]] && ! kill -0 "$(cat "$P3B/qemu.pid" 2>/dev/null)" 2>/dev/null; then
     _assert_result ok "[phase 3b] guest exited (clean poweroff, not timeout-kill)" ""
