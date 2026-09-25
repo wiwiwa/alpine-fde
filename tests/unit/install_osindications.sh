@@ -47,7 +47,7 @@ assert_eq "G-C26: ZERO OsIndications records (single)" "0" "$(grep -c 'fw_osindi
 assert_eq "G-C26: NO reboot-to-BIOS-setup comment (retired)" "0" \
     "$(grep -c 'BIOS setup' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt")
+I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 I_REBOOT=$(line_no "$OUT" "reboot #")
 assert_eq "order: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
@@ -82,7 +82,7 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISK2" 2>&1)
 assert_eq "raid1 dry-run rc 0" "0" "$?"
 assert_eq "raid1: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt")
+I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "raid1: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "raid1: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -93,7 +93,7 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --bcache "$CACHE" 2>&1)
 assert_eq "bcache dry-run rc 0" "0" "$?"
 assert_eq "bcache: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt")
+I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "bcache: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "bcache: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -104,7 +104,7 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISKB" --bcache "$C
 assert_eq "bcache-multi dry-run rc 0" "0" "$?"
 assert_eq "bcache-multi: ZERO OsIndications records" "0" "$(grep -c 'fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt")
+I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "bcache-multi: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "bcache-multi: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
