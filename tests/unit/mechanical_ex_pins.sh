@@ -44,7 +44,7 @@ assert_eq "dispatcher shebang is plain sh (no default xtrace)" "#!/bin/sh" "$(he
 assert_contains "dispatcher runs under errexit (set -eu)" "$(cat "$DISPATCHER")" "set -eu"
 assert_contains "dispatcher exposes the ALPINE_FDE_TRACE opt-in xtrace seam" \
     "$(cat "$DISPATCHER")" 'ALPINE_FDE_TRACE'
-assert_contains "./install bootstrap carries -x (set -eux)" "$(cat "$REPO/install")" "set -eux"
+assert_contains "./alpine-fde bootstrap carries -x (set -eux)" "$(cat "$REPO/alpine-fde")" "set -eux"
 assert_contains "emitted guest script shebang carries -ex (install.sh qemu emission)" \
     "$(cat "$REPO/lib/cmd/install.sh")" '#!/bin/sh -ex'
 assert_contains "emitted guest script carries set -eux (install.sh qemu emission)" \
