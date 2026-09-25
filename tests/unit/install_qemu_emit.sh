@@ -155,8 +155,18 @@ assert_eq "host step emitted as comment: mkfs.btrfs" "1" \
     "$(grep -c '^# HOST: .*mkfs.btrfs' "$SCRIPT")"
 assert_eq "host step emitted as comment: luksFormat (keyslot 0, ephemeral key)" "1" \
     "$(grep -c '^# HOST: .*luksFormat --type luks2' "$SCRIPT")"
-assert_eq "emitted: EVERY luksFormat runs --batch-mode (real-install defect 5: no interactive dangerous-action YES)" "0" \
-    "$(grep 'luksFormat' "$SCRIPT" | grep -vc -- '--batch-mode')"
+# Comment-proof --batch-mode check (w2-lint-leg1): the record's own trailing
+# comment NAMES --batch-mode, so a plain `grep -vc -- --batch-mode` is defeated
+# by it — strip the `# HOST: ` record prefix and the trailing ` #` comment
+# FIRST, then count unbatched records. (A bare `s/#.*$//` would eat the whole
+# host record — in the qemu lane it IS a comment line — and false-positive.)
+assert_eq "emitted: EVERY luksFormat runs --batch-mode on the COMMAND, comment stripped (real-install defect 5: no interactive dangerous-action YES)" "0" \
+    "$(grep 'luksFormat' "$SCRIPT" | sed 's/^# HOST: //; s/ *#.*$//' | grep -vc -- '--batch-mode')"
+# RED guard: the check must be able to FAIL — drop the flag while the comment
+# still vouches for it, on a scratch copy, and the fixed expression flags it
+sed 's/cryptsetup --batch-mode luksFormat/cryptsetup luksFormat/' "$SCRIPT" >"$T/script-nobatch.sh"
+assert_eq "emitted: --batch-mode check is comment-proof (flag dropped, comment kept -> flagged)" "1" \
+    "$(grep 'luksFormat' "$T/script-nobatch.sh" | sed 's/^# HOST: //; s/ *#.*$//' | grep -vc -- '--batch-mode')"
 assert_contains "emitted: luksFormat carries the --batch-mode global option" "$(cat "$SCRIPT")" \
     "cryptsetup --batch-mode luksFormat"
 assert_eq "host step emitted as comment: tree copy (G-C7: /opt/alpine-fde)" "1" \

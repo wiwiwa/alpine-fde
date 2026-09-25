@@ -82,8 +82,16 @@ assert_eq "dry-run rc 0" "0" "$INS_RC"
 assert_contains "plan: sfdisk GPT partitioning" "$INS_OUT" "sfdisk"
 assert_contains "plan: uefi ESP partition" "$INS_OUT" "type=uefi"
 assert_contains "plan: luksFormat luks2" "$INS_OUT" "luksFormat --type luks2"
-assert_eq "plan: EVERY luksFormat runs --batch-mode (no interactive dangerous-action YES, real-install defect 5)" "0" \
-    "$(grep 'luksFormat' <<<"$INS_OUT" | grep -vc -- '--batch-mode')"
+# Comment-proof --batch-mode check (w2-lint-leg1): the plan record's trailing
+# comment NAMES --batch-mode, so a plain `grep -vc -- --batch-mode` is defeated
+# by it — strip the trailing ` #` comment FIRST, then count unbatched records
+assert_eq "plan: EVERY luksFormat runs --batch-mode on the COMMAND, comment stripped (no interactive dangerous-action YES, real-install defect 5)" "0" \
+    "$(grep 'luksFormat' <<<"$INS_OUT" | sed 's/ *#.*$//' | grep -vc -- '--batch-mode')"
+# RED guard: the check must be able to FAIL — drop the flag while the comment
+# still vouches for it, on a scratch copy of the plan, and the fixed expr flags it
+NOBATCH_PLAN=$(grep 'luksFormat' <<<"$INS_OUT" | sed 's/cryptsetup --batch-mode luksFormat/cryptsetup luksFormat/')
+assert_eq "plan: --batch-mode check is comment-proof (flag dropped, comment kept -> flagged)" "1" \
+    "$(grep 'luksFormat' <<<"$NOBATCH_PLAN" | sed 's/ *#.*$//' | grep -vc -- '--batch-mode')"
 assert_contains "plan: Argon2id KDF pinned" "$INS_OUT" "--pbkdf argon2id"
 assert_contains "plan: argon2id memory pin" "$INS_OUT" "--pbkdf-memory 1048576"
 assert_contains "plan: argon2id time pin" "$INS_OUT" "--iter-time 2000"
