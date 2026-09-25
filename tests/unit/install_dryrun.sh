@@ -82,6 +82,8 @@ assert_eq "dry-run rc 0" "0" "$INS_RC"
 assert_contains "plan: sfdisk GPT partitioning" "$INS_OUT" "sfdisk"
 assert_contains "plan: uefi ESP partition" "$INS_OUT" "type=uefi"
 assert_contains "plan: luksFormat luks2" "$INS_OUT" "luksFormat --type luks2"
+assert_eq "plan: EVERY luksFormat runs --batch-mode (no interactive dangerous-action YES, real-install defect 5)" "0" \
+    "$(grep 'luksFormat' <<<"$INS_OUT" | grep -vc -- '--batch-mode')"
 assert_contains "plan: Argon2id KDF pinned" "$INS_OUT" "--pbkdf argon2id"
 assert_contains "plan: argon2id memory pin" "$INS_OUT" "--pbkdf-memory 1048576"
 assert_contains "plan: argon2id time pin" "$INS_OUT" "--iter-time 2000"
@@ -330,9 +332,45 @@ CACHEDEV=$T/cache.img
 run_install --disk "$FAKEDISK" --bcache "$CACHEDEV"
 assert_eq "bcache dry-run rc 0" "0" "$INS_RC"
 assert_contains "bcache: cache dev partitioned (ESP p1 + cache p2)" "$INS_OUT" 'name="cache"'
-assert_contains "bcache: backing dev partitioned (p1 only)" "$INS_OUT" 'name="backing"'
+# PHYSICAL-MEDIA BLOCK (real-install defects 1-4): modules are not auto-loaded
+# on a physical boot, /dev needs coldplug after sfdisk, stale superblocks make
+# make-bcache refuse the device, and the backing device is the WHOLE disk.
+assert_not_contains "bcache: backing dev NOT partitioned (backing = WHOLE disk, bcache semantics)" \
+    "$INS_OUT" 'name="backing"'
+assert_contains "bcache: modprobe bcache before any bcache work" "$INS_OUT" \
+    "if command -v modprobe >/dev/null 2>&1; then modprobe bcache; fi"
+assert_contains "bcache: modprobe btrfs before any btrfs work" "$INS_OUT" \
+    "if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi"
+assert_contains "bcache: early coldplug (mdev -s) before partitioning" "$INS_OUT" "mdev -s"
+O_BCMOD=$(line_no "$INS_OUT" "modprobe bcache")
+O_BTMOD=$(line_no "$INS_OUT" "modprobe btrfs")
+O_COLD1=$(line_no "$INS_OUT" "mdev -s")
+O_CSFD=$(line_no "$INS_OUT" "sfdisk $CACHEDEV")
+O_COLD2=$(line_no "$INS_OUT" "partition device nodes must exist before make-bcache")
+O_WIPEC=$(line_no "$INS_OUT" "dd if=/dev/zero of=${CACHEDEV}2 bs=1M count=1")
+O_WIPEB=$(line_no "$INS_OUT" "dd if=/dev/zero of=$FAKEDISK bs=1M count=1")
+O_MAKEC=$(line_no "$INS_OUT" "make-bcache -C")
+assert_eq "bcache: order — modprobe bcache before modprobe btrfs before coldplug" "1" \
+    "$(( O_BCMOD > 0 && O_BCMOD < O_BTMOD && O_BTMOD < O_COLD1 ? 1 : 0 ))"
+assert_eq "bcache: order — modules + coldplug BEFORE partitioning" "1" \
+    "$(( O_COLD1 > 0 && O_COLD1 < O_CSFD ? 1 : 0 ))"
+assert_eq "bcache: order — post-sfdisk coldplug BEFORE the superblock wipe" "1" \
+    "$(( O_CSFD > 0 && O_CSFD < O_COLD2 && O_COLD2 < O_WIPEC ? 1 : 0 ))"
+assert_eq "bcache: order — superblock wipes BEFORE make-bcache (defect 3)" "1" \
+    "$(( O_WIPEC > 0 && O_WIPEB > 0 && O_WIPEB < O_MAKEC && O_WIPEC < O_MAKEC ? 1 : 0 ))"
+assert_contains "bcache: stale-superblock wipe covers the cache p2 TAIL" "$INS_OUT" \
+    "dd if=/dev/zero of=${CACHEDEV}2 bs=1M count=1 seek="
+assert_contains "bcache: stale-superblock wipe (head) on the WHOLE backing disk" "$INS_OUT" \
+    "dd if=/dev/zero of=$FAKEDISK bs=1M count=1 && dd if=/dev/zero of=$FAKEDISK bs=1M count=1 seek="
 assert_contains "bcache: make-bcache -C on cache p2" "$INS_OUT" "make-bcache -C ${CACHEDEV}2"
-assert_contains "bcache: make-bcache -B on backing p1" "$INS_OUT" "make-bcache -B ${FAKEDISK}1"
+assert_eq "bcache: make-bcache -B on the WHOLE backing disk" "1" \
+    "$(grep -Ec "make-bcache -B $FAKEDISK( |$)" <<<"$INS_OUT")"
+assert_not_contains "bcache: NO make-bcache -B on the backing PARTITION (defect: p1)" "$INS_OUT" \
+    "make-bcache -B ${FAKEDISK}1"
+assert_contains "bcache: WHOLE backing disk registered" "$INS_OUT" \
+    "echo $FAKEDISK > /sys/fs/bcache/register"
+assert_not_contains "bcache: NO backing-p1 registration" "$INS_OUT" \
+    "echo ${FAKEDISK}1 > /sys/fs/bcache/register"
 assert_contains "bcache: cache set attached to bcache0" "$INS_OUT" \
     "/sys/block/bcache0/bcache/attach"
 assert_contains "bcache: WRITETHROUGH pinned (literal, ADR-17)" "$INS_OUT" \
@@ -368,16 +406,31 @@ run_install --disk "$FAKEDISK" --disk "$DISKB" --bcache "$CACHEDEV"
 assert_eq "bcache-multi dry-run rc 0" "0" "$INS_RC"
 assert_contains "bcache-multi: cache dev partitioned (ESP p1 + shared cache p2)" "$INS_OUT" \
     'name="cache"'
-assert_eq "bcache-multi: EACH backing disk partitioned into a backing set" "2" \
+assert_eq "bcache-multi: backing disks NOT partitioned (backing = WHOLE disk)" "0" \
     "$(grep -c 'name=\"backing\"' <<<"$INS_OUT")"
 assert_contains "bcache-multi: make-bcache -C on the shared cache set" "$INS_OUT" \
     "make-bcache -C ${CACHEDEV}2"
-assert_eq "bcache-multi: make-bcache -B per backing p1 (2 backings)" "2" \
+assert_eq "bcache-multi: make-bcache -B on the WHOLE first backing disk" "1" \
+    "$(grep -Ec "make-bcache -B $FAKEDISK( |$)" <<<"$INS_OUT")"
+assert_eq "bcache-multi: make-bcache -B on the WHOLE second backing disk" "1" \
+    "$(grep -Ec "make-bcache -B $DISKB( |$)" <<<"$INS_OUT")"
+assert_eq "bcache-multi: exactly 2 make-bcache -B records (2 backings)" "2" \
     "$(grep -c 'make-bcache -B ' <<<"$INS_OUT")"
-assert_contains "bcache-multi: backing p1 registered (sda1)" "$INS_OUT" \
+O_BCOLD2=$(line_no "$INS_OUT" "partition device nodes must exist before make-bcache")
+O_BWIPE2=$(line_no "$INS_OUT" "dd if=/dev/zero of=${CACHEDEV}2 bs=1M count=1")
+O_BMAKE2=$(line_no "$INS_OUT" "make-bcache -C")
+assert_eq "bcache-multi: order — post-sfdisk coldplug + wipe BEFORE make-bcache (defects 2+3)" "1" \
+    "$(( O_BCOLD2 > 0 && O_BCOLD2 < O_BWIPE2 && O_BWIPE2 < O_BMAKE2 ? 1 : 0 ))"
+assert_not_contains "bcache-multi: NO make-bcache -B on a backing PARTITION (defect: p1)" "$INS_OUT" \
+    "make-bcache -B ${FAKEDISK}1"
+assert_eq "bcache-multi: stale-superblock wipe records cover EVERY member (cache p2 + both disks, 3)" "3" \
+    "$(grep -c 'dd if=/dev/zero of=' <<<"$INS_OUT")"
+assert_contains "bcache-multi: WHOLE first backing disk registered" "$INS_OUT" \
+    "echo $FAKEDISK > /sys/fs/bcache/register"
+assert_contains "bcache-multi: WHOLE second backing disk registered" "$INS_OUT" \
+    "echo $DISKB > /sys/fs/bcache/register"
+assert_not_contains "bcache-multi: NO backing-p1 registration" "$INS_OUT" \
     "echo ${FAKEDISK}1 > /sys/fs/bcache/register"
-assert_contains "bcache-multi: backing p1 registered (sdb1)" "$INS_OUT" \
-    "echo ${DISKB}1 > /sys/fs/bcache/register"
 assert_contains "bcache-multi: bcache0 attached to the shared cset (writethrough)" "$INS_OUT" \
     "/sys/block/bcache0/bcache/attach"
 assert_contains "bcache-multi: bcache1 attached to the shared cset (writethrough)" "$INS_OUT" \

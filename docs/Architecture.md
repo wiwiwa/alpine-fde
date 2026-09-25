@@ -94,7 +94,9 @@ The default filesystem for the encrypted root is **Btrfs**, configured with stan
    p1  ESP     FAT32, holds signed systemd-boot & UKIs (firmware accessible)
    p2  Cache   bcache caching set (make-bcache -C)
    Backing Drive (e.g. HDD --disk, /dev/sda):
-   p1  Backing bcache backing device (make-bcache -B)
+   WHOLE DISK  bcache backing device (make-bcache -B /dev/sda — bcache
+               semantics: the backing device is the whole disk, never a
+               partition; stale superblocks are wiped head+tail first)
     Virtual Device:
     /dev/bcache0 ───▶ LUKS2 dm-crypt (single TPM 2.0 token)
                       └── Btrfs root filesystem (@, @home, @snapshots)
@@ -113,10 +115,10 @@ The default filesystem for the encrypted root is **Btrfs**, configured with stan
    p1  ESP     FAT32, holds signed systemd-boot & UKIs (firmware accessible)
    p2  Cache   bcache caching set (make-bcache -C) shared by all backing drives
    Backing Drives (e.g. HDDs /dev/sda, /dev/sdb):
-   p1  Backing bcache backing device for each disk (make-bcache -B /dev/sda1, make-bcache -B /dev/sdb1)
+   WHOLE DISK  bcache backing device per disk (make-bcache -B /dev/sda, make-bcache -B /dev/sdb)
    Virtual Devices & Encryption:
-   /dev/bcache0 (backing sda1) ───▶ LUKS2 dm-crypt (/dev/mapper/root1) ┐
-   /dev/bcache1 (backing sdb1) ───▶ LUKS2 dm-crypt (/dev/mapper/root2) ┴──▶ Btrfs RAID1 pool
+   /dev/bcache0 (backing sda) ───▶ LUKS2 dm-crypt (/dev/mapper/root1) ┐
+   /dev/bcache1 (backing sdb) ───▶ LUKS2 dm-crypt (/dev/mapper/root2) ┴──▶ Btrfs RAID1 pool
                                                                              (@, @home, @snapshots)
    * Cache Mode: Always "writethrough" for all attached backing devices (crash-safe; backing drives remain 100% consistent).
    * Key Invariant: LUKS2 sits ON TOP of bcache on each device (ciphertext-only caching; zero plaintext on cache SSD).

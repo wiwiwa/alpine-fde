@@ -79,7 +79,7 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
-    rc-update bootctl btrfs reboot chroot; do
+    rc-update bootctl btrfs reboot chroot modprobe mdev; do
     make_stub "$s"
 done
 
@@ -247,12 +247,12 @@ assert_eq "§9.1 Stage 1 chroot install rc 0 (ceremony answers on stdin)" "0" "$
 assert_not_contains "BR-01: --key-file names an EXISTING file at cryptsetup execution time" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "key-file target missing at execution time"
 assert_contains "BR-01: luksFormat ran scripted via the staged ephemeral key-file" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" "cryptsetup luksFormat"
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "cryptsetup --batch-mode luksFormat"
 EPHKEY=$(grep -oE "$T/alpine-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
 assert_eq "G-C23: ephemeral key staged under the tmpfs seam" "1" \
     "$([ -n "$EPHKEY" ] && echo 1 || echo 0)"
 assert_contains "G-C23: keyslot 2 (TEMPORARY) formatted with the ephemeral key via --key-file" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid"
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid"
 assert_eq "G-C23: keyslot 0 NEVER used at luksFormat (reserved for the ceremony, §7.2)" "0" \
     "$(grep -Fc 'luksFormat --key-slot 0' "$ALPINE_FDE_TEST_LOG")"
 assert_contains "G-C23: open uses the same staged key-file" "$(cat "$ALPINE_FDE_TEST_LOG")" \
@@ -261,6 +261,25 @@ assert_eq "G-C23: NO operator passphrase consumed anywhere" "0" \
     "$(grep -c 'ALPINE_FDE_DISK_PASSPHRASE=' <<<"$OUT")"
 assert_not_contains "G-C23: NO interactive passphrase prompt in the run" "$OUT" \
     "Set disk encryption passphrase"
+
+# =============================================================================
+# PHYSICAL-MEDIA block sequence (real-install defects 1+2) + batch-mode LUKS
+# (defect 5): executed at the observed-argv level through the stubs.
+# =============================================================================
+LOG=$(cat "$ALPINE_FDE_TEST_LOG")
+# execution level: the log records the stubs' argv — the guard text itself is
+# pinned verbatim at the plan-text level (install_dryrun.sh / install_qemu_emit.sh)
+assert_contains "physical: btrfs module loaded explicitly (not auto-loaded on a physical boot)" "$LOG" \
+    "modprobe btrfs"
+assert_contains "physical: coldplug (mdev -s) settles /dev before partitioning" "$LOG" \
+    "mdev -s"
+L_MODP=$(first_line_no "$LOG" "modprobe btrfs")
+L_COLDP=$(first_line_no "$LOG" "mdev -s")
+L_HSFD=$(first_line_no "$LOG" "sfdisk")
+assert_eq "physical: order — modprobe BEFORE coldplug BEFORE sfdisk" "1" \
+    "$(( L_MODP > 0 && L_MODP < L_COLDP && L_COLDP < L_HSFD ? 1 : 0 ))"
+assert_eq "defect 5: EVERY executed luksFormat ran --batch-mode (zero interactive dangerous-action prompts)" "0" \
+    "$(grep 'luksFormat' "$ALPINE_FDE_TEST_LOG" | grep -vc -- '--batch-mode')"
 
 # =============================================================================
 # §9.1 step 4 credential ceremony (ADR-20 amended): executed host-side, the
@@ -549,6 +568,8 @@ assert_eq "raid1: secondary got NO ESP (single mkfs.vfat on primary p1)" "1" \
 assert_contains "raid1: ESP on primary p1" "$LOG2" "mkfs.vfat -F 32 -n EFI ${DISK}1"
 assert_eq "raid1: exactly 2 per-member luksFormat records" "2" \
     "$(grep -c 'luksFormat --type luks2' <<<"$LOG2")"
+assert_eq "raid1: BOTH member luksFormat records ran --batch-mode (defect 5)" "2" \
+    "$(grep -c 'cryptsetup --batch-mode luksFormat' <<<"$LOG2")"
 assert_contains "raid1: mkfs.btrfs -d raid1 -m raid1 over both mappers" "$LOG2" \
     "-d raid1 -m raid1 /dev/mapper/root1 /dev/mapper/root2"
 assert_eq "raid1: primary opened as root1" "1" \

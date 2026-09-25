@@ -63,7 +63,7 @@ Two or more disks (repeatable `--disk`): data and metadata are mirrored across t
 ### Topology B: Accelerated Hybrid Storage (`--bcache`)
 Accelerates one or more high-capacity backing drives (repeatable `--disk`) with a fast NVMe caching drive (`--bcache`):
 - ESP (`p1`) and the bcache caching set (`p2`) reside on the fast NVMe drive.
-- Each backing drive hosts a backing device (`p1`), registering as `/dev/bcache0`, `/dev/bcache1`, …
+- Each backing drive is used WHOLE as the backing device (bcache semantics: no partition table on the backing drive), registering as `/dev/bcache0`, `/dev/bcache1`, …
 - A LUKS2 container sits directly on every `/dev/bcacheN` in strictly enforced **`writethrough`** mode.
 
 Single backing drive (fast NVMe caching a slow HDD or SSD):
@@ -357,18 +357,19 @@ or you can inspect and complete manually with: alpine-fde finalize
 
 **Scenario:** In an accelerated single-disk or multi-disk hybrid setup (`--disk /dev/sda --bcache /dev/nvme0n1` or `--bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb`), the NVMe SSD physically fails, taking down both the ESP (`p1`) and the cache partition (`p2`).
 
-Because the system was installed in **`writethrough`** mode, **100% of your data remains intact on the backing disk(s) (`/dev/sda1`, `/dev/sdb1`)**.
+Because the system was installed in **`writethrough`** mode, **100% of your data remains intact on the backing disk(s) (`/dev/sda`, `/dev/sdb`)**.
 
 #### Step 1: Boot Recovery Live Media
 Boot from an Alpine Linux live USB.
 
 #### Step 2: Assemble Backing Device in Standalone Mode
-Without the caching drive present, load the bcache module and register the backing disk(s) directly:
+Without the caching drive present, load the bcache module and register the backing disk(s) directly (each backing drive is used WHOLE — bcache semantics):
 ```sh
 modprobe bcache
-echo /dev/sda1 > /sys/fs/bcache/register
+mdev -s
+echo /dev/sda > /sys/fs/bcache/register
 # For multi-disk setups, register all backing drives:
-# echo /dev/sdb1 > /sys/fs/bcache/register
+# echo /dev/sdb > /sys/fs/bcache/register
 # The virtual block devices appear at /dev/bcache0 (and /dev/bcache1)
 ```
 
@@ -501,18 +502,22 @@ If a backing HDD (e.g. `/dev/sdb`) fails in an accelerated hybrid RAID1 setup:
 1. **Boot live media and assemble surviving array degraded:**
    ```sh
    modprobe bcache
-   echo /dev/sda1 > /sys/fs/bcache/register
+   echo /dev/sda > /sys/fs/bcache/register
    cryptsetup open /dev/bcache0 root1
    mount -o degraded,subvol=@ /dev/mapper/root1 /mnt
    ```
-2. **Install replacement drive** (e.g. `/dev/sdc`) and partition it with a backing partition:
+2. **Install replacement drive** (e.g. `/dev/sdc`) — it is used WHOLE as the
+   backing device (bcache semantics: no partition table on the backing drive).
+   Wipe stale superblocks first (bcache refuses devices with leftover
+   signatures):
    ```sh
-   printf 'label: gpt\ntype=linux, name="backing"\n' | sfdisk /dev/sdc
+   dd if=/dev/zero of=/dev/sdc bs=1M count=1
+   dd if=/dev/zero of=/dev/sdc bs=1M count=1 seek=$(( $(blockdev --getsize64 /dev/sdc) / 1048576 - 1 ))
    ```
 3. **Format as bcache backing device and attach to the NVMe caching set:**
    ```sh
-   make-bcache -B /dev/sdc1
-   echo /dev/sdc1 > /sys/fs/bcache/register
+   make-bcache -B /dev/sdc
+   echo /dev/sdc > /sys/fs/bcache/register
    # Registered as /dev/bcache1
    CSET_UUID=$(bcache-super-show /dev/nvme0n1p2 | grep cset.uuid | awk '{print $2}')
    echo "$CSET_UUID" > /sys/block/bcache1/bcache/attach

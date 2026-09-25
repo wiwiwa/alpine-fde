@@ -8,11 +8,15 @@
 # TOPOLOGIES (§4.1):
 #   single       --disk DISK                       ESP p1 + LUKS2 p2, Btrfs
 #   bcache       --disk BACKING --bcache CACHE     ESP p1 + cache p2 on CACHE,
-#                                                  backing p1 on BACKING,
+#                                                  backing = WHOLE BACKING disk
+#                                                  (bcache semantics: NO
+#                                                  partition table on the
+#                                                  backing dev),
 #                                                  /dev/bcache0 under LUKS2,
 #                                                  writethrough pinned (ADR-17)
 #   bcache-multi --disk D1 --disk D2 --bcache C    shared cache set on C p2,
-#                                                  backing p1 per disk, ONE
+#                                                  backing = WHOLE disk per
+#                                                  disk, ONE
 #                                                  independent LUKS2 container
 #                                                  per /dev/bcacheN, btrfs
 #                                                  raid1 pool across members,
@@ -261,6 +265,19 @@ inst_part() {
   *[0-9]) printf '%sp%s\n' "$1" "$2" ;;
   *) printf '%s%s\n' "$1" "$2" ;;
   esac
+}
+
+# inst_wipe_superblocks_line DEV — single-line host record: dd-zero the HEAD
+# and the TAIL of DEV before it is handed to make-bcache. Real (previously
+# used) disks carry stale filesystem/bcache/LUKS signatures; bcache REFUSES a
+# device with a leftover signature, so the wipe is mandatory before
+# `make-bcache`. dd (head + tail) is the deterministic choice — wipefs is not
+# guaranteed in the installer env. The tail seek is derived at RUN time from
+# `blockdev --getsize64` (the plan line is eval'd / sh -c'd, so the
+# substitution stays literal in dry-run/qemu output); head and tail are `&&`-
+# chained so a failed wipe aborts the plan instead of reaching make-bcache.
+inst_wipe_superblocks_line() {
+  printf '%s\n' "dd if=/dev/zero of=$1 bs=1M count=1 && dd if=/dev/zero of=$1 bs=1M count=1 seek=\$(( \$(blockdev --getsize64 $1) / 1048576 - 1 )) # wipe stale superblocks (head+tail): bcache refuses devices with leftover signatures"
 }
 
 # --- plan records -----------------------------------------------------------
@@ -1005,7 +1022,10 @@ cmd_install_main() {
   if [ "$_im_topology" = "bcache" ]; then
     _im_esp=$(inst_part "$_im_bcache" 1)
     _im_cache=$(inst_part "$_im_bcache" 2)
-    _im_backing=$(inst_part "$_im_disk" 1)
+    # bcache semantics: the BACKING device is the WHOLE data disk (its
+    # superblock lives at LBA 0) — never a partition of it. Only the CACHE dev
+    # is partitioned (ESP p1 + cache set p2).
+    _im_backing=$_im_disk
     _im_luks=/dev/bcache0
   elif [ "$_im_topology" = "bcache-multi" ]; then
     # G-C27/§4.1 topology 4: shared cache set; one LUKS2 container per
@@ -1075,14 +1095,34 @@ cmd_install_main() {
   _im_lukskey_disp=${_im_lukskey:-'<ephemeral-keyfile>'}
 
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
+  # PHYSICAL-MEDIA preconditions (real-install defects 1+2): a physical boot
+  # does NOT auto-load the block modules and /dev is not necessarily settled —
+  # load bcache/btrfs explicitly, then coldplug, BEFORE any bcache/btrfs work.
+  # Explicit `command -v` presence checks (repo idiom — never `|| true`): on
+  # the installer media modprobe/mdev (busybox) always exist; in module-less
+  # fixture environments the records stay inert no-ops while remaining
+  # fail-closed (`set -e` + the plan runner) for any REAL absence.
+  if [ "$(inst_bcache)" = "1" ]; then
+    inst_plan_run host "if command -v modprobe >/dev/null 2>&1; then modprobe bcache; fi # physical boot: the bcache module is not auto-loaded"
+  fi
+  if [ "$(inst_root_fs)" = "btrfs" ]; then
+    inst_plan_run host "if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi # physical boot: the btrfs module is not auto-loaded"
+  fi
+  inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: settle /dev before partitioning"
   case $_im_topology in
   single)
     inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
     ;;
   bcache)
-    # ADR-17: ESP p1 + cache p2 on the FAST dev; backing p1 on the --disk
+    # ADR-17: ESP p1 + cache p2 on the FAST dev; the backing device is the
+    # WHOLE --disk (bcache semantics — the backing dev is NOT partitioned).
     inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
-    inst_plan_run host "printf 'label: gpt\nstart=2048, type=linux, name=\"backing\"\n' | sfdisk $_im_disk"
+    # coldplug AFTER sfdisk (defect 2): the cache p1/p2 device nodes only
+    # appear once the partition table is re-read and coldplug settles.
+    inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
+    # wipe stale superblocks BEFORE make-bcache (defect 3)
+    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_cache")"
+    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_backing")"
     inst_plan_run host "make-bcache -C $_im_cache"
     inst_plan_run host "make-bcache -B $_im_backing"
     inst_plan_run host "echo $_im_cache > /sys/fs/bcache/register && echo $_im_backing > /sys/fs/bcache/register"
@@ -1090,20 +1130,25 @@ cmd_install_main() {
     ;;
   bcache-multi)
     # G-C27/§4.1 topology 4 (18f1213): ESP p1 + SHARED cache set p2 on the
-    # fast dev; EACH backing disk partitioned into a backing set (p1); every
-    # backing device registered (/dev/bcache0, /dev/bcache1, ...) and
-    # attached to the shared cset UUID, writethrough pinned.
+    # fast dev; EACH backing disk is used WHOLE (bcache semantics — the
+    # backing dev is NOT partitioned); every backing device registered
+    # (/dev/bcache0, /dev/bcache1, ...) and attached to the shared cset UUID,
+    # writethrough pinned.
     inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    # coldplug AFTER sfdisk (defect 2), then stale-superblock wipes
+    # BEFORE make-bcache (defect 3) — cache p2 + every whole backing disk.
+    inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
+    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_cache")"
     for _im_d in $_im_disks; do
-      inst_plan_run host "printf 'label: gpt\nstart=2048, type=linux, name=\"backing\"\n' | sfdisk $_im_d"
+      inst_plan_run host "$(inst_wipe_superblocks_line "$_im_d")"
     done
     inst_plan_run host "make-bcache -C $_im_cache"
     for _im_d in $_im_disks; do
-      inst_plan_run host "make-bcache -B $(inst_part "$_im_d" 1)"
+      inst_plan_run host "make-bcache -B $_im_d"
     done
     _im_reg="echo $_im_cache > /sys/fs/bcache/register"
     for _im_d in $_im_disks; do
-      _im_reg="$_im_reg && echo $(inst_part "$_im_d" 1) > /sys/fs/bcache/register"
+      _im_reg="$_im_reg && echo $_im_d > /sys/fs/bcache/register"
     done
     inst_plan_run host "$_im_reg"
     _im_att=''
@@ -1133,7 +1178,7 @@ cmd_install_main() {
   #     TEMPORARY keyslot 2 (unattended; see the SLOT CONTRACT at the top of
   #     this file — keyslot 0 is reserved for the §9.1 step 4 recovery
   #     ceremony, keyslot 1 for the provisional token)
-  inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20)"
+  inst_plan_run host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20); --batch-mode: NO interactive dangerous-action YES prompt (real-install defect 5)"
   inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
   if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     # close/rename: primary mapper is root1 in multi-member topologies;
@@ -1146,7 +1191,7 @@ cmd_install_main() {
       _im_i=$((_im_i + 1))
       _im_mu=$1
       shift
-      inst_plan_run host "cryptsetup luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_mu $_im_keyfile_arg $_im_md # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2)"
+      inst_plan_run host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_mu $_im_keyfile_arg $_im_md # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2); --batch-mode: no interactive YES"
       inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_md root$_im_i"
     done
   fi

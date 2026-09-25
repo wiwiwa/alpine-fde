@@ -123,6 +123,20 @@ assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
     "$(grep -c 'dracut' "$SCRIPT")"
 assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
     "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+
+# --- physical-media block sequence (real-install defects 1+2): the physical ---
+# boot environment does NOT auto-load the block modules and /dev is not settled
+assert_eq "emitted: modprobe btrfs host record (physical boot does not auto-load btrfs)" "1" \
+    "$(grep -c '^# HOST: if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi' "$SCRIPT")"
+assert_eq "emitted: coldplug (mdev -s) host record" "1" \
+    "$(grep -c '^# HOST: if command -v mdev >/dev/null 2>&1; then mdev -s; fi' "$SCRIPT")"
+S_MODP=$(grep -n 'then modprobe btrfs; fi' "$SCRIPT" | cut -d: -f1)
+S_COLD=$(grep -n 'then mdev -s; fi' "$SCRIPT" | cut -d: -f1 | head -1)
+S_HSFD=$(grep -n '^# HOST: .*sfdisk' "$SCRIPT" | cut -d: -f1 | head -1)
+assert_eq "emitted order: modprobe btrfs BEFORE the coldplug" "1" \
+    "$(( S_MODP > 0 && S_MODP < S_COLD ? 1 : 0 ))"
+assert_eq "emitted order: coldplug BEFORE partitioning" "1" \
+    "$(( S_COLD > 0 && S_COLD < S_HSFD ? 1 : 0 ))"
 assert_eq "guest step emitted executable: apk additions txn (§9.1 step 1)" "1" \
     "$(grep -Ec '^apk add --no-cache ' "$SCRIPT")"
 assert_eq "guest step emitted executable: user account (locked, unattended)" "1" \
@@ -141,6 +155,10 @@ assert_eq "host step emitted as comment: mkfs.btrfs" "1" \
     "$(grep -c '^# HOST: .*mkfs.btrfs' "$SCRIPT")"
 assert_eq "host step emitted as comment: luksFormat (keyslot 0, ephemeral key)" "1" \
     "$(grep -c '^# HOST: .*luksFormat --type luks2' "$SCRIPT")"
+assert_eq "emitted: EVERY luksFormat runs --batch-mode (real-install defect 5: no interactive dangerous-action YES)" "0" \
+    "$(grep 'luksFormat' "$SCRIPT" | grep -vc -- '--batch-mode')"
+assert_contains "emitted: luksFormat carries the --batch-mode global option" "$(cat "$SCRIPT")" \
+    "cryptsetup --batch-mode luksFormat"
 assert_eq "host step emitted as comment: tree copy (G-C7: /opt/alpine-fde)" "1" \
     "$(grep -c '^# HOST: .*cp -r .*opt/alpine-fde' "$SCRIPT")"
 assert_eq "host step emitted as comment: pending baseline on target (§9.1 step 2)" "1" \
