@@ -1,0 +1,110 @@
+#!/bin/sh
+# install — remote bootstrap dispatcher for alpine-fde (README "Quick start"):
+#
+#   curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install \
+#       | sh -s -- install --disk /dev/nvme0n1
+#
+# The pipe carries THIS script, so the real installer's interactive credential
+# prompts (user password, recovery passphrase, release-key passphrase) would see
+# EOF on stdin. This dispatcher reconnects stdin to the terminal, fetches the
+# repo source tarball for a pinned ref (curl, falling back to busybox wget on
+# the Alpine live ISO), unpacks it into a fresh mktemp dir, and forwards all
+# arguments to the payload's bin/alpine-fde, propagating its exit code.
+#
+# Seams (ALPINE_FDE_* env namespace, Architecture.md §8.1):
+#   ALPINE_FDE_BOOTSTRAP_TTY          terminal to reconnect stdin to
+#                                     (default /dev/tty)
+#   ALPINE_FDE_BOOTSTRAP_REF          ref to fetch (default main)
+#   ALPINE_FDE_BOOTSTRAP_TARBALL_URL  full tarball URL
+#                                     (default codeload.github.com/<repo>/tar.gz/<ref>)
+#   ALPINE_FDE_BOOTSTRAP_EUID         effective-uid override — test seam for the
+#                                     root precondition (default `id -u`)
+#   ALPINE_FDE_BOOTSTRAP_KEEP_ON_FAIL set to 0 to remove the payload dir even
+#                                     when the installer fails (default: keep)
+#
+# Recorded decisions:
+#   * Checksum pinning is OUT of scope this wave: the tarball is ref-pinned
+#     only, NOT checksum-verified. Revisit when a release channel exists.
+#   * Cleanup: on success the unpacked payload dir is removed; on failure it is
+#     KEPT and its path printed to stderr, so a failed disk install can be
+#     inspected (or its bin/alpine-fde re-run) without re-downloading.
+#   * Exit codes follow the repo convention (lib/common.sh): fail-closed 64 for
+#     the tty and root preconditions; the payload's own exit code propagates
+#     verbatim.
+#   * Every expected-nonzero probe sits in an `if` guard (tty open test,
+#     command -v, fetch, unpack), so a future `set -e` -> `set -ex` sweep
+#     cannot abort before a diagnostic is printed.
+set -eu
+
+bootstrap_fail() { # MESSAGE [RC] — fail loud; keeps the payload dir (see trap)
+    printf 'alpine-fde: bootstrap: %s\n' "$1" >&2
+    _BOOTSTRAP_RC=${2:-64}
+    exit "$_BOOTSTRAP_RC"
+}
+
+# --- 1. reconnect stdin to the terminal ---------------------------------------------
+# NOTE: under `sh -s --`, the shell parses THIS script from stdin — an
+# `exec 0</dev/tty` here would make the shell read the remainder of the script
+# from the terminal (observed: tty content executed as shell commands). The
+# reconnect is therefore payload-scoped: the installer is invoked with the tty
+# as its stdin (step 4), which is the only stdin that matters for the
+# interactive credential prompts.
+ALPINE_FDE_BOOTSTRAP_TTY=${ALPINE_FDE_BOOTSTRAP_TTY:-/dev/tty}
+_BOOTSTRAP_RC=0
+# Subshell probe: if the tty target cannot be opened, fail loudly naming it.
+if ! ( : <"$ALPINE_FDE_BOOTSTRAP_TTY" ) 2>/dev/null; then
+    bootstrap_fail "cannot reconnect stdin to tty '$ALPINE_FDE_BOOTSTRAP_TTY' (no terminal?); run ./bin/alpine-fde directly from a clone instead"
+fi
+
+# --- 2. root precondition (before anything network or disk touching) -----------------
+ALPINE_FDE_BOOTSTRAP_EUID=${ALPINE_FDE_BOOTSTRAP_EUID:-$(id -u)}
+if [ "$ALPINE_FDE_BOOTSTRAP_EUID" != "0" ]; then
+    bootstrap_fail "refusing to run as uid $ALPINE_FDE_BOOTSTRAP_EUID: install partitions disks and must run as root"
+fi
+
+# --- 3. fetch the payload ------------------------------------------------------------
+ALPINE_FDE_BOOTSTRAP_REF=${ALPINE_FDE_BOOTSTRAP_REF:-main}
+ALPINE_FDE_BOOTSTRAP_TARBALL_URL=${ALPINE_FDE_BOOTSTRAP_TARBALL_URL:-https://codeload.github.com/wiwiwa/alpine-fde/tar.gz/$ALPINE_FDE_BOOTSTRAP_REF}
+work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-bootstrap.XXXXXX")
+tarball=$work/tarball.tar.gz
+payload_root=$work/payload
+
+cleanup() {
+    if [ "$_BOOTSTRAP_RC" -ne 0 ] && [ "${ALPINE_FDE_BOOTSTRAP_KEEP_ON_FAIL:-1}" = "1" ]; then
+        printf 'alpine-fde: bootstrap: payload kept for inspection: %s\n' "$work" >&2
+    else
+        rm -rf "$work"
+    fi
+}
+trap cleanup EXIT
+
+if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL -o "$tarball" "$ALPINE_FDE_BOOTSTRAP_TARBALL_URL"; then
+        bootstrap_fail "download failed: $ALPINE_FDE_BOOTSTRAP_TARBALL_URL"
+    fi
+elif command -v wget >/dev/null 2>&1; then
+    # busybox wget on the Alpine live ISO: same -q -O <file> <url> shape
+    if ! wget -q -O "$tarball" "$ALPINE_FDE_BOOTSTRAP_TARBALL_URL"; then
+        bootstrap_fail "download failed: $ALPINE_FDE_BOOTSTRAP_TARBALL_URL"
+    fi
+else
+    bootstrap_fail "neither curl nor wget is available; install curl or busybox wget first"
+fi
+
+mkdir -p "$payload_root"
+if ! tar -xzf "$tarball" -C "$payload_root"; then
+    bootstrap_fail "tarball unpack failed ($ALPINE_FDE_BOOTSTRAP_TARBALL_URL)"
+fi
+# codeload tarballs wrap the tree in a top-level <repo>-<ref>/ dir; locate the
+# payload rather than assuming the wrapper name.
+payload=$(find "$payload_root" -type f -path '*/bin/alpine-fde' | head -n 1)
+if [ -z "$payload" ]; then
+    bootstrap_fail "no bin/alpine-fde found in the fetched tarball ($ALPINE_FDE_BOOTSTRAP_REF)"
+fi
+
+# --- 4. forward everything to the payload; its stdin IS the terminal ----------------
+set +e
+"$payload" "$@" <"$ALPINE_FDE_BOOTSTRAP_TTY"
+_BOOTSTRAP_RC=$?
+set -e
+exit "$_BOOTSTRAP_RC"

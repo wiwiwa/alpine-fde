@@ -53,20 +53,22 @@ Boot the standard Alpine live USB, and install:
 
 ```sh
 # Standard single-disk installation (Btrfs root with @, @home, @snapshots):
-./bin/alpine-fde install --disk /dev/nvme0n1
+curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1
 
 # With optional ephemeral encrypted swap (key wiped on poweroff):
-./bin/alpine-fde install --disk /dev/nvme0n1 --swap 4G
+curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1 --swap 4G
 
 # Accelerated hybrid storage (fast SSD caching slow HDD; strictly writethrough):
-./bin/alpine-fde install --disk /dev/sda --bcache /dev/nvme0n1
+curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/sda --bcache /dev/nvme0n1
 
 # Multi-disk Btrfs RAID1 across two drives:
-./bin/alpine-fde install --disk /dev/nvme0n1 --disk /dev/nvme1n1
+curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1 --disk /dev/nvme1n1
 
 # Accelerated multi-disk hybrid storage (fast SSD caching multiple HDDs in Btrfs RAID1):
-./bin/alpine-fde install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
+curl -sSfL https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
+
+*(The bootstrap script reconnects `stdin` to `/dev/tty` so interactive passphrase prompts work seamlessly through the pipe. Alternatively, if running from a local git clone or unpacked release tarball, invoke `./bin/alpine-fde install ...` directly).*
 
 `install` is unattended **until reboot**: it executes all disk partitioning, package bootstrap, and firmware key enrollment first, prompting for your three credentials — your user account password, your **recovery passphrase**, and your **release signing key passphrase** — as the final step before rebooting directly to disk.
 
