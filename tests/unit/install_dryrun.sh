@@ -65,7 +65,7 @@ assert_eq "unknown runner -> usage rc 2" "2" "$INS_RC"
 export ALPINE_FDE_INSTALL_RUNNER=chroot
 run_install --disk "$FAKEDISK"
 assert_eq "destructive runner without --yes -> usage rc 2" "2" "$INS_RC"
-unset ALPINE_FDE_INSTALL_RUNNER
+export ALPINE_FDE_INSTALL_RUNNER=dry-run
 run_install --fs xfs --disk "$FAKEDISK"
 assert_eq "G-ST1: --fs xfs rejected (btrfs|ext4 only) -> usage rc 2" "2" "$INS_RC"
 assert_contains "--fs error names the valid values" "$INS_OUT" "btrfs or ext4"
@@ -671,7 +671,8 @@ assert_eq "L-06: ALPINE_FDE_YES=0 is NOT consent -> usage rc 2" "2" "$INS_RC"
 assert_contains "L-06: refusal explains the --yes requirement" "$INS_OUT" "requires --yes"
 ALPINE_FDE_YES=no run_install --disk "$FAKEDISK"
 assert_eq "L-06: ALPINE_FDE_YES=no is NOT consent -> usage rc 2" "2" "$INS_RC"
-unset ALPINE_FDE_INSTALL_RUNNER ALPINE_FDE_INSTALL_NO_REBOOT
+export ALPINE_FDE_INSTALL_RUNNER=dry-run
+unset ALPINE_FDE_INSTALL_NO_REBOOT
 
 # --- 8. M-02: injected operator inputs die at the boundary (usage rc 2) --------
 run_install --disk "$FAKEDISK" --user 'x; rm -rf /'
@@ -714,7 +715,8 @@ assert_eq "G-C23: _ime_kf carrier matches the staged key-file" "${_IME_KEYFILE:-
 rm -f "${_IME_KEYFILE:-}"
 unset _IME_KEYFILE _ime_kf ALPINE_FDE_TMPDIR
 trap cleanup EXIT # the resolver re-armed the EXIT trap; restore fixture cleanup
-unset ALPINE_FDE_INSTALL_RUNNER ALPINE_FDE_YES
+export ALPINE_FDE_INSTALL_RUNNER=dry-run
+unset ALPINE_FDE_YES
 
 # --- 9b. §8.1 provision row / ADR-18: --keydir is CONSUMED (staged from the ---
 #         signing medium, NO in-chroot keygen) — README "provision stage1 on

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/unit/install_bootstrap_contract.sh — wget|sh bootstrap `install` script
-# (README Quick start: `wget -qO- .../raw/main/install | sh -s -- install --disk ...`).
+# tests/unit/install_bootstrap_contract.sh — wget|sh bootstrap `alpine-fde` script
+# (README Quick start: `wget -qO- .../raw/main/alpine-fde | sh -s -- install --disk ...`).
 # The script is driven END-TO-END with mocked collaborators (E2E-mock rule: real
 # dispatcher, stubbed fetchers/payload, asserted argv/stdin/exit codes — never
 # source it and poke internal functions):
@@ -20,7 +20,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$HERE/../lib/assert.sh"
-INSTALL="$REPO/install"
+INSTALL="$REPO/alpine-fde"
 
 T=$(mktemp -d /tmp/alpine-fde-boot-contract.XXXXXX)
 trap 'rm -rf "$T"' EXIT
@@ -175,13 +175,13 @@ rc=0; sh -n "$INSTALL" 2>"$T/shn.err" || rc=$?
 assert_eq "sh -n install parses clean" "0" "$rc"
 rc=0; bash -n "$INSTALL" 2>>"$T/shn.err" || rc=$?
 assert_eq "bash -n install parses clean" "0" "$rc"
-assert_eq "install is executable on disk" "yes" \
+assert_eq "bootstrap script is executable on disk" "yes" \
     "$([ -x "$INSTALL" ] && echo yes || echo no)"
-if git -C "$REPO" ls-files --error-unmatch install >/dev/null 2>&1; then
-    assert_eq "install tracked in git as 100755" "100755" \
-        "$(git -C "$REPO" ls-files -s install | awk '{print $1}')"
+if git -C "$REPO" ls-files --error-unmatch alpine-fde >/dev/null 2>&1; then
+    assert_eq "bootstrap script tracked in git as 100755" "100755" \
+        "$(git -C "$REPO" ls-files -s alpine-fde | awk '{print $1}')"
 else
-    assert_eq "install exists (tracked-mode pin applies once committed)" "yes" \
+    assert_eq "bootstrap script exists (tracked-mode pin applies once committed)" "yes" \
         "$([ -f "$INSTALL" ] && echo yes || echo no)"
 fi
 

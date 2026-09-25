@@ -1,5 +1,5 @@
 #!/bin/sh
-# install — remote bootstrap dispatcher for alpine-fde (README "Quick start"):
+# alpine-fde — remote bootstrap dispatcher (repo root; README "Quick start"):
 #
 #   wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install \
 #       | sh -s -- install --disk /dev/nvme0n1

@@ -39,10 +39,11 @@
 #               (§9.1 Stage 2 step 4). I1's two-keyslot at-rest state (0 + 1)
 #               is reached exactly there.
 #
-# RUNNER SEAM (ALPINE_FDE_INSTALL_RUNNER):
-#   dry-run (default)  print the complete action plan, execute nothing
-#   chroot             guided local install from the live ISO: host steps run
+# RUNNER SEAM (ALPINE_FDE_INSTALL_RUNNER) — default chroot (the product);
+#   the seam exists for tests (dry-run plan capture) and CI (qemu emission):
+#   chroot (default)   guided local install from the live ISO: host steps run
 #                      now, guest steps run via `chroot <mnt> sh -c`
+#   dry-run            print the complete action plan, execute nothing
 #   qemu               emit the guest-side plan as a script for the CI harness
 #                      (host steps emitted as comments) — no execution
 #
@@ -86,7 +87,7 @@ fi
 
 SPC_INSTALL_RUNNERS='dry-run chroot qemu'
 
-inst_runner() { printf '%s\n' "${ALPINE_FDE_INSTALL_RUNNER:-dry-run}"; }
+inst_runner() { printf '%s\n' "${ALPINE_FDE_INSTALL_RUNNER:-chroot}"; }
 inst_mnt() { printf '%s\n' "${ALPINE_FDE_INSTALL_MNT:-/mnt}"; }
 # reset-record seams (unit-testable only; a real run never sets these): the
 # device-mapper directory the reset records glob for stale rootN/root-crypt
@@ -253,10 +254,10 @@ MULTIPLE --disk: shared cache set, one independent LUKS2 container per
 /dev/bcacheN, Btrfs RAID1 pool across the members, ESP only on the cache dev.
 --fs ext4 is single-disk only.
 
-Runner (ALPINE_FDE_INSTALL_RUNNER): dry-run (default) prints the plan (the
-credential ceremony appears as plan records only — no prompt, no secret);
-chroot executes (root, live ISO, --yes required; the three ceremony prompts
-are asked in the execution path); qemu emits a guest script.
+Runner: chroot executes (default; root, live ISO, --yes required; the three
+credential ceremony prompts are asked in the execution path). ALPINE_FDE_INSTALL_RUNNER
+is a test/CI seam, not a user setting: dry-run prints the plan only (no
+prompt, no secret); qemu emits a guest script (CI artifact job).
 Env: ALPINE_FDE_ESP_SIZE (default 512M), ALPINE_FDE_MIRROR,
 ALPINE_FDE_INSTALL_MNT, ALPINE_FDE_INSTALL_USER, ALPINE_FDE_DISKS
 (dispatcher-provided disk list), ALPINE_FDE_TMPDIR (ephemeral-key staging
@@ -701,7 +702,11 @@ inst_prompt_secret() {
     _ipl_tty=1
   fi
   _ipl_val=''
-  IFS= read -r _ipl_val || _ipl_val=''
+  # EOF (Ctrl-D / exhausted scripted input) is fail-closed: looping prompts
+  # would otherwise spin forever on exhausted ANSWERS streams (user directive:
+  # mismatched confirms re-prompt instead of exiting).
+  IFS= read -r _ipl_val ||
+    die "install: end of input while waiting for a credential prompt (EOF) — aborting"
   if [ "$_ipl_tty" = "1" ]; then
     stty echo 2>/dev/null
   fi
@@ -751,11 +756,19 @@ inst_ceremony_user_password() {
     _icu_p1=$INST_RECOVERY_PASSPHRASE
     info "install: credential ceremony (2/3): account '$_icu_user' password: Enter — reusing the recovery passphrase"
   else
-    inst_prompt_secret "alpine-fde: repeat the password: " _icu_p2
-    if [ -z "$_icu_p1" ] || [ "$_icu_p1" != "$_icu_p2" ]; then
+    while [ -z "$_icu_p1" ] || [ "$_icu_p1" != "${_icu_p2:-}" ]; do
       unset _icu_p1 _icu_p2
-      die "install: the account passwords were empty or did not match"
-    fi
+      warn "install: the account passwords were empty or did not match — re-prompt until met"
+      inst_prompt_secret "alpine-fde: set the password for account '$_icu_user' (no-echo; press Enter to reuse the recovery passphrase): " _icu_p1
+      if [ -z "$_icu_p1" ]; then
+        [ -n "${INST_RECOVERY_PASSPHRASE:-}" ] ||
+          die "install: the account passwords were empty and no recovery passphrase to reuse"
+        _icu_p1=$INST_RECOVERY_PASSPHRASE
+        info "install: credential ceremony (2/3): account '$_icu_user' password: Enter — reusing the recovery passphrase"
+        break
+      fi
+      inst_prompt_secret "alpine-fde: repeat the password: " _icu_p2
+    done
   fi
   printf '%s:%s\n' "$_icu_user" "$_icu_p1" | chroot "$_icu_mnt" /usr/sbin/chpasswd ||
     die "install: setting the '$_icu_user' password in-chroot failed"
@@ -781,18 +794,14 @@ inst_ceremony_recovery() {
   [ -n "$_icr_auth" ] && [ -f "$_icr_auth" ] ||
     die "install: the staged ephemeral install key is missing — cannot authorize the recovery enrollment (§9.1 step 4 1/3)"
   [ $# -ge 1 ] || die "inst_ceremony_recovery: no target container device given"
-  _icr_attempt=0
   while :; do
-    _icr_attempt=$((_icr_attempt + 1))
-    [ "$_icr_attempt" -le 3 ] ||
-      die "install: recovery passphrase rejected after 3 attempts (§13 entropy floor / mismatch) — restart the install (§12 T2b: one shot at the ceremony)"
     inst_prompt_secret "alpine-fde: set the LUKS2 recovery passphrase (§13: >=12 chars with 3 character classes, or >=16 chars; permanent recovery credential, keyslot 0): " _icr_p1
     inst_prompt_secret "alpine-fde: repeat the recovery passphrase: " _icr_p2
     if [ -n "$_icr_p1" ] && [ "$_icr_p1" = "$_icr_p2" ] && inst_ceremony_floor "$_icr_p1"; then
       break
     fi
     unset _icr_p1 _icr_p2
-    warn "install: recovery passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_icr_attempt/3)"
+    warn "install: recovery passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met"
   done
   INST_RECOVERY_PASSPHRASE=$_icr_p1
   _icr_dir=${ALPINE_FDE_TMPDIR:-/dev/shm}
@@ -839,11 +848,7 @@ inst_ceremony_release_key() {
     unset INST_RECOVERY_PASSPHRASE
     return 0
   fi
-  _ick_attempt=0
   while :; do
-    _ick_attempt=$((_ick_attempt + 1))
-    [ "$_ick_attempt" -le 3 ] ||
-      die "install: release-key passphrase rejected after 3 attempts (§13 entropy floor / mismatch) — restart the install (§12 T2b)"
     inst_prompt_secret "alpine-fde: set the release-key passphrase (encrypts release.pem; no-echo; press Enter to reuse the recovery passphrase): " _ick_p1
     if [ -z "$_ick_p1" ]; then
       [ -n "${INST_RECOVERY_PASSPHRASE:-}" ] ||
@@ -857,7 +862,7 @@ inst_ceremony_release_key() {
       break
     fi
     unset _ick_p1 _ick_p2
-    warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met (attempt $_ick_attempt/3)"
+    warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met"
   done
   ALPINE_FDE_KEY_PASSPHRASE=$_ick_p1
   unset _ick_p1 _ick_p2
@@ -1607,7 +1612,7 @@ EOF
     rm -f "$_im_lukskey" 2>/dev/null
     printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
   else
-    printf 'alpine-fde: dry-run plan complete (%s) — execute with ALPINE_FDE_INSTALL_RUNNER=chroot + --yes (§9.1)\n' "$(inst_runner)" >&2
+    printf 'alpine-fde: dry-run plan complete (%s) — real execution: re-run with --yes (§9.1)\n' "$(inst_runner)" >&2
   fi
   return 0
 }

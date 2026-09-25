@@ -53,22 +53,22 @@ Boot the standard Alpine live USB, and install:
 
 ```sh
 # Standard single-disk installation (Btrfs root with @, @home, @snapshots):
-wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1
+wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/alpine-fde | sh -s -- install --yes --disk /dev/nvme0n1
 
 # With optional ephemeral encrypted swap (key wiped on poweroff):
-wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1 --swap 4G
+wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/alpine-fde | sh -s -- install --yes --disk /dev/nvme0n1 --swap 4G
 
 # Accelerated hybrid storage (fast SSD caching slow HDD; strictly writethrough):
-wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/sda --bcache /dev/nvme0n1
+wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/alpine-fde | sh -s -- install --yes --disk /dev/sda --bcache /dev/nvme0n1
 
 # Multi-disk Btrfs RAID1 across two drives:
-wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --disk /dev/nvme0n1 --disk /dev/nvme1n1
+wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/alpine-fde | sh -s -- install --yes --disk /dev/nvme0n1 --disk /dev/nvme1n1
 
 # Accelerated multi-disk hybrid storage (fast SSD caching multiple HDDs in Btrfs RAID1):
-wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/install | sh -s -- install --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
+wget -qO- https://github.com/wiwiwa/alpine-fde/raw/main/alpine-fde | sh -s -- install --yes --bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb
 ```
 
-*(The bootstrap script reconnects `stdin` to `/dev/tty` so interactive passphrase prompts work seamlessly through the pipe. Alternatively, if running from a local git clone or unpacked release tarball, invoke `./bin/alpine-fde install ...` directly).*
+*(The bootstrap script reconnects `stdin` to `/dev/tty` so interactive passphrase prompts work seamlessly through the pipe. Alternatively, if running from a local git clone or unpacked release tarball, invoke `./bin/alpine-fde install --yes ...` directly).*
 
 `install` is unattended **until reboot**: it executes all disk partitioning, package bootstrap, and firmware key enrollment first, prompting for your three credentials — your **recovery passphrase** first, then your user account password and your **release signing key passphrase** — as the final step before rebooting directly to disk. At the second and third prompts, pressing Enter reuses the recovery passphrase (each prompt carries a hint), so a single memorable passphrase can protect all three credentials.
 
