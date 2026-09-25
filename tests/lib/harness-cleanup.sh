@@ -540,10 +540,22 @@ cmd_prune_runs() {
 #     so a future blob named `console.efi` still cannot eat evidence.
 #     keys/, efivars/, tpm/, tmp/ contain no blob-pattern files and survive
 #     untouched.
-#   - STATE-CHAIN SAFETY: the runner does not call this for s00/s00b at all
-#     (see run-e2e.sh); the cache the from-cache path reuses lives in
-#     tests/e2e/.cache, OUTSIDE any .runs dir, and is unreachable here by
-#     construction.
+#   - STATE-CHAIN SAFETY: the RUNNER does not call this for s00/s00b at all
+#     (run-e2e.sh `_run_one` id check), and as of the 2026-09-25 standalone-
+#     cleanup extension this lib exempts those prefixes ITSELF, keyed on the
+#     run-dir basename — the standalone-exit invocation path
+#     (tests/lib/assert.sh `alpine_fde_exit_prune`) has no scenario id, so
+#     the dir name is the one identity every invocation path shares. The
+#     runner's id check stays as belt and braces. The cache the from-cache
+#     path reuses lives in tests/e2e/.cache, OUTSIDE any .runs dir, and is
+#     unreachable here by construction.
+#   - INVOCATION PATHS (2026-09-25): the runner `_run_one` finalize AND the
+#     scenario's own EXIT trap (tests/lib/assert.sh, armed by every
+#     assertion), so standalone `bash tests/e2e/sXX.sh` runs clean up too.
+#     DOUBLE-FIRE SAFE: a completed pass drops a `.blobs-pruned` marker
+#     inside the run dir (never a delete candidate itself — no blob pattern
+#     matches it) recording the pass's tally; any second call is a cheap
+#     no-op that re-reports the tally.
 #   - ESCAPE HATCH: HARNESS_CLEANUP_KEEP_BLOBS=1 disables the whole pass
 #     (debugging aid). HARNESS_CLEANUP_DRYRUN=1 reports without deleting.
 #   - A timeout-killed scenario may leave a detached helper (qemu/swtpm)
@@ -560,6 +572,18 @@ cmd_prune_blobs() {
         echo "harness-cleanup: prune-blobs: HARNESS_CLEANUP_KEEP_BLOBS=1 — blob cleanup disabled, keeping $dir"
         return 0
     fi
+    # STATE-CHAIN EXEMPTION (2026-09-25, moved in from the runner call site):
+    # these run dirs are the producers every consumer scenario snapshots from
+    # (ALPINE_FDE_E2E_STATE) and what the G-T11b artifact scan reads post-run
+    # — their blobs are NEVER cleaned, on ANY invocation path. Keyed on the
+    # run-dir basename because the standalone-exit path (tests/lib/assert.sh
+    # `alpine_fde_exit_prune`) has no scenario id; the runner's own id check
+    # (run-e2e.sh `_run_one`) stays as belt and braces.
+    case "$(basename "$dir")" in
+        s00-bootstrap-*|s00b-enroll-*)
+            echo "harness-cleanup: prune-blobs: $dir: state-chain producer (s00/s00b) — exempt, blobs kept"
+            return 0 ;;
+    esac
     # shape guard: the run dir must sit under a `.runs` directory (mirrors
     # prune-runs' guard, one level deeper). An absolute or relative path with
     # a dot-component (`/.runs/./x`, `/.runs/../x`) is refused too — no
@@ -573,6 +597,16 @@ cmd_prune_blobs() {
         return 0
     }
     [[ -d "$dir" ]] || { echo "harness-cleanup: prune-blobs: no such run dir: $dir"; return 0; }
+    # DOUBLE-FIRE GUARD: the scenario-exit trap fires before the runner's
+    # `_run_one` finalize on every registry path, so the second call lands
+    # here — a cheap no-op that still names the prior pass's tally ("blob
+    # item(s)" kept in the wording: the captured .out contract pins read it).
+    local marker="$dir/.blobs-pruned" n0=0 f0=0
+    if [[ -f "$marker" ]]; then
+        read -r n0 f0 <"$marker" 2>/dev/null || true
+        echo "harness-cleanup: prune-blobs: $dir: already pruned (marker; ${n0:-0} blob item(s), ${f0:-0} MB freed in a prior pass)"
+        return 0
+    fi
 
     local -a find_args=() doomed=()
     for pat in $BLOB_FILE_PATTERNS; do
@@ -589,6 +623,7 @@ cmd_prune_blobs() {
 
     if ((${#doomed[@]} == 0)); then
         echo "harness-cleanup: prune-blobs: $dir: nothing to clean"
+        printf '0 0\n' >"$marker" 2>/dev/null || true
         return 0
     fi
     freed=$(du -cm -- "${doomed[@]}" 2>/dev/null | tail -1 | cut -f1)
@@ -602,6 +637,9 @@ cmd_prune_blobs() {
     fi
     rm -rf -- "${doomed[@]}"
     ndel=${#doomed[@]}
+    # the double-fire marker is written only by a REAL pass (never under
+    # DRYRUN — a dry-run must leave the dir exactly as it found it)
+    printf '%s %s\n' "$ndel" "$freed" >"$marker" 2>/dev/null || true
     echo "harness-cleanup: prune-blobs: $dir: deleted $ndel blob item(s), ${freed} MB freed"
     return 0
 }

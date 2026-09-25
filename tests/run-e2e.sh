@@ -553,6 +553,11 @@ _run_one() {
     # Best effort — a failed cleanup must never fail the scenario row.
     # Rule set + escape hatch (HARNESS_CLEANUP_KEEP_BLOBS=1): harness-cleanup.sh
     # `prune-blobs`; the report is appended to the scenario's captured .out.
+    # (2026-09-25: the scenario's own EXIT trap — tests/lib/assert.sh
+    # `alpine_fde_exit_prune`, covering STANDALONE runs too — normally pruned
+    # first, so this call is usually prune-blobs' `.blobs-pruned` marker
+    # no-op; the s00/s00b exemption now also lives in the lib itself, keyed
+    # on the run-dir basename.)
     if [[ "$id" != "s00" && "$id" != "s00b" && -n "${scen_rundir:-}" ]]; then
         bash "$TESTS/lib/harness-cleanup.sh" prune-blobs "$scen_rundir" >>"$out_log" 2>&1 || true
     fi

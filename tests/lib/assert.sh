@@ -27,6 +27,68 @@ export TESTS_PASS=0
 export TESTS_FAIL=0
 export ASSERT_RC_OUTPUT=""
 
+# ---------------------------------------------------------------------------
+# PER-SCENARIO CONSUMED-BLOB CLEANUP ON EXIT (Wave-2 queue item 24 ext,
+# 2026-09-25 ENOSPC follow-up). Every e2e scenario sources this lib at
+# startup, but until now only tests/run-e2e.sh's `_run_one` finalize called
+# `harness-cleanup.sh prune-blobs` — a scenario invoked STANDALONE
+# (`bash tests/e2e/sXX.sh`) never passed through the runner, so its run dir
+# kept the whole ~0.5-1.5 GB consumed-blob set, and repeated standalone runs
+# by parallel work lanes refilled tests/e2e/.runs to ENOSPC. So the shared
+# lib arms the cleanup itself:
+#
+#   alpine_fde_arm_exit_prune   chain-safe (re)armer. A source-time `trap`
+#                               alone would NOT survive: scenarios set their
+#                               own EXIT traps AFTER sourcing this lib (the
+#                               REFRESHER/swtpm_cleanup_all pattern), which
+#                               replaces any handler registered here. So the
+#                               armer prepends our handler to whatever EXIT
+#                               handler currently exists, and is re-invoked
+#                               from every _assert_result — the first
+#                               assertion AFTER a scenario's own `trap` call
+#                               re-chains us in front of it (idempotent:
+#                               skips when the chain is already in place).
+#   alpine_fde_exit_prune       the EXIT handler. No-op unless a run dir was
+#                               actually created ($RUN set — the uniform
+#                               scenario convention — under a `.runs` dir and
+#                               existing); otherwise delegates to the REAL
+#                               `prune-blobs` (no deletion logic duplicated
+#                               here), report on STDERR so stdout stays the
+#                               scenario's TAP/`RUNDIR` contract surface.
+#
+# Covered invocation paths: STANDALONE (the hole that caused the refill),
+# registry `_run_one` (serial and -j workers alike — there the scenario exits
+# first, so the runner's later call lands on prune-blobs' `.blobs-pruned`
+# marker and is a cheap no-op), and anything else that exits the scenario
+# process normally (SIGKILL remains unreachable by construction).
+# Failure tolerance: the handler can never change the scenario's exit code
+# (its own status is discarded, and bash preserves the pre-trap exit status).
+alpine_fde_exit_prune() {
+    local d="${RUN:-}" lib="${TESTS:-}/lib/harness-cleanup.sh"
+    [[ -n "$d" && "$d" == /*.runs/* && -d "$d" && -f "$lib" ]] || return 0
+    bash "$lib" prune-blobs "$d" 1>&2 || true
+    return 0
+}
+
+alpine_fde_arm_exit_prune() {
+    local cur body
+    cur=$(trap -p EXIT 2>/dev/null) || return 0
+    [[ "$cur" == *alpine_fde_exit_prune* ]] && return 0
+    if [[ -z "$cur" ]]; then
+        trap 'alpine_fde_exit_prune' EXIT
+        return 0
+    fi
+    # Chain: ours first, then the pre-existing handler verbatim. `trap -p`
+    # prints the handler single-quoted with the outer quotes stripped here —
+    # an embedded single quote would come back `'\''`-escaped and NOT survive
+    # this round-trip; every current scenario EXIT handler is quote-free
+    # (`kill "$REFRESHER" ...; swtpm_cleanup_all ...` / a function name).
+    body=${cur#trap -- \'}
+    body=${body%\' EXIT}
+    trap -- "alpine_fde_exit_prune
+${body}" EXIT
+}
+
 # Internal: record + print one result. $1 ok|not-ok, $2 name, $3 detail.
 _assert_result() {
     local status="$1" name="$2" detail="$3"
@@ -37,6 +99,10 @@ _assert_result() {
         TESTS_FAIL=$((TESTS_FAIL + 1))
         printf 'not ok %d - %s %s\n' "$((TESTS_PASS + TESTS_FAIL))" "$name" "$detail"
     fi
+    # (Re)arm the standalone-exit blob cleanup — cheap (one fork), idempotent;
+    # this is the arming point that makes the chain survive scenarios setting
+    # their own EXIT trap after sourcing this lib.
+    alpine_fde_arm_exit_prune
 }
 
 assert_eq() {
