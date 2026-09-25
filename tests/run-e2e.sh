@@ -124,13 +124,26 @@ _registry_tmpdir_teardown() {
     E2E_TMPDIR_CREATED=""
 }
 
-# --- run-dir disk hygiene (registry-owned) -----------------------------------------
-# Per-scenario best-effort pruning cannot keep .runs small (it dies with the
-# scenario on SIGKILL and races under -j), so the REGISTRY prunes .runs itself:
-# after EVERY scenario completes, and once more on the abort path. The rule set
-# lives in harness-cleanup.sh `prune-runs` (newest 2 per scenario-prefix, 8 GB
-# total cap shrinking to 6 GB oldest-first); its 10-minute in-flight guard is
-# what makes both call sites safe against concurrent/agent runs.
+# --- run-dir disk hygiene (registry-owned + per-scenario blob cleanup) -------------
+# Two layers:
+#   1. PER-SCENARIO BLOB CLEANUP (queue item 24, in `_run_one` below): after a
+#      scenario's result fragment is written, the runner deletes the
+#      scenario's CONSUMED input blobs (uki-*.efi, esp.img, disk.img family,
+#      initrd.cpio, tooling trees — the rule set lives in harness-cleanup.sh
+#      `prune-blobs`; HARNESS_CLEANUP_KEEP_BLOBS=1 disables it). This is the
+#      only bound that works on a live -j wave: prune-runs' fresh-window rule
+#      exempts in-flight dirs, so without the per-scenario pass peak .runs
+#      equals the whole wave's working set (~18 G observed) and a killed
+#      registry strands all of it (two ENOSPC-killed runs, 2026-09-25). The
+#      state-chain producer dirs (s00/s00b) are EXEMPT — consumers snapshot
+#      from them and the G-T11b artifact scan reads them post-run.
+#   2. REGISTRY-OWNED PRUNING: the REGISTRY prunes .runs itself after every
+#      scenario completes and once more on the abort path (rule set in
+#      harness-cleanup.sh `prune-runs`: newest 2 per scenario-prefix, 8 GB
+#      total cap shrinking to 6 GB oldest-first; the 10-minute in-flight guard
+#      is what makes both call sites safe against concurrent/agent runs). On
+#      top of layer 1 this is the backstop for abnormal exits and legacy
+#      blob-laden dirs.
 _registry_pruned=0
 _prune_runs_quiet() {
     bash "$TESTS/lib/harness-cleanup.sh" prune-runs 2>/dev/null || true
@@ -448,7 +461,7 @@ _frag_field() {    # _frag_field <status|seconds> <frag>
 # (background workers are subshells; the phase split guarantees s00/s00b
 # never fork).
 _run_one() {
-    local idx="$1" id="$2" script hint out rc st t0 secs frag stages
+    local idx="$1" id="$2" script hint out rc st t0 secs frag stages scen_rundir
     frag="${FRAG[$idx]}"
     : >"${frag}.log"
     script=$(_script_for "$id")
@@ -511,15 +524,38 @@ _run_one() {
     # as "# boot <run>: powered down|killed after <N>s" lines.
     stages=$(stage_timing_json "$out_log")
     printf '%s\n' "$out" >"${frag}.log"
+    # Every scenario echoes `RUNDIR <path>` as its last line; capture it
+    # generically (the s00/s00b-specific captures below are the historical
+    # narrow form of this).
+    scen_rundir=$(awk '/^RUNDIR /{print $2; exit}' <<<"$out")
     if [[ "$id" == "s00" && "$st" == "pass" ]]; then
-        S00_RUNDIR=$(awk '/^RUNDIR /{print $2; exit}' <<<"$out")
+        S00_RUNDIR=$scen_rundir
         _protect_add "$S00_RUNDIR"   # CR-02/MD-03: prunes must spare s00's state
     fi
     if [[ "$id" == "s00b" && "$st" == "pass" ]]; then
-        S00B_RUNDIR=$(awk '/^RUNDIR /{print $2; exit}' <<<"$out")
+        S00B_RUNDIR=$scen_rundir
         _protect_add "$S00B_RUNDIR"  # CR-02/MD-03: prunes must spare s00b's state
     fi
     _frag_write "$frag" "$id" "$st" "$secs" "$stages"
+    # --- per-scenario blob cleanup (queue item 24) --------------------------------
+    # The scenario is finalized (its fragment row exists — never clean a run
+    # dir before its result row is durable), so its CONSUMED input blobs are
+    # dead weight: strip them IN PLACE so a live -j wave's peak .runs is the
+    # wave's LIVE working set, not every scenario it ever ran (see the
+    # hygiene block at the top of this file). Fires for pass AND fail (and
+    # timeout) rows, on the serial and the -j worker path alike — this
+    # function is the single shared finalize path.
+    # NEVER for s00/s00b: their run dirs are the state chain (s00b snapshots
+    # s00's; the consumers snapshot s00b's; the G-T11b artifact scan reads
+    # both after the whole run). Everything else in .runs has no post-run
+    # reader: consumers snapshot at start, the from-cache path reads
+    # tests/e2e/.cache (outside .runs), and s19-s22 bootstrap in-scenario.
+    # Best effort — a failed cleanup must never fail the scenario row.
+    # Rule set + escape hatch (HARNESS_CLEANUP_KEEP_BLOBS=1): harness-cleanup.sh
+    # `prune-blobs`; the report is appended to the scenario's captured .out.
+    if [[ "$id" != "s00" && "$id" != "s00b" && -n "${scen_rundir:-}" ]]; then
+        bash "$TESTS/lib/harness-cleanup.sh" prune-blobs "$scen_rundir" >>"$out_log" 2>&1 || true
+    fi
 }
 
 # _print_done <index> — completion line for one scenario (its captured output

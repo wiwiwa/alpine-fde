@@ -9,7 +9,19 @@
 #   tests/lib/harness-cleanup.sh registry-exit   # EXIT-trap pass: remove the
 #                                                # registry TMPDIR only (no
 #                                                # process sweep)
-#   HARNESS_CLEANUP_DRYRUN=1 ... sweep|prune-runs  # report, change nothing
+#   tests/lib/harness-cleanup.sh prune-blobs <run-dir>
+#                                                # per-scenario CONSUMED-BLOB
+#                                                # cleanup (queue item 24):
+#                                                # delete the big input blobs
+#                                                # from ONE completed run dir,
+#                                                # keep the evidence
+#   HARNESS_CLEANUP_DRYRUN=1 ... sweep|prune-runs|prune-blobs
+#                                                # report, change nothing
+#   HARNESS_CLEANUP_KEEP_BLOBS=1 ... prune-blobs # escape hatch: disable the
+#                                                # per-scenario blob cleanup
+#                                                # (debugging aid; pinned by
+#                                                # tests/unit/
+#                                                # harness_run_dir_cleanup_contract.sh)
 #
 # Called by tests/run-e2e.sh at registry start (full `sweep`, BEFORE the first
 # scenario) and in the registry EXIT trap (`registry-exit` — deliberately NOT
@@ -347,6 +359,14 @@ cmd_sweep() {
 #       still writing it) — this is what makes abort-path pruning safe.
 #
 # Constants are env-tunable for tests; the defaults are the audited contract.
+# Interplay note (Wave-2 queue item 24): the fresh-window rule (c) means this
+# cap CANNOT bound a live -j wave — peak .runs equals the whole wave's working
+# set and a SIGKILLed registry strands it (two ENOSPC-killed runs, 2026-09-25).
+# The bound that actually works mid-wave is the per-scenario `prune-blobs`
+# pass below: the runner strips each completed scenario's consumed blobs
+# (its own call, not a prune race), so by the time rule (c) expires a dir
+# holds kilobytes of evidence, not gigabytes of blobs. Rules (a)-(d) here stay
+# unchanged and remain the backstop for ABNORMAL exits and pre-24 dirs.
 RUNS_DIR="${HARNESS_CLEANUP_RUNS_DIR:-$TESTS/e2e/.runs}"
 PRUNE_KEEP="${HARNESS_CLEANUP_PRUNE_KEEP:-2}"              # (a) newest kept per prefix
 PRUNE_CAP_MB="${HARNESS_CLEANUP_PRUNE_CAP_MB:-8192}"       # (b) trigger: total .runs size
@@ -484,6 +504,108 @@ cmd_prune_runs() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# PER-SCENARIO BLOB CLEANUP (`prune-blobs <run-dir>`) — Wave-2 queue item 24
+# (user-directed: "should the disk image be removed after each test case?" ->
+# YES). A completed scenario's run dir keeps ~0.5-1.5 GB of CONSUMED input
+# blobs (uki-*.efi @~107-111 MB each, harness*.efi, measure-throwaway.efi,
+# initrd.cpio, esp.img, disk.img + its disk.img.prebootb restore copy, pcrsig
+# *.img, the unpacked tooling tree) while the evidence anyone ever reads back
+# is kilobytes. `prune-runs` above cannot bound a live wave (its fresh-window
+# rule (c) exempts in-flight dirs, and it only fires at registry
+# start/exit/_print_done), so the RUNNER calls this once per scenario, from
+# the per-scenario finalize path (tests/run-e2e.sh `_run_one`, AFTER the
+# result fragment is written — the dir is never cleaned before its row
+# exists), for pass AND fail rows, on both the serial and the -j worker path.
+#
+# AUDITED CONTRACT:
+#   - ONLY ever deletes inside a dir that sits under a `.runs` directory
+#     (the same shape guard as prune-runs, stricter: the passed dir must be
+#     <anything>/.runs/<name>). Never follows symlinks out (find -xdev is not
+#     needed: every deletion is by explicit path INSIDE the given dir).
+#   - FILE classes deleted (env-tunable for tests via
+#     HARNESS_CLEANUP_BLOB_PATTERNS): *.efi *.img *.cpio *.iso *.tar.gz
+#     *.prebootb — recursively. These are the consumed input/build blobs;
+#     none is read back after the scenario completes (verified: the only
+#     post-run readers of .runs are the G-T11b artifact scan and the
+#     ALPINE_FDE_E2E_STATE consumers, and both read ONLY the s00-bootstrap-*/
+#     s00b-enroll-* chain dirs — which the runner exempts from cleanup).
+#   - DIR classes deleted: the unpacked scratch trees whose inputs are
+#     consumed during the run (tooling/ = unpacked tooling.tar.gz,
+#     guest-tree/ = build rootfs tree); env-tunable via
+#     HARNESS_CLEANUP_BLOB_SCRATCH_DIRS.
+#   - NEVER deleted even if a blob pattern would match: console*.log, *.out,
+#     *.json (results/state rows, pcrsign JSON), *.txt (cmdline/os-release/
+#     pcr* records), *.pid — an explicit keep-guard in front of the delete,
+#     so a future blob named `console.efi` still cannot eat evidence.
+#     keys/, efivars/, tpm/, tmp/ contain no blob-pattern files and survive
+#     untouched.
+#   - STATE-CHAIN SAFETY: the runner does not call this for s00/s00b at all
+#     (see run-e2e.sh); the cache the from-cache path reuses lives in
+#     tests/e2e/.cache, OUTSIDE any .runs dir, and is unreachable here by
+#     construction.
+#   - ESCAPE HATCH: HARNESS_CLEANUP_KEEP_BLOBS=1 disables the whole pass
+#     (debugging aid). HARNESS_CLEANUP_DRYRUN=1 reports without deleting.
+#   - A timeout-killed scenario may leave a detached helper (qemu/swtpm)
+#     holding blob fds; deleting then only unlinks — the space frees when
+#     the helper exits, and unix semantics make the unlink itself safe.
+BLOB_FILE_PATTERNS="${HARNESS_CLEANUP_BLOB_PATTERNS:-*.efi *.img *.cpio *.iso *.tar.gz *.prebootb}"
+BLOB_SCRATCH_DIRS="${HARNESS_CLEANUP_BLOB_SCRATCH_DIRS:-tooling guest-tree}"
+# keep-guard: matched against each candidate's basename BEFORE deletion
+BLOB_KEEP_RE='^(console.*\.log|.*\.out|.*\.json|.*\.txt|.*\.pid)$'
+
+cmd_prune_blobs() {
+    local dir=$1 pat f d ndel=0 freed
+    if [[ "${HARNESS_CLEANUP_KEEP_BLOBS:-0}" == "1" ]]; then
+        echo "harness-cleanup: prune-blobs: HARNESS_CLEANUP_KEEP_BLOBS=1 — blob cleanup disabled, keeping $dir"
+        return 0
+    fi
+    # shape guard: the run dir must sit under a `.runs` directory (mirrors
+    # prune-runs' guard, one level deeper). An absolute or relative path with
+    # a dot-component (`/.runs/./x`, `/.runs/../x`) is refused too — no
+    # traversal games on a delete path.
+    case "$dir" in
+        /*.runs/*) ;;                # absolute, under a .runs dir
+        *) echo "harness-cleanup: prune-blobs: refusing non-.runs path '$dir'" >&2; return 0 ;;
+    esac
+    [[ "$dir" == *./.runs/* || "$dir" == */.runs/./* || "$dir" == */.runs/../* ]] && {
+        echo "harness-cleanup: prune-blobs: refusing dot-component path '$dir'" >&2
+        return 0
+    }
+    [[ -d "$dir" ]] || { echo "harness-cleanup: prune-blobs: no such run dir: $dir"; return 0; }
+
+    local -a find_args=() doomed=()
+    for pat in $BLOB_FILE_PATTERNS; do
+        find_args+=( -o -name "$pat" )
+    done
+    find_args=("${find_args[@]:1}")   # drop the leading -o
+    while IFS= read -r -d '' f; do
+        [[ "$(basename "$f")" =~ $BLOB_KEEP_RE ]] && continue   # evidence guard
+        doomed+=("$f")
+    done < <(find "$dir" -type f \( "${find_args[@]}" \) -print0 2>/dev/null)
+    for d in $BLOB_SCRATCH_DIRS; do
+        [[ -d "$dir/$d" ]] && doomed+=("$dir/$d")
+    done
+
+    if ((${#doomed[@]} == 0)); then
+        echo "harness-cleanup: prune-blobs: $dir: nothing to clean"
+        return 0
+    fi
+    freed=$(du -cm -- "${doomed[@]}" 2>/dev/null | tail -1 | cut -f1)
+    freed=${freed:-0}
+    if ((DRYRUN)); then
+        for d in "${doomed[@]}"; do
+            echo "harness-cleanup: WOULD prune blob $(printf '%s' "${d#"$dir"/}" | head -c 60) in $dir"
+        done
+        echo "harness-cleanup: prune-blobs: WOULD delete ${#doomed[@]} item(s), ${freed} MB from $dir [dry-run]"
+        return 0
+    fi
+    rm -rf -- "${doomed[@]}"
+    ndel=${#doomed[@]}
+    echo "harness-cleanup: prune-blobs: $dir: deleted $ndel blob item(s), ${freed} MB freed"
+    return 0
+}
+
 # cmd_registry_exit — the registry EXIT-trap pass. Deliberately NOT a process
 # sweep (see header): remove only the TMPDIR this registry created. Guarded by
 # the dfde-e2e- basename so an inherited value can never widen the rm.
@@ -501,10 +623,13 @@ cmd_registry_exit() {
 case "${1:-sweep}" in
     sweep)          cmd_sweep ;;
     prune-runs)     cmd_prune_runs ;;
+    prune-blobs)    shift
+                    [[ -n "${1:-}" ]] || { echo "usage: $0 prune-blobs <run-dir>" >&2; exit 64; }
+                    cmd_prune_blobs "$1" ;;
     disk-state)     cmd_disk_state ;;
     registry-exit)  cmd_registry_exit ;;
     *)
-        echo "usage: $0 [sweep|prune-runs|disk-state|registry-exit]" >&2
+        echo "usage: $0 [sweep|prune-runs|prune-blobs <run-dir>|disk-state|registry-exit]" >&2
         exit 64
         ;;
 esac
