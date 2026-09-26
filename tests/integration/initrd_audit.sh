@@ -206,6 +206,17 @@ run_audit <(cat "$inv"; printf '%s\n' usr/bin/dpkg)
 assert_rc "audit 2d-3: dpkg present fails the audit" 1 "$RUN_AUDIT_RC"
 assert_contains "audit 2d-3: reason names the denied package tool" "$_initrd_audit_reason" "usr/bin/dpkg"
 
+# --- boot-lane finding #13 (s23 attempt 12c): mkinitfs's base layout creates
+# an EMPTY etc/apk DIRECTORY in the initramfs (its init's own apk scratch
+# dir) — the deny match must not read a bare directory entry as a package
+# tool. Package tools are denied as EXECUTABLES (under bin/ or sbin/); the
+# directory entry passes.
+run_audit <(cat "$inv"; printf '%s\n' etc/apk)
+assert_rc "audit 2f: the mkinitfs etc/apk directory entry is NOT a denied package tool" \
+    0 "$RUN_AUDIT_RC"
+run_audit <(cat "$inv"; printf '%s\n' bin/apk)
+assert_rc "audit 2g: an apk BINARY is still denied (bin/)" 1 "$RUN_AUDIT_RC"
+
 run_audit <(cat "$inv"; printf '%s\n' usr/bin/bash usr/bin/zsh usr/bin/dash)
 assert_rc "audit 2e: foreign shells fail the audit" 1 "$RUN_AUDIT_RC"
 assert_contains "audit 2e: reason names the denied bash" "$_initrd_audit_reason" "usr/bin/bash"
