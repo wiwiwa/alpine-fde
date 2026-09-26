@@ -115,17 +115,17 @@
 #                        state `finalized`, `alpine-fde status` sane, the
 #                        {PCR 7, PCR 11} token on keyslot 1, keyslot 2
 #                        PURGED (I1 at-rest shape), evidence exported to
-#                        vdd. FIDELITY GAP (documented): the installer's
-#                        cmdline.txt carries NO console=ttyS0 (the product
-#                        pins rd.shell=0/rd.emergency=poweroff and nothing
-#                        else), so the initrd-phase hook sentinels are NOT
-#                        visible on the serial console of boot B — the
-#                        passwordless proof here is "login with zero input +
-#                        host-side LUKS shape", not hook-sentinel greps. The
-#                        stub measures the cmdline into PCR 11, so a lane
-#                        CANNOT append console=ttyS0 post-hoc without
-#                        breaking the provisional seal (that invariant is
-#                        itself worth a boot-lane probe).
+#                        vdd. Serial observability of boot B is provided by
+#                        the PLAN-TIME extra-cmdline seam: the P4 feed runs
+#                        the installer with ALPINE_FDE_CMDLINE_EXTRA=
+#                        'console=ttyS0,115200' (lib/cmd/install.sh
+#                        inst_cmdline_extra_check / inst_cmdline_extra) —
+#                        the words land in cmdline.txt BEFORE the ukictl
+#                        build + provisional seal, so the PCR-11 measurement
+#                        and the seal agree (a post-hoc append would break
+#                        the seal). Alpine's mkinitfs setup_inittab_console
+#                        then spawns the serial getty on the installed
+#                        system from the same console= word.
 #   stage esp+i2         host: extract the installed ESP (partition 1) from
 #                        the booted disk, assert BOOTX64.EFI +
 #                        EFI/systemd/systemd-bootx64.efi + UKIs present, and
@@ -473,7 +473,7 @@ wait_console "$A" "P3-46-TOOLING-OK" 300
 # --no-reboot + the explicit P5 poweroff replaces the plan's reboot tail
 # under our control (fidelity note in the header).
 feed_line "$A/serial.sock" \
-    "cd /root/alpine-fde && ALPINE_FDE_MIRROR='$MIRROR_URL' ./bin/alpine-fde install --disk /dev/vdb --user $S23_USER --yes --no-reboot; RC=\$?; echo INSTALL-RC=\$RC"
+    "cd /root/alpine-fde && ALPINE_FDE_MIRROR='$MIRROR_URL' ALPINE_FDE_CMDLINE_EXTRA='console=ttyS0,115200' ./bin/alpine-fde install --disk /dev/vdb --user $S23_USER --yes --no-reboot; RC=\$?; echo INSTALL-RC=\$RC"
 
 # the DNS preflight is the FIRST installer action — corroborate it
 wait_console "$A" "install: live env resolves the mirror host $MIRROR_HOSTNAME" 300
@@ -574,9 +574,10 @@ run_stage qemu_run-b 60 qemu_run "$B" "$RUN/esp-blank.img" "$B/disk.img" \
 _qemu_alive "$B"
 _rearm_trap
 # export drive rides the pcrsig slot this boot (vdc): the evidence channel
-# FIDELITY GAP (documented in the header): no console= in the installed UKI
-# cmdline -> initrd-phase hook sentinels are NOT visible; the passwordless
-# proof is zero-input-to-login + the host-side LUKS shape.
+# console=ttyS0,115200 rides the installed UKI cmdline (plan-time
+# ALPINE_FDE_CMDLINE_EXTRA seam, header) -> kernel + initrd-phase output IS
+# serial-visible; the passwordless proof is zero-input-to-login + the
+# host-side LUKS shape.
 LOGIN_SEEN=0
 i=0
 while ((i < QEMU_TIMEOUT)); do

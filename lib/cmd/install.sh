@@ -124,6 +124,36 @@ INST_ESP_MNT=${INST_ESP_MNT:-}
 inst_root_fs() { printf '%s\n' "${INST_ROOT_FS:-btrfs}"; }
 inst_bcache() { printf '%s\n' "${INST_BCACHE:-0}"; }
 inst_esp_mnt() { printf '%s\n' "${INST_ESP_MNT:-/efi}"; }
+
+# inst_cmdline_extra_check — fail-closed validation of ALPINE_FDE_CMDLINE_EXTRA
+# (the plan-time extra-cmdline seam: extra kernel words appended to the target
+# cmdline.txt, e.g. console=ttyS0,115200 for a headless/serial console). The
+# systemd-stub measures the cmdline into PCR 11, so the words MUST be present
+# BEFORE the ukictl build + provisional seal — a post-hoc append would break
+# the seal; that is why this is an install-time seam and not a boot-time knob.
+# A §8.2 H-G1 pin override (any rd.shell=/rd.emergency= word other than the
+# exact pins) dies HERE, before any disk mutation: the seam must not become a
+# silent escape hatch around the cmdline-pins guard (§8.2 G-U6).
+inst_cmdline_extra_check() {
+  _cex_raw=${ALPINE_FDE_CMDLINE_EXTRA:-}
+  [ -n "$_cex_raw" ] || return 0
+  for _cex_w in $_cex_raw; do
+    case $_cex_w in
+    rd.shell=* | rd.emergency=*)
+      die "install: ALPINE_FDE_CMDLINE_EXTRA may not override the §8.2 H-G1 fail-closed pins ($_cex_w) — only the exact pins rd.shell=0 rd.emergency=poweroff may appear (§8.2)"
+      ;;
+    esac
+  done
+}
+
+# inst_cmdline_extra — the validated extra words, whitespace-normalized to
+# single-space separation (the kernel cmdline is space-separated), no leading/
+# trailing space; empty when the seam is unset. Callers splice with
+# ${extra:+ $extra}.
+inst_cmdline_extra() {
+  printf '%s' "${ALPINE_FDE_CMDLINE_EXTRA:-}" \
+    | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'
+}
 # --- ESP sizing (§13): measured UKI size x retention + headroom ---------------
 INST_ESP_RETENTION=3 # current + 2 retained UKIs (§9.3)
 INST_ESP_HEADROOM_BYTES=$((64 * 1024 * 1024))
@@ -641,6 +671,7 @@ inst_setupmode_gate() {
 # before it), then environment/tool checks.
 inst_preflight() {
   inst_setupmode_gate
+  inst_cmdline_extra_check
   [ "$(id -u)" = "0" ] || die "install: must run as root (live ISO environment)"
   for _if_disk in "$@"; do
     [ -b "$_if_disk" ] || [ -f "$_if_disk" ] || die "install: target disk not found: $_if_disk"
@@ -1594,12 +1625,13 @@ cmd_install_main() {
   # The rd.shell=0/rd.emergency=poweroff cmdline pins below stay: they are the
   # H-G1 fail-closed contract enforced by the cmdline-pins guard (§8.2) on
   # every ukictl build — not a dracut module knob.
+  _im_cmdline_extra=$(inst_cmdline_extra)
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+      "root=UUID=$_im_uuid rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
   else
     inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid ro rd.shell=0 rd.emergency=poweroff"
+      "root=UUID=$_im_uuid ro rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
   fi
   # CR-01 + §4.1: persist the resolved topology + ESP mount for the build
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
