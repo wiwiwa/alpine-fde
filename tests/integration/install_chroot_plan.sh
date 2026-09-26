@@ -472,6 +472,25 @@ assert_eq "target: NO dracut.conf.d directory (ADR-13)" "0" \
 assert_eq "cmdline.txt verbatim: rootflags + §8.2 fail-closed pins" \
     "root=UUID=$LUKS_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
+# --- ALPINE_FDE_CMDLINE_EXTRA: the plan-time extra-cmdline seam (headless /
+# serial-console boots — the s23 install canary) --------------------------------
+# The systemd-stub measures the cmdline into PCR 11, so extra words (e.g.
+# console=ttyS0,115200) MUST be present in cmdline.txt BEFORE the ukictl build
+# + provisional seal: a post-hoc append would break the seal. The seam is the
+# PLAN write, fail-closed against §8.2 H-G1 pin overrides.
+ALPINE_FDE_CMDLINE_EXTRA='console=ttyS0 rd.shell=1' run_install
+assert_eq "cmdline extra: a §8.2 H-G1 pin override fails closed 64" "64" "$RC"
+assert_contains "cmdline extra: the override is named in the error" "$OUT" "rd.shell=1"
+assert_eq "cmdline extra: override rejected BEFORE any mutation (zero commands)" \
+    "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
+# the LAST run stages the tree the earlier verbatim pins in this file read
+ALPINE_FDE_CMDLINE_EXTRA='console=ttyS0,115200  quiet' run_install
+LUX_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
+assert_eq "cmdline extra: appended at PLAN time, whitespace-normalized (PCR-11 seam)" \
+    "root=UUID=$LUX_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff console=ttyS0,115200 quiet" \
+    "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
+unset ALPINE_FDE_CMDLINE_EXTRA
+
 # §4: topology recorded in the target conf (absent file = btrfs default, doc'd)
 assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ROOT_FS=btrfs"
 assert_contains "conf: BCACHE=0 recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "BCACHE=0"
