@@ -89,7 +89,7 @@
 #                        127.0.0.1:$MIRROR_PORT by mirror_serve_start
 #                        (MANIFEST.sha256 + APKINDEXes + apks + tooling).
 #   boot A (ISO)         qemu DIRECT KERNEL BOOT: q35 + OVMF(secboot) + the
-#                        ISO's own vmlinuz-virt/initramfs-virt (-kernel/
+#                        ISO's own vmlinuz-lts/initramfs-lts (-kernel/
 #                        -initrd/-append console=ttyS0,115200) + the ISO as
 #                        AHCI CD (modloop source) + slirp (guest 10.0.2.15,
 #                        host 10.0.2.2) + target=vdb, export=vdc, swtpm
@@ -195,6 +195,16 @@ source "$TESTS/lib/serial.sh"      # feed_line (IN-03: single promoted copy)
 source "$TESTS/lib/stage-timing.sh"   # Step timing: run_stage emits begin/done lines
 # shellcheck source=../lib/local-mirror.sh
 source "$TESTS/lib/local-mirror.sh"   # the pinned local mirror + ISO cache
+# boot-lane finding #19 (s23 attempt 17c): drive the install from the
+# alpine-standard ISO, NOT alpine-virt — the virt kernel's modloop carries NO
+# TPM driver modules (verified: modloop-virt xz blocks contain no char/tpm
+# entries), so /dev/tpmrm0 can never exist in the live env and the step-6
+# provisional seal dies "no usable TPM" no matter what. The standard ISO's
+# lts kernel + modloop-lts carry the TPM drivers, and the lts VERSION matches
+# the linux-lts the plan installs. The sha pin is the release index's.
+ISO_FLAVOR=alpine-standard
+ISO_SHA256_DEFAULT="20c026e3a788bfb75fc8b50a54bcc12aee85e3c75909740bba6a6f4563d63296"
+export ALPINE_FDE_ISO_CACHE="$TESTS/e2e/.cache/isos-s23"
 
 # --- credentials (well-known CI credentials, the s21/s00b convention; the
 # §13 floor requires >=16 chars or >=12 across 3 classes; the substring
@@ -407,7 +417,7 @@ run_stage mirror-selfcheck 60 bash -c "curl -fsS -o /dev/null 'http://127.0.0.1:
 # ============================================================================
 run_stage iso-extract 600 bash -c "
     mkdir -p '$RUN/iso' && bsdtar -xf '$(iso_path)' -C '$RUN/iso' \
-        boot/vmlinuz-virt boot/initramfs-virt boot/modloop-virt"
+        boot/vmlinuz-lts boot/initramfs-lts boot/modloop-lts"
 
 A="$RUN/boot-a"
 mkdir -p "$A"
@@ -447,8 +457,8 @@ _qemu_run_iso() {
         [[ "${args[$i]}" == "-m" ]] && args[$((i + 1))]="$mem"
     done
     args+=(-drive "file=$(iso_path),media=cdrom,readonly=on")
-    args+=(-kernel "$RUN/iso/boot/vmlinuz-virt")
-    args+=(-initrd "$RUN/iso/boot/initramfs-virt")
+    args+=(-kernel "$RUN/iso/boot/vmlinuz-lts")
+    args+=(-initrd "$RUN/iso/boot/initramfs-lts")
     # the slirp netdev: the guest reaches the HOST-side mirror server at
     # 10.0.2.2:$MIRROR_PORT (see the WHY header — the guest-local httpd is
     # unachievable on the pinned ISO); NO external network is involved
