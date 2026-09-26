@@ -446,7 +446,11 @@ mirror_ensure() {
 # disk instead — see the header). Uses busybox httpd when present, else
 # python3 http.server. PID in <docroot>/.httpd.pid.
 mirror_serve_start() {
-    local port="$1" docroot="${2:-$(mirror_cache_root)}" pidfile="$docroot/.httpd.pid"
+    # NB: one assignment per local WORD that references a sibling — `local
+    # a=x b=$a/y` expands ALL words before ANY assignment sticks, so $docroot
+    # was unbound here under set -u (fatal to the caller; boot-lane finding).
+    local port="${1:-}" docroot="${2:-$(mirror_cache_root)}"
+    local pidfile="$docroot/.httpd.pid"
     mkdir -p "$docroot"
     if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
         return 0   # already serving
@@ -467,7 +471,8 @@ mirror_serve_start() {
 }
 
 mirror_serve_stop() {
-    local docroot="${1:-$(mirror_cache_root)}" pidfile="$docroot/.httpd.pid" pid
+    local docroot="${1:-$(mirror_cache_root)}"
+    local pidfile="$docroot/.httpd.pid" pid
     [[ -f "$pidfile" ]] || return 0
     pid=$(cat "$pidfile" 2>/dev/null) || pid=""
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
