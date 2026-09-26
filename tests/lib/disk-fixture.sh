@@ -37,6 +37,7 @@ _disk_kdf_args() {
 disk_make_luks() {
     local file="$1" mib="$2"
     truncate -s "${mib}M" "$file"
+    # shellcheck disable=SC2046  # kdf args are an intentional multi-word arg list
     disk_slot0_passphrase | cryptsetup luksFormat --type luks2 \
         $(_disk_kdf_args) --batch-mode --label alpine-fde-ci "$file" || {
         echo "disk-fixture: luksFormat failed on $file" >&2
@@ -49,6 +50,7 @@ disk_make_luks() {
 # stdin lines: existing key first, then the new one).
 disk_add_slot1() {
     local file="$1"
+    # shellcheck disable=SC2046  # kdf args are an intentional multi-word arg list
     { disk_slot0_passphrase; printf '%s\n' "$ALPINE_FDE_SLOT1_PASSPHRASE"; } |
         cryptsetup luksAddKey $(_disk_kdf_args) "$file" || {
         echo "disk-fixture: luksAddKey failed on $file" >&2

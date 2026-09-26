@@ -14,7 +14,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # --- exit-code contract constants ---
-assert_eq "ALPINE_FDE_OK is 0" "0" "$ALPINE_FDE_OK"
+# (ALPINE_FDE_OK=0 is NOT re-pinned here: a constant asserted against its own
+# literal is the definition of tautology. The NONZERO classes below are real
+# contracts — scripts, hooks and CI branch on them.)
 assert_eq "ALPINE_FDE_DRIFT is 1" "1" "$ALPINE_FDE_DRIFT"
 assert_eq "ALPINE_FDE_USAGE is 2" "2" "$ALPINE_FDE_USAGE"
 assert_eq "ALPINE_FDE_NOT_IMPLEMENTED is 3" "3" "$ALPINE_FDE_NOT_IMPLEMENTED"

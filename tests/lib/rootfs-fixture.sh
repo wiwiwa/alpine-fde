@@ -89,7 +89,7 @@ rootfs_cache_dir() {
 # interop-oracle scaffold, which assembles its fixture rootfs from exactly
 # this pinned deb table).
 rootfs_pin_names() {
-    local line name
+    local name
     while IFS=$'\t' read -r name _sha _url; do
         [[ -z "$name" ]] && continue
         printf '%s\n' "$name"
@@ -100,7 +100,7 @@ rootfs_pin_names() {
 _rootfs_pin_lookup() {
     _PIN_SHA=""
     _PIN_URL=""
-    local line name sha url
+    local name sha url
     while IFS=$'\t' read -r name sha url; do
         [[ -z "$name" ]] && continue
         if [[ "$name" == "$1" ]]; then
@@ -151,7 +151,7 @@ rootfs_ensure() {
 }
 
 rootfs_ensure_all() {
-    local line name
+    local name
     while IFS=$'\t' read -r name _sha _url; do
         [[ -z "$name" ]] && continue
         rootfs_ensure "$name" || return $?

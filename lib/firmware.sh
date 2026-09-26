@@ -121,7 +121,7 @@ fw_guid_le_hex() {
         _fgl_r=$(printf '%s\n' "$_fgl_seg" | fold -w2 | tac | tr -d '\n')
         _fgl_out="$_fgl_out$_fgl_r"
     done
-    printf '%s%s%s%s%s\n' "$_fgl_out" "$_fgl_d" "$_fgl_e"
+    printf '%s%s%s\n' "$_fgl_out" "$_fgl_d" "$_fgl_e"
 }
 
 # fw_hex_le_dec HEXLE — decode a little-endian hex byte string to decimal

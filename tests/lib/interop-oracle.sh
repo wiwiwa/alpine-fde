@@ -72,6 +72,9 @@
 #                                    under <tree> (default: this repo) carry
 #                                    bwrap/Debian-runtime references
 
+# shellcheck disable=SC2034
+# ORACLE_*/ALPINE_FDE_TMPDIR are caller-facing seams: the sourcing oracle
+# suite reads them after interop_oracle_* returns.
 if [[ -n "${_ALPINE_FDE_INTEROP_ORACLE_SOURCED:-}" ]]; then
     return 0
 fi

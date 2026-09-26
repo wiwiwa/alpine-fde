@@ -323,6 +323,7 @@ rule_orphans() {
 
 cmd_sweep() {
     local round
+    # shellcheck disable=SC2034  # retry-round counter; only the loop count matters
     for round in 1 2 3; do
         _scan
         ADDED=0
@@ -426,7 +427,7 @@ cmd_prune_runs() {
     total=$(du -sm -- "$RUNS_DIR" 2>/dev/null | awk '{print $1}')
     total=${total:-0}
 
-    local -a rows sorted
+    local -a rows
     mapfile -t rows < <(_prune_rows | LC_ALL=C sort -t $'\t' -k1,1nr -k4,4)
     local -A kept_by_prefix=() is_fresh=() is_top=()
     for line in "${rows[@]}"; do
@@ -478,7 +479,7 @@ cmd_prune_runs() {
                 echo "harness-cleanup: WOULD delete run dir $name ($size MB): ${doomed[$name]}"
             else
                 echo "harness-cleanup: delete run dir $name ($size MB): ${doomed[$name]}"
-                rm -rf -- "$RUNS_DIR/$name"
+                rm -rf -- "${RUNS_DIR:?}/$name"
             fi
             freed=$((freed + size)); ndel=$((ndel + 1))
         elif [[ "$pfx" == "?" ]]; then
@@ -615,9 +616,12 @@ cmd_prune_blobs() {
     find_args=("${find_args[@]:1}")   # drop the leading -o
     while IFS= read -r -d '' f; do
         [[ "$(basename "$f")" =~ $BLOB_KEEP_RE ]] && continue   # evidence guard
+        # shellcheck disable=SC2190  # doomed is indexed here (`local -a` above);
+        # the -A doomed in the run-dir prune is a different scope
         doomed+=("$f")
     done < <(find "$dir" -type f \( "${find_args[@]}" \) -print0 2>/dev/null)
     for d in $BLOB_SCRATCH_DIRS; do
+        # shellcheck disable=SC2190
         [[ -d "$dir/$d" ]] && doomed+=("$dir/$d")
     done
 

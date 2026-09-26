@@ -458,6 +458,7 @@ enrl_run() {
         err "enroll-tpm: post-assertions failed — enrollment NOT recorded"
         return 1
     fi
+    # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
     ENRL_TOKEN_ID=$(enrl_json_token_id "$_er_post" systemd-tpm2)
     rm -rf "$_er_stage"
     rm -f "$_er_pre" "$_er_post"
@@ -585,6 +586,7 @@ enrl_ensure_once_locked() {
     if ! enrl_run b "$_ee_pub" "$_ee_dev" 0; then
         return 1
     fi
+    # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
     ENRL_ENROLLED=1
     return 0
 }

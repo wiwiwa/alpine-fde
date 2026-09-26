@@ -30,6 +30,7 @@ _ALPINE_FDE_ALPINE_ARTIFACT_SOURCED=1
 _ALPINE_ARTIFACT_HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Download-once cache: tests/e2e/.cache (gitignored via the repo's `.*` rule);
 # ALPINE_FDE_CACHE_DIR (or ALPINE_FDE_ARTIFACT_CACHE_DIR) relocates it.
+# shellcheck disable=SC2034  # caller-facing seam (sibling libs + suites read it)
 ALPINE_ARTIFACT_CACHE_DIR="${ALPINE_FDE_ARTIFACT_CACHE_DIR:-${ALPINE_FDE_CACHE_DIR:-$(cd "$_ALPINE_ARTIFACT_HERE/../e2e" && pwd)/.cache}}"
 mkdir -p "$ALPINE_ARTIFACT_CACHE_DIR"
 
@@ -39,6 +40,7 @@ ALPINE_MINI_ROOTFS_ARCH="x86_64"
 _ALPINE_CDN="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64"
 ALPINE_MINI_ROOTFS_URL="$_ALPINE_CDN/alpine-minirootfs-${ALPINE_MINI_ROOTFS_VERSION}-${ALPINE_MINI_ROOTFS_ARCH}.tar.gz"
 ALPINE_MINI_ROOTFS_SHA256="c5ca053cfe1d85c5b96dff8b9bc57045f7f184a30ffb6b65776409ca90388677"
+# shellcheck disable=SC2034  # pinned size constant (consumed by suites/helpers)
 ALPINE_MINI_ROOTFS_BYTES=3701382
 
 alpine_artifact_cache_dir() { printf '%s\n' "$ALPINE_ARTIFACT_CACHE_DIR"; }

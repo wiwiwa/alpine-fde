@@ -110,7 +110,8 @@ overlay_discard() {
 overlay_publish() {
     local staging=$1 final=$2 lockdir=${3:-$(dirname "$2")}
     mkdir -p "$lockdir"
-    local lockfile="$lockdir/$(basename "$final").lock"
+    local lockfile
+    lockfile="$lockdir/$(basename "$final").lock"
     ( flock -x 9
       mv -f -- "$staging" "$final"
     ) 9>"$lockfile"

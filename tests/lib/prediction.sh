@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # tests/lib/prediction.sh — G-T13 prediction check helper (§12): ukify's
 # predicted PCR 11 (enter-initrd) == the selection PolicyPCR digest over the
 # guest's PRE-UNLOCK PCR 11 reading (the `alpine-fde-pcr-postphase` line),

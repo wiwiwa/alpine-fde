@@ -289,12 +289,12 @@ assert_eq "e2e: apk log recorded exactly one add" "1" "$(grep -c '^add pkg-e2e$'
 assert_eq "e2e: apt-get never touched" "" "$(cat "$FAKE_APT_LOG")"
 
 # --- explicit exit-code contract: every require_pkgs failure mode is 64 (G-I7) ---
-# 64 = fail-closed "missing tools"; 2 stays reserved for bad CLI usage. Pin both
-# halves so a future regression in either direction is caught.
+# 64 = fail-closed "missing tools". (The "rc 2 stays reserved for usage" half of
+# this contract is pinned where it is OBSERVED — dispatch_and_exitcodes.sh's
+# usage-path pins — not by re-asserting a constant against its own literal.)
 reset_log
 rc=0
 msg=$(ALPINE_FDE_NO_INSTALL=1 require_pkgs absent-x:pkg-x 2>&1) || rc=$?
 assert_rc "require_pkgs: rc 64 == missing tools (fail-closed environment failure)" "64" "$rc"
-assert_eq "require_pkgs: rc 2 stays reserved for usage, never environment" "2" "$ALPINE_FDE_USAGE"
 
 finish

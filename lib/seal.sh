@@ -477,7 +477,11 @@ seal_enroll() {
     token_build_json "[$_se_sel]" "$_se_pub" "$SEAL_SIG_B64" "$_se_blob" "$SEAL_SLOT" \
         "$_se_sealed" "$_se_out"
     rm -f "$_se_w/name.hex" "$_se_w/primary.ctx"
+    # Caller-facing seam: consumed by the sourcing caller (token.sh
+    # choreography) and the seal_* unit suites after seal returns.
+    # shellcheck disable=SC2034
     SEAL_TOKEN_FILE=$_se_out
+    # shellcheck disable=SC2034
     SEAL_MODE=$_se_mode
     # NOTE: SEAL_PASS_FILE and the blob halves under $_se_w remain staged for
     # the caller (token.sh choreography / post-asserts) — the caller scrubs

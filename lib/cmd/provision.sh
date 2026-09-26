@@ -601,9 +601,13 @@ EOF
     # BL_* variables are the baseline_write env contract (consumed in baseline.sh)
     # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_PCR0='pending'
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_PCR1='pending'
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_PCR2='pending'
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_PCR3='pending'
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_PCR7='pending'
     if tpm_available; then
         for _s1_i in 0 1 2 3; do
@@ -615,22 +619,32 @@ EOF
         warn "no TPM reachable — pcr0..3 left pending in the baseline"
     fi
     if _s1_sb=$(fw_sb_state); then
+        # shellcheck disable=SC2034  # env-contract for baseline_write
         BL_SB_SECURE_BOOT=$(printf '%s' "$_s1_sb" | sed -n 's/.*secureboot=\([01]\).*/\1/p')
+        # shellcheck disable=SC2034  # env-contract for baseline_write
         BL_SB_SETUP_MODE=$(printf '%s' "$_s1_sb" | sed -n 's/.*setup_mode=\([01]\).*/\1/p')
     fi
     for _s1_pair in PK:pk_fp KEK:kek_fp db:db_fp dbx:dbx_fp; do
         _s1_fp=$(fw_var_sha256 "${_s1_pair%%:*}") || _s1_fp=''
         eval "BL_SB_$(printf '%s' "${_s1_pair#*:}" | tr '[:lower:]' '[:upper:]')=\$_s1_fp"
     done
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_FW_VENDOR=$(dmi_field sys_vendor)
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_FW_VERSION=$(dmi_field bios_version)
     if _s1_el=$(eventlog_info); then
+        # shellcheck disable=SC2034  # env-contract for baseline_write
         BL_FW_EVENTLOG_SHA256=$(printf '%s' "$_s1_el" | cut -d' ' -f1)
+        # shellcheck disable=SC2034  # env-contract for baseline_write
         BL_FW_EVENTLOG_SIZE=$(printf '%s' "$_s1_el" | cut -d' ' -f2)
     fi
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_KEYS_RELEASE_PUB_PATH="$_s1_keydir/release.pub"
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_KEYS_RELEASE_CERT_PATH="$_s1_keydir/release.crt"
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_TARGET_LUKS_UUID=''
+    # shellcheck disable=SC2034  # env-contract for baseline_write
     BL_TARGET_ESP_PARTUUID=''
     _s1_bl=$(sp_baseline_file)
     baseline_write "$_s1_bl"

@@ -823,8 +823,8 @@ inst_prompt_secret() {
 # (passphrase_floor_ok from lib/cmd/rotate.sh, lazily sourced): >=12 chars
 # across >=3 character classes, or >=16 chars.
 inst_ceremony_floor() {
+  # shellcheck disable=SC1090
   command -v passphrase_floor_ok >/dev/null 2>&1 ||
-    # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-$(sp_cmd_dir)}/rotate.sh"
   passphrase_floor_ok "$1"
 }
@@ -895,6 +895,7 @@ inst_ceremony_recovery() {
   while :; do
     inst_prompt_secret "alpine-fde: set the LUKS2 recovery passphrase (§13: >=12 chars with 3 character classes, or >=16 chars; permanent recovery credential, keyslot 0): " _icr_p1
     inst_prompt_secret "alpine-fde: repeat the recovery passphrase: " _icr_p2
+    # shellcheck disable=SC2154  # inst_prompt_secret assigns its named target
     if [ -n "$_icr_p1" ] && [ "$_icr_p1" = "$_icr_p2" ] && inst_ceremony_floor "$_icr_p1"; then
       break
     fi
@@ -966,12 +967,14 @@ inst_ceremony_release_key() {
       break
     fi
     inst_prompt_secret "alpine-fde: repeat the release-key passphrase: " _ick_p2
+    # shellcheck disable=SC2154  # inst_prompt_secret assigns its named target
     if [ -n "$_ick_p1" ] && [ "$_ick_p1" = "$_ick_p2" ] && inst_ceremony_floor "$_ick_p1"; then
       break
     fi
     unset _ick_p1 _ick_p2
     warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met"
   done
+  # shellcheck disable=SC2034  # env seam consumed by keys_encrypt_release
   ALPINE_FDE_KEY_PASSPHRASE=$_ick_p1
   unset _ick_p2
   keys_encrypt_release "$_ick_d" ||
@@ -1179,7 +1182,7 @@ cmd_install_main() {
   # validate the RAW value (inst_esp_mnt defaults an empty INST_ESP_MNT —
   # an explicit --esp '' must die, never silently fall back to /efi)
   case ${INST_ESP_MNT-} in
-  '' | / | [^/]*)
+  '' | / | [!/]*)
     die -r "$ALPINE_FDE_USAGE" "install: --esp must be a mount point under the target root (e.g. /efi or /boot/efi) — got: '${INST_ESP_MNT-}'"
     ;;
   esac
@@ -1520,6 +1523,7 @@ cmd_install_main() {
   # populate record — populate-first sees zero repos and dies with `ERROR:
   # unable to select packages: alpine-base`. The drop is written exactly once,
   # here (NOT repeated in section 5).
+  # shellcheck disable=SC2046  # intentional: one plan line per repository entry
   inst_plan_write /etc/apk/repositories $(inst_repo_lines)
   # item 26 ext (real-install failure #5): apk verifies mirror indexes against
   # the TARGET's <mnt>/etc/apk/keys ONLY — absent on a fresh rootfs, and
