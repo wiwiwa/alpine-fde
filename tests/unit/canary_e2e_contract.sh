@@ -182,6 +182,25 @@ assert_eq "rebuild path re-ran the fetch chain" \
     _pass "rebuilt cache re-verifies against its manifest" ||
     _fail "rebuilt cache manifest does not verify"
 
+# the cache must be BOUND to the derivation that built it (the boot lane's
+# live finding #4 tail: the no-op path can't be "manifest verifies" alone —
+# a DERIVATION change (e.g. the live tool union) would never be fetched and
+# the cache would silently keep missing packages). mirror.json records
+# package_list_sha256; a basis mismatch forces a rebuild.
+if [ -n "$(jq -r '.package_list_sha256 // empty' "$T/cache/v9test/mirror.json" 2>/dev/null)" ]; then
+    _pass "mirror.json records the closure basis (package_list_sha256)"
+else
+    _fail "mirror.json does not record package_list_sha256 (the no-op path cannot detect a derivation change)"
+fi
+N_BEFORE=$(grep -c closure "$CALLLOG" || true)
+INST_ROOT_FS=ext4 mirror_ensure >/dev/null 2>&1
+N_AFTER=$(grep -c closure "$CALLLOG" || true)
+if [ "$N_AFTER" -gt "$N_BEFORE" ]; then
+    _pass "a derivation change forces a rebuild (topology flip is NOT a no-op)"
+else
+    _fail "derivation change was a NO-OP (the cache silently keeps missing packages)"
+fi
+
 # --- 5. ISO pin convention ----------------------------------------------------------
 assert_eq "iso filename convention (flavor-version-arch under the ISO cache)" \
     "$T/isos/alpine-virt-3.24.2-x86_64.iso" "$(iso_path)"
