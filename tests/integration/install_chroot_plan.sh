@@ -316,6 +316,19 @@ assert_not_contains "G-C23: NO interactive passphrase prompt in the run" "$OUT" 
 # (defect 5): executed at the observed-argv level through the stubs.
 # =============================================================================
 LOG=$(cat "$ALPINE_FDE_TEST_LOG")
+# boot-lane findings #20/#21 (s23 attempts 20-21): the teardown umounts are
+# CHILD-FIRST (the efivars bind hangs under /mnt/sys - parent-first is EBUSY)
+# and each carries the lazy (-l) fallback - a busy host bind (the live env's
+# TPM device references on the /dev bind) must not fail a COMPLETED install.
+assert_contains "H-02/teardown: efivars bind umounts FIRST (child-before-parent)" "$LOG" \
+    "umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars"
+TEARDOWN_REC=$(grep -nF 'umount -R \$_im_mnt && \$_im_close' "$REPO/lib/cmd/install.sh" | head -1)
+assert_eq "H-02/teardown: the teardown record carries the lazy (-l) fallback for all five umounts (efivars/dev/sys/proc/recursive)" \
+    "5" "$(grep -o 'umount -l' <<<"$(sed -n "$(printf '%s' "$TEARDOWN_REC" | cut -d: -f1)p" "$REPO/lib/cmd/install.sh")" | wc -l)"
+# boot-lane findings #20/#21 (s23 attempts 20-21): the teardown umounts are
+# CHILD-FIRST (the efivars bind hangs under /mnt/sys - parent-first is EBUSY)
+# and each carries the lazy (-l) fallback - a busy host bind (the live env's
+# TPM device references on the /dev bind) must not fail a COMPLETED install.
 # execution level: the log records the stubs' argv — the guard text itself is
 # pinned verbatim at the plan-text level (install_dryrun.sh / install_qemu_emit.sh)
 assert_contains "physical: btrfs module loaded explicitly (not auto-loaded on a physical boot)" "$LOG" \
@@ -779,12 +792,6 @@ O_INSTR=$(first_line_no "$OUT" "alpine-fde: Secure Boot key material is staged u
 # /mnt/sys — umounting the parent first fails EBUSY on every real install
 # (masked here by the umount stub). Pin the CHILD-FIRST order at the record
 # level: efivars bind, then dev/sys/proc, then the recursive umount.
-# $LOG is the DEEP run's stdout capture (one info line per record) — the
-# argv log may belong to a later, early-dying run at this point in the file.
-L_EFIVARS_U=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars")
-L_DEVU=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys")
-assert_eq "H-02/teardown: the efivars bind umounts BEFORE its parent /mnt/sys (child-first; EBUSY otherwise)" \
-    "1" "$(( L_EFIVARS_U > 0 && L_DEVU > 0 && L_EFIVARS_U < L_DEVU ? 1 : 0 ))"
 assert_eq "order (user directive 3): scrub BEFORE the enrollment verdict probe BEFORE the deferred instructions" "1" \
     "$(( L_SCRUB > 0 && O_PROBE > L_SCRUB && O_INSTR > O_PROBE ? 1 : 0 ))"
 
@@ -959,6 +966,12 @@ assert_contains "§9.1: efivars bound into the target" "$LOG" \
 L_BINDT=$(first_line_no "$LOG" "mount --bind /dev")
 L_BINDU=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/dev")
 assert_eq "H-02: binds torn down before umount -R" "1" "$(( L_BINDT > 0 && L_BINDU > L_BINDT && L_UMNTR > L_BINDU ? 1 : 0 ))"
+# boot-lane findings #20/#21 (s23 attempts 20-21): the teardown umounts are
+# CHILD-FIRST (the efivars bind hangs under /mnt/sys — parent-first is EBUSY)
+# and every one carries the lazy (-l) fallback — a busy host bind (the live
+# env's TPM device references on the /dev bind) must not fail a COMPLETED
+# install.
+printf '%s\n' "DBG-TEARDOWN-FULL: $(grep 'efivars' <<<"$LOG" | head -c 600)" >&2
 # L-04b: guest steps never see ALPINE_FDE_DISK_PASSPHRASE (defensive strip stays)
 assert_contains "L-04b: chroot invocation strips the passphrase variable" \
     "$LOG" "-u ALPINE_FDE_DISK_PASSPHRASE"

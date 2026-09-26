@@ -1878,11 +1878,13 @@ cmd_install_main() {
   # or, when the firmware refused it, the manual-import instructions, an
   # explicit Enter confirmation, and a reboot INTO FIRMWARE SETUP
   # (OsIndications) for the manual key import.
-  # boot-lane finding #20 (s23 attempt 20): the efivars bind is a CHILD of
-  # /mnt/sys — unmounting /mnt/sys while it is still mounted fails EBUSY
-  # ("target is busy") on every real install. Children first: efivars, then
-  # dev/sys/proc, then the recursive target umount, then the mapper close.
-  inst_plan_run host "umount $_im_mnt/sys/firmware/efi/efivars && umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc && umount -R $_im_mnt && $_im_close"
+  # boot-lane findings #20 + #21 (s23 attempts 20-21): (a) the efivars bind is
+  # a CHILD of /mnt/sys — unmounting the parent first fails EBUSY; children
+  # first. (b) /mnt/dev is a bind of the live devtmpfs: the live env's own TPM
+  # device references keep it busy at teardown. The install is COMPLETE at this
+  # point (sealed, state written) — a busy host bind must not fail it: every
+  # umount gets a lazy (-l) fallback, best-effort, never fatal.
+  inst_plan_run host "umount $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || :; umount $_im_mnt/dev 2>/dev/null || umount -l $_im_mnt/dev 2>/dev/null || :; umount $_im_mnt/sys 2>/dev/null || umount -l $_im_mnt/sys 2>/dev/null || :; umount $_im_mnt/proc 2>/dev/null || umount -l $_im_mnt/proc 2>/dev/null || :; umount -R $_im_mnt 2>/dev/null || umount -l $_im_mnt 2>/dev/null || :; $_im_close"
   inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
