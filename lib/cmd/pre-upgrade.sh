@@ -137,7 +137,10 @@ EOF
     fi
     _pu_ts=$(date -u +%Y%m%dT%H%M%SZ)
     _pu_snap="$_pu_snapdir/$_pu_ts"
-    if ! btrfs subvolume snapshot -r "$_pu_src" "$_pu_snap"; then
+    # btrfs prints its own "Create a readonly snapshot ..." line on STDOUT —
+    # silence it: this command's stdout contract is exactly the snapshot path
+    # (a scripting consumer does SNAP=$(alpine-fde pre-upgrade); queue 30).
+    if ! btrfs subvolume snapshot -r "$_pu_src" "$_pu_snap" >/dev/null; then
         err "pre-upgrade: btrfs snapshot failed ($_pu_src -> $_pu_snap)"
         return "$ALPINE_FDE_FAIL_CLOSED"
     fi

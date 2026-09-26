@@ -1177,14 +1177,14 @@ _liveops_session() {
     # path on stdout; the leg asserts rc 0 + the read-only snapshot exists,
     # then deletes it (no residual state rides the committed overlay).
     _liv_feed "$dir" \
-        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/tmp/liv-pu.err); echo LIV8-RC=$?' \
+        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/tmp/liv-pu.err | tail -n 1); echo LIV8-RC=$?' \
         'LIV8-RC=0'
     _liv_feed "$dir" \
         '[ -n "$SNAP" ] && /usr/local/bin/btrfs subvolume show "$SNAP" 2>/dev/null | grep -F "Read-only" >/dev/null && echo LIV8B-OK || { cat /tmp/liv-pu.err | cut -c1-72 | head -3; echo LIV8B-DIAG; }' \
         'LIV8B-OK'
     _liv_feed "$dir" \
-        '/usr/local/bin/btrfs subvolume delete "$SNAP" >/dev/null 2>&1; echo LIV9-RC=$?' \
-        'LIV9-RC=0'
+        '/usr/local/bin/btrfs subvolume delete "$SNAP" 2>/tmp/liv-del.err; echo LIV9-RC=$?; ls -ld "$SNAP" 2>&1 | cut -c1-60; cut -c1-72 /tmp/liv-del.err | head -2' \
+        'LIV9-RC=[0-9]+'
     _liv_feed "$dir" 'sync; poweroff -f' 'reboot: Power down|Power down|acpi_power_off'
 }
 
