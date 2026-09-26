@@ -324,6 +324,55 @@ else
     _fail "mirror_serve_stop lifecycle broken (running=$STOP_WAS_RUNNING; $(head -1 "$T/serve-stop.err"))"
 fi
 
+# --- 6e. the mirror closure must cover the LIVE-env tool set (the boot
+# lane's live finding #4, attempt 4) -------------------------------------------
+# The real installer's FIRST mirror consumption is the preflight's
+# require_pkgs: the virt ISO lacks sfdisk/lsblk (util-linux), mkfs.vfat
+# (dosfstools) and the cryptsetup CLI, and the installer `apk add`s them from
+# ALPINE_FDE_MIRROR — observed live: "apk add util-linux failed ... (no such
+# packaage)" (INSTALL-RC=64). The closure derivation covered ONLY
+# install_package_list (the in-chroot txn), not the live tool pairs.
+# The fix seam: install.sh exposes the pairs ONCE (inst_live_tool_pairs), the
+# preflight consumes them, mirror_package_list derives the pkg-name union —
+# so the two lists cannot drift again.
+PROD_LIVE=$(bash -c "
+    set -u
+    export ALPINE_FDE_CMD_DIR='$REPO/lib/cmd'
+    . '$REPO/lib/common.sh'
+    . '$REPO/lib/cmd/install.sh'
+    inst_live_tool_pairs" 2>&1)
+if [ "$?" -eq 0 ] && [ -n "$PROD_LIVE" ]; then
+    _pass "install.sh exposes inst_live_tool_pairs (the preflight require_pkgs pairs)"
+else
+    _fail "install.sh has no inst_live_tool_pairs seam (got: $(printf '%s' "$PROD_LIVE" | head -1))"
+fi
+MIRROR_COVER=$(bash -c "
+    set -u
+    export ALPINE_FDE_CMD_DIR='$REPO/lib/cmd'
+    . '$REPO/lib/common.sh'
+    . '$REPO/lib/cmd/install.sh'
+    . '$REPO/tests/lib/local-mirror.sh'
+    INST_ROOT_FS=btrfs INST_BCACHE=0 install_package_list
+    mirror_package_list" 2>/dev/null || true)
+_miss=''
+for p in util-linux dosfstools apk-tools cryptsetup openssl btrfs-progs e2fsprogs; do
+    case " $MIRROR_COVER " in
+        *" $p "*) : ;;
+        *) _miss="$_miss $p" ;;
+    esac
+done
+if [ -z "$_miss" ]; then
+    _pass "mirror_package_list covers the live tool union (util-linux dosfstools apk-tools ...)"
+else
+    _fail "mirror_package_list is missing the live tool set:$_miss"
+fi
+if grep -q 'require_pkgs \$(inst_live_tool_pairs)' "$REPO/lib/cmd/install.sh" \
+    && ! grep -q 'require_pkgs apk:apk-tools sfdisk:util-linux' "$REPO/lib/cmd/install.sh"; then
+    _pass "the preflight consumes inst_live_tool_pairs (single source — no drift)"
+else
+    _fail "the preflight still hardcodes the require_pkgs pairs (drifts from the mirror derivation)"
+fi
+
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then
     _fail "s23 is registered in run-e2e.sh — the orchestrator gates registration (boot verification first)"
