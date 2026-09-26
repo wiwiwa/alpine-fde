@@ -248,6 +248,39 @@ else
 fi
 rm -rf "$T/bootfix" "$T/bootfix-cache"
 
+# --- 4c. mirror_serve_start under job control (the boot lane's live finding
+# #12, attempts 12/13) ----------------------------------------------------------
+SCRIPT4C="$T/bootm-4c.sh"
+cat >"$SCRIPT4C" <<EOF
+#!/bin/bash
+set -u -m
+export ALPINE_FDE_LOCAL_MIRROR_CACHE="$T/bootm-cache"
+export ALPINE_FDE_MIRROR_RELEASE=v9test
+. "$REPO/tests/lib/local-mirror.sh"
+docroot="$T/bootm-docroot"
+mkdir -p "\$docroot"
+printf 'PROBE\n' >"\$docroot/probe.txt"
+mirror_serve_start 18912 "\$docroot" >/dev/null 2>&1
+sleep 1
+kill -0 "\$(cat "\$docroot/.httpd.pid")" && curl -fsS http://127.0.0.1:18912/probe.txt | grep -q PROBE
+EOF
+
+# s23 runs with set -m (the watchdog discipline). Under job control, bash
+# makes every background job a process-group leader, so setsid(2) fails and
+# util-linux setsid auto-FORKS: the recorded $! (the setsid parent) dies
+# instantly and the pidfile holds a DEAD pid — mirror_serve_stop then kills
+# nothing and the httpd LEAKS, colliding the next run's mirror-serve
+# ("httpd did not stay up on 127.0.0.1:8123" / "Address in use"). The swtpm
+# fixture fixed the identical defect with a job-control-free ( ) subshell.
+OUT4C=$(bash "$T/bootm-4c.sh" 2>&1)
+if [ $? -eq 0 ]; then
+    _pass "mirror_serve_start under set -m: the pidfile pid is ALIVE and serves"
+else
+    _fail "mirror_serve_start under set -m leaks the server / records a dead pid ($(printf '%s' "$OUT4C" | head -1))"
+fi
+pkill -9 -f "httpd -f -p 127.0.0.1:18912" 2>/dev/null
+rm -rf "$T/bootm-cache" "$T/bootm-docroot" "$T/bootm-4c.sh"
+
 # --- 5. ISO pin convention ----------------------------------------------------------
 assert_eq "iso filename convention (flavor-version-arch under the ISO cache)" \
     "$T/isos/alpine-virt-3.24.2-x86_64.iso" "$(iso_path)"
