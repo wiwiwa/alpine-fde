@@ -51,7 +51,7 @@ set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
-source "$HERE/lib.sh"
+source "$HERE/../unit/lib.sh"
 # the lib self-load seam (house style: seal_mechanism_b.sh) — seal.sh resolves
 # token.sh through ALPINE_FDE_CMD_DIR; must be exported BEFORE seal.sh is sourced
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"

@@ -127,15 +127,16 @@ EOF
         "$sbx/e2e/e2e_infra_smoke.sh"
 
     # blob-creating stub scenarios for one chain-producer id (s00) and three
-    # independent ids (s04/s05 run in the wave; s12 for the serial run)
+    # independent ids (s04/s10 run in the wave; s06 for the serial run)
+    # (s05/s12 were absorbed by the s90 drill — registry consolidation)
     local id file
-    for id in s00 s00b s04 s05 s12; do
+    for id in s00 s00b s04 s10 s06; do
         case "$id" in
             s00)  file=s00-bootstrap-lite.sh ;;
             s00b) file=s00b-enroll-cache.sh ;;
             s04)  file=s04-unsigned-uki.sh ;;
-            s05)  file=s05-sb-off.sh ;;
-            s12)  file=s12-wrong-passphrase.sh ;;
+            s10) file=s10-tpm-absent.sh ;;
+            s06)  file=s06-token-trap.sh ;;
         esac
         cat >"$sbx/e2e/$file" <<'STUB'
 #!/usr/bin/env bash
@@ -242,35 +243,35 @@ results_json() {
 # =============================================================================
 SBX_A="$SBX_ROOT/a"
 build_sandbox "$SBX_A"
-export_kinds s12=pass s00=pass s00b=pass
-run_registry "$SBX_A" "$SBX_A/ctl/out" "$SBX_A/ctl/err" s12 s00 s00b
+export_kinds s06=pass s00=pass s00b=pass
+run_registry "$SBX_A" "$SBX_A/ctl/out" "$SBX_A/ctl/err" s06 s00 s00b
 assert_eq "run A (serial, all pass): runner exit 0" "0" "$?"
 assert_rc "run A: results JSON parses, 3 rows" 0 \
     jq -e '.scenarios | type == "array" and length == 3' "$(results_json "$SBX_A")"
-assert_cleaned "run A serial pass s12" "$(stub_run_dir "$SBX_A" s12)"
+assert_cleaned "run A serial pass s06" "$(stub_run_dir "$SBX_A" s06)"
 # the state-chain producers are EXEMPT: consumers snapshot from these dirs and
 # the G-T11b artifact scan reads them after the whole run — blobs stay
 assert_blobs_kept "run A chain producer s00 (exempt)" "$(stub_run_dir "$SBX_A" s00)"
 assert_blobs_kept "run A chain producer s00b (exempt)" "$(stub_run_dir "$SBX_A" s00b)"
 # the cleanup report is appended to the scenario's captured .out (the runner
 # keeps stdout contract-clean), alongside the scenario's own output
-S12_OUT=$(cat "$(results_json "$SBX_A").dir/s12.out" 2>/dev/null)
-assert_contains "run A: cleanup is on the record in s12's captured .out" \
-    "$S12_OUT" "prune-blobs"
+S06_OUT=$(cat "$(results_json "$SBX_A").dir/s06.out" 2>/dev/null)
+assert_contains "run A: cleanup is on the record in s06's captured .out" \
+    "$S06_OUT" "prune-blobs"
 assert_contains "run A: cleanup report names the dir and the freed total" \
-    "$S12_OUT" "blob item(s)"
+    "$S06_OUT" "blob item(s)"
 
 # =============================================================================
 # Run B — FAIL path, serial: a failing scenario is finalized and cleaned too
 # =============================================================================
 SBX_B="$SBX_ROOT/b"
 build_sandbox "$SBX_B"
-export_kinds s12=fail s04=pass
-run_registry "$SBX_B" "$SBX_B/ctl/out" "$SBX_B/ctl/err" s12 s04
+export_kinds s06=fail s04=pass
+run_registry "$SBX_B" "$SBX_B/ctl/out" "$SBX_B/ctl/err" s06 s04
 assert_eq "run B (fail row present): runner exit 1" "1" "$?"
-assert_rc "run B: s12 row is fail" 0 \
-    jq -e '.scenarios[] | select(.id == "s12") | .status == "fail"' "$(results_json "$SBX_B")"
-assert_cleaned "run B fail s12" "$(stub_run_dir "$SBX_B" s12)"
+assert_rc "run B: s06 row is fail" 0 \
+    jq -e '.scenarios[] | select(.id == "s06") | .status == "fail"' "$(results_json "$SBX_B")"
+assert_cleaned "run B fail s06" "$(stub_run_dir "$SBX_B" s06)"
 assert_cleaned "run B pass s04" "$(stub_run_dir "$SBX_B" s04)"
 
 # =============================================================================
@@ -279,11 +280,11 @@ assert_cleaned "run B pass s04" "$(stub_run_dir "$SBX_B" s04)"
 # =============================================================================
 SBX_C="$SBX_ROOT/c"
 build_sandbox "$SBX_C"
-export_kinds s04=pass s05=fail
-run_registry "$SBX_C" "$SBX_C/ctl/out" "$SBX_C/ctl/err" -j 2 s04 s05
+export_kinds s04=pass s10=fail
+run_registry "$SBX_C" "$SBX_C/ctl/out" "$SBX_C/ctl/err" -j 2 s04 s10
 assert_eq "run C (-j 2 with a fail row): runner exit 1" "1" "$?"
 assert_cleaned "run C worker pass s04" "$(stub_run_dir "$SBX_C" s04)"
-assert_cleaned "run C worker fail s05" "$(stub_run_dir "$SBX_C" s05)"
+assert_cleaned "run C worker fail s10" "$(stub_run_dir "$SBX_C" s10)"
 assert_rc "run C: results JSON parses, 2 rows" 0 \
     jq -e '.scenarios | type == "array" and length == 2' "$(results_json "$SBX_C")"
 
@@ -292,7 +293,7 @@ assert_rc "run C: results JSON parses, 2 rows" 0 \
 # =============================================================================
 SBX_D="$SBX_ROOT/d"
 build_sandbox "$SBX_D"
-export_kinds s12=pass
+export_kinds s06=pass
 SBX_D_KEEP=1
 run_registry_with_keep() {
     (
@@ -305,35 +306,35 @@ run_registry_with_keep() {
         bash ./run-e2e.sh "$@"
     ) >"$SBX_D/ctl/out" 2>"$SBX_D/ctl/err"
 }
-run_registry_with_keep s12
+run_registry_with_keep s06
 assert_eq "run D (KEEP_BLOBS=1): runner exit 0 (hatch never breaks the run)" "0" "$?"
-assert_blobs_kept "run D escape hatch keeps blobs" "$(stub_run_dir "$SBX_D" s12)"
+assert_blobs_kept "run D escape hatch keeps blobs" "$(stub_run_dir "$SBX_D" s06)"
 
 # =============================================================================
 # Run E — prune-blobs self-defense (direct calls on the REAL library)
 # =============================================================================
 SBX_E="$SBX_ROOT/e"
-mkdir -p "$SBX_E/e2e/.runs/s12-stub-1" "$SBX_E/not-runs/s12-stub-1"
-for d in "$SBX_E/e2e/.runs/s12-stub-1" "$SBX_E/not-runs/s12-stub-1"; do
+mkdir -p "$SBX_E/e2e/.runs/s06-stub-1" "$SBX_E/not-runs/s06-stub-1"
+for d in "$SBX_E/e2e/.runs/s06-stub-1" "$SBX_E/not-runs/s06-stub-1"; do
     truncate -s 64k "$d/esp.img"
     printf 'log\n' >"$d/console-b1.log"
 done
 # E1: dry-run reports but changes nothing
 DRY_OUT=$(HARNESS_CLEANUP_DRYRUN=1 bash "$SBX_A/lib/harness-cleanup.real.sh" \
-    prune-blobs "$SBX_E/e2e/.runs/s12-stub-1" 2>&1)
-assert_rc "run E1: dry-run keeps the blob on disk" 0 test -e "$SBX_E/e2e/.runs/s12-stub-1/esp.img"
+    prune-blobs "$SBX_E/e2e/.runs/s06-stub-1" 2>&1)
+assert_rc "run E1: dry-run keeps the blob on disk" 0 test -e "$SBX_E/e2e/.runs/s06-stub-1/esp.img"
 assert_contains "run E1: dry-run says WOULD" "$DRY_OUT" "WOULD"
 # E2: refuse anything not shaped <...>/.runs/<dir>
 REFUSE_OUT=$(bash "$SBX_A/lib/harness-cleanup.real.sh" \
-    prune-blobs "$SBX_E/not-runs/s12-stub-1" 2>&1)
+    prune-blobs "$SBX_E/not-runs/s06-stub-1" 2>&1)
 assert_rc "run E2: non-.runs path refused — blob untouched" 0 \
-    test -e "$SBX_E/not-runs/s12-stub-1/esp.img"
+    test -e "$SBX_E/not-runs/s06-stub-1/esp.img"
 assert_contains "run E2: refusal is loud" "$REFUSE_OUT" "refus"
 # E3: the real deletion pass, direct
-bash "$SBX_A/lib/harness-cleanup.real.sh" prune-blobs "$SBX_E/e2e/.runs/s12-stub-1" >/dev/null 2>&1
-assert_rc "run E3: direct prune-blobs deletes the blob" 0 test ! -e "$SBX_E/e2e/.runs/s12-stub-1/esp.img"
+bash "$SBX_A/lib/harness-cleanup.real.sh" prune-blobs "$SBX_E/e2e/.runs/s06-stub-1" >/dev/null 2>&1
+assert_rc "run E3: direct prune-blobs deletes the blob" 0 test ! -e "$SBX_E/e2e/.runs/s06-stub-1/esp.img"
 assert_file_exists "run E3: direct prune-blobs keeps the console log" \
-    "$SBX_E/e2e/.runs/s12-stub-1/console-b1.log"
+    "$SBX_E/e2e/.runs/s06-stub-1/console-b1.log"
 
 # --- summary -----------------------------------------------------------------------
 TOTAL=$((TESTS_PASS + TESTS_FAIL))

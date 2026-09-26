@@ -86,6 +86,7 @@ env -u ALPINE_FDE_ESP \
     RETENTION=2 \
     "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
 assert_rc "build with conf-persisted ESP_PATH (no env) succeeds" 0 $?
-assert_file_exists "UKI landed on the conf-recorded ESP" "$ESP3/EFI/Linux/alpine-fde-$KVER.efi"
+test -e "$ESP3/EFI/Linux/alpine-fde-$KVER.efi"
+assert_rc "UKI landed on the conf-recorded ESP" 0 $?
 
 finish
