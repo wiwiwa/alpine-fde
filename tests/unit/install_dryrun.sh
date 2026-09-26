@@ -376,8 +376,8 @@ assert_eq "order (user flow directive): state write BEFORE the credential ceremo
 assert_eq "order: enrollment before ukictl build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
     "$(( I_BUILD < I_SEAL ? 1 : 0 ))"
-assert_eq "order: provisional seal before the state write (no banner record, ADR-20 #4)" "1" \
-    "$(( I_SEAL < I_STATE ? 1 : 0 ))"
+assert_eq "order: state write BEFORE the provisional seal (mechanical first — the seal is secret-dependent, it follows the ceremony)" "1" \
+    "$(( I_STATE > 0 && I_STATE < I_SEAL ? 1 : 0 ))"
 assert_eq "order: provisional seal (secret-dependent) BEFORE the teardown" "1" \
     "$(( I_SEAL > 0 && I_SEAL < I_TEARDOWN ? 1 : 0 ))"
 assert_eq "order: state write before teardown" "1" "$(( I_STATE < I_TEARDOWN ? 1 : 0 ))"
