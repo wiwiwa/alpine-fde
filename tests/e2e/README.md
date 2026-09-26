@@ -63,7 +63,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
   with zero input → switch_root into the installed system) must reach
   `login:` on the serial console; §13 ESP-size assertion; G-T13 prediction
   check for the enrolled release UKI.
-- **`s09-tpm-da-locked.sh`** — §10 DA-locked row (G-T15): `swtpm_da_lockout`
+- **`s09-tpm-da-locked.sh`** (RETIRED 2026-09-26 — absorbed by the `s90` drill's `leg6-sboff-da`) — §10 DA-locked row (G-T15): `swtpm_da_lockout`
   (tpm2_dictionarylockout) arms and ENGAGES dictionary-attack lockout
   (enforcement probe positive before AND after the boot — §7.1: the guest's
   refused policy sessions consumed no budget; the GetCapability counter
@@ -73,7 +73,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
   the scenario): the refusal/fallback chain is driven via the PCR 7 drift
   vector instead: refusal → bounded fallback (3 strikes) → PROMPT-FAILED →
   poweroff, never emergency.
-- **`s18-foreign-pcrsig.sh`** — §6.1 signing negative control, foreign key
+- **`s18-foreign-pcrsig.sh`** (RETIRED 2026-09-26 — absorbed by the `s90` drill's `leg5-foreign-sig` + `tests/unit/s18_foreign_pcrsig_host.sh`) — §6.1 signing negative control, foreign key
   (G-T5): the payload `.pcrsig` carries the SAME (correct!) pol entries
   re-signed by a FOREIGN RSA key; the outer sbsign signature is ours so the
   firmware boots it (SB cannot see the payload drive). Host-side, the
@@ -96,28 +96,22 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
 
 | File | Purpose |
 |---|---|
-| `../run-e2e.sh` | Orchestrator: env-check → harness self-test (infra smoke) → named/default scenarios (sequential by default; `-j N` runs up to N concurrent workers, with the s00→s00b chain always first and alone — see tests/README.md "Runner contract details") → per-scenario TAP output → G-T11b artifact scan → aggregated results JSON (`e2e/.runs/results-<ts>.json`) → nonzero exit on failure. Registry maps `s00, s00b, s01c, s03..s13, s15c` (the surviving §10/§12 matrix rows after absorbing `s01/s02/s14/s15/s16/s17`), literal W2b rows `s19..s22`, plus `s18`. A registered id with NO scenario file is a FAILURE (`missing`). |
+| `../run-e2e.sh` | Orchestrator: env-check → harness self-test (infra smoke) → named/default scenarios (sequential by default; `-j N` runs up to N concurrent workers, with the s00→s00b chain always first and alone — see tests/README.md "Runner contract details") → per-scenario TAP output → G-T11b artifact scan → aggregated results JSON (`e2e/.runs/results-<ts>.json`) → nonzero exit on failure. Registry maps `s00, s00b, s01c, s04, s06, s08, s10, s11, s15c` (the surviving §10/§12 matrix rows after absorbing `s01/s02/s14/s15/s16/s17` and the seven early-boot negatives `s03/s05/s07/s09/s12/s13/s18`), literal W2b rows `s19..s22`, plus `s90` (the unified negative drill, appended at runtime). A registered id with NO scenario file is a FAILURE (`missing`); a REMOVED id named on the command line is a loud `unknown` row (also a failure). |
 | `s00-bootstrap-lite.sh` | Full §12 S-00: installer UKI boot → passphrase unlock (zero console input) → pinned-artifact rootfs populate (§3.3) → size budget + package count → disk-side scans → real-CLI `audit --init` baseline finalize (SB-state-guarded) → G-T13 prediction check → ESP-size assertion. Prints `RUNDIR <path>`. |
 | `s00b-enroll-cache.sh` | §12 S-00b + S-01 (continues s00): in-guest production-CLI enroll (ensure-once), pristine-state cache with SHA manifest (`.cache/pristine-s00b/`), zero-input `login:` happy path. Consumes `ALPINE_FDE_S00_STATE`, else cache, else self-bootstraps. Prints `RUNDIR <path>` (`ALPINE_FDE_E2E_STATE`). |
 | `s01-lifecycle-chain.sh` (`s01c`) | Core lifecycle pipeline: consolidates `s00`, `s00b`, `s01`, `s02`, `s14`, and `s16` into one progressive journey (Install → Happy Boot → Kernel Update → Rollback → Key Rotation) advancing a single disk via committed QCOW2 overlays. |
-| `s03-stale-enrollment.sh` | §10 row "enrollment missing/stale": unsigned UKI (.pcrsig absent) and removed token; bounded recovery loop → 3 wrong answers → 3-strike fail-closed poweroff. |
 | `s04-unsigned-uki.sh` | §10 row "unsigned UKI": firmware refuses to execute UKI when Secure Boot is ON and binary lacks a valid PE signature. |
-| `s05-sb-off.sh` | §10 row "SB disabled": SB-off boot of the enrolled disk, PCR 7 drift asserted against the enrolled boot's console (PCR 11 unchanged); refused → retry cap → poweroff. |
 | `s06-token-trap.sh` | §12 trap case / I3: SB-off vars + `tpm2_pubkey` swapped for a foreign RSA key + valid `.pcrsig` → unseal fails closed. |
-| `s07-loader-options.sh` | §12 cmdline-tamper row (I5): release-signed UKI variant with extra cmdline argument booted with stale `.pcrsig` → PCR 11 drift → refusal. |
 | `s08-firmware-drift.sh` | §10 firmware variable drift: modified PK/KEK/db variables produce PCR 7 drift → unseal refused → 3-strike poweroff. |
-| `s09-tpm-da-locked.sh` | §10 DA-locked row (G-T15): armed + enforced dictionary-attack lockout on swtpm; boots, refuses, bounded 3-strike fallback, clean poweroff. |
 | `s10-tpm-absent.sh` | §10 TPM absent: QEMU booted without TPM hardware; unseal hook detects missing TPM, transitions to bounded recovery loop → 3-strike poweroff. |
 | `s11-disk-moved.sh` | §10 disk moved to another machine: disk booted against a virgin TPM; SRK seed mismatch refuses token unseal → bounded fallback → poweroff. |
-| `s12-wrong-passphrase.sh` | §10 passphrase way out: token refused first (SB-off, PCR 7 drift), console fallback reads 3 lines. Boot A: 3 wrong → poweroff. Boot B (recovery positive control): correct slot-0 passphrase → UNSEALED. |
-| `s13-token-tamper.sh` | Token-tamper suite (I3): `pubkey-swap`, `blob-corrupt`, `policy-corrupt`, and `version-99` — each host-tampered via `cryptsetup token import`, each fails closed. |
 | `s15-recovery-chain.sh` (`s15c`) | Disaster recovery & drift pipeline: consolidates `s15` (PCR 7 boot-layer drift) and `s17` (TPM clear / fresh SRK) into one progressive recovery drill. |
-| `s18-foreign-pcrsig.sh` | §6.1 foreign-signer negative control (G-T5): correct pol entries, foreign signature → firmware boots → policy refuses → bounded fallback → poweroff. |
+| `s90-negative-drill.sh` | The UNIFIED EARLY-BOOT NEGATIVE DRILL (queue item 30): 6 staged fail-closed boot legs over ONE shared enrolled base — `leg1-drift` (SB-on PCR 7 drift refusal), `leg2-loader-opt` (tampered-cmdline UKI + stale `.pcrsig`), `leg3-nopcrsig` (ADR-8 signing-key-absent), `leg4-wiped` (enrollment wiped host-side, no self-heal), `leg5-foreign-sig` (I3 gate refusal), `leg6-sboff-da` (ADR-20 pre-unseal guard block + the host-side DA-lockout G-T15 drill). Every leg ends fail-closed (3-strike `poweroff -f`, or the guard's parked Enter prompt + BY-PID kill). Absorbs `s03/s05/s07/s09/s12/s13/s18` (VM-only residuals); their artifact-level verdicts are pinned zero-boot by the `tests/unit/s0{3,13,18}_*_host.sh` suites. Disposition table: `tests/unit/s90_negative_drill_contract.sh`. Contract suite: same file. |
 | `s19-bcache-crash.sh` | §10 cache-SSD-failure row + §12 S-19: hybrid bcache writethrough stack, rescue read on member loss, replacement cache re-attach, production finalize upgrade. |
 | `s20-raid1-member-loss.sh` | §10 RAID1 rows + §12 S-20: btrfs raid1 across two LUKS members; degraded mount rescue, production finalize upgrades both members, zero-input token unlock full-pool reassembly. |
 | `s21-finalize-guard.sh` | §10 "first boot with Secure Boot OFF" + §12 S-21: oneshot stays advisory under SB-off; finalize halts fail-closed at fw_sb_state gate. Boot B (SB-on positive control) runs shared completion chain end-to-end. |
 | `s22-handoff-immunity.sh` | §12 S-22 + §2.1 T2c: provisional PCR-11 token window, guided finalize advances to {PCR 7, PCR 11} binding; tampered UKI fails closed. |
-| *Removed / Absorbed* | `s01`, `s02`, `s14`, `s16` (absorbed into `s01c`); `s15`, `s17` (absorbed into `s15c`). Script files and registry rows removed. |
+| *Removed / Absorbed* | `s01`, `s02`, `s14`, `s16` (absorbed into `s01c`); `s15`, `s17` (absorbed into `s15c`); `s03`, `s05`, `s07`, `s09`, `s12`, `s13`, `s18` (absorbed into `s90` + the wt-bootmin host suites). Script files and registry rows removed. |
 | `../lib/overlay-disk.sh` | Ephemeral QCOW2 overlay + base-image locking (`flock -s` / `LOCK_SH`); allows parallel tests to share base images with instantaneous commit/discard. |
 | `../lib/swtpm-fixture.sh` | swtpm daemon lifecycle: unixio sockets, per-boot `startup-clear` zeroed-PCR discipline, dictionary lockout, and clean socket management. |
 | `../lib/rootfs-fixture.sh` | SHA256-pinned Debian trixie deb/tarball cache (`tests/.cache/`, 41 pins incl. the 257.13 systemd-cryptsetup, the sentinel-pinned artifacts, and the G-HW4/G-HW5 btrfs + udev suite: btrfs-progs, liblzo2, bcache-tools, udev, dmsetup). `rootfs_ensure/deb_extract/tarball_extract`. |
@@ -388,27 +382,29 @@ per §6.1.1 (the PCR-11-only signing limitation stands).
 
 ## Scenario registry
 
-`tests/run-e2e.sh` maps `s00, s00b, s01..s17` (the §10/§12 matrix — the
-letter-suffixed `s00b` continues S-00 and does not inflate the literal
-18-row table the infra smoke pins) plus `s18` (a §6.1 extension row,
-appended at runtime). W2b will append the s19–s22 multi-drive rows (§10
-BASE matrix) to the literal table; the infra smoke's count pin went dynamic
-for that (per-id §10/§12 coverage + no-duplicates + an 18-row floor), so
-the appended rows keep the smoke green. Registration is by FILENAME
+`tests/run-e2e.sh` maps `s00, s00b, s01c, s04, s06, s08, s10, s11, s15c`
+(the surviving §10/§12 matrix — the letter-suffixed `s00b` continues S-00 and
+does not inflate the literal table the infra smoke pins) plus the literal W2b
+rows `s19–s22` and `s90` (the unified early-boot negative drill, appended at
+runtime). The pipeline-absorbed (`s01/s02/s14/s15/s16/s17`) and the
+drill-absorbed (`s03/s05/s07/s09/s12/s13/s18`) ids are REMOVED — files AND
+rows — so naming one yields a loud `unknown` row, never a silent skip. The
+infra smoke's count pin is dynamic (per-id §10/§12 coverage + no-duplicates +
+a 10-row literal floor), so the removals keep it green. Registration is by FILENAME
 CONVENTION: an id is
 runnable iff `tests/e2e/s<nn>[b]-*.sh` matches (glob, lowest name wins); a
 REGISTERED id with no file is a FAILURE (`missing`), never a pending pass —
 a run with zero scenarios executed is also a failure. The literal table in
 `run-e2e.sh` (grep'd by `tests/unit/e2e_infra_smoke.sh`) keeps one row per
 matrix id with the current script name as documentation. Scenario scripts
-that consume the ENROLLED s00b artifacts (`s01 s05 s06 s07 s09 s12 s13
-s18`) honor `ALPINE_FDE_E2E_STATE`; **each snapshots the shared state into
+that consume the ENROLLED s00b artifacts (`s01c s15c s06 s90`) honor
+`ALPINE_FDE_E2E_STATE`; **each snapshots the shared state into
 its own run dir at start** and keeps the dir's mtime fresh — sibling
 scenarios prune `.runs` to the 2 newest dirs globally (never the dirs listed
 in `ALPINE_FDE_PROTECT_DIRS`, which `run-e2e.sh` exports for the state dirs
 its own invocation chains on), and a mid-boot prune
 of the shared state dir or of an actively-written run dir otherwise unlinks
-`console.log` mid-boot (observed live 2026-09-14, s07 first attempt).
+`console.log` mid-boot (observed live 2026-09-14, the s07-era boots).
 Artifacts per run live in `e2e/.runs/<scenario>-<ts>/` (gitignored):
 console.log, qemu.{stdout,stderr}, vars, keys, disk.img, UKI, swtpm state.
 Keep big artifacts out of git and out of the repo root. Under a parallel

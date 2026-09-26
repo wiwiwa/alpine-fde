@@ -60,8 +60,11 @@
 #     3. self-bootstrap: baseline boot + host-side production enroll (1 boot)
 # The mode is on the record ("# drill base: <mode>").
 #
-# Step timing: one leaf stage per leg (`stage leg-<label>: done <s>s`); the
-# runner's additive `stages` object carries them.
+# Step timing: one leaf stage per leg (`stage leg1-drift: done <s>s`); the
+# runner's additive `stages` object carries them. Registry headroom: 6 legs +
+# variant builds want ALPINE_FDE_SCENARIO_BUDGET >= 2700 for default-set runs
+# (the default 1500 s outer budget is calibrated for the single-boot
+# scenarios; a state-consume drill run fits comfortably in 2700 s).
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -536,6 +539,11 @@ D7_LEG1=$(pcr_of "$RUN/console-leg1-drift.log" 7)
 assert_contains "[leg1] init ran (the guard PASSED — SB on, verified boot)" "$LOG" \
     "$(sentinel_of harness_init_started)"
 assert_contains "[leg1] TPM char device appeared" "$LOG" "$(sentinel_of harness_tpm_present)"
+if [[ -n "$D7_LEG1" ]]; then
+    _assert_result ok "[leg1] PCR 7 printed by the boot (drift evidence exists)" ""
+else
+    _assert_result not-ok "[leg1] PCR 7 printed by the boot (drift evidence exists)" "no alpine-fde-pcr sha256:7 line in console"
+fi
 assert_ne "[leg1] PCR 7 drifted vs the enrolled boot (the dbx update was measured)" \
     "$D7_ENROLLED" "${D7_LEG1:-}"
 assert_contains "[leg1] hook ran the enter-initrd extend (the guard let the boot proceed)" "$LOG" \
@@ -752,6 +760,12 @@ if [[ -n "$D7_LEG6" && "$D7_LEG6" != "$ZERO" ]]; then
     _assert_result ok "[leg6] PCR 7 non-zero (SB-off state measured by firmware)" ""
 else
     _assert_result not-ok "[leg6] PCR 7 non-zero (SB-off state measured by firmware)" "PCR7=${D7_LEG6:-absent}"
+fi
+if [[ -n "$D7_LEG6" ]]; then
+    _assert_result ok "[leg6] PCR 7 printed while SB off (SB-off state is measured too)" ""
+else
+    _assert_result not-ok "[leg6] PCR 7 printed while SB off (SB-off state is measured too)" \
+        "no alpine-fde-pcr sha256:7 line in console"
 fi
 assert_ne "[leg6] PCR 7 drifted vs enrolled boot (7=${D7_LEG6:-?})" "$D7_ENROLLED" "${D7_LEG6:-}"
 assert_eq "[leg6] PCR 11 unchanged (the guard blocked before ANY measurement work)" \

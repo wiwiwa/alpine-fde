@@ -39,13 +39,16 @@ Runner contract details:
 
 - **Default selection**: with no ids on the command line, the runner selects
   every registered scenario whose registry status is `ready`, in registry
-  order — currently 20 rows (the state chain `s00 -> s00b -> s01c -> s15c`,
-  the standalone negative scenarios, and the `s19`-`s22` multi-drive rows).
+  order — currently 14 rows (the state chain `s00 -> s00b -> s01c -> s15c`,
+  the surviving standalone scenarios, and the `s19`-`s22` multi-drive rows).
   The six pipeline-absorbed scenarios (`s01`, `s02`, `s14`, `s15`, `s16`,
-  `s17`) are REMOVED: their files are deleted from `tests/e2e/` AND their
-  registry rows are gone, so they cannot be selected or invoked — naming one
-  is a loud `unknown` row. Their invariants are covered by the merged
-  pipelines (see "Retirement of the absorbed scenarios" below).
+  `s17`) and the seven drill-absorbed early-boot negatives (`s03`, `s05`,
+  `s07`, `s09`, `s12`, `s13`, `s18`) are REMOVED: their files are deleted
+  from `tests/e2e/` AND their registry rows are gone, so they cannot be
+  selected or invoked — naming one is a loud `unknown` row. Their invariants
+  are covered by the merged pipelines, the unified negative drill `s90`, and
+  the zero-boot host suites (see "Retirement of the absorbed scenarios"
+  below).
 - **Guest shape**: every guest is `-machine q35 -m 2048 -smp $ALPINE_FDE_GUEST_SMP` (default 2): the in-guest phases under test (systemd, finalize, recovery drills) are multi-process, and a single vCPU serializes them on a multi-core host. Set `ALPINE_FDE_GUEST_SMP=1` for the historical shape.
 - **Accelerator (KVM autodetect)**: `tests/lib/qemu.sh` picks the QEMU
   accelerator from `ALPINE_FDE_ACCEL` (`kvm` | `tcg` | `auto`, default
@@ -365,7 +368,7 @@ In the original standalone scenario suite, over 50 QEMU/OVMF boots are executed 
 Approach 1 consolidates sequential, non-destructive lifecycle stages into unified, progressive pipelines while keeping destructive / fail-closed negative tamper tests isolated:
 
 1. **Multi-Stage Positive Pipelines:** Each stage advances the system state in place, allowing the next stage to boot directly against the mutated disk, ESP, and TPM state without intermediate re-installations or redundant baseline boots.
-2. **Fail-Closed Negatives Kept Standalone:** Negative tamper scenarios (`s03`-`s07`, `s09`-`s13`, `s18`) intentionally terminate in `poweroff -f` or firmware refusal, and continue to execute as standalone single-boot checks against a cached pristine image.
+2. **Fail-Closed Negatives Consolidated Into One Drill (updated 2026-09-26):** the negative scenarios (`s03`-`s07`, `s09`-`s13`, `s18`) terminate in `poweroff -f` or firmware refusal. They now execute as ONE unified fail-closed drill (`s90`, 6 staged boot legs over a single shared enrolled base — see pipeline 3 below); their artifact-level verdicts moved into the zero-boot wt-bootmin host unit suites (`tests/unit/s0{3,13,18}_*_host.sh`), so the default registry no longer pays 7 scenarios' worth of duplicated bootstrap+refusal boots.
 
 ---
 
@@ -558,6 +561,58 @@ above it (recommend 2700) for full-from-install registry runs.
 
 ---
 
+#### 3. Unified Early-Boot Negative Drill — **IMPLEMENTED** (queue item 30, 2026-09-26)
+
+**Id / file:** registry id **`s90`** -> `tests/e2e/s90-negative-drill.sh`
+(appended at runtime, NOT a literal table row — the literal table stays the
+pure §10/§12 matrix). It consolidates the VM-only console residuals of the
+seven early-boot negative scenarios into 6 staged fail-closed boot legs over
+ONE shared enrolled base:
+
+* **leg1-drift** — SB-on PCR 7 drift (dbx update, SB stays 1): the guard
+  passes, the `{7,11}` token's PolicyPCR refuses the stale seal term,
+  refusal-first ordering, 3 wrong answers -> 3-strike fail-closed `poweroff
+  -f` (s12 boot B's negative; s15's refusal vector).
+* **leg2-loader-opt** — a release-signed UKI VARIANT whose `.cmdline` carries
+  one extra word, booted with the STALE clean `.pcrsig` payload: the stub
+  measures the tampered cmdline into PCR 11, the policy session refuses,
+  3-strike (s07; the host-side divergence proof rides along).
+* **leg3-nopcrsig** — a release-signed UKI built WITHOUT the PCR-signing step
+  (ADR-8 signing-key-absent): "pcrsig payload MISSING", the token path never
+  arms, 3-strike (s03 flavor 1).
+* **leg4-wiped** — the standing enrollment wiped host-side (token + its
+  keyslots, raw disk copy): `unseal_token_missing`, NO self-heal (I6),
+  3-strike (s03 flavor 2).
+* **leg5-foreign-sig** — the `.pcrsig` re-signed by a FOREIGN key (same pol
+  bytes, only the signer moved): the I3 openssl gate refuses BEFORE any TPM
+  session, 3-strike (s18 control 1 — the gate-refusal class representative).
+* **leg6-sboff-da** — SB-off vars: the ADR-20 PRE-UNSEAL GUARD blocks at the
+  hook's first step (no TPM op, no prompt; parked on Enter -> qemu killed BY
+  PID), with the DA-locked TPM drilled host-side (armed -> enforced before ->
+  STILL enforced after; G-T15: the guest consumed nothing) (s05 + s09 + s12
+  boot A).
+
+**Absorption bookkeeping:** every absorbed assertion is either in the drill
+(leg-pinned), covered ZERO-BOOT by a wt-bootmin host suite
+(`tests/unit/s03_stale_enrollment_host.sh`, `s13_token_tamper_host.sh`,
+`s18_foreign_pcrsig_host.sh` — the artifact-level verdicts: G-B6 gate
+refusals, token-tamper primitives, foreign-signer recipe controls), or
+DROPPED WITH THE REASON NAMED. The disposition table lives in
+`tests/unit/s90_negative_drill_contract.sh` (the s15c-pattern contract suite,
+which also pins the boot plan and the runner wiring). Net effect: the seven
+absorbed scenarios' ~16–23 boots (standalone, each with its own
+bootstrap/enroll tail) become 6 drill legs (+1 bootstrap boot only when no
+state chain/cache exists).
+
+**R1/R2/R3 semantics:** as the pipelines (the enrolled base is snapshotted
+once into a master dir that is never booted; read-mostly legs run discarded
+QCOW2 overlays; the one mutating leg runs a raw copy; `ALPINE_FDE_E2E_STATE`
+-> the SHA-verified `pristine-s00b` cache -> self-bootstrap, with the mode on
+the record as `# drill base:`); the TPM is re-anchored (fresh, zeroed,
+settled) before every leg; one leaf stage per leg for the Step timing.
+
+---
+
 ### Retirement of the absorbed scenarios
 
 With both pipelines merged and registry-proven green (the lifecycle
@@ -565,7 +620,9 @@ pipeline `s01c` and the recovery pipeline `s15c` each verified standalone in
 full-from-install and from-cache modes, plus in the `-j` registry with the
 chain hoisted), the six standalone scenarios whose boots they absorbed are
 REMOVED: `s01`, `s02`, `s14`, `s16` (absorbed by `s01c`) and `s15`, `s17`
-(absorbed by `s15c`). REMOVED means the scenario FILES are deleted from
+(absorbed by `s15c`). The 2026-09-26 drill consolidation removed seven more:
+`s03`, `s05`, `s07`, `s09`, `s12`, `s13`, `s18` (absorbed by the `s90`
+unified negative drill + the zero-boot wt-bootmin host suites). REMOVED means the scenario FILES are deleted from
 `tests/e2e/` and the registry ROWS are dropped from `tests/run-e2e.sh` —
 not merely deselected. The no-args default run stops paying their duplicated
 fixture/enroll/audit boots — the pipelines assert the same invariants
