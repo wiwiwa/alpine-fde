@@ -221,15 +221,15 @@ mirror_bootstrap_ensure() {
     bdir="$(mirror_cache_root)/bootstrap"
     mkdir -p "$bdir"
     base="$(mirror_upstream)/$(mirror_release)/main/x86_64"
-    local apk_apk="$bdir/apk-tools-static-$(MIRROR_PIN_APK_TOOLS_STATIC_VERSION).apk"
-    local keys_apk="$bdir/alpine-keys-$(MIRROR_PIN_ALPINE_KEYS_VERSION).apk"
+    local apk_apk="$bdir/apk-tools-static-${MIRROR_PIN_APK_TOOLS_STATIC_VERSION}.apk"
+    local keys_apk="$bdir/alpine-keys-${MIRROR_PIN_ALPINE_KEYS_VERSION}.apk"
     if [[ ! -f "$apk_apk" ]]; then
-        url="$base/apk-tools-static-$(MIRROR_PIN_APK_TOOLS_STATIC_VERSION).apk"
+        url="$base/apk-tools-static-${MIRROR_PIN_APK_TOOLS_STATIC_VERSION}.apk"
         echo "local-mirror: fetching $(basename "$apk_apk")" >&2
         _mirror_fetch "$apk_apk" "$url" || return 1
     fi
     if [[ ! -f "$keys_apk" ]]; then
-        url="$base/alpine-keys-$(MIRROR_PIN_ALPINE_KEYS_VERSION).apk"
+        url="$base/alpine-keys-${MIRROR_PIN_ALPINE_KEYS_VERSION}.apk"
         echo "local-mirror: fetching $(basename "$keys_apk")" >&2
         _mirror_fetch "$keys_apk" "$url" || return 1
     fi
@@ -364,8 +364,8 @@ mirror_manifest_write() {
   "pins": {
     "apkindex_main_sha256": "$MIRROR_PIN_MAIN_APKINDEX_SHA256",
     "apkindex_community_sha256": "$MIRROR_PIN_COMMUNITY_APKINDEX_SHA256",
-    "apk_tools_static": "$(MIRROR_PIN_APK_TOOLS_STATIC_VERSION) $MIRROR_PIN_APK_TOOLS_STATIC_SHA256",
-    "alpine_keys": "$(MIRROR_PIN_ALPINE_KEYS_VERSION) $MIRROR_PIN_ALPINE_KEYS_SHA256"
+    "apk_tools_static": "${MIRROR_PIN_APK_TOOLS_STATIC_VERSION} $MIRROR_PIN_APK_TOOLS_STATIC_SHA256",
+    "alpine_keys": "${MIRROR_PIN_ALPINE_KEYS_VERSION} $MIRROR_PIN_ALPINE_KEYS_SHA256"
   },
   "packages": {
     "main": $n_main,

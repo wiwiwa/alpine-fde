@@ -201,6 +201,53 @@ else
     _fail "derivation change was a NO-OP (the cache silently keeps missing packages)"
 fi
 
+# --- 4b. the REAL bootstrap chain (the boot lane's live finding #5) ----------
+# mirror_bootstrap_ensure was never executed hermetically (the section-1
+# stubs replace it) and its rebuild path is broken: the version pins are
+# shell VARIABLES referenced with COMMAND-substitution syntax
+# ($(MIRROR_PIN_APK_TOOLS_STATIC_VERSION) -> "command not found", empty
+# interpolation -> apk-tools-static-.apk -> upstream 404; observed live,
+# attempt 5, the first real rebuild). Execute the REAL function here in a
+# fresh shell (stub-free) with a stubbed _mirror_fetch and pins matching the
+# fixture: it must fetch, verify both hashes, extract apk.static and leave it
+# executable.
+BOOT_OUT=$(bash -c "
+    set -u
+    export ALPINE_FDE_LOCAL_MIRROR_CACHE='$T/bootfix-cache'
+    export ALPINE_FDE_MIRROR_RELEASE='v9test'
+    export ALPINE_FDE_MIRROR_UPSTREAM='http://fake.invalid/alpine'
+    . '$REPO/tests/lib/local-mirror.sh'
+    d='$T/bootfix'
+    mkdir -p \"\$d/src/sbin\"
+    printf '#!/bin/sh\necho apk-static-stub\n' >\"\$d/src/sbin/apk.static\"
+    chmod +x \"\$d/src/sbin/apk.static\"
+    tar -czf \"\$d/apk-tools-static-3.0.8-r0.apk\" -C \"\$d/src\" sbin
+    mkdir -p \"\$d/src2/etc/apk/keys\"
+    printf 'DUMMY-KEY\n' >\"\$d/src2/etc/apk/keys/alpine-devel@example.test.rsa\"
+    tar -czf \"\$d/alpine-keys-2.6-r0.apk\" -C \"\$d/src2\" etc/apk/keys
+    MIRROR_PIN_APK_TOOLS_STATIC_SHA256=\$(sha256sum \"\$d/apk-tools-static-3.0.8-r0.apk\" | awk '{print \$1}')
+    MIRROR_PIN_ALPINE_KEYS_SHA256=\$(sha256sum \"\$d/alpine-keys-2.6-r0.apk\" | awk '{print \$1}')
+    _mirror_fetch() { # stub the wire: serve the fixtures by basename
+        dest=\$1; base=\$(basename \"\$2\")
+        case \"\$base\" in
+            apk-tools-static-*) cp \"\$d/apk-tools-static-3.0.8-r0.apk\" \"\$dest\" ;;
+            alpine-keys-*) cp \"\$d/alpine-keys-2.6-r0.apk\" \"\$dest\" ;;
+            *) return 1 ;;
+        esac
+    }
+    mirror_bootstrap_ensure; echo \"A-RC=\$?\"
+    test -x \"\$ALPINE_FDE_LOCAL_MIRROR_CACHE/bootstrap/apk.static\"; echo \"B-RC=\$?\"
+    \"\$ALPINE_FDE_LOCAL_MIRROR_CACHE/bootstrap/apk.static\" | grep -q apk-static-stub; echo \"C-RC=\$?\"
+" 2>&1)
+if printf '%s' "$BOOT_OUT" | grep -q '^A-RC=0$' \
+    && printf '%s' "$BOOT_OUT" | grep -q '^B-RC=0$' \
+    && printf '%s' "$BOOT_OUT" | grep -q '^C-RC=0$'; then
+    _pass "mirror_bootstrap_ensure (REAL run): fetch + hash pins + apk.static extraction"
+else
+    _fail "mirror_bootstrap_ensure broken on the rebuild path ($(printf '%s' "$BOOT_OUT" | grep -E 'A-RC|B-RC|C-RC|local-mirror' | tr '\n' ' '))"
+fi
+rm -rf "$T/bootfix" "$T/bootfix-cache"
+
 # --- 5. ISO pin convention ----------------------------------------------------------
 assert_eq "iso filename convention (flavor-version-arch under the ISO cache)" \
     "$T/isos/alpine-virt-3.24.2-x86_64.iso" "$(iso_path)"
