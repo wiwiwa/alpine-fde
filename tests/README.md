@@ -69,7 +69,8 @@ Runner contract details:
   its own run dir at start) and share up to N worker slots. Failure
   semantics are unchanged: any scenario failure fails the run; budget,
   vacuous guard and exit-code classes apply per scenario exactly as in
-  sequential mode.
+  sequential mode. (See "Base Image Sharing & Parallel Worker Isolation Architecture"
+  below for how workers safely share the base image without mutation).
 - **Prune safety under `-j`**: with jobs > 1 the runner feeds EVERY existing
   `.runs` dir to the prune filter scenarios already honor
   (`ALPINE_FDE_PROTECT_DIRS`) — re-collected before each worker fork, so
@@ -305,6 +306,55 @@ workaround for a QEMU 11.1 event-loop defect, measured and verified
   processing is 0.1–25 ms/op — the stalls are the host event loop, not swtpm.
   Raw traces: `tests/e2e/.runs/*/…/tpm/tpm-cmd.log`
   (`SWTPM_TIMED_LOG=1` adds per-line timestamps).
+
+## Base Image Sharing & Parallel Worker Isolation Architecture
+
+When running scenarios concurrently via `-j N`, multiple QEMU/OVMF guests execute simultaneously on the host. The test runner ensures deterministic isolation and fast startup by sharing a single golden enrolled base image without in-place mutation or cross-test interference:
+
+```
+[ s00 -> s00b ] (sequential bootstrap & enrollment)
+       │
+       ▼
+[ tests/e2e/.cache/pristine-s00b/ ] ──(read-only golden state)──┐
+       │ (exports ALPINE_FDE_E2E_STATE)                         │
+       ├──────────────────────────┬─────────────────────────────┤
+       ▼                          ▼                             ▼
+Worker 1 (s01c)            Worker 2 (s05)                Worker N (s06)
+- .runs/s01c-<ts>/         - .runs/s05-<ts>/             - .runs/s06-<ts>/
+- private disk copy        - private disk copy           - private disk copy / tamper
+- private swtpm sockets    - private swtpm sockets       - private swtpm sockets
+- ephemeral QCOW2 overlay  - ephemeral QCOW2 overlay     - ephemeral QCOW2 overlay
+```
+
+### 1. Golden Base Image Generation (`s00b-enroll-cache.sh`)
+- `s00b` completes the full in-guest enrollment under UEFI Secure Boot and writes the canonical state to `tests/e2e/.cache/pristine-s00b/`:
+  - `disk.img`: The fully provisioned and enrolled LUKS2 root disk.
+  - `vars-enrolled.fd`: Enrolled UEFI Secure Boot NVRAM variables (`PK`, `KEK`, `db`, `dbx`).
+  - `tpm/tpm2-00.permall`: The non-volatile TPM state containing the Storage Root Key (SRK) seed.
+  - `baseline.json`, `harness.efi`, and signing keys.
+- The directory is verified against a SHA-256 manifest (`SHA256SUMS`).
+
+### 2. State Propagation via `ALPINE_FDE_E2E_STATE`
+- In `tests/run-e2e.sh`, the state chain `s00 -> s00b -> s01c -> s15c` runs first sequentially.
+- Upon completion of `s00b`, the runner exports `ALPINE_FDE_E2E_STATE="$S00B_RUNDIR"`.
+- When background worker subshells launch concurrently `( _run_one "$_i" "$_id" ) &`, each scenario inherits `$ALPINE_FDE_E2E_STATE` (or falls back to the SHA-verified `.cache/pristine-s00b/` directory).
+
+### 3. Disk Sharing & Ephemeral QCOW2 Overlays (`tests/lib/overlay-disk.sh`)
+To guarantee that parallel workers and repeated attempts never corrupt the base image or collide:
+- **Private Working Directory:** Every worker operates inside its own timestamped directory (`tests/e2e/.runs/<scenario>-<ts>/`).
+- **Read-Only Locking (`flock -s` / `LOCK_SH`):** `overlay_lock_acquire` opens every file in the backing chain with shared locks, preventing races against generator rebuilds.
+- **Per-Boot Ephemeral Overlays:** Instead of booting raw disk files directly, QEMU boots a fresh QCOW2 overlay:
+  ```sh
+  qemu-img create -f qcow2 -b "$CANON_DISK" -F raw "$OVERLAY_BOOT"
+  ```
+- **Commit vs. Discard Discipline:**
+  - *Positive lifecycle legs (e.g. `s01c` kernel upgrade / key rotation):* On success, changes are committed into the worker's private canonical disk (`qemu-img commit`), advancing the state for subsequent boots.
+  - *Negative refusal/tamper/fail-closed legs (e.g. `s03`, `s06`, `s15c` drift refusal):* The overlay is discarded (`rm -f "$OVERLAY_BOOT"`), returning the disk state to pristine instantaneously.
+
+### 4. TPM & Socket Concurrency Isolation
+- **Hardware NV Seed Sharing (`tpm2-00.permall`):** Only `tpm2-00.permall` is copied into `$RUN/tpm/`. Because it preserves the NV seed, each worker's `swtpm` instance independently reproduces the exact same Storage Root Key (SRK) required to unseal the LUKS token.
+- **Zero Volatile State (`_reanchor_tpm`):** Before every boot, `tpm2-00.volatilestate` is deleted and `swtpm` is started fresh with `startup-clear`, ensuring PCR 0 and PCR 7 start strictly at 0.
+- **Private Sockets:** Each worker binds its own Unix domain sockets inside `$RUN/` (`tpm/sock`, `tpm/sock.ctrl`, `serial.sock`, `qmp.sock`), completely eliminating host port contention or inter-process interference.
 
 ## Design: Scenario Consolidation & Lifecycle Pipelining (Approach 1)
 
