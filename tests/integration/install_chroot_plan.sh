@@ -1405,6 +1405,18 @@ assert_eq "hosts-based mirror: failing nslookup + /etc/hosts entry -> install pr
     "0" "$RC"
 assert_contains "hosts-based mirror: the probe names the hosts mechanism" "$OUT" \
     "via /etc/hosts"
+# --- boot-lane finding #8: the /dev/shm seam must be VISIBLE in-chroot -------
+# the ceremony's 0600 release-key passphrase seam lives in the LIVE /dev/shm
+# (tmpfs submount); a plain `mount --bind /dev` does not carry submounts, so
+# the in-chroot ukictl build fell back to its interactive prompt and hung the
+# unattended install (attempt 8). The plan must bind /dev/shm explicitly,
+# BEFORE the secret-consuming guest line.
+SHM_BIND=$(grep -c 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG")
+BUILD_LINE=$(grep -nF 'ukictl build' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
+SHM_LINE=$(grep -nF 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
+assert_eq "seam visibility: the plan binds /dev/shm into the target" "1" "$SHM_BIND"
+assert_eq "seam visibility: the bind precedes the secret-consuming ukictl build" "1" \
+    "$(( SHM_LINE > 0 && BUILD_LINE > 0 && SHM_LINE < BUILD_LINE ? 1 : 0 ))"
 assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_ETC/hosts"
 assert_contains "item 26b: the seeded hosts table carries the live entries" \
     "$(cat "$MNT_ETC/hosts")" "desktop-0"
