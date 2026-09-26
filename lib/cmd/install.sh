@@ -1676,6 +1676,13 @@ cmd_install_main() {
   # binds the efivars so the in-chroot NVRAM enrollment reaches the live
   # firmware.
   inst_plan_run host "mkdir -p $_im_mnt/proc $_im_mnt/sys $_im_mnt/dev && mount -t proc proc $_im_mnt/proc && mount --bind /sys $_im_mnt/sys && mount --bind /dev $_im_mnt/dev"
+  # boot-lane finding #8 (s23 attempt 8): the ceremony's 0600 release-key
+  # passphrase seam file lives in the LIVE env's /dev/shm (a tmpfs SUBMOUNT)
+  # — a plain `mount --bind /dev` does NOT carry submounts, so the in-chroot
+  # ukictl build could not read the seam and fell back to its interactive
+  # prompt (hung the unattended install). Bind the shm tree explicitly; the
+  # blocker #8 contract (never argv, never on disk) then actually holds.
+  inst_plan_run host "mkdir -p $_im_mnt/dev/shm && mount --bind /dev/shm $_im_mnt/dev/shm"
   inst_plan_run host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
 
   # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/alpine-fde ---

@@ -1403,6 +1403,7 @@ chmod +x "$T/stubfail/nslookup"
 PATH="$T/stubfail:$PATH" ALPINE_FDE_MIRROR=http://desktop-0:8123/v3.24/main run_install </dev/null
 assert_eq "hosts-based mirror: failing nslookup + /etc/hosts entry -> install proceeds (rc 0)" \
     "0" "$RC"
+printf '%s\n' "DEBUG-OUT-TAIL: $(printf '%s' "$OUT" | tail -3 | tr '\n' '|')" >&2
 assert_contains "hosts-based mirror: the probe names the hosts mechanism" "$OUT" \
     "via /etc/hosts"
 # --- boot-lane finding #8: the /dev/shm seam must be VISIBLE in-chroot -------
