@@ -4,19 +4,23 @@
 # /etc/mkinitfs/features.d/alpine-fde.files and registers the `alpine-fde`
 # feature in /etc/mkinitfs/mkinitfs.conf (mkinitfs packs a feature's entries
 # ONLY when the feature is enabled there — §8.2/ADR-13 staging contract,
-# tests/unit/featuresd_contract.sh); every file the unseal hook needs
-# inside the initramfs is listed here (absolute target-root paths, globs
-# allowed). mkinitfs resolves these paths against the TARGET tree at build
-# time, so the first entry below is also the ONE pinned destination where
-# `install` stages the hook itself (§9.1 step 7):
-#   * the hook script itself
+# tests/unit/featuresd_contract.sh).
+#
+# REAL-SERVER BLOCKER #14 (mkinitfs 3.14.1 packing semantics, proven against
+# the real mkinitfs on the extracted 6.18.53-0-lts tree): mkinitfs routes
+# .files entries through lddtree(1) to resolve shared libraries, and ldtree
+# REJECTS every non-ELF file ("Magic number does not match") — kernel modules
+# (.ko/.ko.gz) and plain-text udev rules listed here were silently dropped.
+# Kernel modules therefore live in alpine-fde.modules (mkinitfs resolves
+# them through modules.dep dependency closure) and the hook script + udev
+# rules are packed via the `custom_files` list in mkinitfs.conf (verbatim
+# copy, no ldtree leg) — both staged by `install` §9.1 step 7.
+#
+# This list now carries ONLY ELF payload (the hook's userland), which is the
+# shape mkinitfs's .files pipeline can actually pack:
 #   * cryptsetup + libcrypto (openssl) for the unlock + signature gate
 #   * the exact tpm2-tools verbs the hook runs + libtss2 (ESYS stack incl.
 #     the device TCTI)
-#   * TPM kernel modules + the TPM udev rule (creates /dev/tpmrm0)
-#   * root filesystem drivers (btrfs default, ext4 optional) and the bcache
-#     block driver + its udev rule for hybrid topologies (§4.1)
-/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
 /usr/bin/cryptsetup
 /usr/lib/libcryptsetup.so*
 /usr/bin/openssl
@@ -38,13 +42,3 @@
 /usr/lib/libtss2-sys.so*
 /usr/lib/libtss2-tctildr.so*
 /usr/lib/libtss2-tcti-device.so*
-/lib/modules/*/kernel/drivers/char/tpm/tpm.ko*
-/lib/modules/*/kernel/drivers/char/tpm/tpm_tis.ko*
-/lib/modules/*/kernel/drivers/char/tpm/tpm_crb.ko*
-/usr/lib/udev/rules.d/*tpm*.rules
-/lib/modules/*/kernel/fs/btrfs/btrfs.ko*
-/lib/modules/*/kernel/fs/ext4/ext4.ko*
-/lib/modules/*/kernel/fs/jbd2/jbd2.ko*
-/lib/modules/*/kernel/fs/mbcache/mbcache.ko*
-/lib/modules/*/kernel/drivers/md/bcache/bcache.ko*
-/usr/lib/udev/rules.d/69-bcache.rules

@@ -378,7 +378,7 @@ I_HOOKS=$(line_no "$INS_OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
 I_BUILD=$(line_no "$INS_OUT" "ukictl build")
 # blocker #12 ORDER GUARD: the features.d module-append staging precedes the
 # build record in the plan (mkinitfs must see the resolved module paths)
-I_APPEND=$(line_no "$INS_OUT" '>> /mnt/etc/mkinitfs/features.d/alpine-fde.files')
+I_APPEND=$(line_no "$INS_OUT" '>> /mnt/etc/mkinitfs/features.d/alpine-fde.modules')
 assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
     "$(( I_APPEND > 0 && I_APPEND < I_BUILD ? 1 : 0 ))"
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
@@ -555,6 +555,8 @@ assert_contains "ext4: conf records ROOT_FS=ext4" "$INS_OUT" "ROOT_FS=ext4"
 APK_TXN_EXT4=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "ext4: apk txn includes e2fsprogs" "$APK_TXN_EXT4" "e2fsprogs"
 assert_not_contains "ext4: apk txn has no btrfs-progs" "$APK_TXN_EXT4" "btrfs-progs"
+assert_not_contains "blocker #14b: non-bcache topology carries NO bcache-tools-udev" \
+    "$APK_TXN_EXT4" "bcache-tools-udev"
 # item 26d: the reset mount teardown is topology-independent now — ONE
 # recursive record covers ext4 exactly as it covers btrfs subvols
 assert_contains "ext4: reset keeps the single guarded recursive umount (item 26d)" "$INS_OUT" \
@@ -628,6 +630,13 @@ assert_not_contains "bcache: NO dracut force_drivers pin" "$INS_OUT" "force_driv
 assert_contains "bcache: conf records BCACHE=1" "$INS_OUT" "BCACHE=1"
 APK_TXN_BC=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "bcache: apk txn includes bcache-tools" "$APK_TXN_BC" "bcache-tools"
+# real-server blocker #14b: Alpine splits the udev integration into the
+# bcache-tools-udev SUBPACKAGE (69-bcache.rules + bcache-register/probe-bcache)
+# — without it the audit's rules requirement can never pack. The -udev
+# subpackage pattern: any future 'required rules file' must check the -udev
+# subpackage, not just the base package.
+assert_contains "blocker #14b: bcache apk txn includes bcache-tools-udev (69-bcache.rules + helpers)" \
+    "$APK_TXN_BC" "bcache-tools-udev"
 BC_CRYPTTAB=$(grep -F 'none luks,tpm2-device=auto,discard' <<<"$INS_OUT")
 assert_contains "bcache: crypttab is a single root entry (NO password-cache)" "$BC_CRYPTTAB" \
     "root UUID="

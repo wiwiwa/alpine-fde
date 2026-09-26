@@ -1,0 +1,23 @@
+# features.d/alpine-fde.modules — mkinitfs MODULE list for the alpine-fde
+# Early-Boot Unseal Hook (docs/Architecture.md §8.2; ADR-13; real-server
+# blocker #14). mkinitfs packs kernel modules ONLY from <feature>.modules:
+# entries are resolved against /lib/modules/<kver>/ and expanded through the
+# modules.dep dependency closure (sbin/mkinitfs find_kmods) — the .files
+# route cannot carry modules (its ldtree pass drops every non-ELF file).
+#
+# `alpine-fde install` stages this file next to alpine-fde.files and the
+# step-7 host record APPENDS the target's resolved module keys here (found
+# under <mnt>/lib/modules/*/kernel, with the /lib/modules/<kver>/ prefix
+# stripped — modules.dep key shape), so a kernel that moves module paths
+# still packs. mkinitfs dedupes the closure (sort -u) — re-runs are safe.
+#
+# Directory entries pack the whole subtree: the TPM dir carries tpm.ko CORE
+# plus EVERY interface driver the kernel ships (tpm_tis/tpm_crb/…), which is
+# what the audit's ANY-of interface-driver requirement resolves against
+# (blocker #12 refinement).
+kernel/drivers/char/tpm
+kernel/fs/btrfs
+kernel/fs/ext4
+kernel/fs/jbd2
+kernel/fs/mbcache
+kernel/drivers/md/bcache

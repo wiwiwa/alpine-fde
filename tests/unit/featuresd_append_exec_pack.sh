@@ -9,10 +9,12 @@
 #       chroot where <mnt> does not exist, so the scan would find nothing and
 #       append nothing (the hypothesized defect shape),
 #   (b) execute BEFORE the in-guest `ukictl build` record (mkinitfs reads the
-#       feature file at build time),
-#   (c) append GUEST-RELATIVE paths (the <mnt> prefix stripped) that resolve
-#       under the target root — the guest sees them at the identical path
-#       after chroot(8),
+#       feature files at build time),
+#   (c) append modules.dep-KEY paths (the /lib/modules/<kver>/ prefix
+#       stripped) to features.d/alpine-fde.modules that resolve under the
+#       target root — mkinitfs expands them through the dep closure
+#       (blocker #14: the .files/ldtree route silently drops non-ELF files,
+#       so modules can NEVER ride .files),
 #   (d) feed a mkinitfs-semantics pack of the staged feature file that the
 #       initrd audit judges COMPLIANT with the previously "missing" modules
 #       (.ko.gz server shape, compression-tolerant) — and the NEGATIVE
@@ -237,7 +239,7 @@ RC=$?
 assert_eq "§9.1 Stage 1 chroot install rc 0 (ceremony answers on stdin)" "0" "$RC"
 
 # --- (a) the append record executes as a HOST record --------------------------
-APPEND_LINE=$(printf '%s\n' "$OUT" | grep -Fm1 'features.d/alpine-fde.files; td=' || true)
+APPEND_LINE=$(printf '%s\n' "$OUT" | grep -Fm1 'features.d/alpine-fde.modules; td=' || true)
 assert_eq "the module-append record is present in the executed plan" "1" \
     "$([ -n "$APPEND_LINE" ] && echo 1 || echo 0)"
 case ${APPEND_LINE-} in
@@ -246,27 +248,49 @@ case ${APPEND_LINE-} in
 esac
 
 # --- (b) execution order: append BEFORE the in-guest build record -------------
-O_APPEND=$(first_line_no "$OUT" 'features.d/alpine-fde.files; td=')
+O_APPEND=$(first_line_no "$OUT" 'features.d/alpine-fde.modules; td=')
 O_BLD=$(first_line_no "$OUT" 'guest: export ALPINE_FDE_ROOT=/')
 assert_eq "the module-append record executes BEFORE the in-guest ukictl build record" "1" \
     "$(( O_APPEND > 0 && O_BLD > O_APPEND ? 1 : 0 ))"
 
-# --- (c) appended lines are GUEST-RELATIVE and target-root-resolvable ---------
+# --- (c) appended lines are modules.dep KEYS, target-root-resolvable ----------
 FEAT=$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.files
-assert_file_exists "the feature file is staged into the target root" "$FEAT"
-MOD_LINES=$(grep "^/lib/modules/$KVER/" "$FEAT" || true)
-assert_eq "the host-side scan appended RESOLVED module lines (non-empty — the scan did not no-op)" "1" \
-    "$([ -n "$MOD_LINES" ] && echo 1 || echo 0)"
-assert_eq "every appended module line is GUEST-RELATIVE (the <mnt> prefix is stripped — chroot(8) resolves the identical path)" "0" \
-    "$(grep -c "^$ALPINE_FDE_INSTALL_MNT/" <<<"$MOD_LINES")"
-assert_eq "every appended module line resolves to a real file under the TARGET root" "0" \
+MODS=$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.modules
+assert_file_exists "the .files feature file is staged into the target root" "$FEAT"
+assert_file_exists "blocker #14: the .modules feature file is staged into the target root" "$MODS"
+assert_eq "blocker #14: the staged .files carries ZERO kernel-module entries (ldtree drops non-ELF)" "0" \
+    "$(grep -c '^/lib/modules' "$FEAT")"
+MOD_LINES=$(grep '^kernel/' "$MODS" || true)
+APPENDED=$(grep '\.ko' <<<"$MOD_LINES" || true)
+assert_eq "the host-side scan appended RESOLVED dep keys (non-empty — the scan did not no-op)" "1" \
+    "$([ -n "$APPENDED" ] && echo 1 || echo 0)"
+assert_eq "every appended key is a modules.dep KEY (no leading slash, no <mnt> prefix)" "0" \
+    "$(grep -cE '^/|^'"$ALPINE_FDE_INSTALL_MNT" <<<"$MOD_LINES")"
+assert_eq "every APPENDED key resolves to a real module file under the TARGET root" "0" \
     "$(while IFS= read -r l; do
            [ -n "$l" ] || continue
-           [ -f "$ALPINE_FDE_INSTALL_MNT$l" ] || { printf 'x'; break; }
-       done <<<"$MOD_LINES" | wc -c)"
+           [ -f "$ALPINE_FDE_INSTALL_MNT/lib/modules/$KVER/$l" ] || { printf 'x'; break; }
+       done <<<"$APPENDED" | wc -c)"
+# static template entries may legitimately glob-skip on trees that lack them
+# (e.g. kernel/fs/mbcache when the kernel ships mbcache.ko at fs/ level) —
+# mkinitfs skips unmatched entries; assert the required dirs DO resolve
+for d in kernel/drivers/char/tpm kernel/fs/btrfs kernel/drivers/md/bcache; do
+    assert_contains "the static .modules template carries $d" "$MOD_LINES" "$d"
+done
 for m in tpm.ko.gz tpm_tis.ko.gz btrfs.ko.gz bcache.ko.gz; do
     assert_contains "the server .ko.gz shape is appended: $m" "$MOD_LINES" "/$m"
 done
+# blocker #14b: the shipped udev rules are staged + registered in custom_files
+# 69-bcache.rules itself is delivered by the bcache-tools-udev SUBPACKAGE
+# (apk txn pin in install_dryrun.sh); the audit leg below seeds it as that
+# package would. install stages only OUR 60-tpm.rules.
+assert_file_exists "blocker #14b: 60-tpm.rules staged to /usr/lib/udev/rules.d" \
+    "$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d/60-tpm.rules"
+assert_contains "blocker #14b: the staged mkinitfs.conf registers the non-ELF payload via custom_files" \
+    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")" \
+    'alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules'
+assert_contains "blocker #14: the staged .files carries the hook staging constant NO more (moved to custom_files)" "0" \
+    "$(grep -c 'alpine-fde-unseal' "$FEAT")"
 
 # =============================================================================
 # (d) mkinitfs packing ACCEPTANCE: pack the STAGED feature file with mkinitfs's
@@ -277,7 +301,13 @@ done
 # entries must FAIL the audit with `missing-from-initrd` verdicts — the exact
 # 6.18.53-0-lts server failure this chain exists to prevent.
 # =============================================================================
-pack() { # <features-file> <out-img> — mkinitfs-semantics read-only pack
+# mkinitfs-semantics read-only pack (blocker #14 shape):
+#   * .files entries: glob-expanded against the target root (ELF userland)
+#   * .modules entries: resolved against /lib/modules/<kver>/ (dirs pack their
+#     subtree) — the dependency closure is mkinitfs-internal and only ADDS
+#     modules, never removes ours, so a direct expansion is the honest floor
+#   * custom_files: verbatim copies (the hook script + the shipped udev rules)
+pack() { # <features-file> <modules-file> <out-img>
     : >"$T/cpio.list"
     while IFS= read -r entry; do
         case $entry in
@@ -288,9 +318,39 @@ pack() { # <features-file> <out-img> — mkinitfs-semantics read-only pack
             [ -f "$f" ] && printf '%s\0' "${f#"$ALPINE_FDE_INSTALL_MNT"/}" >>"$T/cpio.list"
         done
     done <"$1"
+    while IFS= read -r entry; do
+        case $entry in
+            '' | '#'*) continue ;;
+        esac
+        # shellcheck disable=SC2086  # the entry MUST glob against the moddir
+        for f in "$ALPINE_FDE_INSTALL_MNT"/lib/modules/"$KVER"${entry:+/}${entry}; do
+            if [ -d "$f" ]; then
+                while IFS= read -r m; do
+                    printf '%s\0' "${m#"$ALPINE_FDE_INSTALL_MNT"/}" >>"$T/cpio.list"
+                done < <(find "$f" -type f)
+            elif [ -f "$f" ]; then
+                printf '%s\0' "${f#"$ALPINE_FDE_INSTALL_MNT"/}" >>"$T/cpio.list"
+            fi
+        done
+    done <"$2"
+    while IFS= read -r entry; do
+        case $entry in
+            '' | '#'*) continue ;;
+        esac
+        [ -f "$ALPINE_FDE_INSTALL_MNT$entry" ] &&
+            printf '%s\0' "${entry#/}" >>"$T/cpio.list"
+    done <"$T/custom.list"
     (cd "$ALPINE_FDE_INSTALL_MNT" && cpio -0 -o -H newc 2>/dev/null | gzip) \
-        <"$T/cpio.list" >"$2"
+        <"$T/cpio.list" >"$3"
 }
+CUSTOM_LIST=$T/custom.list
+printf '%s\n' '/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh' \
+    '/usr/lib/udev/rules.d/69-bcache.rules' \
+    '/usr/lib/udev/rules.d/60-tpm.rules' >"$CUSTOM_LIST"
+# the bcache-tools-udev payload (simulated — what the apk stages into the
+# target; custom_files copies it into the initrd verbatim)
+mkdir -p "$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d"
+: >"$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d/69-bcache.rules"
 
 # userland the feature file lists (the audit's required set): the install
 # staged only the hook — seed the rest so the pack covers every entry
@@ -314,14 +374,14 @@ printf 'ROOT_FS=btrfs\nBCACHE=1\nTOPOLOGY=bcache\n' >"$T/conf"
 ALPINE_FDE_CONF=$T/conf
 export ALPINE_FDE_CONF
 
-pack "$FEAT" "$T/initrd.img"
+pack "$FEAT" "$MODS" "$T/initrd.img"
 INITRD_AUDIT_OUT=$(initrd_audit "$T/initrd.img" "$KVER" "$ALPINE_FDE_INSTALL_MNT" 2>&1)
 assert_eq "ACCEPTANCE: the packed initrd (staged feature file, .ko.gz server shape) passes the real initrd_audit" "0" "$?"
 assert_contains "ACCEPTANCE: the audit verdict is COMPLIANT (every previously-missing module resolved in-initrd)" \
     "$INITRD_AUDIT_OUT" "inventory compliant"
 
-grep -v '^/lib/modules' "$FEAT" >"$T/nomod.files"
-pack "$T/nomod.files" "$T/initrd-nomod.img"
+: >"$T/nomod.modules"
+pack "$FEAT" "$T/nomod.modules" "$T/initrd-nomod.img"
 INITRD_AUDIT_OUT=$(initrd_audit "$T/initrd-nomod.img" "$KVER" "$ALPINE_FDE_INSTALL_MNT" 2>&1)
 assert_eq "RED control: the SAME pack WITHOUT the module lines FAILS the audit (the pin cannot pass vacuously)" "1" "$?"
 assert_contains "RED control: the failure carries the server verdicts tpm.ko=missing-from-initrd" \

@@ -235,9 +235,10 @@ export PATH="$T/stub:$PATH"
 # --- fixtures ------------------------------------------------------------------
 # hooks/ Alpine layout (G-C16): the templates install's preflight requires
 mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc"
+    "$ALPINE_FDE_HOOKS_DIR/udev" "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    mkinitfs/features.d/alpine-fde.modules udev/60-tpm.rules \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
     chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
@@ -617,7 +618,7 @@ assert_contains "blocker #12: the build record exports ALPINE_FDE_ROOT=/ (kernel
     'export ALPINE_FDE_ROOT=/'
 # ORDER GUARD: the features.d module-append staging (step 7 record) precedes
 # the build record — mkinitfs must see the resolved module paths when it runs
-O_APPEND=$(first_line_no "$OUT" "etc/mkinitfs/features.d/alpine-fde.files")
+O_APPEND=$(first_line_no "$OUT" "etc/mkinitfs/features.d/alpine-fde.modules")
 O_BLD=$(first_line_no "$OUT" "guest: export ALPINE_FDE_ROOT=/")
 assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
     "$(( O_APPEND > 0 && O_BLD > O_APPEND ? 1 : 0 ))"
@@ -883,16 +884,37 @@ assert_eq "target: mkinitfs unseal hook executable" "1" \
 assert_eq "target: retired /etc/mkinitfs hook path NOT used" "0" \
     "$([ -e "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
 assert_file_exists "target: mkinitfs features.d entry shipped" "$MNT_ETC/mkinitfs/features.d/alpine-fde.files"
-# real-server blocker #12: the staged feature file carries the target's
-# RESOLVED module paths (the install appends every found tpm/btrfs/bcache
-# module file) — mkinitfs packs only what the feature file names, and the
-# static globs cannot be trusted across kernel path moves
-assert_contains "blocker #12: the staged feature file names the target's RESOLVED tpm module paths" \
-    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.files")" \
-    "/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm/tpm.ko"
-assert_contains "blocker #12: the staged feature file names the resolved btrfs module path" \
-    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.files")" \
-    "/lib/modules/6.18.35-0-lts/kernel/fs/btrfs/btrfs.ko"
+# real-server blocker #14: the staged .files carries NO kernel-module entries —
+# mkinitfs 3.14.1 routes .files entries through ldtree, which silently DROPS
+# every non-ELF file (.ko/.ko.gz, udev rules); modules ride alpine-fde.modules
+assert_eq "blocker #14: the staged .files carries ZERO kernel-module entries (ldtree drops non-ELF)" "0" \
+    "$(grep -c '^/lib/modules' "$MNT_ETC/mkinitfs/features.d/alpine-fde.files")"
+assert_file_exists "blocker #14: the staged alpine-fde.modules ships" \
+    "$MNT_ETC/mkinitfs/features.d/alpine-fde.modules"
+# real-server blocker #12/#14: the staged MODULES file carries the target's
+# RESOLVED dep keys (modules.dep key shape — /lib/modules/<kver>/ stripped);
+# mkinitfs expands them through the dependency closure at build time
+assert_contains "blocker #12/#14: the staged modules file names the target's RESOLVED tpm module keys" \
+    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.modules")" \
+    "kernel/drivers/char/tpm/tpm.ko"
+assert_contains "blocker #12/#14: the staged modules file names the resolved btrfs module key" \
+    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.modules")" \
+    "kernel/fs/btrfs/btrfs.ko"
+assert_contains "blocker #12/#14: the staged modules file names the resolved tpm_tis module key" \
+    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.modules")" \
+    "kernel/drivers/char/tpm/tpm_tis.ko.gz"
+# blocker #14b: the shipped udev rules are staged into the target and
+# registered in mkinitfs.conf custom_files (the only non-ELF packing path)
+# blocker #14b (CORRECTED): 69-bcache.rules is delivered by the
+# bcache-tools-udev SUBPACKAGE (apk txn pin in install_dryrun.sh) — install
+# stages only OUR 60-tpm.rules; both reach the initrd via custom_files.
+assert_eq "blocker #14b: install does NOT stage 69-bcache.rules (bcache-tools-udev apk owns it)" "0" \
+    "$(grep -c 'cp .*69-bcache.rules' <<<"$OUT")"
+assert_file_exists "blocker #14b: 60-tpm.rules staged to /usr/lib/udev/rules.d" \
+    "$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d/60-tpm.rules"
+assert_contains "blocker #14b: mkinitfs.conf custom_files registers the hook + both rules" \
+    "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" \
+    'alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules'
 assert_contains "target: alpine-fde feature registered in mkinitfs.conf (§8.2/ADR-13)" \
     "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" "alpine-fde"
 assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"

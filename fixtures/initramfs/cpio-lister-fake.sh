@@ -24,7 +24,7 @@
 #     missing-tpmrule  TPM udev rule absent
 #     missing-tpmrule  TPM udev rule absent
 #     deny-gcc         alpine-base + gcc + triplet gcc + make     (deny)
-#     deny-apk         alpine-base + usr/sbin/apk                 (deny)
+#     deny-dpkg        alpine-base + usr/bin/dpkg                 (deny)
 #     deny-shell       alpine-base + bash + zsh + dash            (deny)
 set -eu
 [ $# -eq 1 ] || { echo "usage: cpio-lister-fake.sh <initrd-img>" >&2; exit 2; }
@@ -114,10 +114,10 @@ EOF
             _clf_emit_fs_btrfs
             printf '%s\n' usr/bin/gcc usr/bin/x86_64-linux-gnu-gcc-12 usr/bin/make
             ;;
-        deny-apk)
+        deny-dpkg)
             _clf_emit_core
             _clf_emit_fs_btrfs
-            printf '%s\n' usr/sbin/apk
+            printf '%s\n' usr/bin/dpkg
             ;;
         deny-shell)
             _clf_emit_core

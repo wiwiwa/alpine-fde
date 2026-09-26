@@ -419,7 +419,11 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
     # every arch triplet and version suffix).
     #
     # Package tools are denied: the initramfs must not be able to mutate or
-    # query the package database (apk/apk-tools/apt/dpkg families).
+    # query the package database. REAL-SERVER BLOCKER #14: apk is EXEMPT —
+    # mkinitfs's own `base` feature ships /sbin/apk + the etc/apk skeleton by
+    # design (modloop/rebase flow, stock Alpine), so an apk hit is upstream
+    # behavior, not foreign payload; the foreign-tooling threat is the
+    # Debian-side families (apt/dpkg), which stay denied.
     #
     # Foreign shells (bash/zsh/dash/ksh/...) are denied; busybox, ash and sh
     # are ALLOWED — busybox IS the mkinitfs init framework (ADR-13) and the
@@ -435,7 +439,7 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
                 | *-*linux*-gcc | *-*linux*-gcc-* | *-*linux*-ld | *-*linux*-ld-*)
                 printf 'denied compiler: %s\n' "$_ia_path"
                 ;;
-            apk | apk-* | apt | apt-* | dpkg | dpkg-*)
+            apt | apt-* | dpkg | dpkg-*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 ;;
             bash | zsh | dash | ksh | csh | tcsh | fish)

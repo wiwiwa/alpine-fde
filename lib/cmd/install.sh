@@ -605,7 +605,13 @@ install_package_list() {
   *) _ipl="$_ipl btrfs-progs" ;;
   esac
   if [ "$(inst_bcache)" = "1" ]; then
-    _ipl="$_ipl bcache-tools"
+    # bcache-tools-udev (real-server blocker #14b): Alpine splits the udev
+    # integration into a -udev SUBPACKAGE — without it /usr/lib/udev/rules.d/
+    # 69-bcache.rules (+ bcache-register/probe-bcache helpers) never lands in
+    # the target and the initrd audit's rules requirement can never pack.
+    # NOTE: any future 'required rules file' must check the -udev subpackage,
+    # not just the base package.
+    _ipl="$_ipl bcache-tools bcache-tools-udev"
   fi
   printf '%s\n' "$_ipl"
 }
@@ -664,6 +670,9 @@ inst_preflight() {
   esac
   if [ "$(inst_bcache)" = "1" ]; then
     require_pkgs make-bcache:bcache-tools
+    # blocker #14b: bcache-tools-udev carries the udev integration
+    # (69-bcache.rules + bcache-register/probe-bcache) — TARGET-side only
+    # (delivered by the in-chroot apk txn; NO host tool to probe)
   fi
   # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
   # in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the binary is
@@ -1642,7 +1651,12 @@ cmd_install_main() {
   # package-default conf); grep-guard makes the patch idempotent under
   # re-run; a missing conf (package not yet installed) is created with the
   # feature-only line rather than silently skipped.
-  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde\"\n' >\"\$f\"; } # §8.2/ADR-13: enable the alpine-fde mkinitfs feature (idempotent)"
+  # REAL-SERVER BLOCKER #14: the same record registers `custom_files` —
+  # mkinitfs 3.14.1 routes .files entries through ldtree(1), which silently
+  # DROPS every non-ELF file (the unseal hook script and the udev rules);
+  # custom_files copies them into the initramfs verbatim. Staged later at
+  # step 7; mkinitfs reads the list at build time (idempotent).
+  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde\"\n' >\"\$f\"; }; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde mkinitfs feature + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
   inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
   inst_plan_run guest 'rc-update add networking boot'
   # step 2: pending baseline written ON-TARGET via the baseline writer
@@ -1695,15 +1709,17 @@ cmd_install_main() {
   # under Secure Boot; `alpine-fde finalize` is the guided/crash-resume
   # entry point, Stage 3.)
   # §8.2/ADR-13 staging contract (ONE pinned path): the unseal hook ships to
-  # EXACTLY the absolute path listed in
-  # hooks/mkinitfs/features.d/alpine-fde.files —
-  # /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh — because mkinitfs
-  # copies a feature's inventory from the TARGET tree at build time (that
-  # path, resolved under the target root, is the features.d entry). Staging
-  # under /etc/mkinitfs would leave the listed path unresolved and the hook
-  # silently omitted. The repo-wide convention (hooks_mkinitfs_unseal +
-  # initrd_audit inventories) already pins the /usr/share/alpine-fde spelling.
-  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature file packs every found tpm/btrfs/bcache module, blocker #12)\"; :"
+  # EXACTLY the absolute path pinned in the mkinitfs.conf `custom_files`
+  # registration (step 1b) — /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh.
+  # REAL-SERVER BLOCKER #14: mkinitfs 3.14.1's .files route (ldtree) drops
+  # every non-ELF file, so the hook script + the shipped udev rules are packed
+  # via custom_files (verbatim copy), the KERNEL MODULES ride
+  # features.d/alpine-fde.modules (modules.dep closure), and .files carries
+  # only the ELF userland. Staging under /etc/mkinitfs would leave the pinned
+  # path unresolved and the hook silently omitted. The repo-wide convention
+  # (hooks_mkinitfs_unseal + initrd_audit inventories) pins the
+  # /usr/share/alpine-fde spelling.
+  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/usr/lib/udev/rules.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/mkinitfs/features.d/alpine-fde.modules $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules && cp $_im_hooks/udev/60-tpm.rules $_im_mnt/usr/lib/udev/rules.d/60-tpm.rules && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt/lib/modules/[^/]*/:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature files pack every found tpm/btrfs/bcache module, blocker #12/#14)\"; :"
   inst_plan_run guest 'rc-update add alpine-fde-finalize default'
   # §8.4 (MOVED BEFORE the ceremony — no ceremony secret): resolve the ESP
   # PARTUUID into fstab + target metadata on the

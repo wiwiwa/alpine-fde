@@ -179,7 +179,10 @@ chmod +x "$ALPINE_FDE_HOOKS_DIR"/kernel-hooks.d/*.hook "$ALPINE_FDE_HOOKS_DIR"/m
 printf '\007\000\000\000\001' >"$ALPINE_FDE_EFIVARS_DIR/SetupMode-$GUID_GLOBAL"
 
 FEATURES=$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.files
-HOOK_DST=$(awk '!done && $0 !~ /^#/ && $0 != "" {print; done=1}' "$REPO/hooks/mkinitfs/features.d/alpine-fde.files")
+# REAL-SERVER BLOCKER #14: the hook is no longer a .files entry (mkinitfs's
+# .files/ldtree route drops non-ELF files) — the ONE pinned destination is
+# the mkinitfs.conf `custom_files` registration (step 1b record).
+HOOK_DST='/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
 
 # §9.1 step 4 credential-ceremony answers (ADR-20 amended): the ONLY credential
 # seam is stdin; no flag and no env var exists (S-24). item 12 (AMENDED): the
@@ -211,7 +214,9 @@ assert_eq "featuresd contract: chroot install rc 0" "0" "$RC"
 # (c) the features.d entry path == install's copy destination (ONE path, the
 #     /usr/share/alpine-fde/mkinitfs tree mkinitfs reads at build time)
 # =============================================================================
-assert_eq "featuresd entry lists a single absolute hook path under /usr/share/alpine-fde" \
+assert_eq "featuresd .files carries NO hook entry (non-ELF is custom_files' job, blocker #14)" \
+    "0" "$(grep -c 'alpine-fde-unseal' "$REPO/hooks/mkinitfs/features.d/alpine-fde.files")"
+assert_eq "the pinned hook staging constant stays under /usr/share/alpine-fde" \
     "/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh" "$HOOK_DST"
 assert_contains "install stages the hook TO the features.d path" "$OUT" \
     "cp $ALPINE_FDE_HOOKS_DIR/mkinitfs/alpine-fde-unseal.sh $ALPINE_FDE_INSTALL_MNT$HOOK_DST"
@@ -255,10 +260,23 @@ assert_file_exists "target: /etc/mkinitfs/mkinitfs.conf staged" \
     "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf"
 assert_contains "mkinitfs.conf features= includes alpine-fde" \
     "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")" "alpine-fde"
+assert_contains "blocker #14: mkinitfs.conf registers the hook + udev rules via custom_files" \
+    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")" \
+    'custom_files="/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules"'
+# (69-bcache.rules is delivered by the bcache-tools-udev SUBPACKAGE — apk txn
+# pin in install_dryrun.sh — not by an install cp; the suite's apk stub does
+# not materialize package payloads, so only its custom_files registration is
+# pinned here.)
+assert_file_exists "blocker #14b: shipped 60-tpm.rules staged to /usr/lib/udev/rules.d" \
+    "$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d/60-tpm.rules"
+assert_file_exists "blocker #14a: staged alpine-fde.modules ships" \
+    "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.modules"
 run_install
 assert_eq "featuresd contract: re-run rc 0 (idempotency fixture)" "0" "$RC"
-assert_eq "mkinitfs.conf registration is idempotent (ONE alpine-fde token after re-run)" "1" \
-    "$(grep -o 'alpine-fde' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf" | wc -l)"
+assert_eq "mkinitfs.conf feature registration is idempotent (ONE alpine-fde token in features= after re-run)" "1" \
+    "$(sed -n 's/^features=//p' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf" | grep -o alpine-fde | wc -l)"
+assert_eq "mkinitfs.conf custom_files registration is idempotent (ONE line after re-run)" "1" \
+    "$(grep -c '^custom_files=' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")"
 assert_contains "re-run: registration host record present (grep-guard form)" \
     "$OUT" "mkinitfs.conf"
 

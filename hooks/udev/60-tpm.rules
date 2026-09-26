@@ -1,0 +1,8 @@
+# 60-tpm.rules — TPM character device nodes for the initramfs (real-server
+# blocker #14b, shipped alongside 69-bcache.rules). mkinitfs's mdev creates
+# /dev/tpm0 + /dev/tpmrm0 from the kernel's class device attrs; this rule
+# pins the restrictive mode the §8.2 audit demands a TPM udev rule for, and
+# keeps the same node policy when the target later runs a real udev.
+# Staged to /usr/lib/udev/rules.d/ and packed via mkinitfs.conf custom_files.
+KERNEL=="tpm[0-9]*", MODE="0660"
+KERNEL=="tpmrm[0-9]*", MODE="0660"

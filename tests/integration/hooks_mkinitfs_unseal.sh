@@ -79,6 +79,11 @@ assert_ne() {
 
 HOOK=$REPO/hooks/mkinitfs/alpine-fde-unseal.sh
 FILES=$REPO/hooks/mkinitfs/features.d/alpine-fde.files
+# REAL-SERVER BLOCKER #14: the hook path is no longer a .files entry (the
+# mkinitfs .files/ldtree route drops non-ELF files) — the canonical staging
+# constant is registered in mkinitfs.conf `custom_files` by the install's
+# step-1b record (single source of truth: lib/cmd/install.sh).
+HOOK_INITRAMFS_PATH='/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
 
 TMP=$(mktemp -d /tmp/alpine-fde-unseal.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
@@ -337,7 +342,6 @@ assert_file_exists() { # <desc> <path>
 }
 # the canonical staging path: the one alpine-fde-unseal.sh line in the
 # features.d list (absolute target-root path, no inline comment)
-HOOK_INITRAMFS_PATH=$(grep -E '^[[:space:]]*/.*alpine-fde-unseal\.sh[[:space:]]*$' "$FILES" | head -n 1 | tr -d '[:space:]')
 assert_file_exists "unseal hook exists" "$HOOK"
 assert_eq "hook is executable" "1" "$([ -x "$HOOK" ] && echo 1 || echo 0)"
 sh -n "$HOOK" >/dev/null 2>&1
@@ -345,24 +349,38 @@ assert_eq "hook parses under POSIX sh (busybox ash)" "0" "$?"
 assert_eq "hook source never spawns a shell or rescue path" "" \
     "$(grep -nE '(^|[^a-zA-Z_-])(exec|rescue)([^a-zA-Z_-]|$)|sh +-c|ash +-c' "$HOOK" || true)"
 assert_file_exists "features.d/alpine-fde.files exists" "$FILES"
-assert_ne "features.d lists the hook staging path (canonical constant non-empty)" \
-    "$HOOK_INITRAMFS_PATH" ""
-assert_eq "features.d lists exactly one unseal-hook artifact path" "1" \
+assert_eq "blocker #14: .files carries NO hook entry (non-ELF is custom_files' job)" "0" \
     "$(grep -cE '^[[:space:]]*/.*alpine-fde-unseal\.sh[[:space:]]*$' "$FILES")"
-assert_not_contains "canonical staging path is the features.d-listed path (not the /etc/mkinitfs config dir)" \
+assert_ne "canonical hook staging constant non-empty" "$HOOK_INITRAMFS_PATH" ""
+assert_not_contains "canonical staging path is NOT the retired /etc/mkinitfs config dir" \
     "$HOOK_INITRAMFS_PATH" "etc/mkinitfs"
+assert_contains "blocker #14: install registers the hook path in mkinitfs.conf custom_files" \
+    "$(cat "$REPO/lib/cmd/install.sh")" 'alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules'
+# blocker #14: the packing inventory is SPLIT — ELF userland stays in .files,
+# kernel modules moved to .modules (modules.dep closure), hook script + udev
+# rules ride the mkinitfs.conf custom_files registration (see the install
+# record asserted above).
+MODS_FILES=$REPO/hooks/mkinitfs/features.d/alpine-fde.modules
+MODULES_FILE=$REPO/hooks/mkinitfs/features.d/alpine-fde.modules
 for need in \
-    "$HOOK_INITRAMFS_PATH" \
     usr/bin/cryptsetup usr/bin/openssl \
     usr/bin/tpm2_pcrextend usr/bin/tpm2_startauthsession usr/bin/tpm2_policypcr \
     usr/bin/tpm2_policyauthorize usr/bin/tpm2_loadexternal usr/bin/tpm2_verifysignature \
     usr/bin/tpm2_createprimary usr/bin/tpm2_load usr/bin/tpm2_unseal usr/bin/tpm2_flushcontext \
-    libtss2-esys libtss2-tcti-device \
-    kernel/drivers/char/tpm/tpm_tis.ko \
-    btrfs/btrfs.ko ext4/ext4.ko \
-    drivers/md/bcache/bcache.ko 69-bcache.rules; do
-    assert_contains "features.d file lists $need" "$(cat "$FILES" 2>/dev/null)" "$need"
+    libtss2-esys libtss2-tcti-device; do
+    assert_contains "features.d .files lists $need" "$(cat "$FILES" 2>/dev/null)" "$need"
 done
+for need in \
+    kernel/drivers/char/tpm kernel/fs/btrfs kernel/fs/ext4 \
+    kernel/fs/jbd2 kernel/fs/mbcache kernel/drivers/md/bcache; do
+    assert_contains "features.d .modules lists $need" "$(cat "$MODULES_FILE" 2>/dev/null)" "$need"
+done
+assert_contains "blocker #14: the install record APPENDS resolved module keys to .modules" \
+    "$(cat "$REPO/lib/cmd/install.sh")" 'features.d/alpine-fde.modules'
+assert_contains "blocker #14b: the install record stages 69-bcache.rules" \
+    "$(cat "$REPO/lib/cmd/install.sh")" '69-bcache.rules'
+assert_contains "blocker #14b: the install record stages 60-tpm.rules" \
+    "$(cat "$REPO/lib/cmd/install.sh")" '60-tpm.rules'
 
 # =============================================================================
 # 1. SUCCESS — token path, provisional token {PCR 11} (§9.1 Stage 2)

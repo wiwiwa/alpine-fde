@@ -177,9 +177,20 @@ run_audit <(cat "$inv"; printf '%s\n' usr/bin/x86_64-linux-gnu-gcc-12)
 assert_rc "audit 2c: triplet-prefixed toolchain fails the audit" 1 "$RUN_AUDIT_RC"
 assert_contains "audit 2c: reason names the triplet gcc" "$_initrd_audit_reason" "x86_64-linux-gnu-gcc-12"
 
-run_audit <(cat "$inv"; printf '%s\n' usr/sbin/apk)
-assert_rc "audit 2d: apk present fails the audit" 1 "$RUN_AUDIT_RC"
-assert_contains "audit 2d: reason names the denied package tool" "$_initrd_audit_reason" "usr/sbin/apk"
+# REAL-SERVER BLOCKER #14: apk is EXEMPT from the package-tool deny —
+# mkinitfs's own `base` feature ships /sbin/apk + the etc/apk skeleton by
+# design (stock Alpine modloop/rebase flow); the deny keeps the Debian-side
+# families (apt/dpkg).
+run_audit <(cat "$inv"; printf '%s\n' usr/sbin/apk etc/apk etc/apk/keys)
+assert_rc "audit 2d: stock mkinitfs apk payload PASSES the audit (blocker #14 exemption)" 0 "$RUN_AUDIT_RC"
+
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/apt-get)
+assert_rc "audit 2d-2: apt present fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2d-2: reason names the denied package tool" "$_initrd_audit_reason" "usr/bin/apt-get"
+
+run_audit <(cat "$inv"; printf '%s\n' usr/bin/dpkg)
+assert_rc "audit 2d-3: dpkg present fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 2d-3: reason names the denied package tool" "$_initrd_audit_reason" "usr/bin/dpkg"
 
 run_audit <(cat "$inv"; printf '%s\n' usr/bin/bash usr/bin/zsh usr/bin/dash)
 assert_rc "audit 2e: foreign shells fail the audit" 1 "$RUN_AUDIT_RC"
@@ -287,12 +298,13 @@ assert_file_absent "audit 6b: failure marker cleared on success" \
     "$ROOT/etc/alpine-fde/build-failed"
 
 # 6c: a denied package tool must fail the build closed (ESP untouched)
+# (blocker #14: the deny uses dpkg/apt — apk is mkinitfs-stock and exempt)
 ESP_BEFORE=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
 rm -f "$ROOT/etc/alpine-fde/build-failed"
-build deny-apk
-assert_rc "audit 6c: full build fails closed (64) with apk in the inventory" 64 $?
+build deny-dpkg
+assert_rc "audit 6c: full build fails closed (64) with dpkg in the inventory" 64 $?
 assert_contains "audit 6c: marker names the denied package tool" \
-    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "usr/sbin/apk"
+    "$(cat "$ROOT/etc/alpine-fde/build-failed")" "usr/bin/dpkg"
 assert_eq "audit 6c: ESP untouched by the denied-inventory build" \
     "$ESP_BEFORE" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
 
