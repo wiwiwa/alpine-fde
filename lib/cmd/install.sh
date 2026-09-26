@@ -719,7 +719,7 @@ inst_preflight() {
   # openssl generates the ephemeral install key; sbsign/ukify are NOT
   # host-required (the boot manager + UKI are built + signed IN-CHROOT by
   # ukictl build, §9.1 step 5).
-  # shellcheck disable=SC2086  # deliberate word split: bin:pkg pairs never contain spaces
+  # shellcheck disable=SC2046  # deliberate word split: the bin:pkg pairs never contain spaces
   require_pkgs $(inst_live_tool_pairs)
   # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
   # in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the binary is
