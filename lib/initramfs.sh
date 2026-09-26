@@ -426,7 +426,7 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
     # mkinitfs's own `base` feature ships /sbin/apk + the etc/apk skeleton by
     # design (modloop/rebase flow, stock Alpine), so an apk hit is upstream
     # behavior, not foreign payload; the foreign-tooling threat is the
-    # Debian-side families (apt/dpkg spellings), which stay denied.
+    # Debian-side families, which stay denied (see the deny case below).
     #
     # Foreign shells (bash/zsh/dash/ksh/...) are denied; busybox, ash and sh
     # are ALLOWED — busybox IS the mkinitfs init framework (ADR-13) and the
