@@ -357,7 +357,7 @@ S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
 S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
 # blocker #12 ORDER GUARD: the features.d module-append staging precedes the
 # build record in the emitted script (mkinitfs must see the resolved paths)
-S_APPEND=$(grep -n '>> .*etc/mkinitfs/features.d/alpine-fde.files' "$SCRIPT" | head -1 | cut -d: -f1)
+S_APPEND=$(grep -n '>> .*etc/mkinitfs/features.d/alpine-fde.modules' "$SCRIPT" | head -1 | cut -d: -f1) # blocker #14: the module pack rides features.d .modules (the .files append is gone)
 assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
     "$(( S_APPEND > 0 && S_APPEND < S_BUILD ? 1 : 0 ))"
 S_COPY=$(grep -n 'BOOTX64.EFI' "$SCRIPT" | head -1 | cut -d: -f1)
