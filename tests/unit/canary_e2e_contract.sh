@@ -372,6 +372,28 @@ if grep -q 'require_pkgs \$(inst_live_tool_pairs)' "$REPO/lib/cmd/install.sh" \
 else
     _fail "the preflight still hardcodes the require_pkgs pairs (drifts from the mirror derivation)"
 fi
+# the EXECUTED record: with every tool absent, require_pkgs consuming
+# inst_live_tool_pairs must fail closed 64 naming the operand packages —
+# exactly the record the real installer printed when the mirror lacked them
+LIVE_ERR=$(bash -c "
+    set -u
+    export ALPINE_FDE_CMD_DIR='$REPO/lib/cmd'
+    . '$REPO/lib/common.sh'
+    . '$REPO/lib/cmd/install.sh'
+    PATH=/nonexistent require_pkgs \$(inst_live_tool_pairs)" 2>&1 >/dev/null)
+bash -c "
+    set -u
+    export ALPINE_FDE_CMD_DIR='$REPO/lib/cmd'
+    . '$REPO/lib/common.sh'
+    . '$REPO/lib/cmd/install.sh'
+    PATH=/nonexistent require_pkgs \$(inst_live_tool_pairs)" >/dev/null 2>&1
+LIVE_RC=$?
+if [ "$LIVE_RC" = "64" ] && printf '%s' "$LIVE_ERR" | grep -q "util-linux" \
+    && printf '%s' "$LIVE_ERR" | grep -q "dosfstools"; then
+    _pass "executed record: require_pkgs(inst_live_tool_pairs) fails closed 64 naming the operands"
+else
+    _fail "executed record wrong: rc=$LIVE_RC err=$(printf '%s' "$LIVE_ERR" | head -1)"
+fi
 
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then

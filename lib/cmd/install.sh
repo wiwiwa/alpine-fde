@@ -646,6 +646,30 @@ install_package_list() {
   printf '%s\n' "$_ipl"
 }
 
+# inst_live_tool_pairs — the LIVE-env tool requirements of the §9.1 preflight
+# (the require_pkgs bin:pkg pairs, SINGLE SOURCE): the live ISO may lack any
+# of these tools, in which case the installer apk-adds the package from
+# ALPINE_FDE_MIRROR. Exposed as data so consumers that PROVISION the live
+# environment — the pinned local mirror, tests/lib/local-mirror.sh's
+# mirror_package_list — derive the SAME set the preflight may install (the
+# closure must cover it, or a real install dies at the first preflight probe;
+# boot-lane finding #4: the virt ISO lacks sfdisk/lsblk, and the closure had
+# no util-linux). Topology-conditional exactly like the preflight checks.
+inst_live_tool_pairs() {
+  printf '%s\n' apk:apk-tools sfdisk:util-linux cryptsetup:cryptsetup \
+    mkfs.vfat:dosfstools lsblk:util-linux openssl:openssl
+  case $(inst_root_fs) in
+  ext4) printf '%s\n' mkfs.ext4:e2fsprogs ;;
+  *) printf '%s\n' mkfs.btrfs:btrfs-progs ;;
+  esac
+  if [ "$(inst_bcache)" = "1" ]; then
+    # blocker #14b (main): bcache-tools-udev carries the udev integration
+    # (69-bcache.rules + bcache-register/probe-bcache) — TARGET-side only
+    # (delivered by the in-chroot apk txn; NO host tool to probe)
+    printf '%s\n' make-bcache:bcache-tools bcache-tools-udev
+  fi
+}
+
 # inst_setupmode_gate — G-IL2 (§9.1 preflight, UserGuide §1): the FIRST
 # preflight check, BEFORE any disk mutation. Authenticated NVRAM writes
 # (db/KEK/PK) require SetupMode==1; a vendor PK still installed would make the
@@ -693,18 +717,7 @@ inst_preflight() {
   # openssl generates the ephemeral install key; sbsign/ukify are NOT
   # host-required (the boot manager + UKI are built + signed IN-CHROOT by
   # ukictl build, §9.1 step 5).
-  require_pkgs apk:apk-tools sfdisk:util-linux cryptsetup:cryptsetup \
-    mkfs.vfat:dosfstools lsblk:util-linux openssl:openssl
-  case $(inst_root_fs) in
-  ext4) require_pkgs mkfs.ext4:e2fsprogs ;;
-  *) require_pkgs mkfs.btrfs:btrfs-progs ;;
-  esac
-  if [ "$(inst_bcache)" = "1" ]; then
-    require_pkgs make-bcache:bcache-tools
-    # blocker #14b: bcache-tools-udev carries the udev integration
-    # (69-bcache.rules + bcache-register/probe-bcache) — TARGET-side only
-    # (delivered by the in-chroot apk txn; NO host tool to probe)
-  fi
+  require_pkgs $(inst_live_tool_pairs)
   # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
   # in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the binary is
   # absent — so the boot manager is installed by GUARDED FILE COPY of the

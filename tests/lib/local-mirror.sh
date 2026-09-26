@@ -145,6 +145,16 @@ mirror_package_list() {
     INST_BCACHE=${INST_BCACHE:-0}
     local list
     list=$(install_package_list)
+    # LIVE-env tool union (dedup): the §9.1 preflight's require_pkgs pairs —
+    # the installer apk-adds any of these from the mirror when the live ISO
+    # lacks the tool (the virt ISO lacks sfdisk/lsblk/mkfs.vfat). Without
+    # this union a real install dies at the FIRST preflight probe
+    # (boot-lane finding #4: "apk add util-linux failed ... no such
+    # packaage", INSTALL-RC=64).
+    local pair
+    for pair in $(inst_live_tool_pairs); do
+        list="$list ${pair#*:}"
+    done
     # topology union (dedup): whatever install_package_list's --fs/--bcache
     # conditionals left out is appended, so one mirror serves every topology
     local p
