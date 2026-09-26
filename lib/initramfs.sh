@@ -134,7 +134,12 @@ initramfs_features() {
     initramfs_topology
     _inf_fs=btrfs
     [ "$INI_ROOT_FS" = "ext4" ] && _inf_fs=ext4
-    printf '%s\n' "base cryptsetup $_inf_fs alpine-fde"
+    # boot-lane finding #22 (s23 attempt 22, run ...-1790451796): the platform
+    # STORAGE driver families MUST ride the initramfs — without them boot B
+    # never sees its own disk ("/dev/vdb absent; only loop/ram in
+    # /sys/class/block; Mounting root: failed -> emergency shell"). mkinitfs's
+    # own stock default set carries the same families (ata nvme scsi virtio).
+    printf '%s\n' "base cryptsetup virtio ata nvme scsi $_inf_fs alpine-fde"
 }
 
 # initramfs_build <out> <kver> — produce the initramfs for <kver> at <out>.
