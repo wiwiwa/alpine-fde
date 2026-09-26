@@ -257,8 +257,11 @@ assert_contains "golden base records the mirror/ISO pins (PINS.json)" "$(_s23)" 
 # console wait, qemu.stderr "Failed to connect .../tpm/sock.ctrl: No such
 # file or directory". The established idiom (s15/s21) is the
 # _SWTPM_CLEANUP_TRAP_SET=1 call prefix + a local _track_swtpm definition.
-if [ "$(grep -cE '^run_stage swtpm_start' "$SCENARIO")" -eq 1 ] \
-    && grep -q '^_SWTPM_CLEANUP_TRAP_SET=1 run_stage swtpm_start' "$SCENARIO"; then
+# every `run_stage ... swtpm_start` invocation must carry the guard prefix;
+# unguarded = a line whose command word IS run_stage (guarded lines start
+# with the _SWTPM_CLEANUP_TRAP_SET=1 prefix)
+if [ "$(grep -cE '^[[:space:]]*run_stage[[:space:]].*swtpm_start' "$SCENARIO")" -eq 0 ] \
+    && [ "$(grep -c '_SWTPM_CLEANUP_TRAP_SET=1 run_stage' "$SCENARIO")" -ge 1 ]; then
     _pass "s23 guards the boot-A swtpm_start stage with _SWTPM_CLEANUP_TRAP_SET=1"
 else
     _fail "s23 boot-A swtpm_start stage lacks the _SWTPM_CLEANUP_TRAP_SET=1 guard (the fixture's EXIT trap kills the daemon at stage exit)"

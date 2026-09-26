@@ -381,8 +381,15 @@ run_stage iso-extract 600 bash -c "
 
 A="$RUN/boot-a"
 mkdir -p "$A"
+# _track_swtpm — the s15/s21 idiom: register the fixture dir so the scenario's
+# own _exit_cleanup stops the daemon (the fixture's trap-based
+# swtpm_cleanup_all must stay DISARMED here — see the run_stage guard below).
+_track_swtpm() { SWTPM_DIRS+=("$1"); }
 _track_swtpm "$RUN/tpm"
-run_stage swtpm_start-a 90 swtpm_start "$RUN/tpm"
+# _SWTPM_CLEANUP_TRAP_SET=1: swtpm_start arms `trap swtpm_cleanup_all EXIT` by
+# default — inside the run_stage stage subshell that fires at STAGE EXIT and
+# stops the healthy daemon before qemu can connect (attempt-1 live failure).
+_SWTPM_CLEANUP_TRAP_SET=1 run_stage swtpm_start-a 90 swtpm_start "$RUN/tpm"
 _rearm_trap
 CURRENT_QEMU_DIR="$A"
 
