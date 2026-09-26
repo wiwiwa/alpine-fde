@@ -656,10 +656,11 @@ if [[ "$MODE" == "full" ]]; then
     # overnight-hang window) — hard-bounded; the derived payload is cached.
     _bounded 1800 rootfs-payload bash -c \
         "$(declare -f rootfs_payload_image alpine_artifact_ensure \
-              alpine_artifact_extract alpine_artifact_path alpine_artifact_cache_dir); \
-         $(declare -p ALPINE_ARTIFACT_CACHE_DIR ALPINE_MIN_ROOTFS_VERSION \
-              ALPINE_MIN_ROOTFS_ARCH ALPINE_MIN_ROOTFS_URL \
-              ALPINE_MIN_ROOTFS_SHA256 ALPINE_MIN_ROOTFS_BYTES _HERE 2>/dev/null); \
+              alpine_artifact_extract alpine_artifact_path alpine_artifact_cache_dir \
+              _uki_payload_stub); \
+         $(declare -p ALPINE_ARTIFACT_CACHE_DIR ALPINE_MINI_ROOTFS_VERSION \
+              ALPINE_MINI_ROOTFS_ARCH ALPINE_MINI_ROOTFS_URL \
+              ALPINE_MINI_ROOTFS_SHA256 ALPINE_MINI_ROOTFS_BYTES _HERE 2>/dev/null); \
          rootfs_payload_image '$RUN/rootfs-payload.img' >'$RUN/payload.out'"
     read -r ROOTFS_SHA ROOTFS_BYTES <"$RUN/payload.out"
     [[ -n "$ROOTFS_SHA" ]] || { echo "s01c: rootfs payload build failed"; exit 1; }
