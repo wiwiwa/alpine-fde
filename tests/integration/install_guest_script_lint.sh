@@ -99,6 +99,7 @@ mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/
     "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_EFIVARS_DIR"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    mkinitfs/features.d/alpine-fde.modules \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
     chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
