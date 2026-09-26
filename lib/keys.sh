@@ -360,9 +360,23 @@ keys_encrypt_release() {
 # it ONCE to tmpfs (${ALPINE_FDE_TMPDIR:-/dev/shm}, mode 600, scrubbed by the
 # CALLER's cleanup net) and print the decrypted path; if it is plaintext
 # (offline medium / legacy), print the input path unchanged. Passphrase
-# credential mechanism (RESOLVED-4): ALPINE_FDE_KEY_PASSPHRASE env -> no-echo
-# TTY prompt ([ -t 0 ]) -> loud die 64. A wrong passphrase is a distinct loud
-# die 64 with the tmp staging scrubbed.
+# credential mechanism (RESOLVED-4 + real-server blocker #9a), in ORDER:
+#   1. ALPINE_FDE_KEY_PASSPHRASE env
+#   2. the CEREMONY-STAGED CACHE — the install's credential ceremony (3/3)
+#      hands the confirmed passphrase to a subsequent `ukictl build` through a
+#      0600 tmpfs seam file (${ALPINE_FDE_TMPDIR:-/dev/shm}/
+#      alpine-fde-release-pass.*, blocker #8); when the env seam is empty
+#      (its transport is the CALLER's record, outside this function's
+#      control) scan for that file here and consume it — asking the operator
+#      again right after the ceremony collected the value is not reasonable.
+#      Sanity gate: only a regular, NON-EMPTY file with NO group/other
+#      permission bits is trusted; anything else is warned about and
+#      SKIPPED, never consumed. The file is consumed, not destroyed — the
+#      install's scrub trap owns its lifecycle (I1 teardown).
+#   3. no-echo TTY prompt ([ -t 0 ]) — the LAST resort
+#   4. non-interactive stdin with nothing cached: loud die 64 (never hangs)
+# A wrong passphrase (from the env OR the cache) is a distinct loud die 64
+# with the tmp staging scrubbed.
 keys_unlock() {
     [ $# -eq 1 ] || die "keys_unlock: usage: keys_unlock <keydir>"
     _ku_d=$1
@@ -371,6 +385,34 @@ keys_unlock() {
     if ! keys_is_encrypted "$_ku_src"; then
         printf '%s\n' "$_ku_src"
         return 0
+    fi
+    if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
+        # blocker #9a: ceremony-staged cache BEFORE any prompt (see above)
+        for _ku_pf in "${ALPINE_FDE_TMPDIR:-/dev/shm}"/alpine-fde-release-pass.*; do
+            [ -e "$_ku_pf" ] || continue # unmatched glob — nothing staged
+            [ -f "$_ku_pf" ] || continue
+            _ku_mode=$(stat -c '%a' "$_ku_pf" 2>/dev/null || :)
+            case $_ku_mode in
+                *00) : ;; # no group/other permission bits (0600 as staged)
+                *)
+                    warn "keys_unlock: ignoring ceremony-staged passfile $_ku_pf (mode ${_ku_mode:-unknown} — group/world-readable caches are never consumed)"
+                    continue
+                    ;;
+            esac
+            if [ ! -s "$_ku_pf" ]; then
+                warn "keys_unlock: ignoring ceremony-staged passfile $_ku_pf (empty — the ceremony never wrote it)"
+                continue
+            fi
+            _ku_cached=$(cat "$_ku_pf" 2>/dev/null)
+            if [ -z "$_ku_cached" ]; then
+                warn "keys_unlock: ignoring ceremony-staged passfile $_ku_pf (unreadable/empty content)"
+                continue
+            fi
+            info "keys_unlock: consuming the ceremony-staged release-key passphrase cache ($_ku_pf, 0600) — no prompt"
+            ALPINE_FDE_KEY_PASSPHRASE=$_ku_cached
+            break
+        done
+        unset _ku_pf _ku_mode _ku_cached 2>/dev/null || :
     fi
     if [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then
         if [ -t 0 ]; then

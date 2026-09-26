@@ -27,7 +27,7 @@ export ALPINE_FDE_NO_INSTALL=1
 # shellcheck source=../../lib/keys.sh
 source "$REPO/lib/keys.sh"
 
-T=$(mktemp -d /tmp/alpine-fde-keys-enc.XXXXXX)
+T=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-keys-enc.XXXXXX")
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 export ALPINE_FDE_TMPDIR="$T/shm"
@@ -259,6 +259,13 @@ unlock_rc_notty() {
     ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_unlock "$1" ) >/dev/null 2>&1 </dev/null
     echo $?
 }
+# unlock_rc_env PASSPHRASE KEYDIR - keys_unlock with the env seam SET explicitly
+# (a `VAR=v fn` prefix would NOT do: POSIX keeps the assignment in the calling
+# shell for functions, and the runner's unset would hide it)
+unlock_rc_env() {
+    ( ALPINE_FDE_KEY_PASSPHRASE=$1; keys_unlock "$2" ) >/dev/null 2>&1 </dev/null
+    echo $?
+}
 
 # --- the headline pin: valid staged cache, NO env, NO tty -> unlock SUCCEEDS ---
 rm_cache
@@ -275,8 +282,8 @@ case "$_unlock_out" in
             "an alpine-fde-unlock.* path under $ALPINE_FDE_TMPDIR" "${_unlock_out:-<empty>}"
         ;;
 esac
-openssl pkcs8 -in "$_unlock_out" -passin "pass:$PASS_OK" -out /dev/null 2>/dev/null
-assert_eq "unlock: the unlocked copy decrypts with the CACHED passphrase" "0" "$?"
+openssl pkey -in "$_unlock_out" -out /dev/null 2>/dev/null
+assert_eq "unlock: the unlocked copy is a USABLE key decrypted with the CACHED passphrase" "0" "$?"
 keys_scrub "$_unlock_out"
 assert_contains "unlock: cache consumption is logged" "$(cat "$T/unlock-cache.err")" "alpine-fde-release-pass"
 # the cache file is CONSUMED, not destroyed: the install owns its scrub (I1 teardown)
@@ -288,7 +295,7 @@ rm_cache
 # --- env still wins: a WRONG env over a RIGHT cache -> wrong-passphrase die ---
 stage_cache 600 "$PASS_OK"
 assert_eq "unlock: env checked FIRST (wrong env beats right cache -> 64)" "64" \
-    "$(ALPINE_FDE_KEY_PASSPHRASE=definitely-wrong-pass unlock_rc_notty "$_cache_keydir")"
+    "$(unlock_rc_env definitely-wrong-pass "$_cache_keydir")"
 rm_cache
 
 # --- sanity gate: world-readable (644) cache is refused, never consumed ------

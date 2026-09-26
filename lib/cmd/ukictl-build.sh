@@ -69,6 +69,60 @@ _ukictl_marker_write() {
         || warn "ukictl build: cannot persist failure marker at $_mk_file"
 }
 
+# _uk_kernel_resolve ROOT KVER — real-server blocker #9b: resolve the kernel
+# image for KVER. The verbatim <root>/boot/vmlinuz-<kver> path only exists in
+# fixture sandboxes (which is why every local test passed); real Alpine kernel
+# packages ship the UNVERSIONED FLAVOR image (/boot/vmlinuz-lts for linux-lts
+# — the live run died on "required build input missing:
+# /boot/vmlinuz-6.18.35-0-lts"). Priority order:
+#   1. <root>/boot/vmlinuz-<kver>    (previous verbatim path — still first)
+#   2. <root>/boot/vmlinuz-<flavor>  (the flavor suffix of the kver,
+#      e.g. 6.18.35-0-lts -> lts — the linux-<flavor> package's image)
+#   3. glob <root>/boot/vmlinuz-*    (last resort, already-probed skipped)
+# Every candidate must be a regular NON-EMPTY file (a 0-byte image is a
+# broken install, not a resolvable kernel). On success sets _uk_kernel and
+# returns 0. On a total miss returns 1 with _uk_kernel_cands holding the
+# probed list (newline-separated, in probe order) for the loud failure.
+_uk_kernel_resolve() {
+    _ukr_root=$1
+    _ukr_kver=$2
+    _uk_kernel=''
+    _uk_kernel_cands="$_ukr_root/boot/vmlinuz-$_ukr_kver"
+    # flavor = the kver's trailing package suffix (6.18.35-0-lts -> lts);
+    # empty when the kver carries no flavor (plain <version>) — then only the
+    # versioned path and the glob are probed.
+    _ukr_flavor=$(printf '%s' "$_ukr_kver" | sed -n 's/^[0-9][0-9.]*-[0-9][0-9]*-//p')
+    _ukr_try() { # <candidate> — record it, first regular non-empty file wins
+        case "
+$_uk_kernel_cands
+" in
+        *"
+$1
+"*) : ;; # already probed — never listed twice
+        *) _uk_kernel_cands="$_uk_kernel_cands
+$1" ;;
+        esac
+        [ -f "$1" ] && [ -s "$1" ] && {
+            _uk_kernel=$1
+            return 0
+        }
+        return 1
+    }
+    if _ukr_try "$_ukr_root/boot/vmlinuz-$_ukr_kver"; then
+        return 0
+    fi
+    if [ -n "$_ukr_flavor" ] && _ukr_try "$_ukr_root/boot/vmlinuz-$_ukr_flavor"; then
+        return 0
+    fi
+    for _ukr_g in "$_ukr_root"/boot/vmlinuz-*; do
+        [ -e "$_ukr_g" ] || continue # unmatched glob
+        if _ukr_try "$_ukr_g"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 cmd_ukictl_build_main() {
     strict_mode
 
@@ -242,6 +296,18 @@ cmd_ukictl_build_main() {
     if [ "$_uk_sign_all" -eq 1 ]; then
         _ukictl_re_sign_all "$_uk_manifest" "$_uk_d7" "$_uk_marker"
         exit 0 # re-sign-all returns; this exit fires the cleanup trap with rc 0
+    fi
+
+    # blocker #9b: resolve the kernel image (versioned path -> flavor image ->
+    # glob) BEFORE the input check; a total miss is the loud fail-closed
+    # failure with the candidates probed + the remedy (never a bare
+    # "<root>/boot/vmlinuz-<kver>" that only fixture sandboxes can satisfy).
+    if ! _uk_kernel_resolve "$_uk_root" "$_uk_kver"; then
+        _uk_fail_reason="required build input missing: kernel image for $_uk_kver"
+        err "ukictl build: required build input missing: kernel image for $_uk_kver"
+        err "ukictl build: probed (first regular non-empty file wins): $(printf '%s' "$_uk_kernel_cands" | tr '\n' ' ')"
+        err "ukictl build: remedy: install the matching kernel package (e.g. apk add linux-lts) and check: ls ${_uk_root:-}/boot"
+        exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     for _uk_f in "$_uk_kernel" "$_uk_cmdline" "$_uk_osrelease"; do
