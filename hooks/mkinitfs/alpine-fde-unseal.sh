@@ -70,6 +70,49 @@ _fdh_poweroff() {
     exit 1
 }
 
+# _fdh_state_flip — the §9.1 Stage 2 / ADR-20 marker flip (installed ->
+# provisional-booted on the mounted NEWROOT; atomic tmp+mv; only when the
+# state file says installed). Best-effort: a missing state file (NEWROOT not
+# mounted) is a silent skip — the caller decides when the NEWROOT is right.
+# Also reachable STANDALONE via FDE_STATE_ONLY=1 (the blocker-#23 splice's
+# post-mount point in the stock mkinitfs initramfs-init, where the root is
+# mounted but the unseal itself already ran at the pre-mount splice point).
+_fdh_state_flip() {
+    _fdh_state_dir="$FDE_NEWROOT/etc/alpine-fde"
+    _fdh_state_file="$_fdh_state_dir/install-state.json"
+    [ -f "$_fdh_state_file" ] || return 0
+    _fdh_cur=$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$_fdh_state_file" | head -n 1)
+    [ "$_fdh_cur" = "installed" ] || return 0
+    _fdh_tmp=$(mktemp "$_fdh_state_dir/.install-state.XXXXXX") || _fdh_tmp=''
+    [ -n "$_fdh_tmp" ] || {
+        _msg "warning: could not stage the install-state marker (finalize resumes on the next boot)"
+        return 0
+    }
+    {
+        printf '{\n'
+        printf '  "schema_version": 1,\n'
+        printf '  "state": "provisional-booted",\n'
+        printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+        printf '}\n'
+    } >"$_fdh_tmp" 2>/dev/null &&
+        chmod 600 "$_fdh_tmp" 2>/dev/null || :
+    if mv -f "$_fdh_tmp" "$_fdh_state_file" 2>/dev/null; then
+        _msg "install-state: installed -> provisional-booted"
+    else
+        rm -f "$_fdh_tmp" 2>/dev/null || :
+        _msg "warning: could not update the install-state marker (finalize resumes on the next boot)"
+    fi
+    return 0
+}
+
+# blocker #23: the stock-init splice's post-mount point runs the hook in
+# STATE-ONLY mode — the unseal itself already ran at the pre-mount splice.
+if [ "${FDE_STATE_ONLY:-0}" = "1" ]; then
+    _fdh_state_flip
+    exit 0
+fi
+
+
 # --- §8.2 step 0: PRE-UNSEAL SECURE BOOT GUARD (ADR-20 amended, FIRST) --------
 # efivarfs read in the initrd-safe form of lib/firmware.sh fw_sb_state: the
 # canonical EFI_GLOBAL_VARIABLE namespace only (a same-named variable in any
@@ -443,35 +486,8 @@ for _fdh_wd in $_fdh_members; do
     done
 done
 
-# --- §9.1 Stage 2 / ADR-20: flip installed -> provisional-booted on the
-# mounted NEWROOT (atomic tmp+mv; only when the state file says installed) ------
 if [ "$_fdh_opened" -gt 0 ]; then
-    _fdh_state_dir="$FDE_NEWROOT/etc/alpine-fde"
-    _fdh_state_file="$_fdh_state_dir/install-state.json"
-    if [ -f "$_fdh_state_file" ]; then
-        _fdh_cur=$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$_fdh_state_file" | head -n 1)
-        if [ "$_fdh_cur" = "installed" ]; then
-            _fdh_tmp=$(mktemp "$_fdh_state_dir/.install-state.XXXXXX") || _fdh_tmp=''
-            if [ -n "$_fdh_tmp" ]; then
-                {
-                    printf '{\n'
-                    printf '  "schema_version": 1,\n'
-                    printf '  "state": "provisional-booted",\n'
-                    printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
-                    printf '}\n'
-                } >"$_fdh_tmp" 2>/dev/null &&
-                    chmod 600 "$_fdh_tmp" 2>/dev/null || :
-                if mv -f "$_fdh_tmp" "$_fdh_state_file" 2>/dev/null; then
-                    _msg "install-state: installed -> provisional-booted"
-                else
-                    rm -f "$_fdh_tmp" 2>/dev/null || :
-                    _msg "warning: could not update the install-state marker (finalize resumes on the next boot)"
-                fi
-            else
-                _msg "warning: could not stage the install-state marker (finalize resumes on the next boot)"
-            fi
-        fi
-    fi
+    _fdh_state_flip
 fi
 
 exit 0

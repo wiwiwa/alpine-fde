@@ -430,6 +430,19 @@ _uk_body() {
     # --- 1. initramfs (seam; default dracut --hostonly) ---------------------------
     initramfs_build "$_uk_work/initrd.img" "$_uk_kver"
 
+    # --- 1a. unseal splice (real-server blocker #23; AFTER mkinitfs, BEFORE
+    # ukify — the initrd the UKI embeds must be the spliced one). Stock
+    # mkinitfs 3.14.1 has no hook mechanism: this unpacks the cpio, splices
+    # the unseal invocation + /etc/crypttab into the initramfs-init, and
+    # repacks — idempotent via the ALPINE-FDE-SPLICE-v1 markers, loud-failed
+    # on any structural surprise, and verified by the audit right after.
+    initramfs_splice_unseal "$_uk_work/initrd.img" "${_uk_root}/etc/crypttab" ||
+        {
+            _uk_fail_reason="initramfs splice failed (see above)"
+            err "ukictl build: $_uk_fail_reason"
+            return 1
+        }
+
     # --- 1b. initrd inventory audit (§8.2/§12/I6; loud ADR-8 failure) --------------
     if ! initrd_audit "$_uk_work/initrd.img" "$_uk_kver" "$_uk_root"; then
         _uk_fail_reason="initrd audit failed: ${_initrd_audit_reason:-<no reason>}"

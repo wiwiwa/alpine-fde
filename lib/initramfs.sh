@@ -168,6 +168,395 @@ initramfs_build() {
     [ -f "$_ini_out" ] || die "initramfs: builder produced no output at $_ini_out"
 }
 
+# --- initramfs unseal splice (real-server blocker #23) ---------------------------
+# mkinitfs 3.14.1's initramfs-init has NO user-hook mechanism (no sourced
+# /etc/mkinitfs/* hook, no feature .sh, no crypttab consumer — verified against
+# the stock usr/share/mkinitfs/initramfs-init). The §8.2 Early-Boot Unseal Hook
+# rides in via mkinitfs.conf custom_files
+# (/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh) but is NEVER invoked:
+# boot B tries to mount the raw encrypted container and lands in the
+# recovery shell. The fix is a pinned POST-PROCESS of the built initrd:
+# unpack the cpio, splice the unseal call into initramfs-init at the exact
+# point where drivers + /dev are up (after nlplug-findfs) and BEFORE the root
+# mount attempt, inject /etc/crypttab (nothing else packs it), and repack.
+#
+# TWO splice points, one idempotent step (marker ALPINE-FDE-SPLICE-v1):
+#   splice A (pre-mount, after the nlplug-findfs invocation): run the hook,
+#             then point KOPT_root at the mapped container — the stock mount
+#             uses "$KOPT_root" and the cmdline names the raw LUKS UUID.
+#   splice B (post-mount, before the mount-move/switch_root tail): flip the
+#             ADR-20 install-state marker on the mounted NEWROOT via the
+#             hook's FDE_STATE_ONLY mode (the hook's own flip is guarded by
+#             the state file existing on NEWROOT, which only exists mounted).
+#
+# Splice ordering contract (ADR-20): the hook is fail-closed by construction
+# (bounded recovery prompt -> poweroff -f, never a shell); the splice adds no
+# interactive path of its own.
+
+INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
+INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
+INITRAMFS_INIT_PATH='usr/share/mkinitfs/initramfs-init'
+INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
+
+# initramfs_detect_comp FILE — print the compression name (gzip|xz|zstd|lz4|
+# none) from the magic bytes; dies loud on an unknown image (blocker #23).
+initramfs_detect_comp() {
+    _idc_magic=$(od -An -tx1 -N6 "$1" 2>/dev/null | tr -d ' \n')
+    case $_idc_magic in
+        1f8b*) printf '%s\n' gzip ;;
+        fd377a585a00*) printf '%s\n' xz ;;
+        28b52ffd*) printf '%s\n' zstd ;;
+        04224d18*) printf '%s\n' lz4 ;;
+        '') die "initramfs splice: cannot read the initrd image: $1" ;;
+        *) die "initramfs splice: unknown initrd compression (magic $_idc_magic) in $1 — refusing to splice" ;;
+    esac
+}
+
+# _initramfs_splice_block A|B — print the splice block (tab-indented to match
+# the initramfs-init body) for the given point:
+#   A: after the nlplug-findfs invocation, before resume_from_disk/the mount —
+#      run the fail-closed unseal hook, then point KOPT_root at the mapped
+#      container (the stock mount uses "$KOPT_root"; the cmdline names the raw
+#      LUKS UUID).
+#   B: after the root is mounted, before the mount-move/switch_root tail —
+#      flip the ADR-20 install-state marker via the hook's FDE_STATE_ONLY
+#      mode (the hook's own flip needs the state file on a MOUNTED NEWROOT,
+#      which only exists past splice A's mount).
+_initramfs_splice_block() {
+    case $1 in
+        A)
+            printf '\t# >>> alpine-fde unseal splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_MARKER"
+            printf '\t# §8.2 Early-Boot Unseal Hook: Secure-Boot-guarded TPM 2.0 unseal of the\n'
+            printf '\t# root container. Fail-closed by construction: bounded recovery prompt ->\n'
+            printf '\t# poweroff -f, NEVER a shell (ADR-20). Runs AFTER nlplug-findfs (drivers\n'
+            printf '\t# + /dev up) and BEFORE the root mount attempt.\n'
+            printf '\tif [ -x /%s ]; then\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\tFDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\t# the hook opened the mapped container — mount THAT, not the raw LUKS UUID\n'
+            printf '\t\tif [ -e /dev/mapper/root ]; then\n'
+            printf '\t\t\tKOPT_root=/dev/mapper/root\n'
+            printf '\t\tfi\n'
+            printf '\tfi\n'
+            printf '\t# <<< alpine-fde unseal splice (%s) <<<\n' "$INITRAMFS_SPLICE_MARKER"
+            ;;
+        B)
+            printf '\t# >>> alpine-fde state-flip splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
+            printf '\t# the root is mounted now: flip the ADR-20 install-state marker\n'
+            printf '\t# (installed -> provisional-booted) via the hook%s state-only mode\n' "'s"
+            printf '\tif [ -x /%s ] && [ -f "$sysroot/etc/alpine-fde/install-state.json" ]; then\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\tFDE_STATE_ONLY=1 FDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
+            printf '\tfi\n'
+            printf '\t# <<< alpine-fde state-flip splice (%s) <<<\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
+            ;;
+    esac
+}
+
+# --- initramfs unseal splice (real-server blocker #23) ---------------------------
+# mkinitfs 3.14.1's initramfs-init has NO user-hook mechanism (no sourced
+# /etc/mkinitfs/* hook, no feature .sh, no crypttab consumer — verified against
+# the stock usr/share/mkinitfs/initramfs-init). The §8.2 Early-Boot Unseal Hook
+# rides in via mkinitfs.conf custom_files
+# (/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh) but is NEVER invoked:
+# boot B tries to mount the raw encrypted container and lands in the recovery
+# shell. The fix is a pinned POST-PROCESS of the built initrd: unpack the cpio,
+# splice the unseal call into initramfs-init at the exact point where drivers +
+# /dev are up (after nlplug-findfs) and BEFORE the root mount attempt, inject
+# /etc/crypttab (nothing else packs it), and repack.
+#
+# TWO splice points, one idempotent step (markers ALPINE-FDE-SPLICE-v1 and
+# ALPINE-FDE-SPLICE-FLIP-v1):
+#   splice A (pre-mount, after the nlplug-findfs invocation): run the hook,
+#             then point KOPT_root at the mapped container — the stock mount
+#             uses "$KOPT_root" and the cmdline names the raw LUKS UUID.
+#   splice B (post-mount, before the mount-move/switch_root tail): flip the
+#             ADR-20 install-state marker on the mounted NEWROOT via the
+#             hook's FDE_STATE_ONLY mode (the hook's own flip needs the state
+#             file on a MOUNTED NEWROOT, which only exists past splice A's
+#             mount).
+#
+# Splice ordering contract (ADR-20): the hook is fail-closed by construction
+# (bounded recovery prompt -> poweroff -f, never a shell); the splice adds no
+# interactive path of its own. The splice point ordering is pinned by
+# tests/unit/initramfs_splice_unseal.sh: nlplug-findfs < splice A < hook
+# invocation < resume_from_disk < root mount < splice B < switch_root.
+
+INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
+INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
+INITRAMFS_INIT_PATH='usr/share/mkinitfs/initramfs-init'
+INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
+
+# initramfs_detect_comp FILE — print the compression name (gzip|xz|zstd|lz4|
+# none) from the magic bytes; dies loud on an unknown image (blocker #23).
+initramfs_detect_comp() {
+    _idc_magic=$(od -An -tx1 -N6 "$1" 2>/dev/null | tr -d ' \n')
+    case $_idc_magic in
+        1f8b*) printf '%s\n' gzip ;;
+        fd377a585a00*) printf '%s\n' xz ;;
+        28b52ffd*) printf '%s\n' zstd ;;
+        04224d18*) printf '%s\n' lz4 ;;
+        '') die "initramfs splice: cannot read the initrd image: $1" ;;
+        *) die "initramfs splice: unknown initrd compression (magic $_idc_magic) in $1 — refusing to splice" ;;
+    esac
+}
+
+# _initramfs_splice_block A|B — print the splice block (tab-indented to match
+# the initramfs-init body) for the given point; see the section comment.
+_initramfs_splice_block() {
+    case $1 in
+        A)
+            printf '\t# >>> alpine-fde unseal splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_MARKER"
+            printf '\t# §8.2 Early-Boot Unseal Hook: Secure-Boot-guarded TPM 2.0 unseal of\n'
+            printf '\t# the root container. Fail-closed by construction: bounded recovery\n'
+            printf '\t# prompt -> poweroff -f, NEVER a shell (ADR-20). Runs AFTER\n'
+            printf '\t# nlplug-findfs (drivers + /dev up) and BEFORE the root mount.\n'
+            printf '\tif [ -x /%s ]; then\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\tFDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\t# the hook opened the mapped container — mount THAT, not the raw UUID\n'
+            printf '\t\tif [ -e /dev/mapper/root ]; then\n'
+            printf '\t\t\tKOPT_root=/dev/mapper/root\n'
+            printf '\t\tfi\n'
+            printf '\tfi\n'
+            printf '\t# <<< alpine-fde unseal splice (%s) <<<\n' "$INITRAMFS_SPLICE_MARKER"
+            ;;
+        B)
+            printf '\t# >>> alpine-fde state-flip splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
+            printf '\t# the root is mounted now: flip the ADR-20 install-state marker\n'
+            printf '\t# (installed -> provisional-booted) via the hook state-only mode\n'
+            printf '\tif [ -x /%s ] && [ -f "$sysroot/etc/alpine-fde/install-state.json" ]; then\n' "$INITRAMFS_HOOK_PATH"
+            printf '\t\tFDE_STATE_ONLY=1 FDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
+            printf '\tfi\n'
+            printf '\t# <<< alpine-fde state-flip splice (%s) <<<\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
+            ;;
+    esac
+}
+
+# _initramfs_splice_insert INIT ANCHOR_EXACT BLOCK_FILE AFTER|BEFORE — insert
+# BLOCK_FILE's contents after/before the FIRST line of INIT exactly equal to
+# ANCHOR_EXACT. rc 1 + stderr reason when the anchor is absent (mkinitfs
+# version drift — the caller dies loud, never splices blind).
+_initramfs_splice_insert() {
+    _isi_init=$1 _isi_anchor=$2 _isi_block=$3 _isi_pos=$4
+    awk '
+        function flush_block() {
+            while ((getline bline < blockfile) > 0) print bline
+            close(blockfile)
+        }
+        BEGIN {
+            blockfile = ARGV[2]
+            anchor = ARGV[3]
+            pos = ARGV[4]
+            delete ARGV[2]; delete ARGV[3]; delete ARGV[4]
+        }
+        { lines[++n] = $0 }
+        END {
+            at = 0
+            for (i = 1; i <= n; i++)
+                if (lines[i] == anchor) { at = i; break }
+            if (at == 0) {
+                print "initramfs splice: anchor line not found: [" anchor "] — mkinitfs version drift, refusing to splice blind" > "/dev/stderr"
+                exit 1
+            }
+            for (i = 1; i <= n; i++) {
+                if (pos == "before" && i == at) flush_block()
+                print lines[i]
+                if (pos == "after" && i == at) flush_block()
+            }
+        }
+    ' "$_isi_init" "$_isi_block" "$_isi_anchor" "$_isi_pos" >"$_isi_init.new"
+}
+
+# initramfs_splice_unseal INITRD CRYPTTAB — idempotent splice; rc 0 on success
+# (spliced now, or already spliced), die 64 loud on any structural surprise.
+# INITRAMFS_CMD override builds are SKIPPED with a loud warn (CI stub builders
+# own their initrd contents; the audit mirrors the same skip).
+initramfs_splice_unseal() {
+    [ $# -eq 2 ] || die "initramfs_splice_unseal: usage: <initrd> <crypttab>"
+    _isu_img=$1
+    _isu_crypttab=$2
+    [ -f "$_isu_img" ] || die "initramfs splice: initrd not found: $_isu_img"
+    if [ -n "${INITRAMFS_CMD:-}" ]; then
+        warn "initramfs splice: skipped — INITRAMFS_CMD override owns the initrd contents (blocker #23)"
+        return 0
+    fi
+    require_cmds gzip cpio
+    _isu_comp=$(initramfs_detect_comp "$_isu_img")
+
+    _isu_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-splice.XXXXXX") ||
+        die "initramfs splice: mktemp failed"
+    case $_isu_comp in
+        gzip) _isu_dc="gzip -dc" ;;
+        xz) _isu_dc="xz -dc" ;;
+        zstd) _isu_dc="zstd -dc" ;;
+        lz4) _isu_dc="lz4 -dc" ;;
+        none) _isu_dc="cat" ;;
+    esac
+    $_isu_dc "$_isu_img" 2>/dev/null |
+        cpio --quiet -idm -D "$_isu_work" 2>/dev/null ||
+        {
+            rm -rf "$_isu_work"
+            die "initramfs splice: cpio extraction failed on $_isu_img ($_isu_comp)"
+        }
+    _isu_init="$_isu_work/$INITRAMFS_INIT_PATH"
+    [ -f "$_isu_init" ] || {
+        rm -rf "$_isu_work"
+        die "initramfs splice: $INITRAMFS_INIT_PATH not found in $_isu_img — not a stock mkinitfs initramfs?"
+    }
+
+    if [ "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$_isu_init" 2>/dev/null)" -gt 0 ]; then
+        # idempotent re-entry on an ALREADY-spliced image: refresh only the
+        # crypttab when the caller supplies one and the archive lacks it
+        if [ -n "$_isu_crypttab" ] && [ ! -f "$_isu_work/etc/crypttab" ]; then
+            [ -f "$_isu_crypttab" ] ||
+                die "initramfs splice: crypttab not found: $_isu_crypttab (the hook cannot resolve the root container without it)"
+            mkdir -p "$_isu_work/etc"
+            cp "$_isu_crypttab" "$_isu_work/etc/crypttab"
+        fi
+    else
+        [ -f "$_isu_crypttab" ] ||
+            die "initramfs splice: crypttab not found: $_isu_crypttab (the hook cannot resolve the root container without it)"
+        mkdir -p "$_isu_work/etc"
+        cp "$_isu_crypttab" "$_isu_work/etc/crypttab"
+
+        # splice A: anchor = the nlplug-findfs invocation's closing line
+        # (2-tab indented "$KOPT_root" — the only 2-tab occurrence in the file;
+        # the overlay mount's 3-tab "$KOPT_root" /media/root-ro never matches)
+        _initramfs_splice_block A >"$_isu_work/blockA"
+        _isi_err=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-splice-err.XXXXXX")
+        if ! _initramfs_splice_insert "$_isu_init" \
+            "$(printf '\t\t"$KOPT_root"')" "$_isu_work/blockA" after \
+            2>"$_isi_err"; then
+            _isu_reason=$(cat "$_isi_err")
+            rm -rf "$_isu_work" "$_isi_err"
+            die "initramfs splice: $_isu_reason"
+        fi
+        mv "$_isu_init.new" "$_isu_init"
+        rm -f "$_isi_err"
+
+        # splice B: anchor = the mount-move/switch_root tail's first line
+        _initramfs_splice_block B >"$_isu_work/blockB"
+        _isi_err=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-splice-err.XXXXXX")
+        if ! _initramfs_splice_insert "$_isu_init" \
+            "$(printf '\tcat "$ROOT"/proc/mounts 2>/dev/null | while read -r _dev DIR _type _opts ; do')" \
+            "$_isu_work/blockB" before 2>"$_isi_err"; then
+            _isu_reason=$(cat "$_isi_err")
+            rm -rf "$_isu_work" "$_isi_err"
+            die "initramfs splice: $_isu_reason"
+        fi
+        mv "$_isu_init.new" "$_isu_init"
+        rm -f "$_isi_err"
+    fi
+
+    # repack (same flags as stock sbin/mkinitfs initfs_cpio)
+    case $_isu_comp in
+        gzip) _isu_c="gzip -9" ;;
+        xz) _isu_c="xz -T0" ;;
+        zstd) _isu_c="zstd -T0" ;;
+        lz4) _isu_c="lz4" ;;
+        none) _isu_c="cat" ;;
+    esac
+    (cd "$_isu_work" && find . | sort | cpio --quiet --renumber-inodes -o -H newc) |
+        $_isu_c >"$_isu_img" ||
+        {
+            rm -rf "$_isu_work"
+            die "initramfs splice: repack failed"
+        }
+    rm -rf "$_isu_work"
+
+    # self-verify: markers + hook invocation + parseability of the SHIPPED image
+    initramfs_splice_verify "$_isu_img" ||
+        die "initramfs splice: self-verification failed — refusing to ship the initrd (blocker #23)"
+    return 0
+}
+
+# initramfs_splice_init_content INITRD OUTDIR — extract usr/share/mkinitfs/
+# initramfs-init from INITRD into OUTDIR; prints the extracted path; dies loud
+# when absent. Shared by the splice self-check and the audit.
+initramfs_splice_init_content() {
+    _msc_img=$1
+    _msc_out=$2
+    [ -f "$_msc_img" ] || die "initramfs splice: initrd not found: $_msc_img"
+    require_cmds gzip cpio
+    mkdir -p "$_msc_out"
+    gzip -dc "$_msc_img" 2>/dev/null |
+        cpio --quiet -idm -D "$_msc_out" "$INITRAMFS_INIT_PATH" >/dev/null 2>&1 ||
+        true
+    _msc_f="$_msc_out/$INITRAMFS_INIT_PATH"
+    [ -f "$_msc_f" ] ||
+        die "initramfs splice: $INITRAMFS_INIT_PATH not found in $_msc_img"
+    printf '%s\n' "$_msc_f"
+}
+
+# initramfs_splice_verify INITRD — the splice self-check/audit primitive:
+# both markers appear EXACTLY once, the hook invocation is present, the splice
+# point ordering holds (nlplug-findfs < unseal < resume_from_disk < root mount
+# < state-flip < switch_root), no interactive shell was added, and the spliced
+# init parses. rc 0; rc 1 with $_initrd_splice_reason on any miss.
+initramfs_splice_verify() {
+    _msv_img=$1
+    _initrd_splice_reason=''
+    command -v gzip >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1 || {
+        _initrd_splice_reason="initramfs splice: gzip/cpio not available — cannot verify the splice"
+        err "initrd audit: $_initrd_splice_reason"
+        return 1
+    }
+    _msv_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-splice-verify.XXXXXX") ||
+        die "initramfs splice verify: mktemp failed"
+    _msv_init=$(initramfs_splice_init_content "$_msv_img" "$_msv_work")
+    _msv_fail() {
+        _initrd_splice_reason=$1
+        err "initrd audit: $_initrd_splice_reason"
+        rm -rf "$_msv_work"
+        return 1
+    }
+    for _msv_mark in "$INITRAMFS_SPLICE_MARKER" "$INITRAMFS_SPLICE_FLIP_MARKER"; do
+        _msv_marks=$(grep -cF "$_msv_mark" "$_msv_init")
+        [ "$_msv_marks" -eq 2 ] || {
+            rm -rf "$_msv_work"
+            _msv_fail "initramfs splice: the '$_msv_mark' marker appears $_msv_marks time(s) in $INITRAMFS_INIT_PATH (expected 2: open+close) — the unseal hook is PACKED BUT NEVER CALLED (blocker #23 class)"
+            return 1
+        }
+    done
+    grep -qF "$INITRAMFS_HOOK_PATH" "$_msv_init" || {
+        rm -rf "$_msv_work"
+        _msv_fail "initramfs splice: the unseal hook invocation is missing from $INITRAMFS_INIT_PATH (blocker #23)"
+        return 1
+    }
+    # ordering: nlplug anchor < splice A < resume_from_disk < root mount < splice B
+    _msv_nlplug=$(grep -nF "$(printf '\t\t"$KOPT_root"')" "$_msv_init" | head -n 1 | cut -d: -f1)
+    _msv_spliceA=$(grep -nF "$INITRAMFS_SPLICE_MARKER" "$_msv_init" | head -n 1 | cut -d: -f1)
+    _msv_resume=$(grep -nF '	resume_from_disk' "$_msv_init" | head -n 1 | cut -d: -f1)
+    # the root MOUNT (not an earlier helper reference): first occurrence AFTER
+    # the resume_from_disk call inside the root branch
+    _msv_mount=$(grep -nF '"${KOPT_root#ZFS=}"' "$_msv_init" |
+        { while IFS=: read -r n _; do [ "$n" -gt "$_msv_resume" ] && { echo "$n"; break; }; done; })
+    _msv_flip=$(grep -nF "$INITRAMFS_SPLICE_FLIP_MARKER" "$_msv_init" | head -n 1 | cut -d: -f1)
+    _msv_switch=$(grep -nF '	exec switch_root' "$_msv_init" | head -n 1 | cut -d: -f1)
+    if [ -z "$_msv_nlplug" ] || [ -z "$_msv_spliceA" ] || [ -z "$_msv_resume" ] ||
+        [ -z "$_msv_mount" ] || [ -z "$_msv_flip" ] || [ -z "$_msv_switch" ] ||
+        [ "$_msv_nlplug" -ge "$_msv_spliceA" ] || [ "$_msv_spliceA" -ge "$_msv_resume" ] ||
+        [ "$_msv_resume" -ge "$_msv_mount" ] || [ "$_msv_mount" -ge "$_msv_flip" ] ||
+        [ "$_msv_flip" -ge "$_msv_switch" ]; then
+        rm -rf "$_msv_work"
+        _msv_fail "initramfs splice: splice-point ordering violated (nlplug=$_msv_nlplug unseal=$_msv_spliceA resume=$_msv_resume mount=$_msv_mount flip=$_msv_flip switch_root=$_msv_switch) — the unseal must run after drivers are up and BEFORE the root mount (blocker #23)"
+        return 1
+    fi
+    # the splice block adds NO interactive shell (the s90 no-emergency idiom,
+    # at the splice level)
+    sed -n "/$INITRAMFS_SPLICE_MARKER/,/$INITRAMFS_SPLICE_MARKER/p" "$_msv_init" |
+        grep -qE '(^|[[:space:]])(sh|recovery_shell)([[:space:]]|$)' && {
+        rm -rf "$_msv_work"
+        _msv_fail "initramfs splice: the splice block introduces an interactive shell — the §8.2 no-shell contract is void"
+        return 1
+    }
+    if ! sh -n "$_msv_init" 2>/dev/null; then
+        rm -rf "$_msv_work"
+        _msv_fail "initramfs splice: the spliced $INITRAMFS_INIT_PATH no longer parses (sh -n failed)"
+        return 1
+    fi
+    rm -rf "$_msv_work"
+    return 0
+}
+
 # --- initrd inventory audit (§8.2/§12/I6, G-C11 — resolution R9) -----------------
 # The unlock artifacts are load-bearing: a missing piece means boots prompt,
 # or worse, the hook cannot run at all (G2 lost). The audit runs on EVERY
@@ -251,6 +640,25 @@ initrd_audit() {
         err "$_initrd_audit_reason"
         return 1
     }
+
+    # blocker #23 verdict: the unseal splice must be IN the initramfs-init —
+    # the hook being merely PACKED (custom_files) while never INVOKED is the
+    # exact 'packed but never called' failure class the splice exists to kill.
+    # Scoped to FULL stock initramfs images (initramfs-init present): synthetic
+    # partial images (module-payload fixtures) carry no init to splice.
+    if printf '%s\n' "$_ia_inv" | grep -q "^$INITRAMFS_INIT_PATH$"; then
+        if ! initramfs_splice_verify "$_ia_img"; then
+            _initrd_audit_reason="$_initrd_splice_reason"
+            return 1
+        fi
+        if ! printf '%s\n' "$_ia_inv" | grep -q "^etc/crypttab$"; then
+            _initrd_audit_reason="initrd audit: /etc/crypttab is missing from the initramfs — the unseal hook cannot resolve the root container (blocker #23)"
+            err "$_initrd_audit_reason"
+            return 1
+        fi
+    else
+        warn "initrd audit: splice verdict not applicable — no $INITRAMFS_INIT_PATH in the image (synthetic partial initramfs)"
+    fi
 
     # _ia_has BASENAME — inventory carries a path whose last component matches.
     # REAL-SERVER BLOCKER #12: kernel modules are matched COMPRESSION-SUFFIX
