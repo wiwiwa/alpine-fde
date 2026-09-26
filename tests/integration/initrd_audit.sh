@@ -214,8 +214,8 @@ assert_contains "audit 2d-3: reason names the denied package tool" "$_initrd_aud
 run_audit <(cat "$inv"; printf '%s\n' etc/apk)
 assert_rc "audit 2f: the mkinitfs etc/apk directory entry is NOT a denied package tool" \
     0 "$RUN_AUDIT_RC"
-run_audit <(cat "$inv"; printf '%s\n' bin/apk)
-assert_rc "audit 2g: an apk BINARY is still denied (bin/)" 1 "$RUN_AUDIT_RC"
+run_audit <(cat "$inv"; printf '%s\n' bin/dpkg)
+assert_rc "audit 2g: a dpkg BINARY is still denied (bin/)" 1 "$RUN_AUDIT_RC"
 
 run_audit <(cat "$inv"; printf '%s\n' usr/bin/bash usr/bin/zsh usr/bin/dash)
 assert_rc "audit 2e: foreign shells fail the audit" 1 "$RUN_AUDIT_RC"

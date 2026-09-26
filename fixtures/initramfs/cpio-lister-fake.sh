@@ -119,6 +119,11 @@ EOF
             _clf_emit_fs_btrfs
             printf '%s\n' usr/bin/dpkg
             ;;
+        deny-dpkg)
+            _clf_emit_core
+            _clf_emit_fs_btrfs
+            printf '%s\n' usr/bin/dpkg
+            ;;
         deny-shell)
             _clf_emit_core
             _clf_emit_fs_btrfs

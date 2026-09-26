@@ -441,10 +441,12 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
         # bare directory entry is not a tool. The basename-only deny would
         # have read the directory as a package tool.
         case $_ia_path in
-            bin/apk | bin/apk-* | sbin/apk | sbin/apk-* \
-                | */bin/apk | */bin/apk-* | */sbin/apk | */sbin/apk-* \
-                | */bin/apt | */bin/apt-* | */bin/dpkg | */bin/dpkg-* \
-                | bin/apt | bin/apt-* | bin/dpkg | bin/dpkg-*)
+            # boot-lane finding #14: apk is NOT deniable — mkinitfs's OWN base
+            # feature ships /sbin/apk (now /usr/sbin/apk) and its init uses
+            # apk.static for repository boots: every real Alpine initramfs
+            # carries it. Only foreign package tools are denied.
+            bin/dpkg | bin/dpkg-* | */bin/dpkg | */bin/dpkg-* \
+                | bin/apt | bin/apt-* | */bin/apt | */bin/apt-*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 continue ;;
         esac
@@ -456,10 +458,6 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
                 printf 'denied compiler: %s\n' "$_ia_path"
                 ;;
             apt | apt-* | dpkg | dpkg-*)
-                printf 'denied package tool: %s\n' "$_ia_path"
-                ;;
-||||||| parent of bf928d3 (fix: initrd audit denies package tools by PATH, not basename (GREEN))
-            apk | apk-* | apt | apt-* | dpkg | dpkg-*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 ;;
             bash | zsh | dash | ksh | csh | tcsh | fish)
