@@ -250,8 +250,8 @@ assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no 
 # placeholder (nothing staged, no secret in plan text)
 assert_contains "plan: build record exports the in-chroot release-key dir (blocker #8)" "$INS_OUT" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
-assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder" "$INS_OUT" \
-    '[ -r <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>)'
+assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder (in-target path, blocker #9)" "$INS_OUT" \
+    '[ -s <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>) && rm -f <release-passfile>'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 assert_contains "plan: kernel hooks installed (Alpine kernel-hooks.d layout)" "$INS_OUT" \
     "etc/kernel-hooks.d"

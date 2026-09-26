@@ -474,12 +474,12 @@ inst_execute_plan() {
     printf '%s' "$SPC_PLAN" >"$_ie_plan"
     # L-04a + WR-02: a die mid-plan must leave NOTHING behind — one
     # combined EXIT trap scrubs the plan file AND the staged ephemeral
-    # key-file AND the staged release-passphrase seam file (blocker #8),
-    # then tears the H-02 binds down best-effort (never
+    # key-file AND the in-target release-passphrase seam file (blocker
+    # #8/#9, best-effort), then tears the H-02 binds down best-effort (never
     # masking the real exit code; skipped when we died before the
     # mountpoint was even resolved)
     trap '
-                rm -f "$_ie_plan" "${_ime_kf:-}" "${_ime_pf:-}" 2>/dev/null
+                rm -f "$_ie_plan" "${_ime_kf:-}" "${_im_pf_host:-}" 2>/dev/null
                 if [ -n "${_im_mnt:-}" ]; then
                     umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" \
                         "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
@@ -932,14 +932,16 @@ inst_ceremony_recovery() {
 # passphrase; a typed value is confirm-typed with the §13 floor — re-prompt
 # until met) and encrypt release.pem in place via the existing
 # keys_encrypt_release (ADR-18, AES-256 PBKDF2), then lock it 0400. With
-# SEAMFILE (real-server blocker #8): the confirmed passphrase is ALSO written
-# to the 0600 tmpfs seam file staged at generate time, handing it to the
-# in-chroot `ukictl build` (its keys_unlock consumes
-# ALPINE_FDE_KEY_PASSPHRASE, RESOLVED-4) — never argv, never the log, never
-# persisted (scrubbed with the ephemeral key at teardown). Crash resume: an
-# already-encrypted release.pem (keys_is_encrypted) is skipped AND the seam
-# file stays empty — the build's keys_unlock falls back to its interactive
-# no-echo prompt.
+# SEAMFILE (real-server blocker #8, retargeted by #9): the confirmed
+# passphrase is ALSO written to the 0600 seam file IN THE TARGET ROOT
+# (<mnt>/run/alpine-fde-release-pass — the H-02 /dev bind is PLAIN, so a host
+# tmpfs seam is invisible guest-side), handing it to the in-chroot
+# `ukictl build`: its shell reads it into ALPINE_FDE_KEY_PASSPHRASE
+# (RESOLVED-4, keys_unlock priority 1) — never argv, never the log, consumed
+# (rm) by the build record itself and scrubbed by teardown + the die-path
+# traps (I1). Crash resume: an already-encrypted release.pem
+# (keys_is_encrypted) is skipped AND the seam file stays absent — the build's
+# keys_unlock falls back to its interactive no-echo prompt.
 inst_ceremony_release_key() {
   _ick_d=$1
   _ick_pf=${2:-}
@@ -974,12 +976,18 @@ inst_ceremony_release_key() {
   unset _ick_p2
   keys_encrypt_release "$_ick_d" ||
     die "install: encrypting release.pem (keys_encrypt_release) failed"
-  # real-server blocker #8: hand the passphrase to the in-chroot build via
-  # the 0600 staged tmpfs seam file (path fixed at generate time; mode 0600
-  # set there) — the secret travels disk-file-in-tmpfs -> guest env, never
-  # argv/log, and is scrubbed with the ephemeral key at teardown (I1).
+  # real-server blocker #8/#9: hand the passphrase to the in-chroot build via
+  # the 0600 seam file IN THE TARGET ROOT (a host-tmpfs seam is invisible
+  # through the plain H-02 /dev bind) — the secret travels target-file ->
+  # guest env, never argv/log; the build record consumes (rm) it right after
+  # reading and teardown + the die-path traps own the rest (I1).
   if [ -n "$_ick_pf" ]; then
+    mkdir -p "$(dirname "$_ick_pf")"
+    _ick_um=$(umask)
+    umask 077
     printf '%s' "$_ick_p1" >"$_ick_pf"
+    umask "$_ick_um"
+    chmod 600 "$_ick_pf"
   fi
   unset ALPINE_FDE_KEY_PASSPHRASE INST_RECOVERY_PASSPHRASE _ick_p1
   chmod 0400 "$_ick_d/release.pem"
@@ -1339,30 +1347,30 @@ cmd_install_main() {
   # placeholder — nothing is staged, nothing persists)
   _im_lukskey_disp=${_im_lukskey:-'<ephemeral-keyfile>'}
 
-  # real-server blocker #8: stage the release-key PASSPHRASE SEAM file (0600,
-  # tmpfs — same I1 class as the ephemeral install key). The PATH is fixed at
-  # GENERATE time (the plan is static text); the credential ceremony (3/3)
-  # writes the confirmed passphrase into it at EXECUTE time, and the build
-  # record's in-guest shell reads it into ALPINE_FDE_KEY_PASSPHRASE
-  # (RESOLVED-4's blessed env mechanism) so `ukictl build` can decrypt
-  # /etc/alpine-fde/keys/release.pem. The secret itself NEVER travels in
-  # argv, the plan text, or the log — only this 0600 file path does, exactly
-  # like the ephemeral keyfile. Dry-run: nothing staged — the record carries
-  # the literal <release-passfile> placeholder.
-  _IME_PASSFILE=''
-  if [ "$(inst_runner)" != "dry-run" ]; then
-    _ime_pdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
-    _IME_PASSFILE=$(mktemp "$_ime_pdir/alpine-fde-release-pass.XXXXXX") ||
-      die "install: cannot stage the release-key passphrase seam file ($_ime_pdir usable?)"
-    chmod 600 "$_IME_PASSFILE"
-    _ime_pf=$_IME_PASSFILE
-    # re-arm the combined key/passfile scrub trap (replaces the stager's
-    # key-only trap in THIS shell; inst_execute_plan's mid-plan replacement
-    # keeps scrubbing via the ${_ime_kf:-}/${_ime_pf:-} carriers)
-    trap 'rm -f "${_ime_kf:-}" "${_ime_pf:-}" 2>/dev/null' EXIT
+  # real-server blocker #8 + #9: the release-key PASSPHRASE SEAM for the
+  # in-chroot build. Blocker #8 staged it on the HOST tmpfs (/dev/shm) —
+  # but the H-02 /dev bind is a PLAIN bind (no sub-mounts), so guest-side
+  # /dev/shm is the target's empty dir and the record's read failed silently
+  # in-chroot (blocker #9; keys_unlock's 9a cache glob /dev/shm/
+  # alpine-fde-release-pass.* is equally blind through the bind — the guest
+  # keys_unlock gets the value via ALPINE_FDE_KEY_PASSPHRASE, priority 1,
+  # which outranks the cache anyway; the 9a cache keeps serving HOST-side
+  # callers where /dev/shm IS the host's). The seam therefore lives IN THE
+  # TARGET ROOT: <mnt>/run/alpine-fde-release-pass (guest /run/
+  # alpine-fde-release-pass), 0600, on the LUKS2 container, written by the
+  # ceremony (3/3) at execute time, consumed-and-REMOVED by the build record
+  # in the same breath, scrubbed by teardown + the die-path traps (I1).
+  # Paths are plan-static; dry-run carries the literal <release-passfile>
+  # placeholder (nothing staged, no secret in plan text).
+  if [ "$(inst_runner)" = "dry-run" ]; then
+    _im_pf_host=''
+    _im_pf_guest='<release-passfile>'
+    _im_passfile_disp='<release-passfile>'
+  else
+    _im_pf_host=$_im_mnt/run/alpine-fde-release-pass
+    _im_passfile_disp=$_im_pf_host
+    _im_pf_guest=/run/alpine-fde-release-pass
   fi
-  _im_passfile=$_IME_PASSFILE
-  _im_passfile_disp=${_im_passfile:-'<release-passfile>'}
 
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
   # 1a. RESET a previous FAILED attempt (user-reported, e2e-invisible class):
@@ -1723,23 +1731,26 @@ cmd_install_main() {
   # ($_im_containers, the luksFormat targets) — never the /dev/mapper/* views.
   inst_plan_run host "inst_ceremony_recovery $_im_lukskey_disp $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
   inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
-  inst_plan_run host "inst_ceremony_release_key $_im_keys $_im_passfile_disp # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400; 2nd arg = 0600 tmpfs passphrase seam file for the build (blocker #8)"
+  inst_plan_run host "inst_ceremony_release_key $_im_keys $_im_passfile_disp # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400; 2nd arg = the 0600 passphrase seam file IN THE TARGET ROOT (<mnt>/run/... — guest /run/...; blocker #8/#9)"
   # step 5 (SECRET-dependent — stays AFTER the ceremony): signed boot manager
   # + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is
   # state-gated OFF — the PROVISIONAL seal below is the only enrollment of
   # Stage 1)
-  # REAL-SERVER BLOCKER #8: the build record must (a) configure the
+  # REAL-SERVER BLOCKER #8 + #9: the build record must (a) configure the
   # release-key directory — ukictl build resolves keys_dir() =
   # ALPINE_FDE_KEYDIR/KEY_PATH with NO default; the bare record died
   # "release key directory not configured (set --keydir / KEY_PATH /
   # ALPINE_FDE_KEYDIR)" — and (b) consume the release-key PASSPHRASE the
-  # ceremony (3/3) staged to the 0600 tmpfs seam file: the in-guest shell
-  # reads it into ALPINE_FDE_KEY_PASSPHRASE (RESOLVED-4's blessed env
-  # mechanism — keys_unlock decrypts release.pem with it) so the secret
-  # travels tmpfs-file -> guest env, NEVER argv or the log. Empty/absent
-  # file (crash resume on an already-encrypted release.pem): keys_unlock
-  # falls back to its interactive no-echo prompt.
-  inst_plan_run guest "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -r $_im_passfile_disp ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_passfile_disp) && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8: keydir exported (keys_dir has no default) + passphrase from the 0600 staged seam file (never argv)"
+  # ceremony (3/3) staged to the 0600 seam file IN THE TARGET ROOT: the
+  # in-guest shell reads it (guest /run/alpine-fde-release-pass — a host
+  # tmpfs seam is invisible through the PLAIN H-02 /dev bind, blocker #9)
+  # into ALPINE_FDE_KEY_PASSPHRASE (RESOLVED-4's blessed env mechanism —
+  # keys_unlock priority 1, outranking the 9a /dev/shm cache glob, which
+  # cannot see through the bind anyway) and REMOVES the file in the same
+  # breath, so the secret travels target-file -> guest env, NEVER argv or
+  # the log. Absent file (crash resume on an already-encrypted release.pem):
+  # keys_unlock falls back to its interactive no-echo prompt.
+  inst_plan_run guest "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv)"
   # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
@@ -1755,7 +1766,7 @@ cmd_install_main() {
   # explicit Enter confirmation, and a reboot INTO FIRMWARE SETUP
   # (OsIndications) for the manual key import.
   inst_plan_run host "umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc $_im_mnt/sys/firmware/efi/efivars && umount -R $_im_mnt && $_im_close"
-  inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8)"
+  inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
   # The NVRAM enrollment ran BEFORE the ceremony (mechanical); whether the
@@ -1781,7 +1792,7 @@ cmd_install_main() {
   if [ "$(inst_runner)" != "dry-run" ]; then
     inst_execute_plan
     trap - EXIT
-    rm -f "$_im_lukskey" "${_im_passfile:-}" 2>/dev/null
+    rm -f "$_im_lukskey" "${_im_pf_host:-}" 2>/dev/null
     if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
       printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
     else

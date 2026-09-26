@@ -581,13 +581,69 @@ assert_contains "blocker #8: the build record exports the in-chroot release-key 
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
 assert_contains "blocker #8: the build record feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file" "$BLD_LINE" \
     'ALPINE_FDE_KEY_PASSPHRASE=$(cat'
-assert_contains "blocker #8: the ceremony (3/3) record receives the staged passphrase seam file" "$OUT" \
-    "host: inst_ceremony_release_key $ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys $ALPINE_FDE_TMPDIR/alpine-fde-release-pass."
+assert_contains "blocker #8/9: the ceremony (3/3) record stages the seam IN THE TARGET ROOT (guest-visible: the H-02 /dev bind is PLAIN — guest /dev/shm is the target's empty dir, so the host tmpfs seam was invisible in-chroot; blocker #9)" "$OUT" \
+    "host: inst_ceremony_release_key $ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys $ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass"
+assert_contains "blocker #9: the build record reads the IN-CHROOT seam path and consumes it (rm after read)" "$BLD_LINE" \
+    '[ -s /run/alpine-fde-release-pass ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass'
+assert_eq "blocker #9: the build record NEVER references the host-tmpfs seam (invisible guest-side through the plain /dev bind)" "0" \
+    "$(grep -c '/dev/shm/alpine-fde-release-pass' <<<"$BLD_LINE")"
+# blocker #9 EXECUTION-LEVEL: the ceremony really stages the seam file into
+# the target root. Run a scenario that dies exactly AT the build record (the
+# chroot stub gains a fail arm for the ukictl-build guest step, keeping the
+# provision-stage1/chpasswd simulations): the plan's teardown record never
+# runs, so the ceremony-written target file must be there — 0600, holding the
+# confirmed passphrase.
+cp "$T/stub/chroot" "$T/stub/chroot.save"
+cat >"$T/stub/chroot" <<EOF
+#!/bin/sh
+printf '%s %s\n' "chroot" "\$*" >>"\$ALPINE_FDE_TEST_LOG"
+case "\$*" in
+    *"provision stage1"*)
+        mkdir -p "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys"
+        printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
+            >"$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
+        ;;
+    *"/usr/sbin/chpasswd"*)
+        cat >"\$CHPASSWD_CAPTURE"
+        ;;
+    *"ukictl build"*)
+        # w2-blocker9 die-arm: snapshot the ceremony-staged target seam (it
+        # exists RIGHT NOW — the die-path trap scrubs it at process exit),
+        # then fail exactly the ukictl-build guest step
+        [ -n "\$SEAM_SNAP_SRC" ] && [ -f "\$SEAM_SNAP_SRC" ] &&
+            cp "\$SEAM_SNAP_SRC" "\$SEAM_SNAP" && chmod 600 "\$SEAM_SNAP"
+        echo "simulated guest build failure" >&2
+        exit 1
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$T/stub/chroot"
+SEAM_SNAP_SRC=$ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass
+SEAM_SNAP=$T/seam-snap
+export SEAM_SNAP_SRC SEAM_SNAP
+: >"$ALPINE_FDE_TEST_LOG"
+rm -rf "$ALPINE_FDE_INSTALL_MNT"
+DB_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
+DB_RC=$?
+mv "$T/stub/chroot.save" "$T/stub/chroot"
+chmod +x "$T/stub/chroot"
+assert_eq "blocker #9 exec: the die-before-build scenario fails at the guest build step (64)" "64" "$DB_RC"
+assert_contains "blocker #9 exec: the failure IS the build record" "$DB_OUT" "guest step failed"
+assert_file_exists "blocker #9 exec: the ceremony staged the seam INTO the target root (guest-visible; snapshotted by the stub at build-record time)" \
+    "$SEAM_SNAP"
+assert_eq "blocker #9 exec: the target seam file is 0600" "600" \
+    "$(stat -c '%a' "$SEAM_SNAP" 2>/dev/null)"
+printf '%s' 'Fin4l-Rec0very-X9k2-!qmwjpz' >"$T/seam-expected"
+assert_eq "blocker #9 exec: the target seam file holds the confirmed passphrase (content compared off-log)" "0" \
+    "$(cmp -s "$SEAM_SNAP" "$T/seam-expected" && echo 0 || echo 1)"
+assert_eq "blocker #9 exec: the die-path trap scrubbed the target seam (I1)" "0" \
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass" ] && echo 1 || echo 0)"
 # blocker #8 seam END-TO-END mechanics: replay the REAL record's shell against
 # a fake alpine-fde that dumps env+argv — the passphrase must arrive via the
-# ENVIRONMENT (RESOLVED-4) and NEVER as an argument. The run's own seam file
-# was scrubbed at teardown (I1), so the replay seeds a copy with the same
-# content the ceremony wrote (the confirmed passphrase).
+# ENVIRONMENT (RESOLVED-4) and NEVER as an argument. The replay maps the guest
+# root onto its host view ($MNT) so the record's in-chroot read hits the file
+# the ceremony staged in the die-before-build run above.
 BLD_CMD=${BLD_LINE#* /bin/sh -c }
 FAKE_OUT=$T/fake-build.out
 mkdir -p "$T/fakebin"
@@ -598,12 +654,8 @@ printf 'pass=%s\n' "\${ALPINE_FDE_KEY_PASSPHRASE-UNSET}" >>"$FAKE_OUT"
 printf 'argv=%s\n' "\$*" >>"$FAKE_OUT"
 EOF
 chmod +x "$T/fakebin/alpine-fde"
-SEAM=$(printf '%s' "$BLD_LINE" | grep -o "$ALPINE_FDE_TMPDIR/alpine-fde-release-pass\.[A-Za-z0-9]*" | head -1)
-SEAM_COPY=$T/seam-copy
-printf '%s' 'Fin4l-Rec0very-X9k2-!qmwjpz' >"$SEAM_COPY"
-chmod 600 "$SEAM_COPY"
 BLD_CMD=${BLD_CMD//\/opt\/alpine-fde\/bin\/alpine-fde/$T/fakebin/alpine-fde}
-BLD_CMD=${BLD_CMD//$SEAM/$SEAM_COPY}
+BLD_CMD=${BLD_CMD//\/run\/alpine-fde-release-pass/$SEAM_SNAP}
 sh -c "$BLD_CMD"
 assert_contains "blocker #8: the build sees the release-key dir via the environment" "$(cat "$FAKE_OUT")" \
     "keydir=/etc/alpine-fde/keys"
