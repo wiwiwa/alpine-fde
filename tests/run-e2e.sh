@@ -34,7 +34,14 @@
 # tests/e2e/results-final.json. The six scenarios whose boots the two merged
 # pipelines absorbed (s01/s02/s14/s16 -> s01c; s15/s17 -> s15c) are REMOVED —
 # files deleted from tests/e2e/ AND rows dropped from the registry (see the
-# REGISTRY comment); their invariants live in the pipeline suites.
+# REGISTRY comment); their invariants live in the pipeline suites. The SEVEN
+# early-boot negative scenarios (s03/s05/s07/s09/s12/s13/s18) are likewise
+# REMOVED — files and rows — their VM-only console residuals consolidated into
+# the unified fail-closed drill s90 (queue item 30) and their artifact-level
+# verdicts pinned zero-boot by the wt-bootmin host unit suites
+# (s03_stale_enrollment_host.sh / s13_token_tamper_host.sh /
+# s18_foreign_pcrsig_host.sh); disposition table:
+# tests/unit/s90_negative_drill_contract.sh.
 # The W2b multi-drive rows s19–s22 (§10 BASE matrix + §12 S-19..S-22) are
 # LITERAL table rows — they bootstrap IN-SCENARIO (each builds its own
 # fixtures and consumes no s00/s00b state), so the -j scheduler's s00/s00b
@@ -275,9 +282,12 @@ printf '%s\n' "$PROXY_PLANE_OUT" | tail -1
 #   ready    — in the default set (no-args invocation selects it)
 # The six pipeline-absorbed scenarios are GONE (files AND rows): s01/s02/s14/
 # s16 were absorbed by s01c (the lifecycle pipeline), s15/s17 by s15c (the
-# recovery pipeline); the pipeline suites cover their invariants, so the
-# default run no longer pays their standalone boots and a named invocation of
-# a removed id is a loud `unknown` row, never a silent skip. The surviving
+# recovery pipeline). The seven early-boot negatives (s03/s05/s07/s09/s12/
+# s13/s18) are GONE the same way: absorbed by s90 (the unified negative
+# drill, appended at runtime below) + the wt-bootmin host suites. Their
+# invariants live in the pipeline/drill suites, so the default run no longer
+# pays their standalone boots and a named invocation of a removed id is a
+# loud `unknown` row, never a silent skip. The surviving
 # §10/§12 matrix lives in docs/Architecture.md §12 and the T-bucket gap
 # report; each row must resolve to exactly one id (registry-completeness
 # check in tests/unit/e2e_infra_smoke.sh greps this literal table — keep
@@ -286,33 +296,34 @@ REGISTRY="
 s00	s00-bootstrap-lite.sh	ready
 s00b	s00b-enroll-cache.sh	ready
 s01c	s01-lifecycle-chain.sh	ready
-s03	s03-stale-enrollment.sh	ready
 s04	s04-unsigned-uki.sh	ready
-s05	s05-sb-off.sh	ready
 s06	s06-token-trap.sh	ready
-s07	s07-loader-options.sh	ready
 s08	s08-firmware-drift.sh	ready
-s09	s09-tpm-da-locked.sh	ready
 s10	s10-tpm-absent.sh	ready
 s11	s11-disk-moved.sh	ready
-s12	s12-wrong-passphrase.sh	ready
-s13	s13-token-tamper.sh	ready
 s15c	s15-recovery-chain.sh	ready
 s19	s19-bcache-crash.sh	ready
 s20	s20-raid1-member-loss.sh	ready
 s21	s21-finalize-guard.sh	ready
 s22	s22-handoff-immunity.sh	ready
 "
-# Extension scenario BEYOND the §10/§12 matrix (the §6.1 signing negative
-# control) is appended at runtime, NOT as a literal table line: the literal
-# table keeps exactly the §10/§12 matrix rows (now 22: s00–s17 + the W2b
-# multi-drive rows s19–s22). The infra smoke (tests/unit/e2e_infra_smoke.sh)
-# pins per-id §10/§12 coverage + no duplicates + an 18-row floor (dynamic
-# count — it does not pin 18 exactly anymore). (printf with \t escapes keeps
+# Extension scenarios BEYOND the §10/§12 matrix are appended at runtime, NOT
+# as literal table lines (the §6.1 signing negative control s18 was such an
+# appended row until the 2026-09-26 drill consolidation removed its file AND
+# row): the literal
+# table keeps exactly the §10/§12 matrix rows (now 10 surviving: s00, s04,
+# s06, s08, s10, s11 + the W2b multi-drive rows s19–s22 — the pipeline- and
+# drill-absorbed rows are gone). The infra smoke (tests/unit/e2e_infra_smoke.sh)
+# pins per-id §10/§12 coverage + no duplicates + a 10-row floor (dynamic
+# count — it does not pin 10 exactly anymore). (printf with \t escapes keeps
 # raw tabs out of this file text; at runtime the row is a normal
 # TAB-separated registry entry.)
-#   s18  s18-foreign-pcrsig.sh  (G-T5: foreign-key .pcrsig negative control)
-REGISTRY="${REGISTRY}$(printf '\n%s\t%s\t%s\n' "s18" "s18-foreign-pcrsig.sh" "ready")"
+#   s90  s90-negative-drill.sh  (queue item 30: the unified early-boot NEGATIVE
+#        drill — 6 staged fail-closed legs over one enrolled base; absorbs the
+#        s03/s05/s07/s09/s12/s13/s18 VM-only residuals, whose artifact-level
+#        verdicts are pinned zero-boot by the wt-bootmin host suites; the full
+#        disposition table lives in tests/unit/s90_negative_drill_contract.sh)
+REGISTRY="${REGISTRY}$(printf '\n%s\t%s\t%s\n' "s90" "s90-negative-drill.sh" "ready")"
 
 # _script_for <id> — resolve a scenario id by filename convention
 # (tests/e2e/s<nn>-*.sh; bash globs expand sorted, lowest name wins), with a
@@ -340,7 +351,7 @@ _script_for() {
 # exists, skipping their own producer legs). The removed standalone scenarios
 # are NOT listed: s01 was the only consumer among them (the other five
 # bootstrap in-scenario), and it is gone from the registry with the rest.
-_STATE_CONSUMERS=" s01c s15c s05 s06 s07 s09 s12 s13 s18 "
+_STATE_CONSUMERS=" s01c s15c s06 s90 "
 
 # CR-02/MD-03 prune contract: scenario prunes must never delete the state
 # dirs this invocation chains on (s00's populated state -> s00b -> the state

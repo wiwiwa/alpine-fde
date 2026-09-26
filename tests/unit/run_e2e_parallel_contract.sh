@@ -44,10 +44,13 @@
 #      previous schema (no stages key) — the change is purely additive.
 #   7. Default selection: with NO ids on the command line the runner selects
 #      exactly the registry rows whose status is `ready`, in registry order
-#      (20 rows). The six pipeline-absorbed scenarios s01/s02/s14/s15/s16/s17
-#      are REMOVED — scenario files deleted from tests/e2e/ AND registry rows
-#      dropped — so they cannot appear in any selection, and naming one is a
-#      loud `unknown` row, never a silent skip.
+#      (14 rows). The thirteen REMOVED scenarios — the six pipeline-absorbed
+#      s01/s02/s14/s15/s16/s17 and the seven early-boot negatives
+#      s03/s05/s07/s09/s12/s13/s18 (drill-absorbed; their artifact-level
+#      verdicts are pinned by the wt-bootmin host suites) — are gone
+#      (scenario files deleted from tests/e2e/ AND registry rows dropped), so
+#      they cannot appear in any selection, and naming one is a loud
+#      `unknown` row, never a silent skip (pinned by run D below).
 #
 # RED scaffolding (not used in CI): PAR_CONTRACT_MUTATION=<name> applies one
 # hand-rolled mutation to the SANDBOX COPY ONLY (never the real file) to
@@ -106,22 +109,20 @@ _scenario_file() {
         s02)  echo s02-rollback.sh ;;
         s01c) echo s01-lifecycle-chain.sh ;;
         s15c) echo s15-recovery-chain.sh ;;
-        s03)  echo s03-stale-enrollment.sh ;;
+        # s03/s05/s07/s09/s12/s13/s18 are REMOVED from the registry (drill-
+        # absorbed): no mappings, so the sandbox never even builds stub files
+        # for them — a named invocation must die at the runner's registry
+        # lookup as a loud `unknown` row (run D pins it), never reach a fork.
         s04)  echo s04-unsigned-uki.sh ;;
-        s05)  echo s05-sb-off.sh ;;
         s06)  echo s06-token-trap.sh ;;
-        s07)  echo s07-loader-options.sh ;;
         s08)  echo s08-firmware-drift.sh ;;
-        s09)  echo s09-tpm-da-locked.sh ;;
         s10)  echo s10-tpm-absent.sh ;;
         s11)  echo s11-disk-moved.sh ;;
-        s12)  echo s12-wrong-passphrase.sh ;;
-        s13)  echo s13-token-tamper.sh ;;
-        s18)  echo s18-foreign-pcrsig.sh ;;
         s19)  echo s19-bcache-crash.sh ;;
         s20)  echo s20-raid1-member-loss.sh ;;
         s21)  echo s21-finalize-guard.sh ;;
         s22)  echo s22-handoff-immunity.sh ;;
+        s90)  echo s90-negative-drill.sh ;;
         *)    return 1 ;;
     esac
 }
@@ -195,8 +196,8 @@ EOF
         "$sbx/unit/"swtpm_proxy_data_plane.sh \
         "$sbx/e2e/e2e_infra_smoke.sh"
 
-    for id in s00 s00b s01 s01c s02 s03 s04 s05 s06 s07 s08 s09 s10 s11 s12 \
-              s13 s14 s15 s16 s17 s15c s18 s19 s20 s21 s22; do
+    for id in s00 s00b s01 s01c s02 s04 s06 s08 s10 s11 s14 s15 s16 s17 \
+              s15c s18 s19 s20 s21 s22 s90; do
         _scenario_file "$id" >/dev/null || continue
         cat >"$sbx/e2e/$(_scenario_file "$id")" <<'STUB'
 #!/usr/bin/env bash
@@ -350,17 +351,17 @@ else
 fi
 
 # --- part 2: contract points 2, 3, 4 (+ state-chain prune protection) -------------
-# Requested order is deliberately jumbled: s03 (slowest, timeout-class) FIRST,
+# Requested order is deliberately jumbled: s19 (slowest, timeout-class) FIRST,
 # the state chain in the middle — the runner must hoist s00 -> s00b -> s01c ->
 # s15c ahead of everything, run them sequentially, then share
-# s03/s04/s05/s06 over 3 slots. (s01c = the merged lifecycle pipeline stub,
+# s19/s04/s20/s06 over 3 slots. (s01c = the merged lifecycle pipeline stub,
 # s15c = the merged recovery pipeline stub; Wave-2 task 5b. The parallel ids
-# must all be REGISTERED rows — a removed id like s01/s02 yields a loud
-# `unknown` row without ever forking a worker.)
-export_kinds s00=state s00b=state s05=slowpass s06=fail s03=timeout s04=vacuous s01c=pass s15c=pass
+# must all be REGISTERED rows — a removed id like s01/s02/s03 yields a loud
+# `unknown` row without ever forking a worker; run D pins that shape.)
+export_kinds s00=state s00b=state s20=slowpass s06=fail s19=timeout s04=vacuous s01c=pass s15c=pass
 mkdir -p "$SBX_A/e2e/.runs/pre-existing-peer"
 ORDER_LOG="$CTL_A/order.log"
-run_registry "$SBX_A" "$CTL_A/out" "$CTL_A/err" -j 3 s03 s00 s05 s00b s06 s04 s01c s15c
+run_registry "$SBX_A" "$CTL_A/out" "$CTL_A/err" -j 3 s19 s00 s20 s00b s06 s04 s01c s15c
 RA_RC=$?
 assert_eq "run A (-j 3, mixed statuses): runner exit 1 (scenario-class failure)" "1" "$RA_RC"
 if (( RA_RC != 1 )); then
@@ -380,7 +381,7 @@ check "hoisted pipeline: s01c begins after s00b ends and runs to completion (cha
 check "hoisted pipeline: s15c begins after s01c ends and runs to completion (chain member)" \
     b_s15c '> e_s01c &&' e_s15c '> b_s15c'
 par_before_chain=0
-for _p in s03 s04 s05 s06; do
+for _p in s19 s04 s20 s06; do
     (($(ev_line begin "$_p") > e_s15c)) || par_before_chain=1
 done
 unset _p
@@ -400,7 +401,7 @@ assert_eq "run A results: top-level accel/tcg_only schema preserved" "kvm false"
 assert_eq "run A results: 8 rows, one per requested scenario" "8" \
     "$(jq -r '.scenarios | length' "$RESULT_JSON" 2>/dev/null)"
 assert_eq "run A results: rows in INVOCATION order, never completion order" \
-    '["s03","s00","s05","s00b","s06","s04","s01c","s15c"]' \
+    '["s19","s00","s20","s00b","s06","s04","s01c","s15c"]' \
     "$(jq -c '[.scenarios[].id]' "$RESULT_JSON" 2>/dev/null)"
 assert_eq "run A results: sequential status classes (timeout/fail/pass)" \
     '["timeout","pass","pass","pass","fail","fail","pass","pass"]' \
@@ -421,14 +422,14 @@ assert_contains "run A tallies 3 failed scenarios (1 timeout-class + 2 fail-clas
 assert_contains "run A ran the G-T11b artifact scan over the built state" "$A_OUT" "artifact scan: clean"
 
 # point 5 — protect set covers the state-chain dirs and pre-existing .runs dirs
-for _w in s03 s04 s05 s06; do
+for _w in s19 s04 s20 s06; do
     _pw=$(cat "$CTL_A/protect-$_w.log" 2>/dev/null)
     assert_contains "worker $_w: protect set covers s00's state dir" "$_pw" "$SBX_A/state/s00-state"
     assert_contains "worker $_w: protect set covers s00b's state dir" "$_pw" "$SBX_A/state/s00b-state"
 done
 unset _w _pw
-assert_contains "worker s05: protect set covers pre-existing .runs peer dir" \
-    "$(cat "$CTL_A/protect-s05.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
+assert_contains "worker s20: protect set covers pre-existing .runs peer dir" \
+    "$(cat "$CTL_A/protect-s20.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
 assert_contains "worker s04: protect set covers pre-existing .runs peer dir" \
     "$(cat "$CTL_A/protect-s04.log" 2>/dev/null)" "$SBX_A/e2e/.runs/pre-existing-peer"
 # the hoisted pipelines consume the ENROLLED chain state — their protect set
@@ -443,21 +444,21 @@ assert_contains "hoisted pipeline s15c: protect set covers s00b's state dir" \
     "$(cat "$CTL_A/protect-s15c.log" 2>/dev/null)" "$SBX_A/state/s00b-state"
 
 # --- part 3: contract point 5 — re-collected before EACH worker fork ---------------
-# -j 2 over [s09 slowpass 3s, s05 creator, s07 staged]: s05 (fast) finishes while
-# s09 sleeps; s07 is the LATE fork and must protect the dir s05 created, while
-# s05's own fork predates that dir (proves the mechanism, not a tautology).
-# s07 is also the STAGED row for contract point 6 (its stub emits two
+# -j 2 over [s08 slowpass 3s, s10 creator, s11 staged]: s10 (fast) finishes while
+# s08 sleeps; s11 is the LATE fork and must protect the dir s10 created, while
+# s10's own fork predates that dir (proves the mechanism, not a tautology).
+# s11 is also the STAGED row for contract point 6 (its stub emits two
 # `# stage ... done` lines; the others emit none — additivity both ways).
 SBX_B="$SBX_ROOT/b"
 CTL_B="$SBX_B/ctl"
 build_sandbox "$SBX_B"
-export_kinds s09=slowpass s05=creator s07=staged
-run_registry "$SBX_B" "$CTL_B/out" "$CTL_B/err" -j 2 s09 s05 s07
+export_kinds s08=slowpass s10=creator s11=staged
+run_registry "$SBX_B" "$CTL_B/out" "$CTL_B/err" -j 2 s08 s10 s11
 assert_eq "run B (-j 2, all pass): runner exit 0" "0" "$?"
-assert_contains "late fork s07 protects peer dir created by s05 (pre-fork re-collection)" \
-    "$(cat "$CTL_B/protect-s07.log" 2>/dev/null)" "$SBX_B/e2e/.runs/peer-created-by-s05"
-assert_not_contains "s05's own fork predates its peer dir (mechanism check)" \
-    "$(cat "$CTL_B/protect-s05.log" 2>/dev/null)" "peer-created-by-s05"
+assert_contains "late fork s11 protects peer dir created by s10 (pre-fork re-collection)" \
+    "$(cat "$CTL_B/protect-s11.log" 2>/dev/null)" "$SBX_B/e2e/.runs/peer-created-by-s10"
+assert_not_contains "s10's own fork predates its peer dir (mechanism check)" \
+    "$(cat "$CTL_B/protect-s10.log" 2>/dev/null)" "peer-created-by-s10"
 RESULT_JSON_B=$(ls -t "$SBX_B/e2e/.runs/"results-*.json 2>/dev/null | head -1)
 assert_file_exists "run B aggregated results-<ts>.json" "$RESULT_JSON_B"
 assert_rc "run B results: JSON parses cleanly, 3 rows (all-pass run)" 0 \
@@ -465,21 +466,22 @@ assert_rc "run B results: JSON parses cleanly, 3 rows (all-pass run)" 0 \
 
 # point 6 — Step timing: additive stages object on staged rows, absent elsewhere
 assert_rc "run B results: staged row carries the stages object harvested from '# stage ... done' lines" 0 \
-    jq -e '.scenarios[] | select(.id == "s07") | .stages == {"snap": 1, "build": 2}' "$RESULT_JSON_B"
+    jq -e '.scenarios[] | select(.id == "s11") | .stages == {"snap": 1, "build": 2}' "$RESULT_JSON_B"
 assert_rc "run B results: rows WITHOUT stage lines keep the exact previous schema (no stages key)" 0 \
-    jq -e '.scenarios[] | select(.id != "s07") | has("stages") | not' "$RESULT_JSON_B"
+    jq -e '.scenarios[] | select(.id != "s11") | has("stages") | not' "$RESULT_JSON_B"
 assert_rc "run A results: no row carries a stages key when no scenario emits stage lines (additive)" 0 \
     jq -e '[.scenarios[] | has("stages")] | all(.) == false' "$RESULT_JSON"
 
 # --- part 4: contract point 7 — default selection ----------------------------------
 # NO ids on the command line: the runner must select exactly the `ready`
-# registry rows in registry order — 20 rows. The six pipeline-absorbed ids
-# (s01/s02/s14/s15/s16/s17) were REMOVED — files AND registry rows — so they
-# cannot appear in any selection. All stub kinds default to pass, so an
-# all-pass run must exit 0. (Reset the kinds parts 2-3 exported — the
-# environment leaks across runs in this process.)
-export_kinds s00=pass s00b=pass s03=pass s04=pass s05=pass s06=pass \
-    s01c=pass s15c=pass s07=pass s09=pass
+# registry rows in registry order — 15 rows. The twelve REMOVED ids
+# (s01/s02/s14/s15/s16/s17 pipeline-absorbed; s03/s05/s07/s09/s12/s13/s18
+# drill-absorbed) are gone — files AND registry rows — so they cannot appear
+# in any selection. All stub kinds default to pass, so an all-pass run must
+# exit 0. (Reset the kinds parts 2-3 exported — the environment leaks across
+# runs in this process.)
+export_kinds s00=pass s00b=pass s04=pass s06=pass s08=pass s10=pass s11=pass \
+    s01c=pass s15c=pass s19=pass s20=pass s21=pass s22=pass s90=pass
 SBX_C="$SBX_ROOT/c"
 CTL_C="$SBX_C/ctl"
 build_sandbox "$SBX_C"
@@ -488,12 +490,12 @@ assert_eq "run C (no args): runner exit 0 (default set, all pass)" "0" "$?"
 RESULT_JSON_C=$(ls -t "$SBX_C/e2e/.runs/"results-*.json 2>/dev/null | head -1)
 assert_file_exists "run C aggregated results-<ts>.json" "$RESULT_JSON_C"
 assert_rc "run C results: JSON parses cleanly" 0 jq -e '.scenarios | type == "array"' "$RESULT_JSON_C"
-assert_eq "run C: default set is exactly the 20 ready rows in registry order" \
-    '["s00","s00b","s01c","s03","s04","s05","s06","s07","s08","s09","s10","s11","s12","s13","s15c","s19","s20","s21","s22","s18"]' \
+assert_eq "run C: default set is exactly the 14 ready rows in registry order" \
+    '["s00","s00b","s01c","s04","s06","s08","s10","s11","s15c","s19","s20","s21","s22","s90"]' \
     "$(jq -c '[.scenarios[].id]' "$RESULT_JSON_C" 2>/dev/null)"
-assert_eq "run C: expected default scenario count (20 registered)" "20" \
+assert_eq "run C: expected default scenario count (14 registered)" "14" \
     "$(jq -r '.scenarios | length' "$RESULT_JSON_C" 2>/dev/null)"
-for _r in s01 s02 s14 s15 s16 s17; do
+for _r in s01 s02 s14 s15 s16 s17 s03 s05 s07 s09 s12 s13 s18; do
     assert_rc "run C: removed id $_r is NOT in the default selection" 0 \
         jq -e --arg r "$_r" '[.scenarios[].id] | index($r) | not' "$RESULT_JSON_C"
 done
@@ -503,6 +505,38 @@ assert_rc "run C: s00/s00b still anchor the default selection (state-producer ch
     jq -e '([.scenarios[].id] | index("s00")) != null and ([.scenarios[].id] | index("s00b")) != null' "$RESULT_JSON_C"
 assert_rc "run C: the merged pipelines stay chain-hoisted default members" 0 \
     jq -e '([.scenarios[].id] | index("s01c")) != null and ([.scenarios[].id] | index("s15c")) != null' "$RESULT_JSON_C"
+
+# --- part 5: removed ids are LOUD `unknown` rows (never silent skips) ---------------
+# Naming a REMOVED id must fail the run with an explicit `unknown` row and
+# without forking a worker: the sandbox carries NO stub file for the removed
+# ids (no _scenario_file mapping), so if the runner ever tried to execute one
+# the missing-file path would produce a `missing` row instead — `unknown`
+# proves the registry lookup itself refused. The drill id s90 alongside them
+# is the sanity anchor: a REGISTERED id on the same command line runs.
+SBX_D="$SBX_ROOT/d"
+CTL_D="$SBX_D/ctl"
+build_sandbox "$SBX_D"
+run_registry "$SBX_D" "$CTL_D/out" "$CTL_D/err" -j 2 s03 s90 s12
+assert_eq "run D (removed ids named): runner exit 1 (unknown rows are failures)" "1" "$?"
+RESULT_JSON_D=$(ls -t "$SBX_D/e2e/.runs/"results-*.json 2>/dev/null | head -1)
+assert_file_exists "run D aggregated results-<ts>.json" "$RESULT_JSON_D"
+assert_eq "run D results: one row per named id, invocation order" \
+    '["s03","s90","s12"]' \
+    "$(jq -c '[.scenarios[].id]' "$RESULT_JSON_D" 2>/dev/null)"
+assert_eq "run D results: the removed ids are `unknown`, the registered one ran" \
+    '["unknown","pass","unknown"]' \
+    "$(jq -c '[.scenarios[].status]' "$RESULT_JSON_D" 2>/dev/null)"
+assert_rc "run D results: unknown rows carry seconds 0 (nothing executed)" 0 \
+    jq -e '[.scenarios[] | select(.status == "unknown") | .seconds] | all(. == 0)' "$RESULT_JSON_D"
+if [[ -f "$CTL_D/order.log" ]]; then
+    ORDER_D=$(cat "$CTL_D/order.log" 2>/dev/null)
+else
+    ORDER_D=""
+fi
+assert_not_contains "run D: no worker was ever forked for a removed id" "$ORDER_D" "s03"
+assert_contains "run D: the registered id (s90) DID run" "$ORDER_D" "begin s90"
+assert_contains "run D: the stderr names every unknown id" "$(cat "$CTL_D/err" 2>/dev/null)" \
+    "unknown scenario id: s03"
 
 # --- summary -----------------------------------------------------------------------
 TOTAL=$((TESTS_PASS + TESTS_FAIL))

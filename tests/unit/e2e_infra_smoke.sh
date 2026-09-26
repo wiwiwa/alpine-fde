@@ -378,24 +378,29 @@ assert_ne "swtpm: swtpm_stop really stopped the stack" "0" "$RC"
 # --- scenario registry completeness vs the §10/§12 matrix -------------------------
 # The registry in run-e2e.sh must declare the SURVIVING §10/§12 matrix: a
 # dropped row would silently shrink the failure matrix. Assert every
-# surviving matrix id is covered — s00/s03–s13 (the §10/§12 matrix after the
-# 2026-09-26 removal of the six pipeline-absorbed scenarios s01/s02/s14/s15/
-# s16/s17) PLUS the W2b multi-drive rows s19–s22 (LITERAL table rows, per
-# run-e2e.sh's registry notes). s18 is appended at runtime, not literal.
+# surviving matrix id is covered — s00 + the surviving standalone negatives
+# (the §10/§12 matrix after the 2026-09-26 removals: the six pipeline-absorbed
+# scenarios s01/s02/s14/s15/s16/s17, then the seven early-boot negatives
+# s03/s05/s07/s09/s12/s13/s18 absorbed by the s90 drill) PLUS the W2b
+# multi-drive rows s19–s22 (LITERAL table rows, per run-e2e.sh's registry
+# notes). s90 (the unified fail-closed drill) is appended at runtime, not
+# literal; s18's artifacts are pinned zero-boot by
+# tests/unit/s18_foreign_pcrsig_host.sh (its row went with the drill
+# consolidation).
 # The pinned invariants are (a) the per-id coverage below, (b) no duplicate
-# rows and (c) the post-removal 16-row literal floor.
+# rows and (c) the post-removal 10-row literal floor.
 REGISTRY_IDS=$(awk -F '\t' '$1 ~ /^s[0-9][0-9]$/ {print $1}' "$TESTS/run-e2e.sh")
-for s in s00 s03 s04 s05 s06 s07 s08 s09 s10 s11 s12 s13 \
+for s in s00 s04 s06 s08 s10 s11 \
     s19 s20 s21 s22; do
     assert_contains "registry covers $s" "$REGISTRY_IDS" "$s"
 done
 N_ROWS=$(grep -c . <<<"$REGISTRY_IDS")
 N_UNIQ=$(sort -u <<<"$REGISTRY_IDS" | wc -l)
 assert_eq "registry: no duplicate matrix rows (dynamic count)" "$N_UNIQ" "$N_ROWS"
-if (( N_UNIQ >= 16 )); then
-    _assert_result ok "registry: >= 16 rows (post-removal §10/§12 literal floor)" ""
+if (( N_UNIQ >= 10 )); then
+    _assert_result ok "registry: >= 10 rows (post-removal §10/§12 literal floor)" ""
 else
-    _assert_result not-ok "registry: >= 16 rows (post-removal §10/§12 literal floor)" \
+    _assert_result not-ok "registry: >= 10 rows (post-removal §10/§12 literal floor)" \
         "only $N_UNIQ distinct ids in the literal table"
 fi
 
