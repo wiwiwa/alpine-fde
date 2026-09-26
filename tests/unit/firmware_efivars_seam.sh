@@ -299,7 +299,9 @@ assert_eq "enroll: PK re-created with auth attrs prefix" "07000100" \
 # refused db write warns WITHOUT dying, the KEK and PK writes are STILL
 # attempted (the same firmware will refuse them too — harmless and
 # diagnostic), all key material is staged under <ESP>/alpine-fde-keys, the
-# numbered manual-import instructions are printed, and the install CONTINUES.
+# manual-import instructions are DEFERRED to the very end of the install
+# (blocker #12 follow-up: the fallback stages silently; the install tail
+# prints the instructions ONCE), and the install CONTINUES.
 fb="$tmp/enroll-rm-fails"
 mkdir -p "$fb"
 mkvar_byte "$fb" SetupMode 1
@@ -318,29 +320,62 @@ assert_contains "enroll: KEK write still attempted after the db refusal" "$out" 
     "enrolled KEK"
 assert_contains "enroll: PK write still attempted after the db refusal" "$out" \
     "enrolled PK"
-for _b_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl; do
+# user directive (ESP staging declutter): the user-facing import directory
+# stages EXACTLY the three import files + a README.txt with the numbered
+# steps — NO .esl/.dbx/.cert material (that stays on the target's
+# /etc/alpine-fde/keys for repair use)
+for _b_f in db.auth kek.auth pk.auth; do
     assert_eq "enroll: fallback staged $_b_f under <esp>/alpine-fde-keys" "1" \
         "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
 done
+for _b_f in db.esl kek.esl pk.esl dbx.auth dbx.esl; do
+    assert_eq "enroll: fallback does NOT stage $_b_f (declutter: import dir = 3 files + README)" "0" \
+        "$([ -e "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
+done
+assert_eq "enroll: README.txt staged with the numbered steps" "1" \
+    "$([ -f "$tmp/esp-b/alpine-fde-keys/README.txt" ] && echo 1 || echo 0)"
+assert_contains "enroll: README names the three import files in order (db -> KEK -> PK)" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "db.auth"
+assert_contains "enroll: README names kek.auth" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "kek.auth"
+assert_contains "enroll: README names pk.auth" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "pk.auth"
+assert_contains "enroll: README explains what each file IS" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Key Database"
+assert_contains "enroll: README states the Platform Key is LAST" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Platform Key"
+assert_contains "enroll: README names the firmware menu area" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Secure Boot"
+assert_contains "enroll: README carries the admin-password reminder" \
+    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "administrator"
+# at-firmware marker (user directive): the firmware UI cannot read README.txt —
+# an EMPTY marker file named !import_all_auth_files sorts FIRST in firmware
+# file browsers and its filename IS the instruction; no recognizable key
+# extension so import pickers that filter by extension won't offer it
+assert_eq "enroll: the !import_all_auth_files marker is staged" "1" \
+    "$([ -f "$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" ] && echo 1 || echo 0)"
+assert_eq "enroll: the marker is EMPTY (a reminder, not an importable)" "0" \
+    "$(wc -c <"$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" | tr -d '[:space:]')"
+assert_eq "enroll: the marker sorts FIRST in the firmware file browser" \
+    "!import_all_auth_files" "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | head -n 1)"
+assert_eq "enroll: staged-file set is EXACTLY db.auth kek.auth pk.auth README.txt !import_all_auth_files" "5" \
+    "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | wc -l)"
 assert_contains "enroll: fallback names the staging directory" "$out" \
     "$tmp/esp-b/alpine-fde-keys"
 assert_contains "enroll: fallback per-file cp info line" "$out" \
     "staged db.auth"
-assert_contains "enroll: instruction 1 — copy to a FAT USB stick (or use the ESP files)" \
+# user directive (re-raised): the numbered manual-import instructions are
+# DEFERRED — the fallback stages SILENTLY (one info line) and the install
+# tail prints the instructions ONCE, at the VERY END, immediately before the
+# final confirm/reboot
+assert_contains "enroll: fallback announces the deferral to the install tail" \
+    "$out" "manual-import instructions are DEFERRED to the very end of the install"
+assert_not_contains "enroll: NO numbered instructions mid-flow (deferred to the tail)" \
     "$out" "1. copy the alpine-fde-keys directory to a FAT USB stick"
-assert_contains "enroll: instruction 2 — reboot into firmware setup" "$out" \
-    "2. reboot into the firmware setup"
-assert_contains "enroll: instruction 3 — db.auth, kek.auth, pk.auth in that order" "$out" \
-    "3. under Secure Boot key management import, in this order: db.auth"
-assert_contains "enroll: instruction 3 — .esl via KeyTool.efi" "$out" \
-    "KeyTool.efi"
-assert_contains "enroll: instruction 4 — administrator password" "$out" \
-    "4. while in firmware setup, set an administrator"
-assert_contains "enroll: instruction 5 — crash resume + guarded first boot" "$out" \
-    "5. boot the installed system"
-assert_contains "enroll: instruction 5 names the ADR-20 guarded first boot" "$out" \
-    "ADR-20"
-assert_contains "enroll: final WARN — first boot stays guarded" "$out" \
+assert_not_contains "enroll: NO KeyTool guidance mid-flow (deferred)" \
+    "$out" "KeyTool.efi"
+assert_contains "enroll: final WARN — first boot stays guarded, instructions deferred" \
+    "$out" \
     "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
 # the fallback is NOT the old fail-closed die: no die text may leak through
 assert_eq "enroll: fallback path does not die" "0" \
@@ -383,14 +418,16 @@ assert_contains "enroll: KEK refusal warned" "$out" \
     "cannot write $fd/KEK-$GUID"
 assert_contains "enroll: PK refusal warned" "$out" \
     "cannot write $fd/PK-$GUID"
-for _d_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl dbx.auth dbx.esl; do
-    assert_eq "enroll: fallback staged $_d_f (incl. dbx pair when present)" "1" \
+for _d_f in db.auth kek.auth pk.auth README.txt '!import_all_auth_files'; do
+    assert_eq "enroll: total refusal stages exactly $_d_f (decluttered set)" "1" \
         "$([ -f "$tmp/esp-d/alpine-fde-keys/$_d_f" ] && echo 1 || echo 0)"
 done
 assert_eq "enroll: nothing was written to the read-only efivars dir" "0" \
     "$([ -e "$fd/db-$DBXGUID" ] && echo 1 || echo 0)"
-assert_contains "enroll: numbered instructions present after total refusal" "$out" \
-    "1. copy the alpine-fde-keys directory to a FAT USB stick"
+assert_contains "enroll: total refusal ALSO defers the instructions (no mid-flow block)" \
+    "$out" "manual-import instructions are DEFERRED to the very end of the install"
+assert_not_contains "enroll: total refusal prints NO numbered instructions mid-flow" \
+    "$out" "1. copy the alpine-fde-keys directory to a FAT USB stick"
 assert_contains "enroll: final WARN after total refusal" "$out" \
     "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
 

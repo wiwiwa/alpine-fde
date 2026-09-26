@@ -182,7 +182,10 @@ _INITRD_AUDIT_TPM2_BINS="tpm2_pcrextend tpm2_startauthsession tpm2_policypcr \
 tpm2_policyauthorize tpm2_loadexternal tpm2_verifysignature tpm2_createprimary \
 tpm2_load tpm2_unseal tpm2_flushcontext"
 _INITRD_AUDIT_TSS_LIBS="libtss2-esys libtss2-mu libtss2-rc libtss2-sys libtss2-tctildr libtss2-tcti-device"
-_INITRD_AUDIT_TPM_MODULES="tpm.ko tpm_tis.ko tpm_crb.ko"
+# blocker #12 refinement: the TPM requirement is tpm.ko CORE + at least ONE
+# interface driver (tpm_tis OR tpm_crb) — see initrd_audit.
+_INITRD_AUDIT_TPM_CORE="tpm.ko"
+_INITRD_AUDIT_TPM_IFACE="tpm_tis.ko tpm_crb.ko"
 
 # initrd_lister <initrd-img> — print the initramfs inventory, one archive
 # path per line (cpio -it shape). Default: the mkinitfs image is a gzipped
@@ -208,6 +211,8 @@ initrd_lister() {
 # a loud failure.
 initrd_audit() {
     _ia_img=$1
+    _ia_kver=${2:-} # blocker #12: target kernel — enables modules.builtin
+    _ia_root=${3:-} # blocker #12: target root — enables the tree verdicts
     _initrd_audit_reason=''
     # an INITRAMFS_CMD override owns the initrd contents (CI stub builders
     # emit deterministic placeholder payloads the cpio lister cannot parse);
@@ -242,16 +247,74 @@ initrd_audit() {
         return 1
     }
 
-    # _ia_has BASENAME — inventory carries a path whose last component matches
+    # _ia_has BASENAME — inventory carries a path whose last component matches.
+    # REAL-SERVER BLOCKER #12: kernel modules are matched COMPRESSION-SUFFIX
+    # TOLERANT — Alpine kernel packages ship .ko.gz/.ko.xz/.ko.zst and the
+    # live 6.18.53-0-lts run packed .ko.gz modules the exact-name match could
+    # not see (the audit false-positived "tpm.ko ... btrfs.ko missing" while
+    # the initrd carried every one of them as .ko.gz).
     _ia_has() {
-        printf '%s\n' "$_ia_inv" | grep -Eq "(^|/)$1\$"
+        case $1 in
+            *.ko)
+                _ia_b=${1%.ko}
+                printf '%s\n' "$_ia_inv" |
+                    grep -Eq "(^|/)${_ia_b}\.ko(\.gz|\.xz|\.zst)?$"
+                ;;
+            *)
+                printf '%s\n' "$_ia_inv" | grep -Eq "(^|/)$1\$"
+                ;;
+        esac
+    }
+
+    # REAL-SERVER BLOCKER #12: kernel-reality context. When the caller passes
+    # the target root + kver (ukictl build does), modules are also judged
+    # against /lib/modules/<kver>/modules.builtin — a module the KERNEL BUILT
+    # IN ships no .ko file anywhere, so requiring one in the inventory
+    # false-positives forever.
+    _ia_builtin=''
+    if [ -n "${_ia_kver:-}" ] && [ -n "${_ia_root:-}" ] &&
+        [ -f "${_ia_root}/lib/modules/${_ia_kver}/modules.builtin" ]; then
+        _ia_builtin=$(cat "${_ia_root}/lib/modules/${_ia_kver}/modules.builtin")
+    fi
+
+    # _ia_mod_sat NAME — kernel module SATISFIED: packed in the initrd
+    # (compression-suffix tolerant) or built-in (modules.builtin)
+    _ia_mod_sat() {
+        _ia_has "$1" && return 0
+        [ -n "$_ia_builtin" ] &&
+            printf '%s\n' "$_ia_builtin" | grep -q "/$1\$"
+    }
+
+    # _ia_verdicts collects the per-artifact SELF-DIAGNOSIS appended to the
+    # failure reason (blocker #12d): a miss is
+    #   missing-from-initrd      = the TARGET TREE has the module but mkinitfs
+    #                              did not pack it (feature-file request bug —
+    #                              check the staged alpine-fde.files)
+    #   missing-from-target-tree = the kernel does not ship it at all
+    #   missing                  = no kernel context was provided (legacy)
+    _ia_missing=''
+    _ia_verdicts=''
+    _ia_require_mod() {
+        if ! _ia_mod_sat "$1"; then
+            _ia_missing="$_ia_missing $1"
+            if [ -n "${_ia_kver:-}" ] && [ -n "${_ia_root:-}" ] &&
+                [ -d "${_ia_root}/lib/modules/${_ia_kver}" ]; then
+                if find "${_ia_root}/lib/modules/${_ia_kver}" -name "${1}*" -print -quit 2>/dev/null | grep -q .; then
+                    _ia_verdicts="$_ia_verdicts $1=missing-from-initrd"
+                else
+                    _ia_verdicts="$_ia_verdicts $1=missing-from-target-tree"
+                fi
+            else
+                _ia_verdicts="$_ia_verdicts $1=missing"
+            fi
+        fi
+        return 0
     }
 
     # required: the §8.2 unseal hook itself + cryptsetup/openssl + the exact
-    # tpm2 verbs the hook runs + libtss2 + TPM kernel modules
-    _ia_missing=''
+    # tpm2 verbs the hook runs + libtss2 + the TPM kernel modules
     for _ia_name in "$_INITRD_AUDIT_HOOK" $_INITRD_AUDIT_CRYPT $_INITRD_AUDIT_TPM2_BINS \
-        $_INITRD_AUDIT_TSS_LIBS $_INITRD_AUDIT_TPM_MODULES; do
+        $_INITRD_AUDIT_TSS_LIBS; do
         case $_ia_name in
             libtss2-*)
                 # substring match: sonamed shared objects (libtss2-esys.so.0)
@@ -278,12 +341,34 @@ initrd_audit() {
         esac
     done
 
+    # TPM kernel modules (blocker #12 refinement): require the tpm.ko CORE
+    # plus AT LEAST ONE interface driver that exists for the target kernel
+    # (tpm_tis OR tpm_crb — suffix-tolerant or built-in). Requiring all three
+    # false-positived kernels that ship only one interface driver; the install
+    # record additionally names the DETECTED driver from /sys/class/tpm.
+    _ia_require_mod tpm.ko
+    if ! _ia_mod_sat tpm_tis.ko && ! _ia_mod_sat tpm_crb.ko; then
+        _ia_missing="$_ia_missing tpm_tis.ko|tpm_crb.ko"
+        _ia_v=missing
+        if [ -n "${_ia_kver:-}" ] && [ -n "${_ia_root:-}" ] &&
+            [ -d "${_ia_root}/lib/modules/${_ia_kver}" ]; then
+            if find "${_ia_root}/lib/modules/${_ia_kver}" \
+                \( -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' \) -print -quit 2>/dev/null | grep -q .; then
+                _ia_v=missing-from-initrd
+            else
+                _ia_v=missing-from-target-tree
+            fi
+        fi
+        _ia_verdicts="$_ia_verdicts tpm_tis.ko|tpm_crb.ko=$_ia_v"
+    fi
+
     # required per persisted topology (§8.2/§4.1, G-ST5): the root filesystem
     # driver (btrfs.ko by default; ext4.ko when the conf says ROOT_FS=ext4)
     # and — for hybrid bcache (BCACHE=1) — bcache.ko + 69-bcache.rules
     # (without them /dev/bcache0 never registers and cryptsetup cannot open
     # the container). A missing fs driver is the same G2-loss/I6 class: the
-    # initrd cannot mount root, ever.
+    # initrd cannot mount root, ever. The 69-bcache.rules UDEV RULE is a real
+    # FILE — kernel-reality (built-in) never satisfies it.
     initramfs_topology
     _ia_topo=''
     case $INI_ROOT_FS in
@@ -301,6 +386,9 @@ initrd_audit() {
                     *) _ia_missing="$_ia_missing $_ia_name" ;;
                 esac
                 ;;
+            *.ko)
+                _ia_require_mod "$_ia_name"
+                ;;
             *)
                 if ! _ia_has "$_ia_name"; then
                     _ia_missing="$_ia_missing $_ia_name"
@@ -309,7 +397,8 @@ initrd_audit() {
         esac
     done
     if [ -n "$_ia_missing" ]; then
-        _initrd_audit_reason="initrd audit: required unlock artifact(s) missing:$_ia_missing"
+        _initrd_audit_reason="initrd audit: required unlock artifact(s) missing:$_ia_missing
+initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied; missing-from-initrd = the target tree HAS the module but mkinitfs did not pack it (check the staged /etc/mkinitfs/features.d/alpine-fde.files); missing-from-target-tree = the kernel does not ship it; missing = no kernel context given"
         err "$_initrd_audit_reason"
         return 1
     fi

@@ -47,14 +47,29 @@ export ALPINE_FDE_CONF="$TMP/conf-default-absent"
 FAKE="$REPO/fixtures/initramfs/cpio-lister-fake.sh"
 IMG="$TMP/whatever.img"
 AUDIT_CONF='' # optional per-call ALPINE_FDE_CONF override (topology legs)
+AUDIT_ROOT='' # optional blocker #12 kernel-reality context (target root)
+AUDIT_KVER='' # optional blocker #12 kernel-reality context (kver)
 
 # run_audit <inventory-file | V:variant> — drive the audit in THIS shell with
 # literal var-prefix assignments (they export to the lister child). rc lands
-# in $RUN_AUDIT_RC, the failure reason in $_initrd_audit_reason.
+# in $RUN_AUDIT_RC, the failure reason in $_initrd_audit_reason. When
+# AUDIT_ROOT + AUDIT_KVER are set (blocker #12 kernel-reality legs) they are
+# passed as the audit's target-root/kver arguments.
 RUN_AUDIT_RC=0
 run_audit() {
     _initrd_audit_reason=''
     local spec=$1
+    if [ -n "$AUDIT_ROOT" ] && [ -n "$AUDIT_KVER" ]; then
+        if [ "${spec#V:}" != "$spec" ]; then
+            ALPINE_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+                LISTER_FAKE_VARIANT="${spec#V:}" initrd_audit "$IMG" "$AUDIT_KVER" "$AUDIT_ROOT" 2>/dev/null
+        else
+            ALPINE_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
+                LISTER_FAKE_INV="$spec" initrd_audit "$IMG" "$AUDIT_KVER" "$AUDIT_ROOT" 2>/dev/null
+        fi
+        RUN_AUDIT_RC=$?
+        return 0
+    fi
     if [ -n "$AUDIT_CONF" ]; then
         if [ "${spec#V:}" != "$spec" ]; then
             ALPINE_FDE_CONF="$AUDIT_CONF" INITRD_LISTER_CMD="$FAKE" \
@@ -127,8 +142,15 @@ assert_contains "audit 1c: reason names libtss2-tcti-device" "$_initrd_audit_rea
 
 grep -v 'kernel/drivers/char/tpm/tpm_tis\.ko$' "$inv" >"$TMP/inv-m4.txt"
 run_audit "$TMP/inv-m4.txt"
-assert_rc "audit 1d: missing TPM kernel module fails the audit" 1 "$RUN_AUDIT_RC"
-assert_contains "audit 1d: reason names tpm_tis.ko" "$_initrd_audit_reason" "tpm_tis.ko"
+assert_rc "audit 1d: tpm_tis.ko missing while tpm_crb.ko is packed -> still covered (blocker #12: core + ONE interface)" 0 "$RUN_AUDIT_RC"
+grep -v 'kernel/drivers/char/tpm/tpm_tis\.ko$' "$inv" | grep -v 'kernel/drivers/char/tpm/tpm_crb\.ko$' >"$TMP/inv-m4b.txt"
+run_audit "$TMP/inv-m4b.txt"
+assert_rc "audit 1d: NO interface driver (tis AND crb gone) fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1d: reason names the interface requirement" "$_initrd_audit_reason" "tpm"
+grep -v 'kernel/drivers/char/tpm/tpm\.ko$' "$inv" >"$TMP/inv-m4c.txt"
+run_audit "$TMP/inv-m4c.txt"
+assert_rc "audit 1d: missing tpm.ko CORE fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 1d: reason names the tpm core" "$_initrd_audit_reason" "tpm.ko"
 
 grep -v '60-tpm\.rules$' "$inv" >"$TMP/inv-m5.txt"
 run_audit "$TMP/inv-m5.txt"
@@ -273,6 +295,97 @@ assert_contains "audit 6c: marker names the denied package tool" \
     "$(cat "$ROOT/etc/alpine-fde/build-failed")" "usr/sbin/apk"
 assert_eq "audit 6c: ESP untouched by the denied-inventory build" \
     "$ESP_BEFORE" "$(find "$ESP" -type f -exec sha256sum {} \; | sort)"
+
+# =============================================================================
+# 7. KERNEL-REALITY verdicts (real-server blocker #12): the live 6.18.53-0-lts
+#    run failed "required unlock artifact(s) missing: tpm.ko tpm_tis.ko
+#    tpm_crb.ko btrfs.ko bcache.ko 69-bcache.rules" even though mkinitfs ran —
+#    the audit judged kernel modules by EXACT bare .ko inventory names, blind
+#    to (i) modules the kernel BUILT IN (no .ko file ships anywhere —
+#    modules.builtin is the ground truth) and (ii) compression suffixes
+#    (.ko.gz/.xz/.zst). New contract, when the caller passes the target root
+#    + kver: a kernel module is SATISFIED when it is (a) in the initrd
+#    inventory (compression-suffix tolerant), or (b) declared built-in in the
+#    target's modules.builtin. A miss carries a VERDICT:
+#    missing-from-initrd (in the target tree but not packed — mkinitfs
+#    request bug) vs missing-from-target-tree (the kernel does not ship it).
+# =============================================================================
+KTGT="$TMP/target"
+mkdir -p "$KTGT/lib/modules/6.18.53-0-lts/kernel/drivers/char/tpm" \
+    "$KTGT/lib/modules/6.18.53-0-lts/kernel/fs/btrfs" \
+    "$KTGT/lib/modules/6.18.53-0-lts/kernel/drivers/md/bcache"
+# the kernel BUILT tpm.ko and tpm_crb.ko in — no .ko file exists anywhere
+printf '%s\n' \
+    'kernel/drivers/char/tpm/tpm.ko' \
+    'kernel/drivers/char/tpm/tpm_crb.ko' \
+    >"$KTGT/lib/modules/6.18.53-0-lts/modules.builtin"
+# tpm_tis shipped COMPRESSED; btrfs/bcache shipped plain
+printf 'gz' >"$KTGT/lib/modules/6.18.53-0-lts/kernel/drivers/char/tpm/tpm_tis.ko.gz"
+printf 'ko' >"$KTGT/lib/modules/6.18.53-0-lts/kernel/fs/btrfs/btrfs.ko"
+
+# 7a: everything satisfied — compressed-in-initrd + built-in — PASSES
+# (base = the full compliant section-1 inventory; the three tpm .ko files are
+# REMOVED because the kernel built them in; tpm_tis ships packed as .ko.gz)
+inv7="$TMP/inv-kr-ok.txt"
+{
+    grep -v 'kernel/drivers/char/tpm/tpm\.ko$' "$inv" |
+        grep -v 'kernel/drivers/char/tpm/tpm_tis\.ko$' |
+        grep -v 'kernel/drivers/char/tpm/tpm_crb\.ko$'
+    printf '%s\n' \
+        'kernel/drivers/char/tpm/tpm_tis.ko.gz' \
+        'kernel/drivers/md/bcache/bcache.ko' \
+        'usr/lib/udev/rules.d/69-bcache.rules'
+} >"$inv7"
+AUDIT_CONF=$TMP/conf-bcache AUDIT_ROOT=$KTGT AUDIT_KVER=6.18.53-0-lts
+printf 'ROOT_FS=btrfs\nBCACHE=1\nTOPOLOGY=bcache-multi\n' >"$AUDIT_CONF"
+run_audit "$inv7"
+assert_rc "audit 7a: built-in + compressed-suffix modules satisfy the audit" 0 "$RUN_AUDIT_RC"
+AUDIT_ROOT='' AUDIT_KVER=''
+
+# 7b: btrfs.ko in the TARGET TREE but not packed -> missing-from-initrd verdict
+grep -v 'kernel/fs/btrfs/btrfs\.ko$' "$inv7" >"$TMP/inv-kr-7b.txt"
+AUDIT_CONF=$TMP/conf-bcache AUDIT_ROOT=$KTGT AUDIT_KVER=6.18.53-0-lts
+run_audit "$TMP/inv-kr-7b.txt"
+assert_rc "audit 7b: btrfs.ko absent from the initrd fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 7b: verdict = missing-from-initrd (in the tree, not packed)" \
+    "$_initrd_audit_reason" "btrfs.ko=missing-from-initrd"
+AUDIT_ROOT='' AUDIT_KVER=''
+
+# 7c: bcache.ko in NEITHER initrd nor target tree -> missing-from-target-tree
+grep -v 'kernel/drivers/md/bcache/bcache\.ko$' "$inv7" >"$TMP/inv-kr-7c.txt"
+rm -rf "$KTGT/lib/modules/6.18.53-0-lts/kernel/drivers/md"
+AUDIT_CONF=$TMP/conf-bcache AUDIT_ROOT=$KTGT AUDIT_KVER=6.18.53-0-lts
+run_audit "$TMP/inv-kr-7c.txt"
+assert_rc "audit 7c: bcache.ko absent everywhere fails the audit" 1 "$RUN_AUDIT_RC"
+assert_contains "audit 7c: verdict = missing-from-target-tree" \
+    "$_initrd_audit_reason" "bcache.ko=missing-from-target-tree"
+# 69-bcache.rules is a REAL FILE — never satisfied by kernel reality
+assert_contains "audit 7c: the bcache udev rule is still required as a file" \
+    "$_initrd_audit_reason" "required unlock artifact(s) missing:"
+AUDIT_ROOT='' AUDIT_KVER=''
+
+# 7d: compressed packed modules satisfy the audit even WITHOUT kernel context
+inv7d="$TMP/inv-kr-7d.txt"
+sed 's/\.ko$/.ko.gz/' "$inv" >"$inv7d"
+AUDIT_CONF='' AUDIT_ROOT='' AUDIT_KVER=''
+run_audit "$inv7d"
+assert_rc "audit 7d: compression-suffix-tolerant match works without kernel context" 0 "$RUN_AUDIT_RC"
+
+# 7e: the live-run shape — tpm modules BUILT-IN (nothing tpm-packed) — no
+#     longer false-positives when the caller passes the target context
+inv7e="$TMP/inv-kr-7e.txt"
+{
+    grep -v 'kernel/drivers/char/tpm/tpm\.ko$' "$inv" |
+        grep -v 'kernel/drivers/char/tpm/tpm_tis\.ko$' |
+        grep -v 'kernel/drivers/char/tpm/tpm_crb\.ko$'
+    printf '%s\n' \
+        'kernel/drivers/md/bcache/bcache.ko' \
+        'usr/lib/udev/rules.d/69-bcache.rules'
+} >"$inv7e"
+AUDIT_CONF=$TMP/conf-bcache AUDIT_ROOT=$KTGT AUDIT_KVER=6.18.53-0-lts
+run_audit "$inv7e"
+assert_rc "audit 7e: live-run shape (built-in tpm, no tpm .ko files packed) passes" 0 "$RUN_AUDIT_RC"
+AUDIT_ROOT='' AUDIT_KVER=''
 
 # 6d: the dracut-era dash allow rule is GONE — dash in the inventory now fails
 rm -f "$ROOT/etc/alpine-fde/build-failed"

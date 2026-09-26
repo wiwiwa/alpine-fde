@@ -412,7 +412,7 @@ _uk_body() {
     initramfs_build "$_uk_work/initrd.img" "$_uk_kver"
 
     # --- 1b. initrd inventory audit (§8.2/§12/I6; loud ADR-8 failure) --------------
-    if ! initrd_audit "$_uk_work/initrd.img"; then
+    if ! initrd_audit "$_uk_work/initrd.img" "$_uk_kver" "$_uk_root"; then
         _uk_fail_reason="initrd audit failed: ${_initrd_audit_reason:-<no reason>}"
         err "ukictl build: $_uk_fail_reason"
         return 1

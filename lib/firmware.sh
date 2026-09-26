@@ -193,34 +193,66 @@ fw_var_write() {
 }
 
 # fw_auth_esp_fallback ESP_DIR KEYDIR — the graceful degradation when the
-# firmware refuses NVRAM enrollment (queue 26 ext, user directive: "write
-# .esl to EFI partition, if write to efivars failed, and show instruction to
-# import the file into uefi bios"): stage the .auth packets and the signed
-# .esl lists under <ESP_DIR>/alpine-fde-keys on the already-mounted EFI
-# System Partition, then print the numbered manual-import instructions. The
-# install CONTINUES (rc 0) — first boot stays guarded (ADR-20) until the
-# operator completes the import in firmware setup.
+# firmware refuses NVRAM enrollment (blocker #12 declutter): stages ONLY
+# db.auth/kek.auth/pk.auth + README.txt (the numbered import steps, printable
+# before the reboot) + the empty at-firmware marker !import_all_auth_files
+# (sorts first in firmware file browsers; the filename IS the instruction) to
+# <ESP_DIR>/alpine-fde-keys — the .esl/.dbx/.cert material stays on the
+# target's /etc/alpine-fde/keys for repair use — and prints ONE info line;
+# the numbered manual-import instructions are DEFERRED to the very end of the
+# install (the plan tail). Historical note: the queue-26-ext directive ("write
+# the key material to the EFI partition when the efivars write fails and show
+# how to import it") is still satisfied — the staging is unchanged in spirit;
+# the numbered instructions moved to the install tail and the staged set is
+# decluttered to the three import files.
 fw_auth_esp_fallback() {
     _fef_esp=$1
     _fef_keys=$2
     _fef_dst=$_fef_esp/alpine-fde-keys
     mkdir -p "$_fef_dst" ||
         die "firmware: cannot create $_fef_dst to stage the Secure Boot key material (firmware refused NVRAM enrollment AND the ESP fallback is unavailable) — copy the .auth files from $_fef_keys to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi manually"
-    # .auth packets (fw_var_write input) + .esl lists (KeyTool "enroll from
-    # file"); dbx is staged only when the key ceremony produced one
-    for _fef_f in db.auth kek.auth pk.auth db.esl kek.esl pk.esl dbx.auth dbx.esl; do
-        [ -f "$_fef_keys/$_fef_f" ] || continue
+    # USER DIRECTIVE (blocker #12 ESP staging declutter): the user-facing
+    # import directory stages ONLY the three import files — db.auth, kek.auth,
+    # pk.auth — plus a printable README.txt (host-side reference before the
+    # reboot) and the EMPTY at-firmware marker !import_all_auth_files (the `!`
+    # prefix sorts FIRST in firmware file browsers and the filename IS the
+    # instruction; no recognizable key extension, so import pickers that
+    # filter by extension won't offer it — it is a reminder, not an
+    # importable). The .esl/.dbx/.cert material is NOT staged: it stays on the
+    # target's /etc/alpine-fde/keys for repair use. The numbered manual-import
+    # instructions are NOT printed here — they are DEFERRED to the very end of
+    # the install (the plan tail, immediately before the final
+    # confirm/reboot); the fallback stages silently.
+    for _fef_f in db.auth kek.auth pk.auth; do
+        [ -f "$_fef_keys/$_fef_f" ] ||
+            die "firmware: cannot stage $_fef_dst/$_fef_f — the packet is missing from $_fef_keys (§9.1 step 4 platform-key ceremony bug)"
         cp "$_fef_keys/$_fef_f" "$_fef_dst/$_fef_f" ||
             die "firmware: cannot stage $_fef_keys/$_fef_f -> $_fef_dst/$_fef_f (ESP fallback)"
         info "firmware: staged $_fef_f into $_fef_dst (ESP fallback)"
     done
-    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware; complete it manually:"
-    info "  1. copy the alpine-fde-keys directory to a FAT USB stick (or use the files directly from the EFI partition)"
-    info "  2. reboot into the firmware setup (BIOS/UEFI)"
-    info "  3. under Secure Boot key management import, in this order: db.auth (Key Database), kek.auth (Key Exchange Key), pk.auth (Platform Key) — or enroll the matching .esl files 'from file' with KeyTool.efi or the firmware's own key-management UI"
-    info "  4. while in firmware setup, set an administrator (supervisor) password"
-    info "  5. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot with Secure Boot unconfigured (that is the design, ADR-20), so finish the key import before expecting a passwordless boot"
-    warn "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+    : >"$_fef_dst/!import_all_auth_files"
+    cat >"$_fef_dst/README.txt" <<'EOF'
+alpine-fde — Secure Boot key import (the firmware refused NVRAM enrollment)
+
+This directory holds EXACTLY the three files to import, in this order:
+
+  1. db.auth   — Key Database (trusts the alpine-fde signatures)
+  2. kek.auth  — Key Exchange Key
+  3. pk.auth   — Platform Key — import LAST; it locks the key database
+
+(!import_all_auth_files is only a reminder marker — not importable.)
+
+How: reboot into the firmware setup (BIOS/UEFI). Under Security / Secure
+Boot / Key Management (wording varies by vendor) use "enqueue", "import" or
+KeyTool.efi "enroll from file" — pick each file above IN THE ORDER above.
+Then set an administrator (supervisor) password while still in setup.
+Reboot: the first boot unlocks via the sealed TPM token and auto-finalizes
+under Secure Boot; it REFUSES to boot until the keys are imported (that is
+the design, ADR-20).
+EOF
+    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware (staged: db.auth kek.auth pk.auth README.txt !import_all_auth_files — nothing else)"
+    info "firmware: the manual-import instructions are DEFERRED to the very end of the install (after every other step, immediately before the final confirm/reboot) — the install continues"
+    warn "firmware enrollment incomplete — first boot stays guarded until the keys are imported; the manual-import instructions print at the end of the install"
     return 0
 }
 
@@ -233,8 +265,9 @@ fw_auth_esp_fallback() {
 # attrs, queue 26 ext) is no longer fatal: every remaining variable is still
 # attempted (same firmware refuses them identically — harmless and
 # diagnostic), then the key material is staged to ESP_DIR (default /efi, the
-# in-chroot ESP mount) via fw_auth_esp_fallback and the manual-import
-# instructions are printed; the install continues. A missing/mismatched
+# in-chroot ESP mount) via fw_auth_esp_fallback (silently — the manual-import
+# instructions are DEFERRED to the very end of the install, the plan tail);
+# the install continues. A missing/mismatched
 # PACKET still dies fail-closed (fw_var_write_try preflight): that is a bug,
 # not a firmware quirk.
 fw_auth_enroll() {

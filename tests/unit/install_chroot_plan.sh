@@ -525,6 +525,18 @@ assert_contains "deferred enrollment: the manual-import instructions print at th
     "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys"
 assert_contains "deferred enrollment: instructions name the DIRECT-from-ESP import FIRST (user directive 2)" "$OUT" \
     "import DIRECTLY from the internal ESP"
+# user directive (blocker #12 console enumeration): the instructions name the
+# THREE .auth files explicitly, point at the staged README.txt AND the
+# at-firmware marker file, and NEVER mention the repair-only .esl material
+assert_contains "deferred enrollment: instructions enumerate db.auth" "$OUT" "db.auth"
+assert_contains "deferred enrollment: instructions enumerate kek.auth" "$OUT" "kek.auth"
+assert_contains "deferred enrollment: instructions enumerate pk.auth" "$OUT" "pk.auth"
+assert_contains "deferred enrollment: instructions point at the staged README.txt" "$OUT" \
+    "README.txt"
+assert_contains "deferred enrollment: instructions point at the at-firmware marker file" "$OUT" \
+    "!import_all_auth_files"
+assert_not_contains "deferred enrollment: instructions NEVER mention the repair-only .esl material" \
+    "$OUT" ".esl"
 assert_not_contains "CI seam: NO Enter-confirmation record under NO_REBOOT" "$OUT" \
     "press Enter to reboot into firmware setup"
 assert_not_contains "CI seam: NO firmware-setup trip record under NO_REBOOT" "$OUT" \
@@ -615,9 +627,17 @@ case "\$*" in
         printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
             >"$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
         # blocker #11: the target's installed kernel module trees (the apk
-        # linux-lts transaction's output, simulated)
+        # linux-lts transaction's output, simulated) — incl. module FILES for
+        # the blocker #12 feature-file resolution pin
         mkdir -p "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.12.8-1-amd64" \
-            "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts"
+            "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm" \
+            "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/fs/btrfs" \
+            "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/md/bcache"
+        printf 'tpm' >"$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm/tpm.ko"
+        printf 'tpmtis' >"$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm/tpm_tis.ko.gz"
+        printf 'tpmcrb' >"$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm/tpm_crb.ko.gz"
+        printf 'btrfs' >"$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/fs/btrfs/btrfs.ko"
+        printf 'bcache' >"$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts/kernel/drivers/md/bcache/bcache.ko"
         ;;
     *"/usr/sbin/chpasswd"*)
         cat >"\$CHPASSWD_CAPTURE"
@@ -848,6 +868,16 @@ assert_eq "target: mkinitfs unseal hook executable" "1" \
 assert_eq "target: retired /etc/mkinitfs hook path NOT used" "0" \
     "$([ -e "$MNT_ETC/mkinitfs/alpine-fde-unseal.sh" ] && echo 1 || echo 0)"
 assert_file_exists "target: mkinitfs features.d entry shipped" "$MNT_ETC/mkinitfs/features.d/alpine-fde.files"
+# real-server blocker #12: the staged feature file carries the target's
+# RESOLVED module paths (the install appends every found tpm/btrfs/bcache
+# module file) — mkinitfs packs only what the feature file names, and the
+# static globs cannot be trusted across kernel path moves
+assert_contains "blocker #12: the staged feature file names the target's RESOLVED tpm module paths" \
+    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.files")" \
+    "/lib/modules/6.18.35-0-lts/kernel/drivers/char/tpm/tpm.ko"
+assert_contains "blocker #12: the staged feature file names the resolved btrfs module path" \
+    "$(cat "$MNT_ETC/mkinitfs/features.d/alpine-fde.files")" \
+    "/lib/modules/6.18.35-0-lts/kernel/fs/btrfs/btrfs.ko"
 assert_contains "target: alpine-fde feature registered in mkinitfs.conf (§8.2/ADR-13)" \
     "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" "alpine-fde"
 assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"
