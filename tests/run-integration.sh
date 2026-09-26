@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# tests/run-unit.sh — run tests/unit/*.sh in parallel (default jobs: nproc)
-# and print a TAP-ish summary. Exits nonzero if any assertion or test file failed.
-# A file that exits 0 while emitting ZERO assertions is itself a failure
-# (vacuous pass), and a run that observes no assertions at all (1..0) fails.
+# tests/run-integration.sh — run tests/integration/*.sh in parallel (default
+# jobs: nproc) and print a TAP-ish summary. Exits nonzero if any assertion or
+# test file failed. A file that exits 0 while emitting ZERO assertions is
+# itself a failure (vacuous pass), and a run that observes no assertions at
+# all (1..0) fails.
 #
-# Usage: tests/run-unit.sh [-j <jobs>] [pattern]
+# Same runner semantics as tests/run-unit.sh; this tier owns the HEAVY suites
+# (swtpm daemon spawns, real ukify/sbsign artifact builds, live-seal chains,
+# qemu/serial harness drills) that must not sit on the sub-second unit lane.
+#
+# Usage: tests/run-integration.sh [-j <jobs>] [pattern]
 #   -j, --jobs: number of parallel jobs (default: nproc, or ALPINE_FDE_TEST_JOBS)
-#   pattern: optional glob matched against unit test filenames (default '*')
+#   pattern: optional glob matched against integration test filenames (default '*')
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -37,33 +42,21 @@ if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || (( JOBS < 1 )); then
     JOBS=1
 fi
 
-UNIT_DIR="$HERE/unit"
+INTEGRATION_DIR="$HERE/integration"
 # compgen -G, NOT pathname expansion: a word without wildcard chars is never
 # subject to nullglob (it stays a literal path and rc-127s below), while
 # compgen matches the word as a glob either way — so a non-matching pattern
 # yields an empty list and the clean no-input exit class.
-mapfile -t TEST_FILES < <(compgen -G "$UNIT_DIR/$PATTERN.sh")
+mapfile -t TEST_FILES < <(compgen -G "$INTEGRATION_DIR/$PATTERN.sh")
 # Library files (sourced by tests, never executed) are not tests.
 TEST_FILES=(${TEST_FILES[@]%%*/lib.sh})
-# Forwarder shims (not tests, never counted): thin `exec` seams left behind by
-# suites that MOVED to tests/integration/ but are still invoked by their old
-# tests/unit/ path from tests/run-e2e.sh's pre-scenario self-test. The real
-# suites run in the integration tier (tests/run-integration.sh); executing the
-# forwarders here would double-pay their cost on the sub-second unit lane.
-FORWARDERS="e2e_infra_smoke.sh swtpm_fixture_smoke.sh swtpm_proxy_data_plane.sh"
-kept=()
-for t in "${TEST_FILES[@]}"; do
-    [[ " $FORWARDERS " == *" $(basename "$t") "* ]] && continue
-    kept+=("$t")
-done
-TEST_FILES=(${kept[@]+"${kept[@]}"})
 
 if (( ${#TEST_FILES[@]} == 0 )); then
-    echo "run-unit: no test files matching $UNIT_DIR/$PATTERN.sh" >&2
+    echo "run-integration: no test files matching $INTEGRATION_DIR/$PATTERN.sh" >&2
     exit 66   # EX_NOINPUT
 fi
 
-TMP_OUT=$(mktemp -d /tmp/alpine-fde-run-unit.XXXXXX)
+TMP_OUT=$(mktemp -d /tmp/alpine-fde-run-integration.XXXXXX)
 cleanup() {
     local pids
     pids=$(jobs -p 2>/dev/null)
@@ -99,7 +92,9 @@ for i in "${!TEST_FILES[@]}"; do
     printf '%s\n' "$out"
     # Aggregate this file's assertion counters from its output. Two house
     # styles coexist: TAP ("ok N - name" / "not ok N - name") from tests/lib/
-    # and lib.sh's "ok: name" / "FAIL: name". Count both.
+    # and lib.sh's "ok: name" / "FAIL: name". Count both. A TAP skip marker
+    # ("ok ... # SKIP") counts as a pass — a gated suite that loudly skips is
+    # a pass, not a vacuous one.
     p=$(grep -cE '^ok([: ]|$)' <<<"$out" || true)
     f=$(grep -cE '^(not ok|FAIL:)' <<<"$out" || true)
     TESTS_PASS=$((TESTS_PASS + p))
@@ -127,7 +122,7 @@ done
 TOTAL=$((TESTS_PASS + TESTS_FAIL))
 echo "1..$TOTAL"
 if (( TOTAL == 0 )); then
-    echo "# run-unit: no assertions observed across ${#TEST_FILES[@]} file(s) — vacuous run" >&2
+    echo "# run-integration: no assertions observed across ${#TEST_FILES[@]} file(s) — vacuous run" >&2
     exit 1
 fi
 echo "# pass=$TESTS_PASS fail=$TESTS_FAIL files=$FILE_FAILS"

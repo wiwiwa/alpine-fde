@@ -11,7 +11,8 @@ the harness; `lib/` and `bin/` (repo root) hold the Alpine FDE tooling itself.
 tests/env-check.sh          # exit 1 + MISSING list if a prereq is absent
 tests/run-unit.sh           # runs tests/unit/*.sh in parallel (default: nproc), TAP-ish output
 tests/run-unit.sh -j 2      # explicit concurrency (or ALPINE_FDE_TEST_JOBS)
-tests/run-unit.sh 'pattern' # subset by filename glob, e.g. the swtpm smoke test
+tests/run-unit.sh 'pattern' # subset by filename glob
+tests/run-integration.sh    # heavy tier: swtpm daemons, real artifact builds, live-seal chains
 tests/run-e2e.sh            # harness self-test, then the default scenario set (see below)
 tests/run-e2e.sh s05        # one scenario (runs the self-test first either way)
 tests/run-e2e.sh -j 2 s03 s05   # up to 2 scenarios concurrently (see below)
@@ -21,13 +22,27 @@ tests/run-e2e.sh -j 2 s03 s05   # up to 2 scenarios concurrently (see below)
 that exits nonzero without emitting a `not ok` counts as one failure (crash
 detection). The contract is fail-closed on vacuous results: a file that exits
 0 while emitting **zero assertions** is a failure (silent test rot), and a run
-that observes no assertions at all (`1..0`) fails.
+that observes no assertions at all (`1..0`) fails. `run-integration.sh` has
+the same runner semantics over `tests/integration/`.
+
+### Unit vs integration tier
+
+`tests/unit/` holds the SUB-SECOND tier: dispatchers, parsers, plan-order
+pins, host-side negative suites — suites that spawn no daemon and build no
+real artifact, so `run-unit.sh` stays near-instant. Anything that spawns a
+daemon (`swtpm`), builds real artifacts (real `ukify`/`sbsign`/`openssl`
+chains), or otherwise measures in seconds lives in `tests/integration/`
+(run via `run-integration.sh`). Both tiers use the same assertion libraries
+(`tests/unit/lib.sh`, `tests/lib/*`) and the same vacuous-pass contract. The
+one intentional exception to the wall-time rule: `unit/` also carries
+`static_analysis.sh` — a cached shellcheck pass + `-ex` policy pins whose
+warm run costs milliseconds (cache under `tests/.shellcheck-cache`).
 
 `run-e2e.sh` failure classes are distinct (§12):
 
 - **exit 64** — environment/prerequisite failure (env-check, missing tools).
 - **exit 65** — *harness-failure*: the infra self-test
-  (`tests/unit/e2e_infra_smoke.sh`) runs BEFORE any scenario; if the fixtures,
+  (`tests/integration/e2e_infra_smoke.sh`) runs BEFORE any scenario; if the fixtures,
   UKI builder, serial client or registry contract are broken, the run stops
   there. Infra breakage is never reported as a scenario failure.
 - **exit 1** — scenario-class failures. A registered scenario id whose
@@ -146,8 +161,8 @@ the mismatch.
 | `lib/swtpm-fixture.sh` | swtpm lifecycle: `swtpm_start`/`swtpm_stop`/`swtpm_reset`/`swtpm_ensure`/`swtpm_seed_pcrs`/`swtpm_pcrextend`/`swtpm_pcrread`/`swtpm_cleanup_all` |
 | `run-unit.sh` | unit test runner |
 | `env-check.sh` | prerequisite check (commands + SHA256-pinned OVMF secboot files) |
-| `unit/swtpm_fixture_smoke.sh` | the fixture's own test |
-| `unit/swtpm_proxy_data_plane.sh` | the SIMPLIFIED direct-socket wiring: host commands, a live qemu-style `SET_DATAFD` establishment straight into stock swtpm, and the between-boots EOF-exit + restart + zeroed-PCR discipline |
+| `integration/swtpm_fixture_smoke.sh` | the fixture's own test |
+| `integration/swtpm_proxy_data_plane.sh` | the SIMPLIFIED direct-socket wiring: host commands, a live qemu-style `SET_DATAFD` establishment straight into stock swtpm, and the between-boots EOF-exit + restart + zeroed-PCR discipline |
 | `sentinels-257.13.txt` | versioned console-sentinel table (see below) |
 
 ## swtpm fixture: TCTI decision (verified empirically)
@@ -239,7 +254,7 @@ interleaved safely, including during a live boot. Known broker limits:
 state-blob migration
 commands (`CMD_GET/SET_STATEBLOB`) are refused through the public paths.
 
-Regression test: `tests/unit/swtpm_proxy_data_plane.sh` (the SIMPLIFIED
+Regression test: `tests/integration/swtpm_proxy_data_plane.sh` (the SIMPLIFIED
 direct-socket wiring: host commands before a guest establishment; INIT +
 SET_DATAFD DIRECT to stock swtpm; the guest data path; the between-boots
 EOF-exit + restart discipline with zeroed PCRs).
@@ -632,7 +647,7 @@ removed id is no longer possible: naming one yields a loud `unknown` row
 stays honest by the same token: the removed ids left the runner's
 state-consumer set (`s01` was the only one in it — the other five bootstrap
 in-scenario), the registry-completeness pins in
-`tests/unit/e2e_infra_smoke.sh` cover every SURVIVING row (16-row literal
+`tests/integration/e2e_infra_smoke.sh` cover every SURVIVING row (16-row literal
 floor), and the default-set pins (contents, count, removed-ids-absent) live
 in `tests/unit/run_e2e_parallel_contract.sh`.
 
