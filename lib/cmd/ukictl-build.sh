@@ -219,6 +219,16 @@ cmd_ukictl_build_main() {
     _uk_baseline="$_uk_etc/baseline.json"
     _uk_cmdline=${CMDLINE_PATH:-"$_uk_etc/cmdline.txt"}
     _uk_kernel="${_uk_root}/boot/vmlinuz-$_uk_kver"
+    # boot-lane finding #9: Alpine ships FLAVOR-named kernels — /boot/vmlinuz-lts
+    # (or -virt), with the release only in /lib/modules/<kver> — so the
+    # versioned path above never exists on a real target. Fall back to the
+    # flavor name (the last dash segment of the kver: 6.18.53-0-lts -> lts).
+    if [ ! -f "$_uk_kernel" ]; then
+        _uk_flavor=${_uk_kver##*-}
+        if [ -n "$_uk_flavor" ] && [ -f "${_uk_root}/boot/vmlinuz-$_uk_flavor" ]; then
+            _uk_kernel="${_uk_root}/boot/vmlinuz-$_uk_flavor"
+        fi
+    fi
     _uk_osrelease="${_uk_root}/etc/os-release"
     # LO-01: the kver interpolates into UKI paths, manifest keys and the keep-set
     # JSON — validate once at the boundary (usage error, not a build failure)

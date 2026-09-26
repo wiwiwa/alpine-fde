@@ -1851,6 +1851,14 @@ cmd_install_main() {
   # the retired no-arg form fell back to `uname -r` — the LIVE ISO's kernel
   # — whose module tree does not exist in the target.
   inst_plan_run guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde ukictl build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
+||||||| parent of 78e0729 (fix: resolve the INSTALLED target kernel for the in-chroot build (flavor-named kernels) (GREEN))
+  # ceremony (3/3) staged to the 0600 tmpfs seam file: the in-guest shell
+  # reads it into ALPINE_FDE_KEY_PASSPHRASE (RESOLVED-4's blessed env
+  # mechanism — keys_unlock decrypts release.pem with it) so the secret
+  # travels tmpfs-file -> guest env, NEVER argv or the log. Empty/absent
+  # file (crash resume on an already-encrypted release.pem): keys_unlock
+  # falls back to its interactive no-echo prompt.
+  inst_plan_run guest "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -r $_im_passfile_disp ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_passfile_disp) && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8: keydir exported (keys_dir has no default) + passphrase from the 0600 staged seam file (never argv)"
   # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
