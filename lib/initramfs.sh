@@ -309,8 +309,6 @@ initrd_audit() {
             fi
         fi
         return 0
-||||||| parent of cc6f268 (fix: initrd audit accepts compressed kernel modules (.ko.gz/.xz/.zst/.bz2) (GREEN))
-        printf '%s\n' "$_ia_inv" | grep -Eq "(^|/)$1\$"
     }
 
     # required: the §8.2 unseal hook itself + cryptsetup/openssl + the exact

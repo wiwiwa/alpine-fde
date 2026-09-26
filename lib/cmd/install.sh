@@ -710,6 +710,7 @@ inst_preflight() {
   for _if_h in kernel-hooks.d/alpine-fde-build.hook \
     kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    mkinitfs/features.d/alpine-fde.modules \
     apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
     [ -f "$(inst_hooks_dir)/$_if_h" ] || die "install: hook template missing: $(inst_hooks_dir)/$_if_h"
   done

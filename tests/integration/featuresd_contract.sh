@@ -234,6 +234,20 @@ assert_eq "staged hook is the SHIPPED hook, byte-for-byte" \
     "$(cat "$ALPINE_FDE_INSTALL_MNT$HOOK_DST")"
 assert_eq "staged hook is executable" "1" \
     "$([ -x "$ALPINE_FDE_INSTALL_MNT$HOOK_DST" ] && echo 1 || echo 0)"
+
+# --- boot-lane finding #10 (s23 attempt 10): module entries ride the
+# .modules list (modules.dep closure — lddtree, which the .files path feeds
+# through, DROPS compressed kernel modules), never the .files list.
+assert_file_exists "shipped: alpine-fde.modules present" \
+    "$REPO/hooks/mkinitfs/features.d/alpine-fde.modules"
+assert_eq "shipped: alpine-fde.files carries NO /lib/modules entries (they would be dropped by lddtree)" \
+    "0" "$(grep -c '^/lib/modules/' "$REPO/hooks/mkinitfs/features.d/alpine-fde.files")"
+assert_contains "shipped: the module list covers the TPM drivers" \
+    "$(cat "$REPO/hooks/mkinitfs/features.d/alpine-fde.modules")" "kernel/drivers/char/tpm"
+assert_contains "shipped: the module list covers the root-fs driver" \
+    "$(cat "$REPO/hooks/mkinitfs/features.d/alpine-fde.modules")" "kernel/fs/btrfs"
+assert_contains "install stages the module list to the target features.d" "$OUT" \
+    "cp $ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d/alpine-fde.modules $ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.modules"
 _missing=0
 while IFS= read -r _fd_line; do
     case $_fd_line in
