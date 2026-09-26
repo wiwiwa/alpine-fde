@@ -191,16 +191,19 @@ assert_eq "probe: system binary -> no ukify argv addition" "" "$(cat "$TMP/probe
 # discovered candidate — the same shape as the installed guest, where
 # /opt/alpine-fde/lib/measure.sh resolves)
 rm -rf "$TMP/stage-b"
-ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" ALPINE_FDE_MEASURE_BIN= measure_probe "$TMP/stage-b" \
+ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" ALPINE_FDE_MEASURE_BIN='' measure_probe "$TMP/stage-b" \
     >"$TMP/probe.b.out" 2>/dev/null
 assert_rc "probe: shim path -> rc 0" 0 $?
 assert_eq "probe: shim path -> --tools=<staging dir>" \
     "--tools=$TMP/stage-b" "$(cat "$TMP/probe.b.out")"
 assert_file_exists "probe: staged an executable systemd-measure shim" "$TMP/stage-b/systemd-measure"
-test -x "$TMP/stage-b/systemd-measure"
-assert_rc "staged shim is executable" 0 $?
+if [ -x "$TMP/stage-b/systemd-measure" ]; then
+    _pass "staged shim is executable"
+else
+    _fail "staged shim is NOT executable"
+fi
 # the staged shim itself must reproduce the oracle
-ALPINE_FDE_MEASURE_BIN= "$TMP/stage-b/systemd-measure" sign "${ARGV[@]}" \
+ALPINE_FDE_MEASURE_BIN='' "$TMP/stage-b/systemd-measure" sign "${ARGV[@]}" \
     --private-key="$KEYA" --public-key="$PUBA" >"$TMP/staged.sign.json" 2>/dev/null
 if cmp -s "$TMP/oracle.sign.json" "$TMP/staged.sign.json"; then
     _pass "staged shim reproduces the oracle byte-for-byte through the executable path"
@@ -212,7 +215,7 @@ fi
 # (ALPINE_FDE_CMD_DIR forced to an empty dir so the bundled measure.sh is
 # unreachable AND the system binary is seam-absent — a true double absence)
 /bin/bash -c ". '$REPO/lib/common.sh'; . '$REPO/lib/measure.sh';
-             ALPINE_FDE_CMD_DIR='$TMP/nothing' ALPINE_FDE_MEASURE_BIN= measure_probe '$TMP/stage-c'" \
+             ALPINE_FDE_CMD_DIR='$TMP/nothing' ALPINE_FDE_MEASURE_BIN='' measure_probe '$TMP/stage-c'" \
     >"$TMP/probe.c.out" 2>"$TMP/probe.c.err"
 _rc=$?
 assert_rc "probe: neither implementation -> fail-closed 64" 64 "$_rc"
@@ -224,7 +227,7 @@ assert_contains "fail-closed message names lib/measure.sh" \
 # --- 8. END-TO-END: real ukify embeds the shim's .pcrsig -----------------------------
 if command -v ukify >/dev/null 2>&1 && command -v objcopy >/dev/null 2>&1 &&
     [ -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub ]; then
-    ALPINE_FDE_MEASURE_BIN= ukify build \
+    ALPINE_FDE_MEASURE_BIN='' ukify build \
         "--linux=$TMP/linux.bin" "--initrd=$TMP/initrd.img" "--cmdline=@$TMP/cmdline.txt" \
         "--os-release=@$TMP/os-release" "--uname=$KVER" \
         --pcr-banks=sha256 --phases=enter-initrd \

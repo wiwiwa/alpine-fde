@@ -252,7 +252,7 @@ cmd_ukictl_build_main() {
             ;;
     esac
 
-    require_pkgs jq:jq openssl:openssl ukify:systemd-ukify sbsign:sbsigntool sbverify:sbsigntool
+    require_pkgs jq:jq openssl:openssl ukify:ukify sbsign:sbsigntool sbverify:sbsigntool
 
     # --- 0. loud-fail preconditions BEFORE any ESP mutation (ADR-8) --------------
     if ! _uk_key_reason=$(keys_check); then

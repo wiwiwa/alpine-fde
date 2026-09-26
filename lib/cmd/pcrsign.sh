@@ -152,7 +152,7 @@ cmd_pcrsign_main() {
 
     # §6.1.1 step 1: ukify primary, systemd-measure fallback; loud 64 if neither
     if ! command -v ukify >/dev/null 2>&1 && ! command -v systemd-measure >/dev/null 2>&1; then
-        require_pkgs ukify:systemd-ukify
+        require_pkgs ukify:ukify
     fi
 
     # --- fail-closed preconditions (ADR-8: keys before any artifact) -------------
