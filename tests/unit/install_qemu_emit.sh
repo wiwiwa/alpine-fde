@@ -294,8 +294,15 @@ assert_contains "guest: the guarded copy record dies fail-closed when no loader 
     'no systemd-boot loader EFI binary found in-chroot'
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" "0" \
     "$(grep -Ec 'bootctl( |$)' "$SCRIPT")"
-assert_eq "guest: ukictl build (§9.1 step 5)" "1" \
-    "$(grep -cx '/opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
+# real-server blocker #8: the build line must configure the release-key dir
+# (ukictl build resolves keys_dir() with NO default) and feed the passphrase
+# from the ceremony-staged 0600 seam file — never argv.
+assert_contains "blocker #8: the emitted build line exports the in-chroot release-key dir" "$(cat "$SCRIPT")" \
+    "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
+assert_contains "blocker #8: the emitted build line feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file (never argv)" "$(cat "$SCRIPT")" \
+    'ALPINE_FDE_KEY_PASSPHRASE=$(cat'
+assert_eq "guest: ukictl build (§9.1 step 5) — with the blocker #8 keydir export + staged passphrase seam" "1" \
+    "$(grep -c 'export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; \[ -r .*alpine-fde-release-pass\.[A-Za-z0-9]* \] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat .*alpine-fde-release-pass\.[A-Za-z0-9]*) && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
     "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"

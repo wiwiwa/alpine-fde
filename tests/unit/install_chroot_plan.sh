@@ -372,8 +372,13 @@ assert_contains "ceremony (3/3): release.pem encrypted via keys_encrypt_release 
     "openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256"
 assert_eq "ceremony: NO secret ever appears in command argv (the log IS the argv record)" "0" \
     "$(grep -Ec 'U5er-P4ss|Fin4l-Rec0very|R3lease-K3ypass' <<<"$(cat "$ALPINE_FDE_TEST_LOG")")"
-assert_eq "ceremony: NO credential env seam in the emitted run" "0" \
-    "$(grep -Ec 'ALPINE_FDE_(KEY|RECOVERY|DISK)_PASSPHRASE=' <<<"$OUT")"
+# blocker #8 amendment: the plan may REFERENCE ALPINE_FDE_KEY_PASSPHRASE only
+# as an assignment FROM the 0600 staged seam file ($(cat <file>)) — never as
+# a literal value in the emitted text.
+assert_eq "ceremony: the ONLY passphrase-env reference is the seam-file assignment (blocker #8)" "1" \
+    "$(grep -Fc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat' <<<"$OUT")"
+assert_eq "ceremony: NO passphrase-env assignment from anything but the staged seam file" "0" \
+    "$(grep 'ALPINE_FDE_KEY_PASSPHRASE=' <<<"$OUT" | grep -vFc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat')"
 assert_eq "ceremony: recovery passfile scrubbed (keys_scrub, I1)" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ceremony.*' 2>/dev/null | wc -l)"
 assert_eq "ceremony: encrypt stage scrubbed (keys_encrypt_release tmp)" "0" \
@@ -564,6 +569,50 @@ assert_contains "blocker #7: the copy record dies fail-closed when no loader bin
     'no systemd-boot loader EFI binary found in-chroot'
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the run" "0" \
     "$(grep -Ec 'bootctl( |$)' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
+
+# real-server blocker #8: the ukictl build record must configure the
+# release-key dir (ukictl build resolves keys_dir() = ALPINE_FDE_KEYDIR/
+# KEY_PATH — NO default; the bare record died "release key directory not
+# configured") and consume the ceremony-staged 0600 tmpfs passphrase seam
+# file — the passphrase itself NEVER in argv or the log (RESOLVED-4 env
+# mechanism, fed from the file inside the guest shell).
+BLD_LINE=$(grep -m1 'ukictl build' "$ALPINE_FDE_TEST_LOG")
+assert_contains "blocker #8: the build record exports the in-chroot release-key dir" "$BLD_LINE" \
+    "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
+assert_contains "blocker #8: the build record feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file" "$BLD_LINE" \
+    'ALPINE_FDE_KEY_PASSPHRASE=$(cat'
+assert_contains "blocker #8: the ceremony (3/3) record receives the staged passphrase seam file" "$OUT" \
+    "host: inst_ceremony_release_key $ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys $ALPINE_FDE_TMPDIR/alpine-fde-release-pass."
+# blocker #8 seam END-TO-END mechanics: replay the REAL record's shell against
+# a fake alpine-fde that dumps env+argv — the passphrase must arrive via the
+# ENVIRONMENT (RESOLVED-4) and NEVER as an argument. The run's own seam file
+# was scrubbed at teardown (I1), so the replay seeds a copy with the same
+# content the ceremony wrote (the confirmed passphrase).
+BLD_CMD=${BLD_LINE#* /bin/sh -c }
+FAKE_OUT=$T/fake-build.out
+mkdir -p "$T/fakebin"
+cat >"$T/fakebin/alpine-fde" <<EOF
+#!/bin/sh
+printf 'keydir=%s\n' "\${ALPINE_FDE_KEYDIR-UNSET}" >"$FAKE_OUT"
+printf 'pass=%s\n' "\${ALPINE_FDE_KEY_PASSPHRASE-UNSET}" >>"$FAKE_OUT"
+printf 'argv=%s\n' "\$*" >>"$FAKE_OUT"
+EOF
+chmod +x "$T/fakebin/alpine-fde"
+SEAM=$(printf '%s' "$BLD_LINE" | grep -o "$ALPINE_FDE_TMPDIR/alpine-fde-release-pass\.[A-Za-z0-9]*" | head -1)
+SEAM_COPY=$T/seam-copy
+printf '%s' 'Fin4l-Rec0very-X9k2-!qmwjpz' >"$SEAM_COPY"
+chmod 600 "$SEAM_COPY"
+BLD_CMD=${BLD_CMD//\/opt\/alpine-fde\/bin\/alpine-fde/$T/fakebin/alpine-fde}
+BLD_CMD=${BLD_CMD//$SEAM/$SEAM_COPY}
+sh -c "$BLD_CMD"
+assert_contains "blocker #8: the build sees the release-key dir via the environment" "$(cat "$FAKE_OUT")" \
+    "keydir=/etc/alpine-fde/keys"
+assert_contains "blocker #8: the build decrypts via the passphrase from the environment (staged seam file)" "$(cat "$FAKE_OUT")" \
+    "pass=Fin4l-Rec0very-X9k2-!qmwjpz"
+assert_contains "blocker #8: the passphrase does NOT appear in the build's argv" "$(cat "$FAKE_OUT")" \
+    "argv=ukictl build"
+assert_eq "blocker #8: NO passphrase literal anywhere in the run's output or command log" "0" \
+    "$(grep -c 'Fin4l-Rec0very-X9k2-!qmwjpz' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
     "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24: provisional seal guest line after the build

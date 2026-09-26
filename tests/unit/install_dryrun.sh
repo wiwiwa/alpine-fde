@@ -202,8 +202,13 @@ assert_eq "item 27 sanity: mkfs still targets the MAPPER (decrypted view — cor
     "$(grep -Ec 'mkfs\.btrfs -U [0-9a-f-]{36} /dev/mapper/root-crypt' <<<"$INS_OUT")"
 assert_not_contains "plan: NO credential env seam in the plan (ADR-20 amended)" "$INS_OUT" \
     "ALPINE_FDE_RECOVERY_PASSPHRASE"
-assert_not_contains "plan: NO release-key passphrase env in the plan" "$INS_OUT" \
-    "ALPINE_FDE_KEY_PASSPHRASE"
+# blocker #8 amendment: the build record may reference ALPINE_FDE_KEY_PASSPHRASE
+# only as an assignment FROM the staged seam file (dry-run: the literal
+# <release-passfile> placeholder) — never a value in the plan text.
+assert_eq "plan: the ONLY release-key passphrase-env reference is the seam-file assignment (blocker #8)" "1" \
+    "$(grep -Fc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>)' <<<"$INS_OUT")"
+assert_eq "plan: NO release-key passphrase-env assignment other than the seam file" "0" \
+    "$(grep 'ALPINE_FDE_KEY_PASSPHRASE=' <<<"$INS_OUT" | grep -vFc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat')"
 assert_not_contains "plan: NO operator passphrase env consumption" "$INS_OUT" \
     "ALPINE_FDE_DISK_PASSPHRASE"
 assert_contains "plan: user account created (§8.1 user account row)" "$INS_OUT" "adduser"
@@ -239,6 +244,14 @@ assert_contains "plan: the guarded copy probes the loader binary in-chroot, fail
     '/usr/share/systemd/bootctl/systemd-bootx64.efi'
 assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no bootctl binary)" "0" \
     "$(grep -Ec 'bootctl( |$)' <<<"$INS_OUT")"
+# real-server blocker #8: the build record configures the release-key dir
+# (ukictl build resolves keys_dir() with NO default) and consumes the
+# ceremony-staged 0600 passphrase seam file — dry-run carries the literal
+# placeholder (nothing staged, no secret in plan text)
+assert_contains "plan: build record exports the in-chroot release-key dir (blocker #8)" "$INS_OUT" \
+    "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
+assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder" "$INS_OUT" \
+    '[ -r <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>)'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 assert_contains "plan: kernel hooks installed (Alpine kernel-hooks.d layout)" "$INS_OUT" \
     "etc/kernel-hooks.d"
@@ -309,8 +322,8 @@ assert_eq "plan: exactly ONE OsIndications record — the DEFERRED-enrollment fi
     "$(grep -c 'fw_osindications_set' <<<"$INS_OUT")"
 assert_contains "plan: the firmware trip is runtime-gated on the deferred branch (PK absent)" "$INS_OUT" \
     'else fw_osindications_set /sys/firmware/efi/efivars && reboot; fi'
-assert_contains "plan: explicit ephemeral-key scrub record (I1, §9.1 teardown)" \
-    "$INS_OUT" "rm -f <ephemeral-keyfile> # I1: ephemeral install key scrubbed"
+assert_contains "plan: explicit ephemeral-key scrub record (I1, §9.1 teardown; incl. the blocker #8 passphrase seam file)" \
+    "$INS_OUT" "rm -f <ephemeral-keyfile> <release-passfile> # I1: ephemeral install key + release-passphrase seam file scrubbed"
 assert_contains "plan: direct reboot record, runtime-gated on the success path (ADR-20)" "$INS_OUT" \
     "reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
 assert_contains "plan: efivars bound into the target (§9.1)" "$INS_OUT" \
