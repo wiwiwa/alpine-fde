@@ -7,8 +7,10 @@
 #   * SetupMode=0        ⇒ fail-closed 64, "clear vendor PK in BIOS" guidance,
 #                          ZERO plan records (no destructive command executed)
 #   * SetupMode=1        ⇒ proceed — the full ADR-20 unattended plan runs
-#                          under stubs: G-C23 ephemeral key, G-C25 banner,
-#                          state `installed`, G-C26 (no OsIndications)
+#                          under stubs: G-C23 ephemeral key, G-C25 NO banner
+#                          (ADR-20 #4: the banner path is removed — /etc/motd
+#                          and /etc/issue stay untouched), state `installed`,
+#                          G-C26 (no OsIndications)
 #   * absent efivars     ⇒ fail-closed 64
 #   * SetupMode variable absent (attrs-only/missing) ⇒ fail-closed 64
 #   * the §13 passphrase-floor preflight step is RETIRED (the floor moved into
@@ -153,17 +155,17 @@ mkvar() { # NAME BYTE — attrs u32le 0x7 + payload byte (efivars fixture)
     printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$ALPINE_FDE_EFIVARS_DIR/$1-$GUID_GLOBAL"
 }
 
-# §9.1 step-4 credential-ceremony answers (the documented test/CI seam): six
-# lines = confirm-typed pairs for the account password, the recovery passphrase
-# and the release-key passphrase; every value passes the §13 floor.
+# §9.1 step-4 credential-ceremony answers (the documented test/CI seam), in
+# the item-12 AMENDED order: the recovery passphrase is asked FIRST (lines 1-2,
+# confirm-typed, §13 floor); the account password (2/3) and the release-key
+# passphrase (3/3) DEFAULT to the recovery passphrase on bare Enter (lines 3-4
+# are empty).
 ANSWERS=$T/answers
 cat >"$ANSWERS" <<'EOF'
-U5er-P4ss-X9k2-!qmwjpz
-U5er-P4ss-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
 Fin4l-Rec0very-X9k2-!qmwjpz
-R3lease-K3ypass-X7!qmz
-R3lease-K3ypass-X7!qmz
+
+
 EOF
 
 run_install() {
@@ -225,10 +227,10 @@ assert_eq "SetupMode=1 -> chroot install rc 0 (unattended)" "0" "$RC"
 assert_contains "SetupMode=1: partitioning ran" "$(cat "$ALPINE_FDE_TEST_LOG")" "sfdisk"
 assert_contains "SetupMode=1: luksFormat ran (ephemeral keyslot 0, G-C23)" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "luksFormat"
-assert_file_exists "SetupMode=1: MOTD banner dropped (G-C25)" \
-    "$ALPINE_FDE_INSTALL_MNT/etc/motd"
-assert_contains "SetupMode=1: MOTD banner says NOT finalized" \
-    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/motd")" "NOT finalized"
+assert_eq "SetupMode=1: NO MOTD banner written (G-C25, ADR-20 #4: banner path removed)" "0" \
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/motd" ] && echo 1 || echo 0)"
+assert_eq "SetupMode=1: /etc/issue untouched (ADR-20 #4)" "0" \
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/issue" ] && echo 1 || echo 0)"
 assert_file_exists "SetupMode=1: install-state written" \
     "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
 assert_contains "SetupMode=1: state=installed" \
@@ -237,5 +239,15 @@ assert_eq "SetupMode=1: NO OsIndications write (G-C26)" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
 assert_not_contains "SetupMode=1: NO interactive disk-passphrase prompt (retired; the ceremony is the only credential seam)" "$OUT" \
     "Set disk encryption passphrase"
+
+# =============================================================================
+# Exhausted stdin at the ceremony is FAIL-CLOSED (EOF): die 64 with the
+# explicit EOF message — no bounded-attempt wording, no unbounded re-prompt.
+# =============================================================================
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 </dev/null)
+RC=$?
+assert_eq "exhausted stdin (EOF) -> fail-closed 64" "64" "$RC"
+assert_contains "exhausted stdin: the EOF fail-closed message" "$OUT" \
+    "end of input while waiting for a credential prompt (EOF)"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
