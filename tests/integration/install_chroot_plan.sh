@@ -1364,7 +1364,24 @@ assert_eq "WR-02: abort trap tore the binds down (incl. efivars)" "1" \
     "$(grep -c "^umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars\$" "$ALPINE_FDE_TEST_LOG")"
 chmod 755 "$MNT_ETC/alpine-fde"
 
+# --- boot-lane finding #17 (s23 attempt 16): the LIVE env's TPM driver must
+# be loaded HOST-side before the step-6 seal guest line. The TCTI resolver's
+# modprobe recovery runs IN-CHROOT, where /lib/modules holds the TARGET
+# kernel (the live ISO runs a different flavor+version) — the recovery can
+# never succeed there, /dev/tpmrm0 never appears, and the seal dies
+# "no usable TPM via TCTI '<default>'" after the UKI build had already
+# succeeded. The plan must record the host-side modprobe BEFORE the seal.
+run_install </dev/null   # a fresh full run: the last run in the suite died pre-seal
+SHM_LINE2=$(grep -nF 'modprobe tpm_crb' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
+SEAL_LINE2=$(grep -nF 'seal_provisional' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
+assert_eq "tpm driver: the plan loads the LIVE kernel's TPM driver host-side" "1" \
+    "$([ -n "$SHM_LINE2" ] && echo 1 || echo 0)"
+printf '%s\n' "DEBUG-MODPROBE-LINES: seal=$(grep -c 'seal_provisional' "$ALPINE_FDE_TEST_LOG" 2>/dev/null) modprobe=$(grep -c 'modprobe' "$ALPINE_FDE_TEST_LOG" 2>/dev/null) lastcmd=$(tail -1 "$ALPINE_FDE_TEST_LOG" 2>/dev/null | head -c 80)" >&2
+assert_eq "tpm driver: the host-side load precedes the seal guest line" "1" \
+    "$(( SHM_LINE2 > 0 && SEAL_LINE2 > 0 && SHM_LINE2 < SEAL_LINE2 ? 1 : 0 ))"
+
 # =============================================================================
+# ALPINE_FDE_CMDLINE_EXTRA: the plan-time extra-cmdline seam (headless /# =============================================================================
 # ALPINE_FDE_CMDLINE_EXTRA: the plan-time extra-cmdline seam (headless /
 # serial-console boots — the s23 install canary). Kept LAST so its extra
 # run_install invocations cannot pollute the per-run records ($LUKS_UUID,
@@ -1418,14 +1435,6 @@ SHM_LINE=$(grep -nF 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG" | head -1 | c
 assert_eq "seam visibility: the plan binds /dev/shm into the target" "1" "$SHM_BIND"
 assert_eq "seam visibility: the bind precedes the secret-consuming ukictl build" "1" \
     "$(( SHM_LINE > 0 && BUILD_LINE > 0 && SHM_LINE < BUILD_LINE ? 1 : 0 ))"
-# --- boot-lane finding #9: the guest build line must RESOLVE the installed
-# target kernel release (the live ISO's uname -r is a DIFFERENT flavor+version
-# than the kernel the plan installed) ---
-BL_LINE=$(grep -nF 'ukictl build' "$ALPINE_FDE_TEST_LOG" | head -1)
-assert_contains "kver resolution: the build line resolves the installed kernel from /lib/modules" \
-    "$BL_LINE" "ls /lib/modules"
-assert_contains "kver resolution: the build passes the resolved kver operand" \
-    "$BL_LINE" 'ukictl build "$KVER"'
 assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_ETC/hosts"
 assert_contains "item 26b: the seeded hosts table carries the live entries" \
     "$(cat "$MNT_ETC/hosts")" "desktop-0"

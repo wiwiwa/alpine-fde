@@ -1858,6 +1858,13 @@ cmd_install_main() {
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
   # the choreography targets the container devs, never the mapper views)
+  # boot-lane finding #17 (s23 attempt 16): load the LIVE kernel's TPM driver
+  # HOST-side, before the seal guest line. The TCTI resolver's modprobe
+  # recovery runs IN-CHROOT, where /lib/modules holds the TARGET kernel (the
+  # live ISO runs a different flavor+version) — in-chroot modprobe can never
+  # load the driver, /dev/tpmrm0 never appears, and the seal dies
+  # "no usable TPM via TCTI '<default>'" after a successful UKI build.
+  inst_plan_run host "modprobe tpm_crb 2>/dev/null; modprobe tpm_tis 2>/dev/null; : # blocker #18 companion: ensure the live kernel's TPM driver is loaded (host-side; the in-chroot modprobe resolves the target's module tree)"
   inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_containers)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
