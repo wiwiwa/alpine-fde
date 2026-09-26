@@ -67,11 +67,22 @@ _initramfs_conf_get() {
 
 INI_ROOT_FS=btrfs
 INI_BCACHE=0
+INI_TOPOLOGY='' # '' = legacy conf WITHOUT a TOPOLOGY key (derive from BCACHE)
 _INI_TOPO_WARNED=0
 
-# initramfs_topology — resolve INI_ROOT_FS (btrfs|ext4) and INI_BCACHE (0|1)
-# from the persisted conf. Absent or invalid ROOT_FS ⇒ btrfs default; a note
-# is warned at most once per process.
+# initramfs_topology — resolve INI_ROOT_FS (btrfs|ext4), INI_BCACHE (0|1) and
+# INI_TOPOLOGY (single|bcache|bcache-multi|raid1|'') from the persisted conf.
+# Absent or invalid ROOT_FS ⇒ btrfs default; a note is warned at most once
+# per process. REAL-SERVER BLOCKER #10: BCACHE=1 covered both bcache AND
+# bcache-multi, so crypttab_tpm2_check's count rule could not tell them apart
+# — the conf now carries TOPOLOGY and:
+#   * TOPOLOGY present+valid → INI_TOPOLOGY=<value>; INI_BCACHE derives FROM
+#     it (bcache|bcache-multi ⇒ 1 — the bcache.ko initrd need is identical;
+#     single|raid1 ⇒ 0)
+#   * TOPOLOGY absent (OLD conf) → INI_TOPOLOGY stays '' and INI_BCACHE
+#     derives from BCACHE exactly as before (BACK-COMPAT: the historical
+#     BCACHE=1 ⇒ exactly-one crypttab rule keeps applying)
+#   * TOPOLOGY invalid → warn + default to single (INI_BCACHE=0)
 initramfs_topology() {
     _ito_fs=$(_initramfs_conf_get ROOT_FS)
     _ito_note=''
@@ -88,9 +99,27 @@ initramfs_topology() {
             _ito_note="invalid ROOT_FS '$_ito_fs' in alpine-fde.conf — defaulting to btrfs (§4.1)"
             ;;
     esac
-    case $(_initramfs_conf_get BCACHE) in
-        1) INI_BCACHE=1 ;;
-        *) INI_BCACHE=0 ;;
+    _ito_topo=$(_initramfs_conf_get TOPOLOGY)
+    case $_ito_topo in
+        single | bcache | bcache-multi | raid1)
+            INI_TOPOLOGY=$_ito_topo
+            case $_ito_topo in
+                bcache | bcache-multi) INI_BCACHE=1 ;;
+                *) INI_BCACHE=0 ;;
+            esac
+            ;;
+        '')
+            INI_TOPOLOGY=''
+            case $(_initramfs_conf_get BCACHE) in
+                1) INI_BCACHE=1 ;;
+                *) INI_BCACHE=0 ;;
+            esac
+            ;;
+        *)
+            INI_TOPOLOGY=single
+            INI_BCACHE=0
+            _ito_note="$_ito_note invalid TOPOLOGY '$_ito_topo' in alpine-fde.conf — defaulting to single (§4.1)"
+            ;;
     esac
     if [ "$_INI_TOPO_WARNED" -eq 0 ] && [ -n "$_ito_note" ]; then
         warn "initramfs: $_ito_note"
@@ -345,13 +374,18 @@ initrd_audit() {
 #   * multi-disk Btrfs RAID1: entries `root1`, `root2`, … each carrying
 #     password-cache=yes (fallback prompts only once across members)
 #   * tpm2-device= is MANDATORY on EVERY root/root<N> entry
-#   * BCACHE=1 (persisted conf) ⇒ the file must be bcache-shaped: exactly one
+#   * count rule (TOPOLOGY-aware, real-server blocker #10): TOPOLOGY=single
+#     or bcache ⇒ exactly ONE root/root<N> entry; TOPOLOGY=bcache-multi or
+#     raid1 ⇒ at least TWO (one per member container); a LEGACY conf without
+#     the TOPOLOGY key keeps the historical BCACHE=1 ⇒ exactly-one rule
 #     root entry (the LUKS2 container on /dev/bcache0)
 
 # crypttab_tpm2_check <crypttab-path> — rc 0 iff <path> exists and EVERY
 # non-comment entry whose target is `root` or `root<N>` carries tpm2-device=;
 # a multi-entry (RAID1) file additionally requires password-cache=yes on each
-# such entry, and BCACHE=1 requires exactly one root entry. Comments/blank
+# such entry, and the root/root<N> COUNT is topology-checked (blocker #10:
+# TOPOLOGY=single|bcache ⇒ exactly 1; bcache-multi|raid1 ⇒ >=2; a legacy conf
+# without TOPOLOGY keeps BCACHE=1 ⇒ exactly 1). Comments/blank
 # lines ignored; a tpm2-device= on any non-root line is not sufficient. On
 # failure prints a one-line reason (stdout) for the ADR-8 marker.
 crypttab_tpm2_check() {
@@ -368,10 +402,30 @@ crypttab_tpm2_check() {
         return 1
     fi
     _ct_n=$(printf '%s\n' "$_ct_entries" | grep -c .)
-    if [ "$INI_BCACHE" = "1" ] && [ "$_ct_n" -ne 1 ]; then
-        printf '%s\n' "crypttab guard: BCACHE=1 topology requires exactly one root entry (the LUKS2 container on the bcache device), found $_ct_n in $_ct_file (§8.2/§4.1)"
-        return 1
-    fi
+    # REAL-SERVER BLOCKER #10: the count rule is TOPOLOGY-aware. INI_TOPOLOGY
+    # '' = legacy conf WITHOUT the TOPOLOGY key — keep the historical
+    # BCACHE=1 ⇒ exactly-one rule verbatim (back-compat: an old conf must
+    # keep failing the same way it always did).
+    case $INI_TOPOLOGY in
+        single | bcache)
+            if [ "$_ct_n" -ne 1 ]; then
+                printf '%s\n' "crypttab guard: TOPOLOGY=$INI_TOPOLOGY requires exactly one root entry (the single LUKS2 container), found $_ct_n in $_ct_file (§8.2/§4.1)"
+                return 1
+            fi
+            ;;
+        bcache-multi | raid1)
+            if [ "$_ct_n" -lt 2 ]; then
+                printf '%s\n' "crypttab guard: TOPOLOGY=$INI_TOPOLOGY requires at least two root/root<N> entries (one per member container), found $_ct_n in $_ct_file (§8.2/§4.1)"
+                return 1
+            fi
+            ;;
+        *)
+            if [ "$INI_BCACHE" = "1" ] && [ "$_ct_n" -ne 1 ]; then
+                printf '%s\n' "crypttab guard: BCACHE=1 topology requires exactly one root entry (the LUKS2 container on the bcache device), found $_ct_n in $_ct_file (§8.2/§4.1)"
+                return 1
+            fi
+            ;;
+    esac
     _ct_bad=''
     while IFS= read -r _ct_line; do
         [ -n "$_ct_line" ] || continue

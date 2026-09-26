@@ -1589,12 +1589,19 @@ cmd_install_main() {
   fi
   # CR-01 + §4.1: persist the resolved topology + ESP mount for the build
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
-  # BCACHE=0 — consumers must not require the file to exist.
+  # BCACHE=0, TOPOLOGY=single — consumers must not require the file to exist.
+  # REAL-SERVER BLOCKER #10: TOPOLOGY is persisted EXPLICITLY — BCACHE=1
+  # covered both bcache AND bcache-multi, which made
+  # crypttab_tpm2_check's "BCACHE=1 ⇒ exactly one root entry" count rule
+  # false-positive on bcache-multi's CORRECT root1+root2 crypttab (the live
+  # run died "found 2"). Consumers: lib/initramfs.sh initramfs_topology
+  # (INI_TOPOLOGY; old confs without the key keep deriving from BCACHE).
   inst_plan_write /etc/alpine-fde/alpine-fde.conf \
     '# alpine-fde runtime config (KEY=VALUE).' \
-    '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0.' \
+    '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0, TOPOLOGY=single.' \
     "ROOT_FS=$(inst_root_fs)" \
     "BCACHE=$(inst_bcache)" \
+    "TOPOLOGY=$_im_topology" \
     "ESP_PATH=$_im_esp_mnt"
   # H-02: the freshly populated chroot has no /proc /sys /dev — bind them
   # before the first guest step so the in-chroot ceremony behaves. §9.1 also

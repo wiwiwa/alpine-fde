@@ -475,6 +475,8 @@ assert_eq "cmdline.txt verbatim: rootflags + §8.2 fail-closed pins" \
 assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ROOT_FS=btrfs"
 assert_contains "conf: BCACHE=0 recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "BCACHE=0"
 assert_contains "conf: ESP_PATH=/efi persisted (CR-01)" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ESP_PATH=/efi"
+assert_contains "conf: TOPOLOGY=single persisted (blocker #10: BCACHE=1 covered both bcache AND bcache-multi)" \
+    "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "TOPOLOGY=single"
 assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" \
     "Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0"
 

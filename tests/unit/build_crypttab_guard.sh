@@ -13,6 +13,14 @@
 # additionally requires password-cache=yes on every entry (single-disk entries
 # MAY carry it — allowed, not required); with BCACHE=1 persisted in
 # alpine-fde.conf the file must be bcache-shaped (exactly ONE root entry).
+#
+# real-server blocker #10: BCACHE=1 covered both bcache AND bcache-multi, so
+# the exactly-one count rule false-positived on bcache-multi's correct
+# root1+root2 crypttab. The conf persists TOPOLOGY=<single|bcache|bcache-multi|
+# raid1> and the count rule is topology-aware (single/bcache ⇒ 1;
+# bcache-multi/raid1 ⇒ >=2); an OLD conf without TOPOLOGY keeps the legacy
+# BCACHE=1 ⇒ exactly-one rule (back-compat, section 10); invalid TOPOLOGY
+# warns and defaults to single.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -186,6 +194,132 @@ assert_rc "crypttab 10: BCACHE=1 refuses a multi-entry (RAID1) crypttab (64)" 64
 assert_contains "crypttab 10: marker names the bcache single-entry requirement" \
     "$(cat "$ROOT/etc/alpine-fde/build-failed" 2>/dev/null)" "bcache"
 assert_eq "crypttab 10: initramfs builder never invoked" "0" "$(calls)"
+# NOTE: section 10 IS the back-compat leg for blocker #10 — an OLD conf
+# (BCACHE=1, no TOPOLOGY key) must keep the historical exactly-one rule.
+
+# =============================================================================
+# real-server blocker #10: the persisted conf covered bcache AND bcache-multi
+# with the single BCACHE=1 flag, so crypttab_tpm2_check's "BCACHE=1 ⇒ exactly
+# one root entry" count rule false-positived on bcache-multi's CORRECT
+# root1+root2 crypttab (the live run died "found 2"). The conf now persists
+# TOPOLOGY=<single|bcache|bcache-multi|raid1> and the count rule is
+# topology-aware: single/bcache ⇒ exactly 1; bcache-multi/raid1 ⇒ >=2.
+# =============================================================================
+
+# --- 11. TOPOLOGY=bcache-multi with the correct 2-entry crypttab -> passes ----
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=bcache-multi' >"$TMP/alpine-fde.conf"
+printf '%s\n' \
+    'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 11 (blocker #10): TOPOLOGY=bcache-multi accepts its correct root1+root2 crypttab" 0 $?
+assert_eq "crypttab 11 (blocker #10): initramfs builder invoked" "1" "$(calls)"
+assert_file_absent "crypttab 11 (blocker #10): failure marker cleared" "$ROOT/etc/alpine-fde/build-failed"
+
+# --- 12. TOPOLOGY=single: exactly-one rule intact ------------------------------
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=0' 'TOPOLOGY=single' >"$TMP/alpine-fde.conf"
+printf '%s\n' \
+    'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 12: TOPOLOGY=single accepts a single root entry" 0 $?
+printf '%s\n' \
+    'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 12: TOPOLOGY=single refuses a 2-entry crypttab (64)" 64 $?
+assert_eq "crypttab 12: initramfs builder never invoked" "0" "$(calls)"
+
+# --- 13. TOPOLOGY=bcache (plain): exactly-one rule intact ----------------------
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=bcache' >"$TMP/alpine-fde.conf"
+printf '%s\n' \
+    'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 13: TOPOLOGY=bcache accepts a single root entry (bcache shape)" 0 $?
+printf '%s\n' \
+    'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 13: TOPOLOGY=bcache refuses a 2-entry crypttab (64)" 64 $?
+assert_eq "crypttab 13: initramfs builder never invoked" "0" "$(calls)"
+
+# --- 14. invalid TOPOLOGY -> warn + default to single --------------------------
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=topo-nonsense' >"$TMP/alpine-fde.conf"
+printf '%s\n' \
+    'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+IV_OUT=$(env ALPINE_FDE_BIN_TEST=1 ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_ESP="$ESP" \
+    ALPINE_FDE_KEYDIR="$REPO/fixtures/keys" ALPINE_FDE_NO_INSTALL=1 \
+    ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
+    INITRAMFS_CMD="$REC {out} {kver}" \
+    RETENTION=1 \
+    "$REPO/bin/alpine-fde" ukictl build "$KVER" 2>&1 >/dev/null)
+assert_rc "crypttab 14: invalid TOPOLOGY defaults to single (1-entry crypttab passes)" 0 $?
+assert_contains "crypttab 14: invalid TOPOLOGY warns and names the default" "$IV_OUT" \
+    "invalid TOPOLOGY"
+assert_contains "crypttab 14: the warn names the default" "$IV_OUT" "defaulting to single"
+# the defaulted single rule still bites a 2-entry file
+printf '%s\n' \
+    'root1 UUID=33333333-3333-3333-3333-333333333333 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    'root2 UUID=44444444-4444-4444-4444-444444444444 none luks,tpm2-device=auto,password-cache=yes,discard' \
+    >"$ROOT/etc/crypttab"
+rm -f "$CALLS" "$ROOT/etc/alpine-fde/build-failed"
+build
+assert_rc "crypttab 14: invalid TOPOLOGY defaulted to single refuses a 2-entry crypttab (64)" 64 $?
 rm -f "$TMP/alpine-fde.conf" # restore the absent-conf default for later legs
+
+# =============================================================================
+# direct lib legs: initramfs_topology resolves INI_TOPOLOGY/INI_BCACHE
+# =============================================================================
+ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+# shellcheck source=../../lib/common.sh
+source "$REPO/lib/common.sh"
+# shellcheck source=../../lib/initramfs.sh
+source "$REPO/lib/initramfs.sh"
+export ALPINE_FDE_CONF="$TMP/alpine-fde.conf" # the direct legs read THIS conf
+
+# TOPOLOGY=bcache-multi: INI_TOPOLOGY set AND INI_BCACHE stays 1 (bcache.ko
+# is still required in the initrd for a bcache-multi root)
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=bcache-multi' >"$TMP/alpine-fde.conf"
+INI_TOPOLOGY=''; INI_BCACHE=0; _INI_TOPO_WARNED=0
+initramfs_topology </dev/null
+assert_eq "topology lib: TOPOLOGY=bcache-multi resolves INI_TOPOLOGY" "bcache-multi" "$INI_TOPOLOGY"
+assert_eq "topology lib: TOPOLOGY=bcache-multi keeps INI_BCACHE=1 (bcache.ko needed)" "1" "$INI_BCACHE"
+
+# back-compat: OLD conf without TOPOLOGY — INI_TOPOLOGY empty, BCACHE drives
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' >"$TMP/alpine-fde.conf"
+INI_TOPOLOGY=''; INI_BCACHE=0; _INI_TOPO_WARNED=0
+initramfs_topology </dev/null
+assert_eq "topology lib: conf without TOPOLOGY leaves INI_TOPOLOGY empty (legacy derive)" "" "$INI_TOPOLOGY"
+assert_eq "topology lib: conf without TOPOLOGY keeps deriving INI_BCACHE from BCACHE" "1" "$INI_BCACHE"
+
+# TOPOLOGY=single: INI_BCACHE forced 0 even if a stale BCACHE=1 lingers
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=single' >"$TMP/alpine-fde.conf"
+INI_TOPOLOGY=''; INI_BCACHE=1; _INI_TOPO_WARNED=0
+initramfs_topology </dev/null
+assert_eq "topology lib: TOPOLOGY=single resolves INI_TOPOLOGY" "single" "$INI_TOPOLOGY"
+assert_eq "topology lib: TOPOLOGY=single forces INI_BCACHE=0 (no bcache.ko)" "0" "$INI_BCACHE"
+
+# invalid TOPOLOGY: warn-once + default single, INI_BCACHE 0
+printf '%s\n' 'ROOT_FS=btrfs' 'BCACHE=1' 'TOPOLOGY=nonsense' >"$TMP/alpine-fde.conf"
+IV_WARN=$(
+    ALPINE_FDE_CONF="$TMP/alpine-fde.conf" # subshell: assignments do not leak
+    INI_TOPOLOGY=''; INI_BCACHE=1; _INI_TOPO_WARNED=0
+    initramfs_topology </dev/null 2>&1
+)
+assert_eq "topology lib: invalid TOPOLOGY defaults INI_TOPOLOGY to single" "single" "$INI_TOPOLOGY"
+assert_eq "topology lib: invalid TOPOLOGY forces INI_BCACHE=0" "0" "$INI_BCACHE"
+assert_contains "topology lib: invalid TOPOLOGY warns" "$IV_WARN" "invalid TOPOLOGY"
+rm -f "$TMP/alpine-fde.conf"
 
 finish

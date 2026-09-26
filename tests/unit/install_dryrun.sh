@@ -253,6 +253,11 @@ assert_contains "plan: build record exports the in-chroot release-key dir (block
 assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder (in-target path, blocker #9)" "$INS_OUT" \
     '[ -s <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>) && rm -f <release-passfile>'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
+# real-server blocker #10: the conf persists the resolved TOPOLOGY (BCACHE=1
+# covered both bcache AND bcache-multi, which made crypttab_tpm2_check's
+# exactly-one count rule false-positive on bcache-multi's correct crypttab)
+assert_contains "plan: conf persists TOPOLOGY (blocker #10)" "$INS_OUT" \
+    "TOPOLOGY=single"
 assert_contains "plan: kernel hooks installed (Alpine kernel-hooks.d layout)" "$INS_OUT" \
     "etc/kernel-hooks.d"
 assert_contains "plan: tree staged to /opt/alpine-fde" "$INS_OUT" "opt/alpine-fde"
