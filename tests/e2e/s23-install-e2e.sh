@@ -404,6 +404,8 @@ build_docroot() {
     cp -al "$MIRROR_DIR/." "$docroot/mirror/$rel/"
     cp "$RUN/alpine-fde.tar.gz" "$docroot/tooling/alpine-fde.tar.gz"
 }
+# port hygiene: no leaked listener from ANY previous crashed run may hold 8123
+pkill -9 -f "httpd -f -p 127.0.0.1:$MIRROR_PORT" 2>/dev/null || :
 run_stage mirror-docroot 600 build_docroot "$DOCROOT"
 run_stage mirror-serve 60 mirror_serve_start "$MIRROR_PORT" "$DOCROOT"
 _rearm_trap
