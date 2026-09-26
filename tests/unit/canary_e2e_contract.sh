@@ -291,6 +291,39 @@ assert_contains "s23 attaches the slirp netdev for the mirror route" "$(_s23)" \
 assert_contains "s23 maps the mirror name at the slirp host IP (10.0.2.2)" "$(_s23)" \
     "10.0.2.2"
 
+# --- 6d. mirror_serve_start/stop: the HOST transfer channel must WORK under
+# set -u (the boot lane's live finding #3, attempt 3) --------------------------
+# `local a="x" b="$a/y"` under set -u fails: `local` expands ALL of its words
+# BEFORE any assignment sticks, so $docroot in the same local line was
+# unbound ("local-mirror.sh: line 449: docroot: unbound variable"). The seam
+# is execution-pinned here: serve a file over 127.0.0.1 and stop cleanly.
+SRV_PORT=$(( 18000 + $$ % 20000 ))
+mkdir -p "$T/serve"
+printf 'SERVE-PROBE-OK\n' >"$T/serve/probe.txt"
+# the call runs in a set -u SUBSHELL deliberately: the defect this pin guards
+# (unbound $docroot inside the same `local` line) is FATAL to the caller —
+# as sourced here it would abort this whole suite, which is exactly how the
+# scenario's mirror-serve stage died (attempt 3)
+if ( set -u; mirror_serve_start "$SRV_PORT" "$T/serve" ) 2>"$T/serve.err" \
+    && [ "$(curl -fsS "http://127.0.0.1:$SRV_PORT/probe.txt")" = "SERVE-PROBE-OK" ]; then
+    _pass "mirror_serve_start serves the docroot over 127.0.0.1 under set -u"
+else
+    _fail "mirror_serve_start unusable under set -u ($(head -1 "$T/serve.err"))"
+fi
+# stop is only meaningful against a RUNNING server (else the check is
+# vacuous): require the pidfile the start above leaves, then stop, then
+# require BOTH the pidfile gone and the port closed. A failed start makes
+# this pin FAIL (the lifecycle is one contract).
+STOP_WAS_RUNNING=0
+[ -f "$T/serve/.httpd.pid" ] && STOP_WAS_RUNNING=1
+( set -u; mirror_serve_stop "$T/serve" ) 2>"$T/serve-stop.err"
+if [ "$STOP_WAS_RUNNING" = 1 ] && [ ! -f "$T/serve/.httpd.pid" ] \
+    && ! curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$SRV_PORT/probe.txt"; then
+    _pass "mirror_serve_stop kills the server and clears the pidfile"
+else
+    _fail "mirror_serve_stop lifecycle broken (running=$STOP_WAS_RUNNING; $(head -1 "$T/serve-stop.err"))"
+fi
+
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then
     _fail "s23 is registered in run-e2e.sh — the orchestrator gates registration (boot verification first)"
