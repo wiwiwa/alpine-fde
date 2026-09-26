@@ -436,7 +436,7 @@ _cache_store() {
     # A cache without it (ext4 era, ladder-only pcrsig drive) fails
     # _cache_verify and triggers a rebuild; the login-stage initrd of that
     # generation cannot boot an older-layout disk and vice versa.
-    printf 'btrfs-3\ntree-sha256 %s\n' "$(rootfs_payload_tree_digest)" >"$stage/FORMAT"
+    printf 'btrfs-3\ntree-sha256 %s\n' "$tree_digest" >"$stage/FORMAT"
     # s00 STATE SHAPE (tpm/tpm2-00.permall): the snapshot below consumes
     # $STATE/tpm/tpm2-00.permall — a flat copy here would be silently skipped
     # by that guard and the from-cache boot would resume a VIRGIN TPM whose
@@ -505,7 +505,8 @@ else
     # repo root) — never a hand-dumped pin table (G-E1: the Debian pins are
     # not the payload any more).
     run_stage rootfs-payload 1800 bash -c \
-        "$(declare -f rootfs_payload_image alpine_artifact_ensure \
+        "$(declare -f rootfs_payload_image rootfs_payload_tree_digest \
+              _uki_payload_stub alpine_artifact_ensure \
               alpine_artifact_extract alpine_artifact_path alpine_artifact_cache_dir); \
          $(declare -p ALPINE_ARTIFACT_CACHE_DIR ALPINE_MINI_ROOTFS_VERSION \
               ALPINE_MINI_ROOTFS_ARCH ALPINE_MINI_ROOTFS_URL \

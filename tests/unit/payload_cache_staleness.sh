@@ -75,8 +75,17 @@ assert_contains "P5: _cache_verify compares FORMAT line 2 against the CURRENT tr
     'grep -qx "tree-sha256 $(rootfs_payload_tree_digest)" "$dir/FORMAT"'
 
 # --- P6: _cache_store records the binding, refuses to store without it -------
-assert_contains "P6: _cache_store writes FORMAT line 2 (tree-sha256)" "$SC" \
-    "printf 'btrfs-3\\ntree-sha256 %s\\n' \"\$(rootfs_payload_tree_digest)\""
+assert_contains "P6: _cache_store writes FORMAT line 2 from the passed digest" "$SC" \
+    "printf 'btrfs-3\\ntree-sha256 %s\\n' \"\$tree_digest\" >\"\$stage/FORMAT\""
+# the cache-store stage runs _cache_store inside `bash -c "$(declare -f ...)"`:
+# only DECLARED functions exist there, so the body must take the digest as an
+# argument (live-failed 2026-09-26: a body-side `$(rootfs_payload_tree_digest)`
+# died "command not found" and cached an EMPTY binding).
+_SCS_BODY=$(sed -n '/^_cache_store() {/,/^}/p' "$S00B")
+assert_not_contains "P6: _cache_store body never calls the lib helper (undecleared in its subshell)" \
+    "$_SCS_BODY" "rootfs_payload_tree_digest"
+assert_contains "P6: the rootfs-payload stage declares the digest helper + stub builder alongside rootfs_payload_image" "$SC" \
+    "declare -f rootfs_payload_image rootfs_payload_tree_digest"
 assert_contains "P6: _cache_store refuses a digest-less store (loud rc 64)" "$SC" \
     "no tree digest (payload staleness binding)"
 assert_contains "P6: the cache-store stage passes the digest into the subshell" "$SC" \
