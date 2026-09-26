@@ -160,6 +160,19 @@ assert_contains "audit 1e: reason names the TPM udev rule requirement" "$_initrd
 grep -v 'btrfs\.ko$' "$inv" >"$TMP/inv-m6.txt"
 run_audit "$TMP/inv-m6.txt"
 assert_rc "audit 1f: missing btrfs.ko fails the audit (default topology)" 1 "$RUN_AUDIT_RC"
+
+# --- boot-lane finding #10 (s23 attempt 10, run ...-1790429268): Alpine 6.18
+# kernels ship COMPRESSED modules (tpm.ko.gz, tpm_tis.ko.gz, tpm_crb.ko.gz,
+# btrfs.ko.gz) and mkinitfs packs them verbatim — the audit's anchored
+# basename match must accept the compression suffix or every real install
+# fails the initrd audit ("required unlock artifact(s) missing: tpm.ko
+# tpm_tis.ko tpm_crb.ko btrfs.ko") despite a correct initramfs.
+invz="$TMP/inv-compressed.txt"
+sed -e 's/tpm\.ko$/tpm.ko.gz/' -e 's/tpm_tis\.ko$/tpm_tis.ko.gz/' \
+    -e 's/tpm_crb\.ko$/tpm_crb.ko.gz/' -e 's/btrfs\.ko$/btrfs.ko.gz/' "$inv" >"$invz"
+run_audit "$invz"
+assert_rc "audit 1g: compressed modules (.ko.gz) satisfy the module requirements" 0 "$RUN_AUDIT_RC"
+
 assert_contains "audit 1f: reason names btrfs.ko" "$_initrd_audit_reason" "btrfs.ko"
 
 # =============================================================================
