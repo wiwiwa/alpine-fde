@@ -249,6 +249,23 @@ assert_contains "golden base carries a FORMAT generation marker" "$(_s23)" "inst
 assert_contains "golden base is SHA-manifested" "$(_s23)" "MANIFEST.sha256"
 assert_contains "golden base records the mirror/ISO pins (PINS.json)" "$(_s23)" "PINS.json"
 
+# --- 6b. the swtpm fixture handoff (the boot lane's live finding #1) ----------
+# swtpm_start arms `trap swtpm_cleanup_all EXIT INT TERM` when
+# _SWTPM_CLEANUP_TRAP_SET==0 (tests/lib/swtpm-fixture.sh); inside a run_stage
+# stage subshell that trap fires at STAGE EXIT and stops the freshly-started,
+# healthy daemon — observed live: s23 attempt 1 lost boot A in the first
+# console wait, qemu.stderr "Failed to connect .../tpm/sock.ctrl: No such
+# file or directory". The established idiom (s15/s21) is the
+# _SWTPM_CLEANUP_TRAP_SET=1 call prefix + a local _track_swtpm definition.
+if [ "$(grep -cE '^run_stage swtpm_start' "$SCENARIO")" -eq 1 ] \
+    && grep -q '^_SWTPM_CLEANUP_TRAP_SET=1 run_stage swtpm_start' "$SCENARIO"; then
+    _pass "s23 guards the boot-A swtpm_start stage with _SWTPM_CLEANUP_TRAP_SET=1"
+else
+    _fail "s23 boot-A swtpm_start stage lacks the _SWTPM_CLEANUP_TRAP_SET=1 guard (the fixture's EXIT trap kills the daemon at stage exit)"
+fi
+assert_contains "s23 defines _track_swtpm (SWTPM_DIRS registration — no phantom call)" "$(_s23)" \
+    '_track_swtpm() { SWTPM_DIRS+=("$1"); }'
+
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then
     _fail "s23 is registered in run-e2e.sh — the orchestrator gates registration (boot verification first)"
