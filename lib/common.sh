@@ -133,11 +133,60 @@ load_config() {
 # side-effect-free; resolution order: CLI flags > ALPINE_FDE_* > conf.
 
 # --- TPM access ------------------------------------------------------------------
-# tpm — run tpm2-tools with the configured TCTI.
-# ALPINE_FDE_TCTI empty/unset → TPM2TOOLS_TCTI set to empty → tctildr default discovery.
+# tpm — run tpm2-tools with the resolved TCTI.
+# ALPINE_FDE_TCTI set → used verbatim (the e2e/seam override; e.g.
+# device:/dev/tpmrm0 against a swtpm fixture). UNSET → real-server blocker #18:
+# the empty value used to fall through to tpm2's tctildr DEFAULT DISCOVERY
+# (tabrmd daemon first), which fails on the installer env — and tpm2_loadexternal
+# (the seal path's first TPM touch) died as
+#   keys_keyname_verifying: tpm2_loadexternal failed for .../release.pub
+# Instead the wrapper resolves the TCTI ITSELF: probe /dev/tpmrm0 then
+# /dev/tpm0 → device:<dev>; if neither node exists, attempt `modprobe tpm_crb`
+# + `modprobe tpm_tis` once (best-effort, quiet) and re-probe; only then fail
+# loud + specific rc 64 naming the probes. ALPINE_FDE_TPM_DEV_DIR is the test
+# seam for the probed directory (mirrors ALPINE_FDE_MAPPER_DIR).
 # `command` bypasses any shell function named tpm2 (no recursion, real binary only).
+tpm_tcti_resolve() {
+  if [ -n "${ALPINE_FDE_TCTI:-}" ]; then
+    printf '%s\n' "$ALPINE_FDE_TCTI"
+    return 0
+  fi
+  _ttr_dir=${ALPINE_FDE_TPM_DEV_DIR:-/dev}
+  _ttr_tries=0
+  while :; do
+    # -e (not -c): the real /dev nodes are character devices, but the test
+    # seam dir carries plain files (unprivileged tests cannot mknod)
+    if [ -e "$_ttr_dir/tpmrm0" ]; then
+      printf '%s\n' "device:$_ttr_dir/tpmrm0"
+      return 0
+    fi
+    if [ -e "$_ttr_dir/tpm0" ]; then
+      printf '%s\n' "device:$_ttr_dir/tpm0"
+      return 0
+    fi
+    [ "$_ttr_tries" -eq 0 ] || break
+    _ttr_tries=1
+    # best-effort driver load (the live ISO kernel may not have loaded it),
+    # quiet, then re-probe once
+    modprobe tpm_crb >/dev/null 2>&1
+    modprobe tpm_tis >/dev/null 2>&1
+  done
+  die "no TPM device node found (probed $_ttr_dir/tpmrm0, $_ttr_dir/tpm0; modules tpm_crb/tpm_tis load attempted) — the TPM is absent or its driver is not loaded"
+}
+
 tpm() {
-  TPM2TOOLS_TCTI="${ALPINE_FDE_TCTI:-}" command tpm2 "$@"
+  if [ -n "${ALPINE_FDE_TCTI:-}" ]; then
+    TPM2TOOLS_TCTI="$ALPINE_FDE_TCTI" command tpm2 "$@"
+  else
+    # resolve lazily on FIRST use; cache so per-verb resolution cost is paid
+    # once. A FAILED resolution propagates: the specific refusal has already
+    # been printed — never fall through with an EMPTY TCTI (that is exactly
+    # the silent tctildr-default-discovery failure of blocker #18).
+    if [ -z "${_ALPINE_FDE_TCTI_RESOLVED:-}" ]; then
+      _ALPINE_FDE_TCTI_RESOLVED=$(tpm_tcti_resolve) || return $?
+    fi
+    TPM2TOOLS_TCTI="$_ALPINE_FDE_TCTI_RESOLVED" command tpm2 "$@"
+  fi
 }
 
 # --- preconditions -----------------------------------------------------------------

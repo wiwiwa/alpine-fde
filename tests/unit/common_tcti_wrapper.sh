@@ -36,12 +36,26 @@ chmod +x "$tmpbin/tpm2"
 PATH="$tmpbin:$PATH"
 export PATH
 
-# --- ALPINE_FDE_TCTI unset/empty: TPM2TOOLS_TCTI must be set-but-empty (tctildr default) ---
-out=$(ALPINE_FDE_TCTI='' tpm getcap -l)
+# --- ALPINE_FDE_TCTI unset/empty: the wrapper RESOLVES the TCTI itself ----------
+# (real-server blocker #18: the old set-but-empty value fed tctildr default
+# discovery, which fails on the installer env). With a dev-dir seam holding a
+# tpmrm0 file the resolved value is device:<dir>/tpmrm0.
+DEVDIR="$tmp/dev"
+mkdir -p "$DEVDIR"
+: >"$DEVDIR/tpmrm0"
+export ALPINE_FDE_TPM_DEV_DIR="$DEVDIR" # ambient seam for the later cases
+out=$(ALPINE_FDE_TCTI='' ALPINE_FDE_TPM_DEV_DIR="$DEVDIR" tpm getcap -l)
 assert_eq "wrapper returns the tool's stdout" "canned-tpm2-output" "$out"
 line=$(tail -n 1 "$FAKE_TPM2_LOG")
-assert_eq "empty ALPINE_FDE_TCTI -> set-but-empty TPM2TOOLS_TCTI, argv forwarded" \
-    "tcti=[] args=[getcap][-l]" "$line"
+assert_eq "empty ALPINE_FDE_TCTI -> resolved device TCTI, argv forwarded" \
+    "tcti=[device:$DEVDIR/tpmrm0] args=[getcap][-l]" "$line"
+
+# --- ALPINE_FDE_TCTI unset AND no device node: loud specific rc 64 ---------------
+out=$(ALPINE_FDE_TCTI='' ALPINE_FDE_TPM_DEV_DIR="$tmp/no-dev" tpm getcap -l 2>&1)
+rc=$?
+assert_rc "blocker #18: unset TCTI + no TPM node -> fail-closed 64" "64" "$rc"
+assert_contains "blocker #18: the refusal names the probed nodes and modules" "$out" \
+    "probed $tmp/no-dev/tpmrm0, $tmp/no-dev/tpm0; modules tpm_crb/tpm_tis load attempted"
 
 # --- ALPINE_FDE_TCTI propagated ---
 out=$(ALPINE_FDE_TCTI=swtpm tpm pcrread sha256 0)
