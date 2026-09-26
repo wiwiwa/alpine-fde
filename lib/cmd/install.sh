@@ -511,8 +511,11 @@ inst_execute_plan() {
     trap '
                 rm -f "$_ie_plan" "${_ime_kf:-}" "${_im_pf_host:-}" 2>/dev/null
                 if [ -n "${_im_mnt:-}" ]; then
-                    umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" \
-                        "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
+                    # boot-lane finding #20: CHILD MOUNTS FIRST — the efivars
+                    # bind hangs under /mnt/sys, so the parent must unmount
+                    # after it (parent-first is EBUSY on every real install).
+                    umount "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
+                    umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" 2>/dev/null || :
                 fi
             ' EXIT
     while IFS='	' read -r _ie_kind _ie_cmd <&3; do
@@ -1875,7 +1878,11 @@ cmd_install_main() {
   # or, when the firmware refused it, the manual-import instructions, an
   # explicit Enter confirmation, and a reboot INTO FIRMWARE SETUP
   # (OsIndications) for the manual key import.
-  inst_plan_run host "umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc $_im_mnt/sys/firmware/efi/efivars && umount -R $_im_mnt && $_im_close"
+  # boot-lane finding #20 (s23 attempt 20): the efivars bind is a CHILD of
+  # /mnt/sys — unmounting /mnt/sys while it is still mounted fails EBUSY
+  # ("target is busy") on every real install. Children first: efivars, then
+  # dev/sys/proc, then the recursive target umount, then the mapper close.
+  inst_plan_run host "umount $_im_mnt/sys/firmware/efi/efivars && umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc && umount -R $_im_mnt && $_im_close"
   inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------

@@ -775,6 +775,16 @@ assert_eq "order: teardown before the ephemeral-key scrub (G-C26/I1)" "1" \
 # the scrub; the verdict probe precedes them
 O_PROBE=$(first_line_no "$OUT" "INST_SB_ENROLLED=1")
 O_INSTR=$(first_line_no "$OUT" "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys")
+# boot-lane finding #20 (s23 attempt 20): the efivars bind is a CHILD mount of
+# /mnt/sys — umounting the parent first fails EBUSY on every real install
+# (masked here by the umount stub). Pin the CHILD-FIRST order at the record
+# level: efivars bind, then dev/sys/proc, then the recursive umount.
+# $LOG is the DEEP run's stdout capture (one info line per record) — the
+# argv log may belong to a later, early-dying run at this point in the file.
+L_EFIVARS_U=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars")
+L_DEVU=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys")
+assert_eq "H-02/teardown: the efivars bind umounts BEFORE its parent /mnt/sys (child-first; EBUSY otherwise)" \
+    "1" "$(( L_EFIVARS_U > 0 && L_DEVU > 0 && L_EFIVARS_U < L_DEVU ? 1 : 0 ))"
 assert_eq "order (user directive 3): scrub BEFORE the enrollment verdict probe BEFORE the deferred instructions" "1" \
     "$(( L_SCRUB > 0 && O_PROBE > L_SCRUB && O_INSTR > O_PROBE ? 1 : 0 ))"
 
@@ -949,8 +959,6 @@ assert_contains "§9.1: efivars bound into the target" "$LOG" \
 L_BINDT=$(first_line_no "$LOG" "mount --bind /dev")
 L_BINDU=$(first_line_no "$LOG" "umount $ALPINE_FDE_INSTALL_MNT/dev")
 assert_eq "H-02: binds torn down before umount -R" "1" "$(( L_BINDT > 0 && L_BINDU > L_BINDT && L_UMNTR > L_BINDU ? 1 : 0 ))"
-assert_contains "H-02: teardown umounts the efivars bind" "$LOG" \
-    "umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars"
 # L-04b: guest steps never see ALPINE_FDE_DISK_PASSPHRASE (defensive strip stays)
 assert_contains "L-04b: chroot invocation strips the passphrase variable" \
     "$LOG" "-u ALPINE_FDE_DISK_PASSPHRASE"
@@ -1360,8 +1368,8 @@ assert_eq "L-04a: ephemeral key-file scrubbed on failed step (I1)" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ephkey.*' 2>/dev/null | wc -l)"
 assert_eq "WR-02 fixture: plan teardown never ran (die before teardown)" "0" \
     "$(grep -c 'umount -R' "$ALPINE_FDE_TEST_LOG")"
-assert_eq "WR-02: abort trap tore the binds down (incl. efivars)" "1" \
-    "$(grep -c "^umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars\$" "$ALPINE_FDE_TEST_LOG")"
+assert_eq "WR-02: abort trap tore the binds down (child-first, incl. efivars)" "2" \
+    "$(grep -cE "^umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars\$|^umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc\$" "$ALPINE_FDE_TEST_LOG")"
 chmod 755 "$MNT_ETC/alpine-fde"
 
 # --- boot-lane finding #17 (s23 attempt 16): the LIVE env's TPM driver must

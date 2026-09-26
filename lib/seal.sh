@@ -152,9 +152,13 @@ seal_pcrread() {
 seal_require_env() {
     command -v tpm2 >/dev/null 2>&1 ||
         die "seal: tpm2-tools not found (tpm2 binary) — Mechanism B sealing requires tpm2-tools"
-    if ! tpm getcap properties-fixed >/dev/null 2>&1; then
-        die "seal: no usable TPM via TCTI '${ALPINE_FDE_TCTI:-<default>}' — cannot seal"
-    fi
+    _sre_out=$(tpm getcap properties-fixed 2>&1) || {
+        # boot-lane finding #18b (s23 attempt 17c): never mask the underlying
+        # getcap failure — the TCTI resolved fine once and the probe still
+        # failed (in-chroot tpm2 vs the resolved device node); the operator
+        # needs the actual analyzer output.
+        die "seal: no usable TPM via TCTI '${ALPINE_FDE_TCTI:-<default>}' — getcap failed: $_sre_out"
+    }
 }
 
 # seal_keydir_check <keydir> — the keydir exists and holds release.pub (the
