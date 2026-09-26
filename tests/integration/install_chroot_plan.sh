@@ -1418,6 +1418,14 @@ SHM_LINE=$(grep -nF 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG" | head -1 | c
 assert_eq "seam visibility: the plan binds /dev/shm into the target" "1" "$SHM_BIND"
 assert_eq "seam visibility: the bind precedes the secret-consuming ukictl build" "1" \
     "$(( SHM_LINE > 0 && BUILD_LINE > 0 && SHM_LINE < BUILD_LINE ? 1 : 0 ))"
+# --- boot-lane finding #9: the guest build line must RESOLVE the installed
+# target kernel release (the live ISO's uname -r is a DIFFERENT flavor+version
+# than the kernel the plan installed) ---
+BL_LINE=$(grep -nF 'ukictl build' "$ALPINE_FDE_TEST_LOG" | head -1)
+assert_contains "kver resolution: the build line resolves the installed kernel from /lib/modules" \
+    "$BL_LINE" "ls /lib/modules"
+assert_contains "kver resolution: the build passes the resolved kver operand" \
+    "$BL_LINE" 'ukictl build "$KVER"'
 assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_ETC/hosts"
 assert_contains "item 26b: the seeded hosts table carries the live entries" \
     "$(cat "$MNT_ETC/hosts")" "desktop-0"

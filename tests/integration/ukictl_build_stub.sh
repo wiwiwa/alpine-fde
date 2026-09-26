@@ -80,6 +80,19 @@ assert_rc "ukictl build succeeds over stub inputs" 0 $rc
 # --- ESP: canonical layout, .pcrsig/.pcrpkey embedded, SB signature valid ----------
 UKI="$ESP/EFI/Linux/alpine-fde-$KVER.efi"
 assert_file_exists "UKI installed at ESP:/EFI/Linux/alpine-fde-<kver>.efi" "$UKI"
+
+# --- boot-lane finding #9 (s23 attempt 9): Alpine ships FLAVOR-named kernels
+# (/boot/vmlinuz-lts, modules at /lib/modules/<kver>), NOT vmlinuz-<kver>.
+# A real install resolves the target kver (6.18.53-0-lts) but the kernel file
+# is vmlinuz-lts — the build must fall back to the flavor name or every real
+# install dies at step 5 ("required build input missing").
+KVER2=6.18.53-0-lts
+cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-lts"
+out2=$(alpine-fde ukictl build "$KVER2" 2>&1)
+rc2=$?
+assert_rc "ukictl build: Alpine flavor-named kernel (/boot/vmlinuz-lts) resolves" 0 $rc2
+assert_file_exists "ukictl build: UKI produced for the flavor-named kernel kver" \
+    "$ESP/EFI/Linux/alpine-fde-$KVER2.efi"
 ukify_inspect=$(ukify inspect "$UKI" 2>/dev/null || objdump -h "$UKI")
 assert_contains "UKI carries a .pcrsig section (Mechanism A'' signed PCR 11)" "$ukify_inspect" ".pcrsig"
 assert_contains "UKI carries a .pcrpkey section" "$ukify_inspect" ".pcrpkey"
