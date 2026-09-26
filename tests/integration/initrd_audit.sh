@@ -154,8 +154,8 @@ assert_contains "audit 1d: reason names the tpm core" "$_initrd_audit_reason" "t
 
 grep -v '60-tpm\.rules$' "$inv" >"$TMP/inv-m5.txt"
 run_audit "$TMP/inv-m5.txt"
-assert_rc "audit 1e: missing TPM udev rule fails the audit" 1 "$RUN_AUDIT_RC"
-assert_contains "audit 1e: reason names the TPM udev rule requirement" "$_initrd_audit_reason" "udev rule"
+assert_rc "audit 1e: missing TPM udev rule is a loud WARN, not a failure (devtmpfs creates tpmrm0 in-kernel; boot-lane finding #11)" \
+    0 "$RUN_AUDIT_RC"
 
 grep -v 'btrfs\.ko$' "$inv" >"$TMP/inv-m6.txt"
 run_audit "$TMP/inv-m6.txt"
