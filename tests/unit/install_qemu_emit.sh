@@ -65,7 +65,7 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
-    bootctl lsblk btrfs cryptsetup reboot; do
+    lsblk btrfs cryptsetup reboot; do
     make_stub "$s"
 done
 # nslookup — preflight-only DNS probe (host-side, never a plan step): succeed
@@ -283,8 +283,17 @@ assert_contains "emitted: defer-custody — provision record defers release.pem 
     "$(grep -m1 'provision stage1' "$SCRIPT")" "--defer-custody"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
     "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
-assert_eq "guest: bootctl install (ESP layout)" "1" \
-    "$(grep -cx 'bootctl install --esp-path=/efi --boot-path=/efi' "$SCRIPT")"
+# real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
+# the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
+# ships NO bootctl binary; the retired record died POST-ceremony)
+assert_eq "guest: boot manager installed by guarded file copy (loader probed fail-closed in-chroot, blocker #7)" "1" \
+    "$(grep -c 'for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do \[ -f "\$p" \]' "$SCRIPT")"
+assert_contains "guest: the guarded copy record targets BOTH ESP homes (canonical + removable fallback)" "$(cat "$SCRIPT")" \
+    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+assert_contains "guest: the guarded copy record dies fail-closed when no loader binary exists" "$(cat "$SCRIPT")" \
+    'no systemd-boot loader EFI binary found in-chroot'
+assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" "0" \
+    "$(grep -Ec 'bootctl( |$)' "$SCRIPT")"
 assert_eq "guest: ukictl build (§9.1 step 5)" "1" \
     "$(grep -cx '/opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
@@ -325,7 +334,12 @@ assert_eq "item 27 lint (extended): the emitted seal/token choreography NEVER re
 S_KEYGEN=$(grep -n 'provision stage1 --mode in-chroot' "$SCRIPT" | cut -d: -f1)
 S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
 S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
+S_COPY=$(grep -n 'BOOTX64.EFI' "$SCRIPT" | head -1 | cut -d: -f1)
 assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL ? 1 : 0 ))"
+assert_eq "emitted order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \
+    "$(( S_ENROLL > 0 && S_ENROLL < S_CERR ? 1 : 0 ))"
+assert_eq "emitted order (user flow directive): boot-manager guarded copy BEFORE the credential ceremony" "1" \
+    "$(( S_COPY > 0 && S_COPY < S_CERR ? 1 : 0 ))"
 assert_eq "emitted order: enrollment before build" "1" "$(( S_ENROLL < S_BUILD ? 1 : 0 ))"
 assert_eq "emitted order: build before the provisional seal" "1" "$(( S_BUILD < S_SEAL ? 1 : 0 ))"
 
@@ -342,6 +356,30 @@ assert_not_contains "banner: NO pending-recovery-passphrase notice emitted" "$(c
 S_STATE=$(grep -n 'inst_state_write installed' "$SCRIPT" | cut -d: -f1)
 assert_eq "emitted order: the state write still stands (G-C28 amended, no banner record)" "1" \
     "$(( S_STATE > 0 ? 1 : 0 ))"
+# user flow directive: the state write (and every other mechanical step) is
+# EMITTED BEFORE the credential-ceremony records
+assert_eq "emitted order (user flow directive): state write BEFORE the credential ceremony (mechanical first)" "1" \
+    "$(( S_STATE > 0 && S_STATE < S_CERR ? 1 : 0 ))"
+
+# --- ESP-fallback tail (user directives): verdict probe + deferred ----------
+# instructions as the LAST records (host comments for the harness); under the
+# CI seam (NO_REBOOT=1) the Enter-confirmation + firmware-setup trip + direct
+# reboot records are not emitted.
+assert_contains "tail: enrollment verdict probe record (runtime-conditional PK probe on the live efivars seam)" "$(cat "$SCRIPT")" \
+    "if fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi"
+S_SCRUB=$(grep -n '^# HOST: rm -f /dev/shm/alpine-fde-ephkey' "$SCRIPT" | cut -d: -f1)
+S_PROBE=$(grep -n 'INST_SB_ENROLLED=1' "$SCRIPT" | cut -d: -f1)
+S_INSTR=$(grep -n 'alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys' "$SCRIPT" | cut -d: -f1)
+assert_eq "tail order (user directive 3): scrub BEFORE verdict probe BEFORE the deferred instructions (instructions LAST)" "1" \
+    "$(( S_SCRUB > 0 && S_SCRUB < S_PROBE && S_PROBE < S_INSTR ? 1 : 0 ))"
+assert_contains "tail: deferred instructions name the DIRECT-from-ESP import first (user directive 2)" "$(cat "$SCRIPT")" \
+    "import DIRECTLY from the internal ESP"
+assert_eq "CI seam: NO Enter-confirmation record emitted under NO_REBOOT" "0" \
+    "$(grep -c 'press Enter to reboot into firmware setup' "$SCRIPT")"
+assert_eq "CI seam: NO firmware-setup trip record emitted under NO_REBOOT" "0" \
+    "$(grep -c 'fw_osindications_set' "$SCRIPT")"
+assert_eq "CI seam: NO reboot record emitted under NO_REBOOT" "0" \
+    "$(grep -c 'then reboot' "$SCRIPT")"
 
 # --- emitted script is sound but NEVER executed -----------------------------------
 assert_rc "emitted script parses (escape loop sound)" 0 sh -n "$SCRIPT"

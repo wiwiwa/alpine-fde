@@ -230,7 +230,15 @@ assert_contains "plan: fstab @home subvol form" "$INS_OUT" "btrfs subvol=@home,d
 assert_contains "plan: fstab @snapshots subvol form" "$INS_OUT" "btrfs subvol=@snapshots,defaults 0 2"
 assert_contains "plan: ESP fstab line" "$INS_OUT" "PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2"
 assert_not_contains "plan: no ext4 fstab root line under btrfs default" "$INS_OUT" "/ ext4 defaults 0 1"
-assert_contains "plan: bootctl install (ESP layout for the in-chroot build)" "$INS_OUT" "bootctl install"
+# real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
+# the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
+# ships NO bootctl binary; the retired record died POST-ceremony)
+assert_contains "plan: boot manager via guarded file copy, BOTH ESP homes (blocker #7)" "$INS_OUT" \
+    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+assert_contains "plan: the guarded copy probes the loader binary in-chroot, fail-closed" "$INS_OUT" \
+    '/usr/share/systemd/bootctl/systemd-bootx64.efi'
+assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no bootctl binary)" "0" \
+    "$(grep -Ec 'bootctl( |$)' <<<"$INS_OUT")"
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 assert_contains "plan: kernel hooks installed (Alpine kernel-hooks.d layout)" "$INS_OUT" \
     "etc/kernel-hooks.d"
@@ -293,13 +301,18 @@ assert_not_contains "plan: no banner finalize directive" "$INS_OUT" \
 # G-C28/§9.1 step 9: state `installed` — the last state write
 assert_contains "plan: §9.1 step 9 — state installed via istate_write" "$INS_OUT" \
     "inst_state_write installed"
-# G-C26: NO OsIndications anywhere (firmware-trip flow retired)
-assert_eq "plan: ZERO OsIndications records (G-C26)" "0" \
+# G-C26 (AMENDED by the user's flow directives): the OsIndications firmware
+# trip is BACK — but ONLY as the runtime-conditional DEFERRED-enrollment tail
+# (firmware refused NVRAM enrollment -> manual import); the success path
+# keeps the direct reboot to disk.
+assert_eq "plan: exactly ONE OsIndications record — the DEFERRED-enrollment firmware trip (G-C26 amended)" "1" \
     "$(grep -c 'fw_osindications_set' <<<"$INS_OUT")"
+assert_contains "plan: the firmware trip is runtime-gated on the deferred branch (PK absent)" "$INS_OUT" \
+    'else fw_osindications_set /sys/firmware/efi/efivars && reboot; fi'
 assert_contains "plan: explicit ephemeral-key scrub record (I1, §9.1 teardown)" \
     "$INS_OUT" "rm -f <ephemeral-keyfile> # I1: ephemeral install key scrubbed"
-assert_contains "plan: direct reboot record (ADR-20: no firmware trip)" "$INS_OUT" \
-    "reboot # §9.1: direct reboot to disk (ADR-20)"
+assert_contains "plan: direct reboot record, runtime-gated on the success path (ADR-20)" "$INS_OUT" \
+    "reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
 assert_contains "plan: efivars bound into the target (§9.1)" "$INS_OUT" \
     "mount --bind /sys/firmware/efi/efivars /mnt/sys/firmware/efi/efivars"
 assert_contains "plan: teardown includes the efivars umount" "$INS_OUT" \
@@ -315,12 +328,13 @@ assert_eq "plan: zero sbverify records" "0" \
 assert_not_contains "plan: no <signing-medium> placeholder" "$INS_OUT" "<signing-medium>"
 assert_eq "plan: release.pem named ONLY by the ceremony record" "1" \
     "$(grep -c 'release.pem' <<<"$INS_OUT")"
-# plan-order discipline (§9.1): baseline pending BEFORE the key ceremony; the
-# CREDENTIAL ceremony (§9.1 step 4, ADR-20 amended) after the platform keys and
-# BEFORE NVRAM enrollment; enrollment BEFORE the build; build BEFORE the
-# provisional seal; seal BEFORE the state write (the banner record it used to
-# precede was removed with the banner path, ADR-20 #4); teardown
-# BEFORE the scrub; scrub BEFORE the reboot (G-C26)
+# plan-order discipline (§9.1 + user flow directives): baseline pending BEFORE
+# the key ceremony; EVERY MECHANICAL step (NVRAM enrollment, boot-manager
+# copy, hooks staging, metadata, state write) BEFORE the CREDENTIAL
+# ceremony (§9.1 step 4, ADR-20 amended) — the ceremony is the LAST
+# interactive section; only the SECRET-dependent build + provisional seal
+# follow it; then teardown -> scrub -> verdict probe -> deferred instructions
+# -> confirm -> firmware trip / direct reboot
 line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 I_BASE=$(line_no "$INS_OUT" "inst_baseline_pending_write")
 I_KEYGEN=$(line_no "$INS_OUT" "provision stage1 --mode in-chroot")
@@ -328,6 +342,8 @@ I_CERU=$(line_no "$INS_OUT" "inst_ceremony_user_password")
 I_CERR=$(line_no "$INS_OUT" "inst_ceremony_recovery")
 I_CERK=$(line_no "$INS_OUT" "inst_ceremony_release_key")
 I_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
+I_COPY=$(line_no "$INS_OUT" "BOOTX64.EFI")
+I_HOOKS=$(line_no "$INS_OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
 I_BUILD=$(line_no "$INS_OUT" "ukictl build")
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
 I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
@@ -335,7 +351,11 @@ I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
 # reset block also carries a bare `umount -R /mnt` (earlier in the plan)
 I_TEARDOWN=$(line_no "$INS_OUT" "&& umount -R /mnt")
 I_SCRUB=$(line_no "$INS_OUT" "rm -f <ephemeral-keyfile>")
-I_REBOOT=$(line_no "$INS_OUT" "reboot #")
+I_PROBE=$(line_no "$INS_OUT" "INST_SB_ENROLLED=1")
+I_SBINSTR=$(line_no "$INS_OUT" "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys")
+I_SBCONF=$(line_no "$INS_OUT" "press Enter to reboot into firmware setup")
+I_SBTRIP=$(line_no "$INS_OUT" "fw_osindications_set")
+I_REBOOT=$(line_no "$INS_OUT" "reboot; fi # §9.1: direct reboot")
 assert_eq "order: baseline pending before key ceremony" "1" "$(( I_BASE < I_KEYGEN ? 1 : 0 ))"
 assert_eq "order: §9.1 step 4 — platform keys BEFORE the credential ceremony" "1" \
     "$(( I_KEYGEN > 0 && I_KEYGEN < I_CERR ? 1 : 0 ))"
@@ -343,18 +363,36 @@ assert_eq "order: item 12 — ceremony asks the recovery passphrase FIRST (1/3)"
     "$(( I_CERR > 0 && I_CERR < I_CERU ? 1 : 0 ))"
 assert_eq "order: item 12 — user password (2/3) before release key (3/3)" "1" \
     "$(( I_CERU > 0 && I_CERU < I_CERK ? 1 : 0 ))"
-assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
-    "$(( I_CERK > 0 && I_CERK < I_ENROLL ? 1 : 0 ))"
-assert_eq "order: key ceremony before NVRAM enrollment" "1" "$(( I_KEYGEN < I_ENROLL ? 1 : 0 ))"
+assert_eq "order (user flow directive): platform keys BEFORE the NVRAM enrollment" "1" \
+    "$(( I_KEYGEN > 0 && I_KEYGEN < I_ENROLL ? 1 : 0 ))"
+assert_eq "order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \
+    "$(( I_ENROLL > 0 && I_ENROLL < I_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): boot-manager guarded copy BEFORE the credential ceremony" "1" \
+    "$(( I_COPY > 0 && I_COPY < I_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a build input)" "1" \
+    "$(( I_HOOKS > 0 && I_HOOKS < I_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): state write BEFORE the credential ceremony (mechanical)" "1" \
+    "$(( I_STATE > 0 && I_STATE < I_CERR ? 1 : 0 ))"
 assert_eq "order: enrollment before ukictl build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
     "$(( I_BUILD < I_SEAL ? 1 : 0 ))"
 assert_eq "order: provisional seal before the state write (no banner record, ADR-20 #4)" "1" \
     "$(( I_SEAL < I_STATE ? 1 : 0 ))"
+assert_eq "order: provisional seal (secret-dependent) BEFORE the teardown" "1" \
+    "$(( I_SEAL > 0 && I_SEAL < I_TEARDOWN ? 1 : 0 ))"
 assert_eq "order: state write before teardown" "1" "$(( I_STATE < I_TEARDOWN ? 1 : 0 ))"
-assert_eq "order: G-C26 — teardown before the ephemeral scrub" "1" \
+assert_eq "order: teardown before the ephemeral scrub" "1" \
     "$(( I_TEARDOWN < I_SCRUB ? 1 : 0 ))"
-assert_eq "order: scrub before the direct reboot" "1" "$(( I_SCRUB < I_REBOOT ? 1 : 0 ))"
+# user directive 3: instructions LAST — after the scrub — then the explicit
+# confirmation, then the firmware trip, then (success path) the direct reboot
+assert_eq "order (user directive 3): scrub BEFORE the enrollment verdict probe" "1" \
+    "$(( I_SCRUB > 0 && I_SCRUB < I_PROBE ? 1 : 0 ))"
+assert_eq "order (user directive 3): verdict probe BEFORE the deferred instructions (instructions print at the VERY END)" "1" \
+    "$(( I_PROBE > 0 && I_PROBE < I_SBINSTR ? 1 : 0 ))"
+assert_eq "order (user directive 3): instructions BEFORE the Enter confirmation BEFORE the firmware trip BEFORE the direct reboot" "1" \
+    "$(( I_SBINSTR > 0 && I_SBINSTR < I_SBCONF && I_SBCONF < I_SBTRIP && I_SBTRIP < I_REBOOT ? 1 : 0 ))"
+assert_contains "plan: deferred instructions name the DIRECT-from-ESP import first (user directive 2)" "$INS_OUT" \
+    "import DIRECTLY from the internal ESP"
 # apk order (REAL-INSTALL DEFECT 6, e2e-invisible class): the
 # /etc/apk/repositories drop MUST PRECEDE the populate — apk resolves against
 # the TARGET's <mnt>/etc/apk/repositories, so a populate-first plan sees zero
@@ -453,12 +491,16 @@ assert_contains "reset: bcache-stop carries the warn branch + || : no-op tail" "
 # --- 2c. NO_REBOOT seam (CI) ---------------------------------------------------------
 ALPINE_FDE_INSTALL_NO_REBOOT=1 run_install --disk "$FAKEDISK"
 assert_eq "NO_REBOOT=1: rc 0" "0" "$INS_RC"
-assert_not_contains "NO_REBOOT=1: reboot record suppressed" "$INS_OUT" "reboot #"
+assert_not_contains "NO_REBOOT=1: Enter-confirmation record suppressed" "$INS_OUT" \
+    "press Enter to reboot into firmware setup"
+assert_not_contains "NO_REBOOT=1: firmware-setup trip record suppressed" "$INS_OUT" \
+    "fw_osindications_set"
+assert_not_contains "NO_REBOOT=1: reboot records suppressed" "$INS_OUT" "reboot; fi"
 run_install --disk "$FAKEDISK" --no-reboot
 assert_eq "--no-reboot flag: rc 0" "0" "$INS_RC"
-assert_not_contains "--no-reboot flag: reboot record suppressed" "$INS_OUT" "reboot #"
+assert_not_contains "--no-reboot flag: reboot records suppressed" "$INS_OUT" "reboot; fi"
 run_install --disk "$FAKEDISK"
-assert_contains "default: reboot record present" "$INS_OUT" "reboot #"
+assert_contains "default: reboot records present (deferred trip + direct reboot)" "$INS_OUT" "reboot; fi"
 
 # --- 3. G-ST1b: --fs ext4 keeps the flat path verbatim -------------------------------
 run_install --disk "$FAKEDISK" --fs ext4
@@ -770,8 +812,8 @@ assert_contains "esp: mount plan creates the flag mount point" "$INS_OUT" \
     "mkdir -p /mnt/home /mnt/.snapshots /mnt/boot/efi"
 assert_contains "esp: ESP mounted at the flag mount point" "$INS_OUT" \
     "mount $FAKEDISK"$(printf '%s' "1")" /mnt/boot/efi"
-assert_contains "esp: bootctl install targets the flag mount point" "$INS_OUT" \
-    "bootctl install --esp-path=/boot/efi --boot-path=/boot/efi"
+assert_contains "esp: guarded boot-manager copy record targets the flag mount point (blocker #7)" "$INS_OUT" \
+    'cp "$ldr" /boot/efi/EFI/BOOT/BOOTX64.EFI'
 assert_contains "esp: NVRAM enrollment record passes the flag ESP (fallback staging dir)" \
     "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /boot/efi"
 assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
