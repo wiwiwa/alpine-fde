@@ -488,12 +488,20 @@ mirror_serve_start() {
     if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
         return 0   # already serving
     fi
-    if command -v busybox >/dev/null 2>&1 && busybox httpd --help >/dev/null 2>&1; then
-        setsid busybox httpd -f -p "127.0.0.1:$port" -h "$docroot" &
-    else
-        setsid python3 -m http.server "$port" --bind 127.0.0.1 --directory "$docroot" >/dev/null 2>&1 &
-    fi
-    echo $! >"$pidfile"
+    # boot-lane finding #12: spawn INSIDE a job-control-free ( ) subshell (the
+    # swtpm_start idiom). Under a set -m caller, bash makes a background job a
+    # process-group leader — setsid(2) fails and util-linux setsid auto-forks,
+    # so the recorded $! (the setsid parent) died instantly and the pidfile
+    # held a DEAD pid: mirror_serve_stop killed nothing and the httpd leaked
+    # into the next run's port.
+    (
+        if command -v busybox >/dev/null 2>&1 && busybox httpd --help >/dev/null 2>&1; then
+            setsid busybox httpd -f -p "127.0.0.1:$port" -h "$docroot" &
+        else
+            setsid python3 -m http.server "$port" --bind 127.0.0.1 --directory "$docroot" >/dev/null 2>&1 &
+        fi
+        echo $! >"$pidfile"
+    )
     sleep 1
     kill -0 "$(cat "$pidfile")" 2>/dev/null || {
         echo "local-mirror: httpd did not stay up on 127.0.0.1:$port" >&2
