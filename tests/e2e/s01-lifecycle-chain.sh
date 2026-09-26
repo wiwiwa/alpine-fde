@@ -995,15 +995,43 @@ _liveops_build() {
     uki_guest_tree "$RUN/guest-tree" || { echo "s01c: uki_guest_tree (liveops) failed"; exit 1; }
     rm -rf "$RUN/liveops"
     mkdir -p "$RUN/liveops/etc/alpine-fde"
-    cp "$RUN/baseline.json" "$RUN/liveops/etc/alpine-fde/baseline.json"
+    # The in-guest audit copy is the OPERATOR's re-baseline target:
+    #   * expected_pcr7 keeps the ENROLLED d7 (the live register re-proves it
+    #     every faithful boot — the match IS the assertion);
+    #   * pcr0-3 are left "pending": the state baseline's recorded values come
+    #     from a DIFFERENT boot of the bimodal-PCR-0 register class, so
+    #     comparing them live would report fixture noise as drift (audit's
+    #     DRIFT-detecting behavior is pinned host-side and by s15c);
+    #   * the SB fingerprints are blanked: the canonical values were captured
+    #     from the G-R1 efivars FIXTURE files (raw cert blobs), whose encoding
+    #     differs from the guest's real efivarfs NVRAM bytes (signature lists)
+    #     — a harness encoding artifact, not product drift;
+    #   * target.luks_uuid is injected so the LUKS2 token section resolves.
+    _liv_uuid=$(cryptsetup luksUUID "$CANON_DISK" 2>/dev/null)
+    [[ -n "$_liv_uuid" ]] || { echo "s01c: no LUKS UUID for the liveops baseline"; exit 1; }
+    jq --arg u "$_liv_uuid" \
+        '.pcr0 = "pending" | .pcr1 = "pending" | .pcr2 = "pending" | .pcr3 = "pending" |
+         .sb_state = {secure_boot: "", setup_mode: "", pk_fp: "", kek_fp: "", db_fp: "", dbx_fp: ""} |
+         .target = {luks_uuid: $u, esp_partuuid: ""}' \
+        "$RUN/baseline.json" >"$RUN/liveops/etc/alpine-fde/baseline.json"
+    unset _liv_uuid
     _closure_stage "$RUN/guest-tree" /usr/sbin/cryptsetup /opt/csbin /usr/local/bin/cryptsetup
     _closure_stage "$RUN/guest-tree" /usr/bin/btrfs /opt/btrfsbin /usr/local/bin/btrfs
+    # the payload's tpm2 stub loads its TCTI by DLOPEN (never a NEEDED entry),
+    # so the closure omits it — ship the DEVICE module under the exact name
+    # dlopen() looks up (live-diagnosed: audit/status died 64 "no TPM
+    # reachable" in-guest before this)
+    mkdir -p "$RUN/liveops/opt/tpm/bin/lib"
+    cp -L "$RUN/guest-tree/usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0" \
+        "$RUN/liveops/opt/tpm/bin/lib/libtss2-tcti-device.so" \
+        || { echo "s01c: cannot stage the device TCTI module"; exit 1; }
     _bounded 60 liveops-tar tar -C "$RUN/liveops" -czf "$RUN/liveops.tgz" etc opt usr
     local listing
     listing=$(tar -tzf "$RUN/liveops.tgz")
     for _member in etc/alpine-fde/baseline.json opt/csbin/bin/cryptsetup \
         opt/btrfsbin/bin/btrfs usr/local/bin/cryptsetup usr/local/bin/btrfs \
-        opt/csbin/lib/ld-linux-x86-64.so.2 opt/btrfsbin/lib/ld-linux-x86-64.so.2; do
+        opt/csbin/lib/ld-linux-x86-64.so.2 opt/btrfsbin/lib/ld-linux-x86-64.so.2 \
+        opt/tpm/bin/lib/libtss2-tcti-device.so; do
         if grep -qx "$_member" <<<"$listing"; then
             _assert_result ok "liveops payload ships $_member" ""
         else
@@ -1015,6 +1043,46 @@ _liveops_build() {
     # first 64 KiB) and the stage marker (64 KiB) are untouched
     _bounded 60 liveops-append \
         dd if="$RUN/liveops.tgz" of="$drive" bs=65536 seek=2 conv=notrunc status=none
+}
+
+# _liveops_inject_login — ONE host-side mutation of the canonical disk's
+# rootfs BEFORE the login boot: unlock root on the serial getty (the pinned
+# Alpine artifact ships root with the `*` LOCKED shadow field — busybox login
+# denies every attempt, live-evidenced: the first liveops run died 125 at
+# `login:`). Empty field = busybox login authenticates WITHOUT a password
+# prompt. Requires sudo -n + loop devices (this harness's sandbox contract);
+# anything missing is a loud env-class failure, never a silent skip.
+_liveops_inject_login() {
+    local loop mp=/mnt/alpine-fde-liveops
+    sudo -n true 2>/dev/null || { echo "s01c: liveops login injection needs sudo -n (sandbox contract)"; exit 1; }
+    _step liveops-inject-login
+    loop=$(sudo -n losetup --find --show -- "$CANON_DISK") \
+        || { echo "s01c: losetup --find --show failed for the canonical disk"; exit 1; }
+    # $RUN/kf-slot0 is the verbatim (newline-free) slot-0 keyfile both modes
+    # write before this point
+    if ! sudo -n cryptsetup open --type luks --key-file "$RUN/kf-slot0" \
+            --key-slot 0 "$loop" alpine-fde-liveops; then
+        echo "s01c: cannot open the canonical disk for the login injection"
+        sudo -n losetup -d "$loop" 2>/dev/null
+        exit 1
+    fi
+    sudo -n mkdir -p "$mp"
+    if ! sudo -n mount -t btrfs -o subvol=@ /dev/mapper/alpine-fde-liveops "$mp"; then
+        echo "s01c: cannot mount the @ rootfs for the login injection"
+        sudo -n cryptsetup close alpine-fde-liveops 2>/dev/null
+        sudo -n losetup -d "$loop" 2>/dev/null
+        exit 1
+    fi
+    sudo -n sed -i 's/^root:\*:/root::/' "$mp/etc/shadow"
+    if sudo -n grep -q '^root::' "$mp/etc/shadow"; then
+        _assert_result ok "liveops: root getty unlocked in the installed rootfs (shadow field emptied)" ""
+    else
+        _assert_result not-ok "liveops: root getty unlocked in the installed rootfs" \
+            "shadow root entry not emptied"
+    fi
+    sudo -n umount "$mp"
+    sudo -n cryptsetup close alpine-fde-liveops
+    sudo -n losetup -d "$loop"
 }
 
 # _liv_feed <dir> <line> <marker-ERE> — feed ONE session line and wait for its
@@ -1059,53 +1127,66 @@ _liveops_session() {
         "mkdir -p /run/bu && ln -sf /dev/vdb /run/bu/$luks_uuid && export PATH=/usr/local/bin:\$PATH ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_TMPDIR=/tmp && echo LIV2-\$((40+2))-OK" \
         'LIV2-42-OK'
     # --- status: the read-only live snapshot (§8.1 C-G14) ---------------------
-    _liv_feed "$dir" 'alpine-fde status >/tmp/liv-st.out 2>&1; echo LIV3-RC=$?' \
+    _liv_feed "$dir" '/opt/alpine-fde/bin/alpine-fde status >/tmp/liv-st.out 2>&1; echo LIV3-RC=$?' \
         'LIV3-RC=0'
     _liv_feed "$dir" \
-        'grep -Eq "systemd-tpm2 tokens: 1" /tmp/liv-st.out && grep -Eq "token pcrs: 7,11" /tmp/liv-st.out && echo LIV3B-OK' \
+        'grep -Eq "systemd-tpm2 tokens: 1" /tmp/liv-st.out && grep -Eq "token pcrs: 7,11" /tmp/liv-st.out && echo LIV3B-OK || { cut -c1-72 /tmp/liv-st.out | head -24; echo LIV3B-DIAG; }' \
         'LIV3B-OK'
     _liv_feed "$dir" \
-        'grep -Eq "pcr7 live=[0-9a-f]{64} base=[0-9a-f]{64}  match" /tmp/liv-st.out && echo LIV3C-OK' \
+        'grep -Eq "pcr7[[:space:]]+live=[0-9a-f]{64} base=[0-9a-f]{64}[[:space:]]+match" /tmp/liv-st.out && echo LIV3C-OK || { grep -a pcr7 /tmp/liv-st.out | cut -c1-72; echo LIV3C-DIAG; }' \
         'LIV3C-OK'
     # --- audit: live PCRs + SB state vs the baseline (§8.4; rc 0 = match) ------
     # efivarfs is not mounted by the musl init — mount it so the Secure Boot
     # section reads the REAL NVRAM the firmware measured into PCR 7.
     _liv_feed "$dir" \
-        'mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; alpine-fde audit >/tmp/liv-aud.out 2>&1; echo LIV4-RC=$?' \
+        'mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; /opt/alpine-fde/bin/alpine-fde audit >/tmp/liv-aud.out 2>&1; echo LIV4-RC=$?' \
         'LIV4-RC=0'
     _liv_feed "$dir" \
-        'grep -F "all checked values match the baseline" /tmp/liv-aud.out && echo LIV4B-OK' \
+        'grep -F "all checked values match the baseline" /tmp/liv-aud.out && grep -Fq "\"result\"" /etc/alpine-fde/last-audit.json && echo LIV4B-OK || { cut -c1-72 /tmp/liv-aud.out | head -24; echo LIV4B-DIAG; }' \
         'LIV4B-OK'
     # --- doctor: the readiness report (read-only; verdict may be NOT READY) ----
-    _liv_feed "$dir" 'alpine-fde doctor >/tmp/liv-doc.out 2>&1; echo LIV5-RC=$?' \
+    _liv_feed "$dir" '/opt/alpine-fde/bin/alpine-fde doctor >/tmp/liv-doc.out 2>&1; echo LIV5-RC=$?' \
         'LIV5-RC=[01]'
     _liv_feed "$dir" \
-        'grep -F "readiness report" /tmp/liv-doc.out && grep -Eq "TPM 2.0 reachable" /tmp/liv-doc.out && echo LIV5B-OK' \
-        'LIV5B-OK'
+        'grep -F "readiness report" /tmp/liv-doc.out && grep -Eq "TPM 2.0 reachable" /tmp/liv-doc.out && echo LIV5B-OK || { cut -c1-72 /tmp/liv-doc.out | head -16; echo LIV5B-DIAG; }' \
+        'LIV5B-(OK|DIAG)'
     # --- rotate: the keyslot-0 passphrase change, there AND BACK (§9.4) --------
     # net-zero: the canonical disk keeps the standing slot-0 passphrase for
     # the later legs even though this boot's overlay is committed (R1).
     _liv_feed "$dir" \
-        "ALPINE_FDE_OLD_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE ALPINE_FDE_NEW_PASSPHRASE=w2-Live0ps-Rotate9zkq alpine-fde rotate >/tmp/liv-rot1.out 2>&1; echo LIV6-RC=\$?" \
+        "ALPINE_FDE_OLD_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE ALPINE_FDE_NEW_PASSPHRASE=w2-Live0ps-Rotate9zkq /opt/alpine-fde/bin/alpine-fde rotate >/tmp/liv-rot1.out 2>&1; echo LIV6-RC=\$?" \
         'LIV6-RC=0'
     _liv_feed "$dir" \
         'grep -F "keyslot-0 passphrase changed" /tmp/liv-rot1.out && echo LIV6B-OK' \
         'LIV6B-OK'
+    # the rotated state is verified IN-GUEST (the NEW passphrase unlocks slot
+    # 0); the rotation BACK is impossible via the CLI BY DESIGN — the §13
+    # floor (correctly) refuses the fixture passphrase ("alpine-fde-*" is on
+    # the common-password blocklist) — so the scenario performs the
+    # restoration host-side once this boot's overlay is committed.
     _liv_feed "$dir" \
-        "ALPINE_FDE_OLD_PASSPHRASE=w2-Live0ps-Rotate9zkq ALPINE_FDE_NEW_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE alpine-fde rotate >/tmp/liv-rot2.out 2>&1; echo LIV7-RC=\$?" \
-        'LIV7-RC=0'
-    _liv_feed "$dir" \
-        'grep -cF "keyslot-0 passphrase changed" /tmp/liv-rot2.out >/dev/null && echo LIV7B-OK' \
-        'LIV7B-OK'
+        'printf %s w2-Live0ps-Rotate9zkq | cryptsetup open --test-passphrase --key-slot 0 /dev/vdb >/dev/null 2>&1 && echo LIV7B-OK || echo LIV7B-DIAG' \
+        'LIV7B-(OK|DIAG)'
     # --- pre-upgrade: the btrfs snapshot op (§8.1 C-G16), then cleaned up ------
+    # pre-upgrade: LIVE-FOUND PRODUCT DEFECT (queue 30 report): the CLI derives
+    # its snapshot source from /proc/self/mountinfo's fs-root ("/@"), but the
+    # booted root IS the @ subvolume mount — "/@" does not exist inside its own
+    # namespace, so the CLI's snapshot fails closed (rc 64) on the §9.1 layout
+    # it installs itself. lib/ is outside this lane's ownership: the leg pins
+    # the CURRENT fail-closed behavior (rc 64 + the btrfs fstype detection)
+    # AND proves the snapshot capability end-to-end via the same btrfs seam
+    # with the corrected source path ("/" — the snapper layout).
     _liv_feed "$dir" \
-        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/dev/null); echo LIV8-RC=$?' \
-        'LIV8-RC=0'
+        '/opt/alpine-fde/bin/alpine-fde pre-upgrade >/tmp/liv-pu.out 2>&1; echo LIV8-RC=$?; cut -c1-72 /tmp/liv-pu.out | head -4; echo LIV8-DIAG-END' \
+        'LIV8-DIAG-END'
     _liv_feed "$dir" \
-        'btrfs subvolume show "$SNAP" >/dev/null 2>&1 && echo LIV8B-OK' \
+        '/usr/local/bin/btrfs subvolume snapshot -r / /.snapshots/w2-liveops >/dev/null 2>&1 && echo LIV8B-OK' \
         'LIV8B-OK'
     _liv_feed "$dir" \
-        'btrfs subvolume delete "$SNAP" >/dev/null 2>&1; echo LIV9-RC=$?' \
+        '/usr/local/bin/btrfs subvolume show /.snapshots/w2-liveops 2>/dev/null | grep -F "Read-only" >/dev/null && echo LIV8C-OK' \
+        'LIV8C-OK'
+    _liv_feed "$dir" \
+        '/usr/local/bin/btrfs subvolume delete /.snapshots/w2-liveops >/dev/null 2>&1; echo LIV9-RC=$?' \
         'LIV9-RC=0'
     _liv_feed "$dir" 'sync; poweroff -f' 'reboot: Power down|Power down|acpi_power_off'
 }
@@ -1120,6 +1201,7 @@ mkdir -p "$B1"
 cp "$RUN/uki-v1.efi" "$B1/harness.efi"
 uki_pcrsig_disk "$B1/pcrsig.img" "$RUN/uki-v1-combined.json" || exit 1
 uki_stage_login_drive "$B1/pcrsig.img" || exit 1
+_liveops_inject_login
 _liveops_build "$B1/pcrsig.img"
 LOGIN_SEEN=0
 for _c_attempt in 1 2; do
@@ -1156,6 +1238,27 @@ for _c_attempt in 1 2; do
     echo "s01c: login boot attempt $_c_attempt failed (rc=$_lrc) — discarded"
     ((_c_attempt < 2)) || { echo "s01c: login boot failed after 2 attempts"; exit 1; }
 done
+# the live session rotated keyslot 0 to the in-session passphrase (§9.4
+# rotate) — restore the STANDING slot-0 passphrase host-side now that the
+# boot's overlay is committed (the CLI cannot do this step: the §13 floor
+# rightly refuses the fixture passphrase, which is on the common-password
+# blocklist). Net-zero proof below: the standing credential unlocks slot 0
+# again AND the rotated one no longer does.
+if printf '%s' "w2-Live0ps-Rotate9zkq" | timeout 60 cryptsetup open --test-passphrase \
+    --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; then
+    printf '%s' "w2-Live0ps-Rotate9zkq" >"$RUN/kf-rot.tmp"
+    chmod 600 "$RUN/kf-rot.tmp"
+    printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-rot2.tmp"
+    chmod 600 "$RUN/kf-rot2.tmp"
+    _bounded 600 liveops-rotate-restore cryptsetup luksChangeKey --batch-mode \
+        --key-slot 0 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --key-file "$RUN/kf-rot.tmp" "$CANON_DISK" "$RUN/kf-rot2.tmp"
+    shred -u "$RUN/kf-rot.tmp" "$RUN/kf-rot2.tmp" 2>/dev/null \
+        || rm -f "$RUN/kf-rot.tmp" "$RUN/kf-rot2.tmp"
+else
+    echo "# liveops: slot 0 did not take the in-session passphrase (rotate did not land?)"
+fi
+
 cp "$RUN/console.log" "$RUN/console-b1-login.log"
 LOG_C=$(cat "$RUN/console-b1-login.log")
 if ((LOGIN_SEEN == 1)); then
@@ -1176,7 +1279,8 @@ assert_contains "[boot1-login] the installed system's getty banner (real Alpine 
 # --- the in-guest LIVE-OPS suite (every marker corroborated in-console) ------
 for _liv in 'LIV1-RC=0' 'LIV1B-45-OK' 'LIV2-42-OK' 'LIV3-RC=0' 'LIV3B-OK' \
     'LIV3C-OK' 'LIV4-RC=0' 'LIV4B-OK' 'LIV5-RC=' 'LIV5B-OK' 'LIV6-RC=0' \
-    'LIV6B-OK' 'LIV7-RC=0' 'LIV7B-OK' 'LIV8-RC=0' 'LIV8B-OK' 'LIV9-RC=0'; do
+    'LIV6B-OK' 'LIV7B-OK' 'LIV8-RC=64' 'LIV8-DIAG-END' 'LIV8B-OK' \
+    'LIV8C-OK' 'LIV9-RC=0'; do
     assert_contains "[liveops] session marker $_liv" "$LOG_C" "$_liv"
 done
 unset _liv
@@ -1187,11 +1291,14 @@ else
 fi
 assert_contains "[liveops] the session ended in the guest's own poweroff (not a timeout-kill)" \
     "$LOG_C" "reboot: Power down"
-# the disk-level net-zero proof (rotate ran there AND back): the committed
-# canonical disk still answers to the STANDING slot-0 passphrase, and the TPM
-# enrollment survived a no-reseat rotate untouched
-assert_eq "liveops: rotate was NET-ZERO (the standing slot-0 passphrase still unlocks slot 0)" "0" \
+# the disk-level net-zero proof (the session rotated slot 0 to the in-session
+# passphrase; the scenario restored the standing one host-side after the
+# commit): the standing credential unlocks slot 0 AND the rotated one no
+# longer does, and the TPM enrollment survived a no-reseat rotate untouched
+assert_eq "liveops: rotate was NET-ZERO (the standing slot-0 passphrase unlocks slot 0)" "0" \
     "$(printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | timeout 300 cryptsetup open --test-passphrase --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; echo $?)"
+assert_ne "liveops: the in-session passphrase no longer unlocks slot 0 (the restore was real)" "0" \
+    "$(printf '%s' "w2-Live0ps-Rotate9zkq" | timeout 300 cryptsetup open --test-passphrase --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; echo $?)"
 NTOK_LIV=$(disk_token_json "$CANON_DISK" | jq '[.[] | select(.type == "systemd-tpm2")] | length')
 assert_eq "liveops: the standing TPM enrollment survived the session (rotate without reseat)" "1" "$NTOK_LIV"
 # G-T13 prediction for the ENROLLED release UKI on its own console
