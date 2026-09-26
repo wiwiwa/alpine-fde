@@ -252,6 +252,15 @@ assert_contains "plan: build record exports the in-chroot release-key dir (block
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
 assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder (in-target path, blocker #9)" "$INS_OUT" \
     '[ -s <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>) && rm -f <release-passfile>'
+# real-server blocker #11: the record derives the TARGET's installed kernel
+# in-guest and passes it to ukictl build (the no-arg form fell back to
+# uname -r — the LIVE ISO kernel, absent from the target)
+assert_contains "plan: build record derives the target kver in-guest (blocker #11)" "$INS_OUT" \
+    'kv=$(cd /lib/modules'
+assert_contains "plan: build record passes the derived kver to ukictl build (blocker #11)" "$INS_OUT" \
+    'ukictl build "$kv"'
+assert_contains "plan: build record fails closed when the target has NO module tree (blocker #11)" "$INS_OUT" \
+    'no kernel module tree under /lib/modules'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 # real-server blocker #10: the conf persists the resolved TOPOLOGY (BCACHE=1
 # covered both bcache AND bcache-multi, which made crypttab_tpm2_check's

@@ -147,7 +147,42 @@ cmd_ukictl_build_main() {
         esac
         shift
     done
-    _uk_kver=${1:-$(uname -r)}
+    if [ $# -ge 1 ]; then
+        _uk_kver=$1
+    elif [ "$_uk_sign_all" -eq 1 ]; then
+        # --re-sign-all consumes NO kernel image: it re-signs every retained
+        # manifest entry against the CURRENT baseline — no kver to resolve
+        # (blocker #11's strict no-arg resolution applies to real builds only)
+        _uk_kver=''
+    else
+        # REAL-SERVER BLOCKER #11: NO-ARG invocation. `uname -r` is the LIVE
+        # ISO's kernel on install media while the TARGET's installed linux-lts
+        # is a different version (/lib/modules/<live-kver> does not exist in
+        # the target — the live run built for the wrong kernel). Resolution
+        # order: exactly ONE directory under <root>/lib/modules -> use it
+        # (the in-chroot invocation sanity case); else `uname -r` ONLY when
+        # its module dir actually exists in the target (back-compat for a
+        # booted target); else fail closed LISTING the available dirs.
+        _uk_mods="${ALPINE_FDE_ROOT:-}/lib/modules"
+        _uk_cands=''
+        for _uk_d in "$_uk_mods"/*/; do
+            [ -d "$_uk_d" ] || continue # unmatched glob / non-dir: skipped
+            _uk_b=${_uk_d%/} # the glob's trailing slash would empty ##*/
+            _uk_cands="$_uk_cands ${_uk_b##*/}"
+        done
+        _uk_n=${_uk_cands//[^ ]/}
+        _uk_run=$(uname -r 2>/dev/null)
+        if [ ${#_uk_n} -eq 1 ]; then
+            _uk_kver=${_uk_cands# }
+            _uk_kver=${_uk_kver% }
+        elif [ -n "$_uk_run" ] && [ -d "${_uk_mods}/$_uk_run" ]; then
+            _uk_kver=$_uk_run
+        else
+            err "ukictl build: no kver given and no resolvable kernel module tree under $_uk_mods (found:${_uk_cands:- none}; the running kernel '${_uk_run:-unknown}' is not installed there) — pass the target kernel version explicitly (real-server blocker #11)"
+            exit 64
+        fi
+        unset _uk_mods _uk_cands _uk_d _uk_b _uk_n _uk_run
+    fi
     [ $# -le 1 ] || {
         err "ukictl build: too many arguments"
         cmd_ukictl_build_usage
@@ -178,7 +213,9 @@ cmd_ukictl_build_main() {
     _uk_osrelease="${_uk_root}/etc/os-release"
     # LO-01: the kver interpolates into UKI paths, manifest keys and the keep-set
     # JSON — validate once at the boundary (usage error, not a build failure)
-    if ! esp_validate_kver "$_uk_kver"; then
+    # blocker #11: --re-sign-all carries NO kver (nothing to validate) — it
+    # exits at the re-sign-all branch below before any kver consumption
+    if [ "$_uk_sign_all" -eq 0 ] && ! esp_validate_kver "$_uk_kver"; then
         err "ukictl build: invalid kernel version: '$_uk_kver' (alphanumerics, '.', '_', '-' only)"
         cmd_ukictl_build_usage
         exit "$ALPINE_FDE_USAGE"

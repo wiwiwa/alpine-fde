@@ -587,6 +587,16 @@ assert_contains "blocker #8/9: the ceremony (3/3) record stages the seam IN THE 
     "host: inst_ceremony_release_key $ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys $ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass"
 assert_contains "blocker #9: the build record reads the IN-CHROOT seam path and consumes it (rm after read)" "$BLD_LINE" \
     '[ -s /run/alpine-fde-release-pass ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass'
+# real-server blocker #11: the record derives the TARGET's installed kernel
+# IN-GUEST (newest dir under /lib/modules) and passes it to ukictl build — the
+# retired no-arg form fell back to uname -r, the LIVE ISO kernel (whose
+# /lib/modules tree does not exist in the target)
+assert_contains "blocker #11: the build record derives the target kver in-guest" "$BLD_LINE" \
+    'kv=$(cd /lib/modules'
+assert_contains "blocker #11: the build record PASSES the derived kver to ukictl build" "$BLD_LINE" \
+    'ukictl build "$kv"'
+assert_contains "blocker #11: the build record fails closed with an actionable message when the target has NO modules" "$BLD_LINE" \
+    'no kernel module tree under /lib/modules'
 assert_eq "blocker #9: the build record NEVER references the host-tmpfs seam (invisible guest-side through the plain /dev bind)" "0" \
     "$(grep -c '/dev/shm/alpine-fde-release-pass' <<<"$BLD_LINE")"
 # blocker #9 EXECUTION-LEVEL: the ceremony really stages the seam file into
@@ -604,6 +614,10 @@ case "\$*" in
         mkdir -p "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys"
         printf -- '-----BEGIN PRIVATE KEY-----\nfake-plaintext-release-key\n-----END PRIVATE KEY-----\n' \\
             >"$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem"
+        # blocker #11: the target's installed kernel module trees (the apk
+        # linux-lts transaction's output, simulated)
+        mkdir -p "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.12.8-1-amd64" \
+            "$ALPINE_FDE_INSTALL_MNT/lib/modules/6.18.35-0-lts"
         ;;
     *"/usr/sbin/chpasswd"*)
         cat >"\$CHPASSWD_CAPTURE"
@@ -658,13 +672,19 @@ EOF
 chmod +x "$T/fakebin/alpine-fde"
 BLD_CMD=${BLD_CMD//\/opt\/alpine-fde\/bin\/alpine-fde/$T/fakebin/alpine-fde}
 BLD_CMD=${BLD_CMD//\/run\/alpine-fde-release-pass/$SEAM_SNAP}
+# blocker #11: map the guest root onto its host view so the in-record
+# derivation reads the TARGET's module trees (seeded by the provision arm:
+# 6.12.8-1-amd64 + 6.18.35-0-lts — newest-version wins)
+BLD_CMD=${BLD_CMD//\/lib\/modules/$ALPINE_FDE_INSTALL_MNT/lib/modules}
 sh -c "$BLD_CMD"
 assert_contains "blocker #8: the build sees the release-key dir via the environment" "$(cat "$FAKE_OUT")" \
     "keydir=/etc/alpine-fde/keys"
 assert_contains "blocker #8: the build decrypts via the passphrase from the environment (staged seam file)" "$(cat "$FAKE_OUT")" \
     "pass=Fin4l-Rec0very-X9k2-!qmwjpz"
-assert_contains "blocker #8: the passphrase does NOT appear in the build's argv" "$(cat "$FAKE_OUT")" \
-    "argv=ukictl build"
+assert_contains "blocker #11: the derived TARGET kver reaches the build's argv (newest /lib/modules dir)" "$(cat "$FAKE_OUT")" \
+    "argv=ukictl build 6.18.35-0-lts"
+assert_contains "blocker #8/#11: the passphrase does NOT appear in the build's argv" "$(cat "$FAKE_OUT")" \
+    "argv=ukictl build 6.18.35-0-lts"
 assert_eq "blocker #8: NO passphrase literal anywhere in the run's output or command log" "0" \
     "$(grep -c 'Fin4l-Rec0very-X9k2-!qmwjpz' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \

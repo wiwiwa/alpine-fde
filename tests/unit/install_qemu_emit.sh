@@ -305,11 +305,14 @@ assert_contains "blocker #8: the emitted build line feeds ALPINE_FDE_KEY_PASSPHR
 # guest /dev/shm is the target's empty dir); the record reads the in-chroot
 # path and consumes it (rm after read).
 assert_eq "blocker #9: the emitted build line reads the IN-CHROOT seam path and consumes it" "1" \
-    "$(grep -c 'export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; \[ -s /run/alpine-fde-release-pass \] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
+    "$(grep -c 'export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; \[ -s /run/alpine-fde-release-pass \] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass && export ALPINE_FDE_KEY_PASSPHRASE; kv=' "$SCRIPT")"
 assert_eq "blocker #9: the emitted build line NEVER references the host-tmpfs seam" "0" \
     "$(grep -c '/dev/shm/alpine-fde-release-pass' "$SCRIPT")"
-assert_eq "guest: ukictl build (§9.1 step 5) — with the blocker #8/#9 keydir export + in-target passphrase seam" "1" \
-    "$(grep -c 'export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; \[ -s /run/alpine-fde-release-pass \] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass && export ALPINE_FDE_KEY_PASSPHRASE; /opt/alpine-fde/bin/alpine-fde ukictl build' "$SCRIPT")"
+# real-server blocker #11: the emitted record derives the TARGET kver in-guest
+# and passes it to ukictl build (the no-arg form fell back to uname -r, the
+# LIVE ISO kernel)
+assert_eq "guest: ukictl build (§9.1 step 5) — with the blocker #8/#9/#11 keydir export + in-target passphrase seam + derived target kver" "1" \
+    "$(grep -c 'ukictl build "\$kv"' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
     "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
