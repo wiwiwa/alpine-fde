@@ -43,6 +43,16 @@ die() {
   exit "$_sp_rc"
 }
 
+# fde_strip_trailing_cr VARNAME — remove ONE trailing CR from $VARNAME in
+# place. Serial and management consoles send CR LF for Enter; `IFS= read -r`
+# keeps the CR in the value, and the secret readers' [:cntrl:] guard would
+# then refuse EVERY entry typed at such a console (real-server blocker #15).
+fde_strip_trailing_cr() {
+  _fcr_cr=$(printf '\r')
+  eval "$1=\${$1%\$_fcr_cr}"
+  unset _fcr_cr
+}
+
 # --- config ---------------------------------------------------------------------
 # config_path — effective config file path (§8.4). $ALPINE_FDE_CONF overrides
 # the default; the Alpine path is the only spelling (no legacy fallback).

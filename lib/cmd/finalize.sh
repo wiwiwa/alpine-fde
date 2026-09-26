@@ -223,6 +223,7 @@ fin_read_recovery_passphrase() {
             _frr_restore=1
         fi
         IFS= read -r _frr_p1 || _frr_p1=''
+        fde_strip_trailing_cr _frr_p1
         if [ "$_frr_restore" = 1 ]; then
             stty echo 2>/dev/null
         fi
@@ -232,6 +233,7 @@ fin_read_recovery_passphrase() {
             _frr_restore=1
         fi
         IFS= read -r _frr_p2 || _frr_p2=''
+        fde_strip_trailing_cr _frr_p2
         if [ "$_frr_restore" = 1 ]; then
             stty echo 2>/dev/null
         fi

@@ -818,6 +818,7 @@ inst_prompt_secret() {
     stty echo 2>/dev/null
   fi
   printf '\n' >&2
+  fde_strip_trailing_cr _ipl_val
   case $_ipl_val in
   *[[:cntrl:]]*)
     die "install: the entered secret contains control characters — refusing (it must be typeable at a console prompt)"

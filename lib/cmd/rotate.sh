@@ -107,6 +107,8 @@ rot_prompt() {
     read -r _rp_b </dev/tty || _rp_b=''
     stty echo 2>/dev/null || true
     printf '\n' >&2
+    fde_strip_trailing_cr _rp_a
+    fde_strip_trailing_cr _rp_b
     if [ "$_rp_a" != "$_rp_b" ]; then
         die "rotate: passphrases do not match"
     fi
