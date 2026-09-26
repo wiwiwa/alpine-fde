@@ -445,8 +445,7 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
             # feature ships /sbin/apk (now /usr/sbin/apk) and its init uses
             # apk.static for repository boots: every real Alpine initramfs
             # carries it. Only foreign package tools are denied.
-            bin/dpkg | bin/dpkg-* | */bin/dpkg | */bin/dpkg-* \
-                | bin/apt | bin/apt-* | */bin/apt | */bin/apt-*)
+            *bin/dpkg* | *bin/apt*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 continue ;;
         esac

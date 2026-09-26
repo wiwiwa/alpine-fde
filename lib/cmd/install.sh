@@ -647,7 +647,8 @@ install_package_list() {
 }
 
 # inst_live_tool_pairs — the LIVE-env tool requirements of the §9.1 preflight
-# (the require_pkgs bin:pkg pairs, SINGLE SOURCE): the live ISO may lack any
+# (the binary:package pairs the live-env require_pkgs probe consumes,
+# SINGLE SOURCE): the live ISO may lack any
 # of these tools, in which case the installer apk-adds the package from
 # ALPINE_FDE_MIRROR. Exposed as data so consumers that PROVISION the live
 # environment — the pinned local mirror, tests/lib/local-mirror.sh's
@@ -718,6 +719,7 @@ inst_preflight() {
   # openssl generates the ephemeral install key; sbsign/ukify are NOT
   # host-required (the boot manager + UKI are built + signed IN-CHROOT by
   # ukictl build, §9.1 step 5).
+  # shellcheck disable=SC2086  # deliberate word split: bin:pkg pairs never contain spaces
   require_pkgs $(inst_live_tool_pairs)
   # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
   # in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the binary is

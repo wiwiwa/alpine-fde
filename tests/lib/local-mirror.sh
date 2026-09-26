@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash  # [[ ]], arrays, _MIRROR_CURL array — bash test lib
 # tests/lib/local-mirror.sh — pinned LOCAL Alpine apk mirror + ISO cache for
 # the install canary (tests/e2e/s23-install-e2e.sh, queue item 32/25) and any
 # other lane that needs a drift-detectable, download-once Alpine package
@@ -105,6 +106,7 @@ MIRROR_PIN_ALPINE_KEYS_SHA256="dd211936d544f4050924ce8aec078d24e7b1b036ae70b30bd
 ISO_FLAVOR="alpine-virt"
 ISO_VERSION="3.24.2"
 ISO_ARCH="x86_64"
+# shellcheck disable=SC2034  # pin of record (docs: byte size of the pinned ISO)
 ISO_SIZE_BYTES=69206016
 ISO_SHA256_DEFAULT="3ab424762af704b2c2a9e57df1dc37f982af260071504d977f2fb96822e7130b"
 
@@ -327,8 +329,8 @@ mirror_closure_fetch() {
         found=$((found + 1))
     done
     # count per component for the report
-    n_main=$(ls "$(mirror_repo_dir main)" 2>/dev/null | grep -c '\.apk$' || true)
-    n_comm=$(ls "$(mirror_repo_dir community)" 2>/dev/null | grep -c '\.apk$' || true)
+    n_main=$(find "$(mirror_repo_dir main)" -maxdepth 1 -name '*.apk' 2>/dev/null | wc -l)
+    n_comm=$(find "$(mirror_repo_dir community)" -maxdepth 1 -name '*.apk' 2>/dev/null | wc -l)
     rm -rf "$work"
     if [[ -n "$missing" ]]; then
         echo "local-mirror: CLOSURE/INDEX DRIFT — $missing resolved upstream but (name,version) is absent from the PINNED indexes:" >&2
@@ -350,8 +352,8 @@ mirror_manifest_write() {
         find main/x86_64 community/x86_64 -name '*.apk' | sort | xargs sha256sum
     } >"$cdir/MANIFEST.sha256"
     local n_main n_comm
-    n_main=$(ls "$(mirror_repo_dir main)" | grep -c '\.apk$' || true)
-    n_comm=$(ls "$(mirror_repo_dir community)" | grep -c '\.apk$' || true)
+    n_main=$(find "$(mirror_repo_dir main)" -maxdepth 1 -name '*.apk' | wc -l)
+    n_comm=$(find "$(mirror_repo_dir community)" -maxdepth 1 -name '*.apk' | wc -l)
     cat >"$cdir/mirror.json" <<JSON
 {
   "schema_version": 1,
