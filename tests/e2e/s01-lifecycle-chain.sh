@@ -928,8 +928,191 @@ else
     _stage_close "cache-reuse"
 fi
 
+# --- in-guest LIVE-OPS suite (user directive: status / audit / doctor /
+# rotate / pre-upgrade executed DURING a live boot, riding boot 1's login
+# session — ZERO additional boots) --------------------------------------------
+#
+# The installed Alpine root ships the tooling tree + the glibc-closure stubs
+# (tpm2/jq/flock) but NOT cryptsetup or btrfs userspace (the §3.3 additions
+# set arrives via apk in the production flow; the initrd's pinned Debian
+# binaries cannot execute on the musl root un-wrapped). The session therefore
+# ships BOTH tools as payload-tail stubs — the PROVEN _uki_payload_stub
+# pattern (own loader + library closure + wrapper), built from the guest
+# tree's OWN Debian binaries and libraries (the exact closure the initrd
+# runs) — plus the finalized baseline.json, all in one tarball appended AFTER
+# the login marker on the payload drive (offset 128 KiB; the pcrsig region
+# and the marker stay untouched).
+#
+# Console discipline (the s20 lossy-serial lesson): every long output lands
+# in a FILE in-guest and is corroborated IN-GUEST (grep over the unwrapped
+# file); only short, computed markers (LIV*-RC=0 / LIV*-OK) travel back over
+# the serial console. Host-side assertions then pin those markers.
+
+_closure_stage() { # <tree> <bin-path-in-tree> <optdir> <wrapper-abs-path>
+    local tree="$1" bin="$2" optdir="$3" wrapper="$4"
+    local src="$tree$bin"
+    [[ -f "$src" ]] || { echo "s01c: liveops closure: $src missing in the guest tree"; exit 1; }
+    mkdir -p "$RUN/liveops/$optdir/bin" "$RUN/liveops/$optdir/lib"         "$RUN/liveops$(dirname "$wrapper")"
+    cp -L "$src" "$RUN/liveops/$optdir/bin/$(basename "$bin")"
+    local -a queue=("$src")
+    local -A seen=()
+    local cur needed cand ld
+    while ((${#queue[@]} > 0)); do
+        cur=${queue[0]}
+        queue=("${queue[@]:1}")
+        [[ -z "${seen[$cur]:-}" ]] || continue
+        seen[$cur]=1
+        while IFS= read -r needed; do
+            [[ -n "$needed" ]] || continue
+            cand=""
+            for _ld in "$tree/usr/lib/x86_64-linux-gnu/$needed"                 "$tree/lib/x86_64-linux-gnu/$needed"                 "$tree/usr/lib/$needed" "$tree/lib/$needed"; do
+                [[ -f "$_ld" ]] && { cand="$_ld"; break; }
+            done
+            [[ -n "$cand" ]] || {
+                echo "s01c: liveops closure: NEEDED $needed (of $(basename "$cur")) is not in the guest tree"
+                exit 1
+            }
+            cp -L "$cand" "$RUN/liveops/$optdir/lib/"
+            queue+=("$cand")
+        done < <(objdump -p "$cur" 2>/dev/null | awk '/NEEDED/ {print $2}')
+    done
+    ld=$(find "$tree" -name 'ld-linux-x86-64.so.2' 2>/dev/null | head -1)
+    [[ -n "$ld" ]] || { echo "s01c: liveops closure: no ld-linux in the guest tree"; exit 1; }
+    cp -L "$ld" "$RUN/liveops/$optdir/lib/ld-linux-x86-64.so.2"
+    printf '#!/bin/sh
+exec %s/lib/ld-linux-x86-64.so.2 --library-path %s/lib %s/bin/%s "$@"
+' \
+        "$optdir" "$optdir" "$optdir" "$(basename "$bin")" >"$RUN/liveops$wrapper"
+    chmod 755 "$RUN/liveops$wrapper"
+}
+
+# _liveops_build <login-payload-drive> — stage the tail tarball + assert its
+# contents BEFORE the boot is spent (fail-closed staging, never a silent
+# no-op session).
+_liveops_build() {
+    local drive="$1"
+    _step liveops-closures
+    uki_guest_tree "$RUN/guest-tree" || { echo "s01c: uki_guest_tree (liveops) failed"; exit 1; }
+    rm -rf "$RUN/liveops"
+    mkdir -p "$RUN/liveops/etc/alpine-fde"
+    cp "$RUN/baseline.json" "$RUN/liveops/etc/alpine-fde/baseline.json"
+    _closure_stage "$RUN/guest-tree" /usr/sbin/cryptsetup /opt/csbin /usr/local/bin/cryptsetup
+    _closure_stage "$RUN/guest-tree" /usr/bin/btrfs /opt/btrfsbin /usr/local/bin/btrfs
+    _bounded 60 liveops-tar tar -C "$RUN/liveops" -czf "$RUN/liveops.tgz" etc opt usr
+    local listing
+    listing=$(tar -tzf "$RUN/liveops.tgz")
+    for _member in etc/alpine-fde/baseline.json opt/csbin/bin/cryptsetup \
+        opt/btrfsbin/bin/btrfs usr/local/bin/cryptsetup usr/local/bin/btrfs \
+        opt/csbin/lib/ld-linux-x86-64.so.2 opt/btrfsbin/lib/ld-linux-x86-64.so.2; do
+        if grep -qx "$_member" <<<"$listing"; then
+            _assert_result ok "liveops payload ships $_member" ""
+        else
+            _assert_result not-ok "liveops payload ships $_member" "missing from liveops.tgz"
+        fi
+    done
+    unset _member
+    # append AFTER the login marker (offset 128 KiB): the pcrsig region (the
+    # first 64 KiB) and the stage marker (64 KiB) are untouched
+    _bounded 60 liveops-append \
+        dd if="$RUN/liveops.tgz" of="$drive" bs=65536 seek=2 conv=notrunc status=none
+}
+
+# _liv_feed <dir> <line> <marker-ERE> — feed ONE session line and wait for its
+# computed marker with qemu liveness + the overall budget (a lost marker is a
+# LOUD hang, never a timeout-kill guess).
+_liv_feed() {
+    local dir="$1" line="$2" marker="$3" i=0
+    feed_line "$dir/serial.sock" "$line"
+    while ((i < 600)); do
+        grep -qE -- "$marker" "$dir/console.log" 2>/dev/null && return 0
+        if ! _qemu_alive_check; then
+            # qemu died: the marker may have landed in the same moment as the
+            # exit (the session's own poweroff) — one final look before dying
+            grep -qE -- "$marker" "$dir/console.log" 2>/dev/null && return 0
+            _hang_fail CONSOLE-WAIT "liveops:$marker" "qemu died mid-session"
+        fi
+        _budget_check "liveops:$marker"
+        sleep 1
+        i=$((i + 1))
+    done
+    _hang_fail CONSOLE-WAIT "liveops:$marker" "not seen in 600s; tail: $(tail -3 "$dir/console.log" 2>/dev/null | tr '\n' ' ')"
+}
+
+# _liveops_session <dir> — the fed operator session (runs ONCE, on the
+# successful login attempt's live console; the boot ends in its own
+# `poweroff -f`).
+_liveops_session() {
+    local dir="$1" luks_uuid
+    luks_uuid=$(cryptsetup luksUUID "$CANON_DISK" 2>/dev/null)
+    [[ -n "$luks_uuid" ]] || { echo "s01c: no LUKS UUID on the canonical disk (liveops)"; exit 1; }
+    echo "# live session: logging in on the serial console (one keystroke: the username)"
+    _liv_feed "$dir" "root" '~# '
+    _liv_feed "$dir" \
+        'dd if=/dev/vdc bs=65536 skip=2 | gzip -dc > /liveops.tgz; echo LIV1-RC=$?' \
+        'LIV1-RC=0'
+    _liv_feed "$dir" 'tar -xf /liveops.tgz -C / && echo LIV1B-$((43+2))-OK' \
+        'LIV1B-45-OK'
+    # the operator environment: the stub wrappers on PATH, the device TCTI,
+    # the by-uuid seam (no udev in the guest for the container — the s00b
+    # idiom), and a writable tmp dir for the CLI's temp-key files
+    _liv_feed "$dir" \
+        "mkdir -p /run/bu && ln -sf /dev/vdb /run/bu/$luks_uuid && export PATH=/usr/local/bin:\$PATH ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_TMPDIR=/tmp && echo LIV2-\$((40+2))-OK" \
+        'LIV2-42-OK'
+    # --- status: the read-only live snapshot (§8.1 C-G14) ---------------------
+    _liv_feed "$dir" 'alpine-fde status >/tmp/liv-st.out 2>&1; echo LIV3-RC=$?' \
+        'LIV3-RC=0'
+    _liv_feed "$dir" \
+        'grep -Eq "systemd-tpm2 tokens: 1" /tmp/liv-st.out && grep -Eq "token pcrs: 7,11" /tmp/liv-st.out && echo LIV3B-OK' \
+        'LIV3B-OK'
+    _liv_feed "$dir" \
+        'grep -Eq "pcr7 live=[0-9a-f]{64} base=[0-9a-f]{64}  match" /tmp/liv-st.out && echo LIV3C-OK' \
+        'LIV3C-OK'
+    # --- audit: live PCRs + SB state vs the baseline (§8.4; rc 0 = match) ------
+    # efivarfs is not mounted by the musl init — mount it so the Secure Boot
+    # section reads the REAL NVRAM the firmware measured into PCR 7.
+    _liv_feed "$dir" \
+        'mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; alpine-fde audit >/tmp/liv-aud.out 2>&1; echo LIV4-RC=$?' \
+        'LIV4-RC=0'
+    _liv_feed "$dir" \
+        'grep -F "all checked values match the baseline" /tmp/liv-aud.out && echo LIV4B-OK' \
+        'LIV4B-OK'
+    # --- doctor: the readiness report (read-only; verdict may be NOT READY) ----
+    _liv_feed "$dir" 'alpine-fde doctor >/tmp/liv-doc.out 2>&1; echo LIV5-RC=$?' \
+        'LIV5-RC=[01]'
+    _liv_feed "$dir" \
+        'grep -F "readiness report" /tmp/liv-doc.out && grep -Eq "TPM 2.0 reachable" /tmp/liv-doc.out && echo LIV5B-OK' \
+        'LIV5B-OK'
+    # --- rotate: the keyslot-0 passphrase change, there AND BACK (§9.4) --------
+    # net-zero: the canonical disk keeps the standing slot-0 passphrase for
+    # the later legs even though this boot's overlay is committed (R1).
+    _liv_feed "$dir" \
+        "ALPINE_FDE_OLD_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE ALPINE_FDE_NEW_PASSPHRASE=w2-Live0ps-Rotate9zkq alpine-fde rotate >/tmp/liv-rot1.out 2>&1; echo LIV6-RC=\$?" \
+        'LIV6-RC=0'
+    _liv_feed "$dir" \
+        'grep -F "keyslot-0 passphrase changed" /tmp/liv-rot1.out && echo LIV6B-OK' \
+        'LIV6B-OK'
+    _liv_feed "$dir" \
+        "ALPINE_FDE_OLD_PASSPHRASE=w2-Live0ps-Rotate9zkq ALPINE_FDE_NEW_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE alpine-fde rotate >/tmp/liv-rot2.out 2>&1; echo LIV7-RC=\$?" \
+        'LIV7-RC=0'
+    _liv_feed "$dir" \
+        'grep -cF "keyslot-0 passphrase changed" /tmp/liv-rot2.out >/dev/null && echo LIV7B-OK' \
+        'LIV7B-OK'
+    # --- pre-upgrade: the btrfs snapshot op (§8.1 C-G16), then cleaned up ------
+    _liv_feed "$dir" \
+        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/dev/null); echo LIV8-RC=$?' \
+        'LIV8-RC=0'
+    _liv_feed "$dir" \
+        'btrfs subvolume show "$SNAP" >/dev/null 2>&1 && echo LIV8B-OK' \
+        'LIV8B-OK'
+    _liv_feed "$dir" \
+        'btrfs subvolume delete "$SNAP" >/dev/null 2>&1; echo LIV9-RC=$?' \
+        'LIV9-RC=0'
+    _liv_feed "$dir" 'sync; poweroff -f' 'reboot: Power down|Power down|acpi_power_off'
+}
+
 # =================================================================================
-# Boot 1 (login half) — zero-input token unlock -> login: (s00b boot C + s01 happy)
+# Boot 1 (login half) — zero-input token unlock -> login: -> the LIVE-OPS
+# session (status / audit / doctor / rotate / pre-upgrade in-guest)
 # =================================================================================
 _stage_open "boot1-login"
 B1="$RUN/boot1-login"
@@ -937,6 +1120,7 @@ mkdir -p "$B1"
 cp "$RUN/uki-v1.efi" "$B1/harness.efi"
 uki_pcrsig_disk "$B1/pcrsig.img" "$RUN/uki-v1-combined.json" || exit 1
 uki_stage_login_drive "$B1/pcrsig.img" || exit 1
+_liveops_build "$B1/pcrsig.img"
 LOGIN_SEEN=0
 for _c_attempt in 1 2; do
     _budget_check "boot1-login-attempt:$_c_attempt"
@@ -954,7 +1138,12 @@ for _c_attempt in 1 2; do
     _wait_login "$RUN" "$QEMU_TIMEOUT" || _lrc=$?
     if ((_lrc == 0)); then
         LOGIN_SEEN=1
-        qemu_kill "$RUN"
+        CURRENT_QEMU_DIR="$RUN"
+        _liveops_session "$RUN"
+        # the session's last feed was `sync; poweroff -f` — the guest exits
+        # itself; a stale guest is killed loudly (never a silent timeout)
+        _wedge_wait "$RUN" "$QEMU_TIMEOUT" || _hang_fail LIVEOPS-EXIT "b1-login" \
+            "the live session's poweroff never landed (wait rc=$?)"
         CURRENT_QEMU_DIR=""
         sleep 1
         _bounded 900 overlay-commit-b1-login qemu-img commit -f qcow2 -- "$_c_overlay"
@@ -984,6 +1173,27 @@ assert_contains "[boot1-login] root mount is the §9.1 @ subvolume (G-HW5 btrfs 
     "alpine-fde-btrfs: root mounted subvol=@ (login stage)"
 assert_contains "[boot1-login] the installed system's getty banner (real Alpine userspace)" "$LOG_C" \
     "Welcome to Alpine Linux"
+# --- the in-guest LIVE-OPS suite (every marker corroborated in-console) ------
+for _liv in 'LIV1-RC=0' 'LIV1B-45-OK' 'LIV2-42-OK' 'LIV3-RC=0' 'LIV3B-OK' \
+    'LIV3C-OK' 'LIV4-RC=0' 'LIV4B-OK' 'LIV5-RC=' 'LIV5B-OK' 'LIV6-RC=0' \
+    'LIV6B-OK' 'LIV7-RC=0' 'LIV7B-OK' 'LIV8-RC=0' 'LIV8B-OK' 'LIV9-RC=0'; do
+    assert_contains "[liveops] session marker $_liv" "$LOG_C" "$_liv"
+done
+unset _liv
+if grep -qE 'LIV5-RC=[01]' <<<"$LOG_C"; then
+    _assert_result ok "[liveops] doctor completed (readiness report produced, verdict not gated)" ""
+else
+    _assert_result not-ok "[liveops] doctor completed" "no LIV5-RC marker"
+fi
+assert_contains "[liveops] the session ended in the guest's own poweroff (not a timeout-kill)" \
+    "$LOG_C" "reboot: Power down"
+# the disk-level net-zero proof (rotate ran there AND back): the committed
+# canonical disk still answers to the STANDING slot-0 passphrase, and the TPM
+# enrollment survived a no-reseat rotate untouched
+assert_eq "liveops: rotate was NET-ZERO (the standing slot-0 passphrase still unlocks slot 0)" "0" \
+    "$(printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | timeout 300 cryptsetup open --test-passphrase --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; echo $?)"
+NTOK_LIV=$(disk_token_json "$CANON_DISK" | jq '[.[] | select(.type == "systemd-tpm2")] | length')
+assert_eq "liveops: the standing TPM enrollment survived the session (rotate without reseat)" "1" "$NTOK_LIV"
 # G-T13 prediction for the ENROLLED release UKI on its own console
 CONSOLE="$RUN/console-b1-login.log"
 cp "$RUN/uki-v1.pcrsig.json" "$RUN/uki-pcrsig.json"
