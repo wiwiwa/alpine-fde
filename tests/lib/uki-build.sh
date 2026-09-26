@@ -1191,16 +1191,36 @@ esp_make() {
 # derived payload carries a sidecar sha256 verified on every reuse (MD-07: a
 # corrupted cached payload must never propagate into a UKI silently).
 # Cache: <alpine-artifact cache>/alpine-fde-payload-rootustar.tar.gz.
+
+# rootfs_payload_tree_digest — content digest of the repo tree the payload
+# embeds (bin lib hooks docs). The payload sidecar sha proves the CACHED BYTES
+# intact, never that they are CURRENT: the 2026-09-26 registry (results-
+# 20260926T093432Z.nZzWyQ.json, s01c LIV3 RC=127) died on a payload cached
+# 2026-09-21 whose embedded tree still used the pre-rename /opt/debian-fde
+# name, so every guest booted WITHOUT /opt/alpine-fde — a banned spelling no
+# shipped file contains any more. Every reuse decision therefore re-digests
+# the tree (~0.8 MB of scripts) and the sidecar carries BOTH digests.
+rootfs_payload_tree_digest() {
+    (cd "$_HERE/../.." && find bin lib hooks docs -type f -print0 2>/dev/null \
+        | LC_ALL=C sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}')
+}
+
 rootfs_payload_image() {
     local out="$1"
     local derived="$ALPINE_ARTIFACT_CACHE_DIR/alpine-fde-payload-rootustar.tar.gz"
     local derived_sha="$derived.sha256"
-    local sha bytes aligned
+    local sha bytes aligned tree_digest cached_tree_digest
+    tree_digest=$(rootfs_payload_tree_digest)
+    cached_tree_digest=$(sed -n '2p' "$derived_sha" 2>/dev/null)
     if [[ -f "$derived" && -f "$derived_sha" ]] \
-        && [[ "$(sha256sum "$derived" | awk '{print $1}')" == "$(awk '{print $1}' "$derived_sha")" ]]; then
+        && [[ "$(sha256sum "$derived" | awk '{print $1}')" == "$(awk '{print $1}' "$derived_sha")" ]] \
+        && [[ -n "$cached_tree_digest" && "$tree_digest" == "$cached_tree_digest" ]]; then
         :
     else
-        if [[ -f "$derived" ]]; then
+        if [[ -f "$derived" && -f "$derived_sha" ]] \
+            && [[ "$(sha256sum "$derived" | awk '{print $1}')" == "$(awk '{print $1}' "$derived_sha")" ]]; then
+            echo "uki-build: derived payload cache is STALE (embedded repo tree changed) — re-deriving" >&2
+        elif [[ -f "$derived" ]]; then
             echo "uki-build: derived payload cache failed its sidecar-sha check — re-deriving" >&2
         fi
         rm -f "$derived" "$derived_sha"
@@ -1250,7 +1270,11 @@ rootfs_payload_image() {
             return 1
         fi
         rm -rf "$tmp"
+        # sidecar line 1: the payload's own sha (corruption guard, MD-07);
+        # line 2: the repo-tree content digest (staleness guard — see
+        # rootfs_payload_tree_digest)
         sha256sum "$tmpout" | awk '{print $1}' >"$tmpout.sha"
+        printf '%s\n' "$tree_digest" >>"$tmpout.sha"
         mv "$tmpout" "$derived"
         mv "$tmpout.sha" "$derived_sha"
     fi

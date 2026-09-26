@@ -399,14 +399,22 @@ _cache_verify() {
         && -f "$dir/harness.efi" && -f "$dir/pcrsig.img" && -f "$dir/vars-enrolled.fd" \
         && -f "$dir/baseline.json" && -f "$dir/uki-pcrsig.json" \
         && -f "$dir/uki-pcrsig-combined.json" ]] || return 1
-    (cd "$dir" && sha256sum --check --quiet MANIFEST.sha256) >/dev/null 2>&1
+    (cd "$dir" && sha256sum --check --quiet MANIFEST.sha256) >/dev/null 2>&1 || return 1
+    # STALENESS BINDING (2026-09-26 registry, s01c LIV3 RC=127): the disk's
+    # installed rootfs was laid down FROM the derived Alpine payload, so a
+    # payload whose embedded repo tree changed (the /opt/debian-fde ->
+    # /opt/alpine-fde rename) invalidates the cache even though every recorded
+    # byte is still sha-intact. FORMAT line 2 carries the tree digest the
+    # build installed; a mismatch (or an old one-line FORMAT) rebuilds.
+    grep -qx "tree-sha256 $(rootfs_payload_tree_digest)" "$dir/FORMAT"
 }
 
 # _cache_store <cache-dir> <run-dir> — snapshot the enrolled state into the
 # stable cache (called via run_stage's bash -c bridge; explicit args because
 # the bridge subshell does not inherit scenario locals)
 _cache_store() {
-    local dir="$1" run="$2"
+    local dir="$1" run="$2" tree_digest="${3:-}"
+    [[ -n "$tree_digest" ]] || { echo "s00b: _cache_store: no tree digest (payload staleness binding)"; return 64; }
     # Wave-2 2b generator publish: build the snapshot at a STAGING path, then
     # LOCK_EX + atomic mv into place — a consumer reading the previous
     # generation keeps its old inode to natural completion; new consumers get
@@ -428,7 +436,7 @@ _cache_store() {
     # A cache without it (ext4 era, ladder-only pcrsig drive) fails
     # _cache_verify and triggers a rebuild; the login-stage initrd of that
     # generation cannot boot an older-layout disk and vice versa.
-    printf 'btrfs-3\n' >"$stage/FORMAT"
+    printf 'btrfs-3\ntree-sha256 %s\n' "$(rootfs_payload_tree_digest)" >"$stage/FORMAT"
     # s00 STATE SHAPE (tpm/tpm2-00.permall): the snapshot below consumes
     # $STATE/tpm/tpm2-00.permall — a flat copy here would be silently skipped
     # by that guard and the from-cache boot would resume a VIRGIN TPM whose
@@ -441,7 +449,7 @@ _cache_store() {
         tpm/tpm2-00.permall baseline.json uki-pcrsig.json uki-pcrsig-combined.json >MANIFEST.sha256)
     local lock="$dir.publish.lock"
     ( flock -x 9; rm -rf "$dir"; mv -- "$stage" "$dir" ) 9>"$lock"
-    echo "# pristine enrolled state cached in $dir (FORMAT $(cat "$dir/FORMAT"), SHA256 manifest: $(wc -l <"$dir/MANIFEST.sha256") entries)"
+    echo "# pristine enrolled state cached in $dir (FORMAT $(head -1 "$dir/FORMAT"), tree-sha256 $(sed -n '2p' "$dir/FORMAT" | cut -d' ' -f2), SHA256 manifest: $(wc -l <"$dir/MANIFEST.sha256") entries)"
 }
 
 STATE="${ALPINE_FDE_S00_STATE:-}"
@@ -1198,7 +1206,7 @@ assert_pcr11_prediction "G-T13 [boot B]"
 _BL_D7_STORE=$(jq -r '.expected_pcr7' "$RUN/baseline.json")
 if grep -qF "$(sentinel_of cli_seal_slot)" "$RUN/console.log" \
     && [[ "$CLI_RC" == "0" && -n "$BOOTB_D7" && "$BOOTB_D7" == "$_BL_D7_STORE" ]]; then
-    run_stage cache-store 900 bash -c "$(declare -f _cache_store); _cache_store '$CACHE_DIR' '$RUN'"
+    run_stage cache-store 900 bash -c "$(declare -f _cache_store); _cache_store '$CACHE_DIR' '$RUN' '$(rootfs_payload_tree_digest)'"
 else
     echo "s00b: enrollment evidence missing or SELF-INCONSISTENT (rc=$CLI_RC, live d7=${BOOTB_D7:-<none>} vs baseline $_BL_D7_STORE) — pristine cache NOT stored"
 fi
