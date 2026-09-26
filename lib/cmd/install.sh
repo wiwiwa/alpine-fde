@@ -3,7 +3,19 @@
 # install (§9.1/ADR-20): partition + block layer, LUKS2 keyslot 0 formatted
 # with the internal ephemeral install key (never persisted, I1), minimal
 # Alpine rootfs (§3.3 apk populate), and the in-chroot provisioning ceremony
-# ending in a provisional TPM token (PCR 11 only) + direct reboot to disk.
+# ending in a provisional TPM token (PCR 11 only) + a direct reboot to disk —
+# or, when the firmware REFUSED NVRAM enrollment, the manual key-import
+# instructions, an explicit Enter confirmation, and a reboot INTO FIRMWARE
+# SETUP (OsIndications) instead.
+#
+# FLOW ORDER (user directives, real-server blocker #7): every MECHANICAL step
+# that needs no ceremony secret (NVRAM enrollment, boot-manager file copy,
+# hooks/metadata/state staging) runs BEFORE the credential ceremony;
+# the ceremony (recovery -> account -> release-key prompts) is the LAST
+# interactive section; only the secret-dependent UKI build + provisional seal
+# + teardown + the final reboot tail follow it. The boot manager is installed
+# by GUARDED FILE COPY (Alpine ships NO bootctl binary — real-server blocker
+# #7), never by invoking bootctl.
 #
 # TOPOLOGIES (§4.1):
 #   single       --disk DISK                       ESP p1 + LUKS2 p2, Btrfs
@@ -51,7 +63,9 @@
 # host-side at $MNT (chroot) or emitted as guest printf lines (qemu).
 #
 # ALPINE_FDE_INSTALL_NO_REBOOT=1 (or --no-reboot) suppresses the final reboot
-# record (CI seam): the plan ends after teardown + ephemeral-key scrub.
+# records (CI seam): the plan ends after teardown + ephemeral-key scrub + the
+# enrollment verdict + (deferred path) the manual-import instructions; the
+# Enter-confirmation and the reboot records themselves are not emitted.
 
 if [ -n "${ALPINE_FDE_INSTALL_LOADED:-}" ]; then
   return 0
@@ -216,6 +230,53 @@ inst_tooling_copy_cmd() {
   return 0
 }
 
+# inst_loader_binary [PREFIX] — print the first existing systemd-boot LOADER
+# EFI binary under PREFIX (default: the live env root) at the known package
+# paths, rc 1 when none exists. Real-server blocker #7: Alpine ships NO
+# bootctl binary (pkgs.alpinelinux.org contents search: zero hits, even edge)
+# — the in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the retired
+# `bootctl install` record died "/bin/sh: bootctl: not found" POST-ceremony.
+# The boot manager is therefore installed by FILE COPY of the loader binary
+# the systemd-boot package ships (inst_bootmgr_copy_line); this probe backs
+# the fail-closed preflight check.
+# inst_loader_probe_prefix — the PREFIX the live-env loader probe runs under
+# (test seam, ALPINE_FDE_LOADER_PROBE_PREFIX; a real run probes '/' — empty).
+# Like inst_mapper_dir: unit tests point it at a sandbox so the probe's
+# live-env/apk-fetch branches are deterministic on any host.
+inst_loader_probe_prefix() { printf '%s\n' "${ALPINE_FDE_LOADER_PROBE_PREFIX:-}"; }
+
+inst_loader_binary() {
+  _ilb_p=${1:-}
+  for _ilb_c in \
+    usr/share/systemd/bootctl/systemd-bootx64.efi \
+    usr/lib/systemd/boot/efi/systemd-bootx64.efi; do
+    if [ -f "$_ilb_p/$_ilb_c" ]; then
+      printf '%s\n' "$_ilb_p/$_ilb_c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# inst_bootmgr_copy_line ESP_MNT — the single-line GUEST command installing the
+# systemd-boot boot manager by GUARDED FILE COPY (real-server blocker #7 —
+# never a bootctl invocation). Probes the known loader paths IN-CHROOT at
+# execution time and fails closed (exit 1 kills the plan) naming the package
+# when none exists; otherwise copies the loader to BOTH ESP homes:
+#   <esp>/EFI/systemd/systemd-bootx64.efi — canonical path (the kernel hook
+#       verifies/re-signs it on every later transaction; the audit manifest
+#       pins it)
+#   <esp>/EFI/BOOT/BOOTX64.EFI — removable-media fallback path: boots on any
+#       firmware with NO NVRAM dependency (the harness fixtures already model
+#       BOOTX64 as the default entry)
+# The in-chroot build (ukictl build, §8.3) signs the binaries; the
+# systemd-boot-update.service mask (§6) stays consistent with the retired
+# bootctl flow. Run BEFORE the credential ceremony (no secret involved).
+inst_bootmgr_copy_line() {
+  _bcl_esp=$1
+  printf '%s\n' "ldr=''; for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do [ -f \"\$p\" ] && { ldr=\"\$p\"; break; }; done; [ -n \"\$ldr\" ] || { echo 'alpine-fde: ERROR: no systemd-boot loader EFI binary found in-chroot (probed /usr/share/systemd/bootctl/systemd-bootx64.efi, /usr/lib/systemd/boot/efi/systemd-bootx64.efi) — the systemd-boot package is missing or incomplete; the boot manager cannot be installed; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; mkdir -p $_bcl_esp/EFI/systemd $_bcl_esp/EFI/BOOT && cp \"\$ldr\" $_bcl_esp/EFI/systemd/systemd-bootx64.efi && cp \"\$ldr\" $_bcl_esp/EFI/BOOT/BOOTX64.EFI && echo \"alpine-fde: info: boot manager installed by guarded file copy: \$ldr -> $_bcl_esp/EFI/systemd/systemd-bootx64.efi + $_bcl_esp/EFI/BOOT/BOOTX64.EFI (removable-media fallback path, no NVRAM dependency; signed by the in-chroot build, §8.3)\" # boot manager via guarded file copy of the systemd-boot loader binary (fail-closed probe; real-server blocker #7)"
+}
+
 install_usage() {
   cat >&2 <<'EOF'
 Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
@@ -238,12 +299,19 @@ CEREMONY (§9.1 step 4 — exactly three no-echo prompts: the account password,
 the LUKS2 recovery passphrase into keyslot 0 with the §13 entropy floor
 enforced via re-prompt until met, and the release-key passphrase encrypting
 release.pem via keys_encrypt_release; there is no flag and no environment
-seam for any credential), firmware NVRAM enrollment db -> KEK -> PK, bootctl
-install + signed boot manager and UKI via `ukictl build`, PROVISIONAL TPM
-token sealed into keyslot 1 (Mechanism B, PCR 11 only, from the UKI's
-.pcrsig), install-state=installed — then
-teardown (unmount + ephemeral-key scrub) and a direct reboot to disk (no
-firmware trip): the first boot unlocks via the provisional token and
+seam for any credential) — with EVERY mechanical step BEFORE the ceremony
+(firmware NVRAM enrollment db -> KEK -> PK, the boot manager installed by
+guarded file copy of the systemd-boot loader EFI binary to
+<esp>/EFI/BOOT/BOOTX64.EFI — Alpine ships no bootctl binary —, hooks, target
+metadata, install-state=installed) so the
+credential ceremony sits LAST; only the secret-dependent steps follow it
+(signed UKI + boot manager via `ukictl build`, PROVISIONAL TPM token sealed
+into keyslot 1, Mechanism B, PCR 11 only, from the UKI's .pcrsig), then
+teardown (unmount + ephemeral-key scrub) and: a direct reboot to disk when
+NVRAM enrollment succeeded — or, when the firmware refused it (key material
+staged to <esp>/alpine-fde-keys), the manual-import instructions, an explicit
+Enter confirmation, and a reboot INTO FIRMWARE SETUP (OsIndications) for the
+manual key import: the first boot unlocks via the provisional token and
 alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
 `alpine-fde finalize` is the guided/crash-resume entry point (Stage 3).
 
@@ -595,6 +663,30 @@ inst_preflight() {
   esac
   if [ "$(inst_bcache)" = "1" ]; then
     require_pkgs make-bcache:bcache-tools
+  fi
+  # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
+  # in-chroot `apk add systemd-boot` transaction SUCCEEDS yet the binary is
+  # absent — so the boot manager is installed by GUARDED FILE COPY of the
+  # loader EFI binary the systemd-boot package ships (inst_bootmgr_copy_line).
+  # PREFLIGHT (fail-closed BEFORE any disk mutation): resolve the loader
+  # binary — live env first (inst_loader_binary), then the systemd-boot apk
+  # fetched from the configured mirror. Only a DECISIVE negative (a readable
+  # package listing carrying NO loader binary) dies; an unprobeable
+  # environment (no apk, unreachable mirror, fixtures) SKIPS with a warn —
+  # never a silent pass — and the plan's copy record re-probes in-chroot
+  # fail-closed.
+  if _if_loader=$(inst_loader_binary "$(inst_loader_probe_prefix)"); then
+    info "install: loader EFI binary present in the live env ($_if_loader)"
+  elif command -v apk >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 &&
+    _if_pkglist=$(apk fetch --quiet --stdout systemd-boot 2>/dev/null | tar -tz 2>/dev/null) &&
+    [ -n "$_if_pkglist" ]; then
+    if printf '%s\n' "$_if_pkglist" | grep -q 'systemd-bootx64\.efi$'; then
+      info "install: the systemd-boot package at $(inst_mirror) ships the loader EFI binary (boot manager installs by guarded file copy)"
+    else
+      die "install: the systemd-boot package at $(inst_mirror) ships NO loader EFI binary (systemd-bootx64.efi) — the boot manager cannot be installed; fix the mirror/package set before installing (real-server blocker #7)"
+    fi
+  else
+    warn "install: loader-binary preflight inconclusive (no apk in the live env, or the systemd-boot package is not fetchable from $(inst_mirror)) — the plan's copy record re-probes in-chroot, fail-closed"
   fi
   # item 26b (real-install failure #3): the apk populate resolves the mirror
   # via the LIVE env resolver and the in-chroot transaction via the TARGET's
@@ -1508,25 +1600,6 @@ cmd_install_main() {
   else
     inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody'
   fi
-  # step 4 (ADR-20 AMENDED, §9.1 step 4): the interactive CREDENTIAL CEREMONY —
-  # three no-echo questions, the only interactive input of the whole lifecycle,
-  # run in-chroot while the ephemeral install key (TEMPORARY keyslot 2) is
-  # still staged to authorize the recovery luksAddKey. NO flag and NO
-  # credential env seam exists (S-24): the prompts run only in the execution
-  # path (these records are eval'd host-side by the chroot runner), every
-  # typed secret is §13-floored with re-prompt until met, and no credential
-  # ever appears in plan text, argv, the environment, or on disk/ESP (I1/I4).
-  # Dry-run/qemu emit the records as inert text. ORDER (item 12 AMENDED,
-  # normative): the recovery passphrase FIRST (1/3); the user password (2/3)
-  # and the release-key passphrase (3/3) DEFAULT to it on bare Enter, each
-  # prompt carrying a reuse hint. The ceremony runs AFTER the platform-key
-  # ceremony (so release.pem exists), BEFORE the provisional seal (so keyslot
-  # 0 is occupied and token_free_slot yields 1). DEVICE CONTRACT (item 27):
-  # the recovery record passes the CONTAINER devices ($_im_containers, the
-  # luksFormat targets) — never the /dev/mapper/* views.
-  inst_plan_run host "inst_ceremony_recovery $_im_lukskey_disp $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
-  inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
-  inst_plan_run host "inst_ceremony_release_key $_im_keys # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400"
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (SetupMode was gate-checked host-side in preflight). The in-chroot
   # ESP mount ($_im_esp_mnt, §8.1 --esp/env ALPINE_FDE_ESP/default /efi) is
@@ -1535,18 +1608,21 @@ cmd_install_main() {
   # to <ESP>/alpine-fde-keys and prints manual-import instructions instead of
   # dying — the install continues.
   inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
-  # ESP layout for the in-chroot build (systemd-boot binaries from the apk
-  # transaction; ukictl build signs them, §9.1 step 5)
-  inst_plan_run guest "bootctl install --esp-path=$_im_esp_mnt --boot-path=$_im_esp_mnt"
-  # step 5: signed boot manager + initial UKI (baseline pending ⇒ the build's
-  # ensure-once enrollment is state-gated OFF — the PROVISIONAL seal below
-  # is the only enrollment of Stage 1)
-  inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde ukictl build'
-  # step 6: PROVISIONAL TPM enrollment (G-C24) — Mechanism B, PCR 11 only,
-  # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
-  # the choreography targets the container devs, never the mapper views)
-  inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_containers)"
-  # step 7: hooks + trigger + first-boot AUTO-FINALIZER (§9.1 step 7;
+  # step 4b (REPLACED + MOVED BEFORE the ceremony — real-server blocker #7:
+  # Alpine ships NO bootctl binary; the retired `bootctl install` record died
+  # "/bin/sh: bootctl: not found" AFTER the credential ceremony had already
+  # run): the boot manager installs by GUARDED FILE COPY of the loader EFI
+  # binary the systemd-boot package ships — probed fail-closed in-chroot — to
+  # BOTH ESP homes: EFI/systemd/systemd-bootx64.efi (canonical; re-signed by
+  # the kernel hook on later transactions, pinned by the audit manifest) and
+  # EFI/BOOT/BOOTX64.EFI (removable-media fallback path — boots on any
+  # firmware with NO NVRAM dependency; the harness fixtures already model
+  # BOOTX64 as the default entry). The in-chroot build signs it (§8.3); the
+  # §6 systemd-boot-update.service mask stays consistent.
+  inst_plan_run guest "$(inst_bootmgr_copy_line $_im_esp_mnt)"
+  # step 7 (MOVED BEFORE the credential ceremony — no ceremony secret; the
+  # staging is also a ukictl-build INPUT — the kernel hook fires on every
+  # build): hooks + trigger + first-boot AUTO-FINALIZER (§9.1 step 7;
   # ADR-13/ADR-19/ADR-20, G-C16 Alpine layout — flat templates copied to
   # their run-parts destinations; the auto-finalizer oneshot ships to
   # /etc/init.d/ and is enabled for the default runlevel. ADR-20 amended
@@ -1564,7 +1640,8 @@ cmd_install_main() {
   # initrd_audit inventories) already pins the /usr/share/alpine-fde spelling.
   inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize"
   inst_plan_run guest 'rc-update add alpine-fde-finalize default'
-  # §8.4: resolve the ESP PARTUUID into fstab + target metadata on the
+  # §8.4 (MOVED BEFORE the ceremony — no ceremony secret): resolve the ESP
+  # PARTUUID into fstab + target metadata on the
   # on-target pending baseline (luks_uuid = primary; member_uuids additive)
   if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid $_im_members_uuids"
@@ -1573,20 +1650,73 @@ cmd_install_main() {
   fi
   # step 8 (G-C25, ADR-20 #4): NO unfinalized banner is written — /etc/motd
   # and /etc/issue stay untouched (the banner path is removed).
-  # step 9 (G-C28): ceremony state machine — `installed` (the last state
-  # write; the provisional-booted middle state is written by the first-boot
-  # service)
+  # step 9 (G-C28, MOVED BEFORE the ceremony — no ceremony secret): ceremony
+  # state machine — `installed` (the last state write; the provisional-booted
+  # middle state is written by the first-boot service)
   inst_plan_run host "inst_state_write installed"
+  # step 4 (ADR-20 AMENDED, §9.1 step 4): the interactive CREDENTIAL CEREMONY —
+  # three no-echo questions, the only interactive input of the whole lifecycle,
+  # run in-chroot while the ephemeral install key (TEMPORARY keyslot 2) is
+  # still staged to authorize the recovery luksAddKey. NO flag and NO
+  # credential env seam exists (S-24): the prompts run only in the execution
+  # path (these records are eval'd host-side by the chroot runner), every
+  # typed secret is §13-floored with re-prompt until met, and no credential
+  # ever appears in plan text, argv, the environment, or on disk/ESP (I1/I4).
+  # Dry-run/qemu emit the records as inert text. ORDER (item 12 AMENDED,
+  # normative): the recovery passphrase FIRST (1/3); the user password (2/3)
+  # and the release-key passphrase (3/3) DEFAULT to it on bare Enter, each
+  # prompt carrying a reuse hint. POSITION (user flow directive): the ceremony
+  # is the LAST interactive section — EVERY mechanical step precedes it
+  # (enrollment, boot-manager copy, hooks, metadata, state above);
+  # only the SECRET-dependent steps follow (the signed UKI + boot-manager
+  # build, which consumes the release-key custody the ceremony just
+  # completed, and the provisional seal). The ceremony runs AFTER the
+  # platform-key ceremony (so release.pem exists), BEFORE the provisional
+  # seal (so keyslot 0 is occupied and token_free_slot yields 1). DEVICE
+  # CONTRACT (item 27): the recovery record passes the CONTAINER devices
+  # ($_im_containers, the luksFormat targets) — never the /dev/mapper/* views.
+  inst_plan_run host "inst_ceremony_recovery $_im_lukskey_disp $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
+  inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
+  inst_plan_run host "inst_ceremony_release_key $_im_keys # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400"
+  # step 5 (SECRET-dependent — stays AFTER the ceremony): signed boot manager
+  # + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is
+  # state-gated OFF — the PROVISIONAL seal below is the only enrollment of
+  # Stage 1)
+  inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde ukictl build'
+  # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
+  # enrollment (G-C24) — Mechanism B, PCR 11 only,
+  # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
+  # the choreography targets the container devs, never the mapper views)
+  inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_containers)"
 
-  # --- 8. teardown + scrub + DIRECT reboot (§9.1 Teardown; G-C26) -----------
-  # The OsIndications bit-0 write / reboot-into-BIOS-setup firmware trip is
-  # RETIRED (ADR-20): the plan ends with unmount, container close, the
-  # explicit ephemeral-key scrub (I1), and a plain reboot to disk.
+  # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
+  # Operationally AFTER the ceremony + secret-dependent steps (the guest build
+  # + seal run inside the chroot this unmounts): unmount, container close, the
+  # explicit ephemeral-key scrub (I1). The FINAL reboot is the plan's tail
+  # (§9 below): a direct reboot to disk when the NVRAM enrollment succeeded —
+  # or, when the firmware refused it, the manual-import instructions, an
+  # explicit Enter confirmation, and a reboot INTO FIRMWARE SETUP
+  # (OsIndications) for the manual key import.
   inst_plan_run host "umount $_im_mnt/dev $_im_mnt/sys $_im_mnt/proc $_im_mnt/sys/firmware/efi/efivars && umount -R $_im_mnt && $_im_close"
   inst_plan_run host "rm -f $_im_lukskey_disp # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
+  # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
+  # The NVRAM enrollment ran BEFORE the ceremony (mechanical); whether the
+  # firmware ACCEPTED it is only knowable at RUN time (generate-time cannot
+  # know machine state — the reset-record idiom): probe PK on the LIVE
+  # efivars (the in-chroot enrollment wrote the bind-mounted live NVRAM).
+  inst_plan_run host "if fw_var_present $(fw_efivars_dir) PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi # enrollment verdict: PK absent = NVRAM enrollment refused — manual key import still pending (deferred)"
+  # DEFERRED path (user directive 3): the manual-import instructions print at
+  # the VERY END of the install — after every mechanical step — naming the
+  # DIRECT-from-ESP import FIRST (user directive 2: the key material is staged
+  # on the internal ESP precisely so the firmware can load it from there).
+  # The explicit Enter confirmation + the firmware-setup reboot follow
+  # (emitted only when the reboot is not suppressed by the CI seam).
+  inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s\n' 'alpine-fde: Secure Boot key material is staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition — the firmware refused NVRAM enrollment; finish the import manually:' '  1. import DIRECTLY from the internal ESP when the firmware key-management UI can browse it (the files are already at $_im_esp_mnt/alpine-fde-keys — this is why they are staged on the EFI partition); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. under Secure Boot key management import, in this order: db.auth (Key Database), kek.auth (Key Exchange Key), pk.auth (Platform Key) — or enroll the matching .esl files from file with KeyTool.efi or the firmware key-management UI' '  4. while in firmware setup, set an administrator (supervisor) password' '  5. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until the keys are imported (that is the design, ADR-20)'; fi # deferred enrollment: manual-import instructions printed LAST (user directive: instructions at the very end; direct-from-ESP import first)"
   if [ "$_im_no_reboot" = "0" ] && [ "${ALPINE_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
-    inst_plan_run host 'reboot # §9.1: direct reboot to disk (ADR-20)'
+    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s' 'alpine-fde: review the manual-import instructions above, then press Enter to reboot into firmware setup (UEFI): ' >&2; IFS= read -r _im_enter || :; fi # deferred enrollment: EXPLICIT user confirmation before the firmware reboot (user directive)"
+    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else fw_osindications_set $(fw_efivars_dir) && reboot; fi # deferred enrollment: next boot enters firmware setup (OsIndications bit 0) for the manual key import"
+    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
   else
     info "install: reboot suppressed (ALPINE_FDE_INSTALL_NO_REBOOT/--no-reboot) — CI seam"
   fi
@@ -1595,7 +1725,11 @@ cmd_install_main() {
     inst_execute_plan
     trap - EXIT
     rm -f "$_im_lukskey" 2>/dev/null
-    printf 'alpine-fde: install complete — direct reboot to disk; first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
+    if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
+      printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
+    else
+      printf 'alpine-fde: install complete — firmware NVRAM enrollment was REFUSED: the Secure Boot key material is staged under %s/alpine-fde-keys; the installer reboots into firmware setup for the manual key import (first boot stays guarded until the keys are imported, ADR-20)\n' "$_im_esp_mnt" >&2
+    fi
   else
     printf 'alpine-fde: dry-run plan complete (%s) — real execution: re-run with --yes (§9.1)\n' "$(inst_runner)" >&2
   fi

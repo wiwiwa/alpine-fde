@@ -80,9 +80,40 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
-    rc-update bootctl btrfs reboot chroot modprobe mdev nslookup; do
+    rc-update btrfs reboot chroot modprobe mdev nslookup; do
     make_stub "$s"
 done
+
+# apk — log argv; serve the fixture systemd-boot apk for the preflight
+# loader-binary probe (apk fetch --stdout; real-server blocker #7), pass
+# everything else
+cat >"$T/stub/apk" <<EOF
+#!/bin/sh
+printf '%s %s\n' "apk" "\$*" >>"\$ALPINE_FDE_TEST_LOG"
+case "\$*" in
+    *fetch*systemd-boot*)
+        [ -n "\$LOADER_APK_FIXTURE" ] && [ -f "\$LOADER_APK_FIXTURE" ] && cat "\$LOADER_APK_FIXTURE"
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$T/stub/apk"
+
+# real-server blocker #7 fixtures: the systemd-boot apk the preflight fetches
+# from the configured mirror — one WITH the loader EFI binary (the common
+# case), one WITHOUT (the decisive-negative preflight die)
+PKGROOT=$T/pkgroot
+mkdir -p "$PKGROOT/usr/share/systemd/bootctl"
+: >"$PKGROOT/usr/share/systemd/bootctl/systemd-bootx64.efi"
+tar -czf "$T/systemd-boot-loader.apk" -C "$PKGROOT" usr
+mkdir -p "$T/pkgroot-noloader/etc"
+: >"$T/pkgroot-noloader/etc/placeholder"
+tar -czf "$T/systemd-boot-noloader.apk" -C "$T/pkgroot-noloader" etc
+export LOADER_APK_FIXTURE=$T/systemd-boot-loader.apk
+# loader-probe PREFIX seam: point the LIVE-env probe at an empty sandbox so
+# the preflight deterministically exercises the mirror apk-fetch branch (the
+# dev/CI host itself may or may not carry a loader binary)
+export ALPINE_FDE_LOADER_PROBE_PREFIX=$T/no-live-loader
 
 # openssl — log argv; deterministic 256-bit hex body (the staged ephemeral
 # install key; G-C23). pkcs8/asn1parse emulate the ADR-18 PKCS#8 envelope so
@@ -293,6 +324,14 @@ assert_contains "physical: coldplug (mdev -s) settles /dev before partitioning" 
 L_MODP=$(first_line_no "$LOG" "modprobe btrfs")
 L_COLDP=$(first_line_no "$LOG" "mdev -s")
 L_HSFD=$(first_line_no "$LOG" "sfdisk")
+# real-server blocker #7 (bootctl): the preflight resolves the loader EFI
+# binary BEFORE any disk mutation — live env first, then the mirror's
+# systemd-boot apk (fixture-served); only a DECISIVE negative dies.
+assert_contains "blocker #7: preflight resolves the loader binary via the mirror systemd-boot apk (decisive positive)" "$OUT" \
+    "ships the loader EFI binary"
+L_LDPROBE=$(first_line_no "$LOG" "apk fetch --quiet --stdout systemd-boot")
+assert_eq "blocker #7: the loader-binary preflight probe runs BEFORE partitioning" "1" \
+    "$(( L_LDPROBE > 0 && L_LDPROBE < L_HSFD ? 1 : 0 ))"
 assert_eq "physical: order — modprobe BEFORE coldplug BEFORE sfdisk" "1" \
     "$(( L_MODP > 0 && L_MODP < L_COLDP && L_COLDP < L_HSFD ? 1 : 0 ))"
 assert_eq "defect 5: EVERY executed luksFormat ran --batch-mode (zero interactive dangerous-action prompts)" "0" \
@@ -343,19 +382,29 @@ assert_eq "ceremony (3/3): release.pem on target IS the encrypted form" "1" \
     "$(grep -qc 'fake-pbes2-encrypted-ADR18' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem" && echo 1 || echo 0)"
 assert_eq "ceremony (3/3): encrypted release.pem locked 0400" "400" \
     "$(stat -c '%a' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem")"
-# ceremony order: AFTER the platform keys, BEFORE NVRAM enrollment (§9.1);
-# item 12: recovery passphrase asked FIRST
+# ceremony order: AFTER the platform keys (release.pem must exist) and AFTER
+# every MECHANICAL step (user flow directive: the credential ceremony is the
+# LAST interactive section); item 12: recovery passphrase asked FIRST
 O_KEYGEN=$(first_line_no "$OUT" "provision stage1 --mode in-chroot")
 O_CERU=$(first_line_no "$OUT" "host: inst_ceremony_user_password")
 O_CERR=$(first_line_no "$OUT" "host: inst_ceremony_recovery")
 O_CERK=$(first_line_no "$OUT" "host: inst_ceremony_release_key")
 O_ENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
+O_COPY=$(first_line_no "$OUT" "EFI/BOOT/BOOTX64.EFI")
+O_HOOKS=$(first_line_no "$OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
+O_STATE=$(first_line_no "$OUT" "host: inst_state_write installed")
 assert_eq "order: platform keys BEFORE the ceremony (release.pem must exist)" "1" \
     "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERR ? 1 : 0 ))"
 assert_eq "order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
     "$(( O_CERR > 0 && O_CERR < O_CERU && O_CERU < O_CERK ? 1 : 0 ))"
-assert_eq "order: ceremony BEFORE NVRAM enrollment" "1" \
-    "$(( O_CERK > 0 && O_CERK < O_ENROLL ? 1 : 0 ))"
+assert_eq "order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \
+    "$(( O_ENROLL > 0 && O_ENROLL < O_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): boot-manager guarded file copy BEFORE the credential ceremony" "1" \
+    "$(( O_COPY > 0 && O_COPY < O_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a ukictl-build input)" "1" \
+    "$(( O_HOOKS > 0 && O_HOOKS < O_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): install-state write BEFORE the credential ceremony (mechanical)" "1" \
+    "$(( O_STATE > 0 && O_STATE < O_CERR ? 1 : 0 ))"
 
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
 ROOTFS_UUID=$(grep -oE -- '-U [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
@@ -455,10 +504,25 @@ assert_eq "install-state: state=installed" "installed" \
 L_STATE=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: inst_state_write installed" | cut -d: -f1)
 assert_eq "G-C28: inst_state_write installed is a host plan record" "1" \
     "$(( L_STATE > 0 ? 1 : 0 ))"
-# G-C26: NO OsIndications write anywhere (firmware-trip flow retired)
-assert_eq "G-C26: efivars dir holds NO OsIndications variable" "0" \
+# G-C26 (AMENDED by the user's flow directives): the OsIndications firmware
+# trip is BACK — but ONLY on the DEFERRED-enrollment path, as a
+# runtime-conditional TAIL record. The default fixture run is DEFERRED (the
+# in-chroot enrollment is stubbed, so PK is absent on the live efivars);
+# under the CI seam (NO_REBOOT) the confirm + trip + reboot records are not
+# emitted — the verdict probe + the deferred instructions are.
+assert_eq "G-C26: efivars dir holds NO OsIndications variable under the CI seam" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
-assert_not_contains "G-C26: NO OsIndications step in the run" "$OUT" "fw_osindications_set"
+assert_contains "deferred enrollment: the verdict probe record probes PK on the live efivars" "$OUT" \
+    "if fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi"
+assert_contains "deferred enrollment: the manual-import instructions print at the VERY END (EXECUTED output, not the record echo)" "$OUT" \
+    "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys"
+assert_contains "deferred enrollment: instructions name the DIRECT-from-ESP import FIRST (user directive 2)" "$OUT" \
+    "import DIRECTLY from the internal ESP"
+assert_not_contains "CI seam: NO Enter-confirmation record under NO_REBOOT" "$OUT" \
+    "press Enter to reboot into firmware setup"
+assert_not_contains "CI seam: NO firmware-setup trip record under NO_REBOOT" "$OUT" \
+    "fw_osindications_set"
+assert_not_contains "CI seam: NO reboot record under NO_REBOOT" "$OUT" "then reboot"
 
 # =============================================================================
 # §9.1 in-chroot sequence: order + argv as observed through the chroot stub
@@ -487,8 +551,19 @@ assert_eq "defer-custody: NO release-key prompt before the ceremony (exactly ONE
     "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
 assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
     "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
-assert_contains "ESP layout for the in-chroot build" "$LOG" \
-    "bootctl install --esp-path=/efi --boot-path=/efi"
+# real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
+# the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
+# ships NO bootctl binary; the retired record died "/bin/sh: bootctl: not
+# found" POST-ceremony)
+COPY_LOG=$(grep -m1 'BOOTX64.EFI' "$ALPINE_FDE_TEST_LOG")
+assert_contains "blocker #7: boot manager installed by guarded file copy (loader probed fail-closed in-chroot)" "$COPY_LOG" \
+    'for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi'
+assert_contains "blocker #7: the copy record targets BOTH ESP homes (canonical + removable-media fallback)" "$COPY_LOG" \
+    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+assert_contains "blocker #7: the copy record dies fail-closed when no loader binary exists" "$COPY_LOG" \
+    'no systemd-boot loader EFI binary found in-chroot'
+assert_eq "blocker #7: ZERO bootctl invocations anywhere in the run" "0" \
+    "$(grep -Ec 'bootctl( |$)' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
 assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
     "/opt/alpine-fde/bin/alpine-fde ukictl build"
 # G-C24: provisional seal guest line after the build
@@ -537,6 +612,12 @@ assert_eq "order: build before the provisional seal (.pcrsig source)" "1" \
     "$(( L_BUILD < L_SEAL ? 1 : 0 ))"
 assert_eq "order: teardown before the ephemeral-key scrub (G-C26/I1)" "1" \
     "$(( L_UMNTR > 0 && L_SCRUB > L_UMNTR ? 1 : 0 ))"
+# user directive 3: the deferred instructions print at the VERY END — after
+# the scrub; the verdict probe precedes them
+O_PROBE=$(first_line_no "$OUT" "INST_SB_ENROLLED=1")
+O_INSTR=$(first_line_no "$OUT" "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys")
+assert_eq "order (user directive 3): scrub BEFORE the enrollment verdict probe BEFORE the deferred instructions" "1" \
+    "$(( L_SCRUB > 0 && O_PROBE > L_SCRUB && O_INSTR > O_PROBE ? 1 : 0 ))"
 
 # =============================================================================
 # item 26b (real-install failure #3): DNS preflight + target resolv.conf seed.
@@ -583,6 +664,39 @@ else
     assert_eq "26ext: no live keyring -> warn branch executed, target keyring NOT faked" "1" \
         "$([ ! -e "$MNT_ETC/apk/keys" ] && grep -qF 'alpine-fde: warn: no keyring on the live env' <<<"$OUT" && echo 1 || echo 0)"
 fi
+# =============================================================================
+# real-server blocker #7 (bootctl): loader-binary preflight FAILS CLOSED —
+# with a mirror systemd-boot package that carries NO loader EFI binary the
+# install dies 64 BEFORE any disk mutation (the retired bootctl record used
+# to die POST-ceremony: "/bin/sh: bootctl: not found").
+# =============================================================================
+LOADER_APK_FIXTURE=$T/systemd-boot-noloader.apk
+: >"$ALPINE_FDE_TEST_LOG"
+NL_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
+NL_RC=$?
+LOADER_APK_FIXTURE=$T/systemd-boot-loader.apk
+assert_eq "blocker #7: loader-less systemd-boot package -> fail-closed 64 (preflight, before partitioning)" "64" "$NL_RC"
+assert_contains "blocker #7: the error names the decisive negative" "$NL_OUT" \
+    "ships NO loader EFI binary"
+assert_contains "blocker #7: the error says what to fix" "$NL_OUT" \
+    "fix the mirror/package set before installing"
+assert_eq "blocker #7: nothing executed but the mirror fetch probe" "1" \
+    "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
+assert_contains "blocker #7: that one command IS the package fetch probe" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "apk fetch --quiet --stdout systemd-boot"
+
+# live-env positive: with the probe PREFIX seam seeded, the live env itself
+# satisfies the loader preflight (no mirror fetch needed)
+mkdir -p "$T/live-loader/usr/lib/systemd/boot/efi"
+: >"$T/live-loader/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+ALPINE_FDE_LOADER_PROBE_PREFIX=$T/live-loader
+LV_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
+LV_RC=$?
+ALPINE_FDE_LOADER_PROBE_PREFIX=$T/no-live-loader
+assert_eq "blocker #7: loader present in the live env -> preflight passes" "0" "$LV_RC"
+assert_contains "blocker #7: the live-env probe reports the resolved loader path" "$LV_OUT" \
+    "loader EFI binary present in the live env"
+
 # G-C23/I1: the ephemeral key does NOT survive the run
 assert_eq "G-C23: ephemeral key-file scrubbed at teardown" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ephkey.*' 2>/dev/null | wc -l)"
@@ -910,10 +1024,12 @@ assert_contains "26b: the error says what to fix (configure networking first)" "
 DNS_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
 DNS_RC=$?
 assert_eq "26b: repeat (fresh log): unresolvable mirror -> fail-closed 64" "64" "$DNS_RC"
-assert_eq "26b: repeat (fresh log): the ONLY stubbed command that ran is the nslookup probe" "1" \
+assert_eq "26b: repeat (fresh log): the ONLY stubbed commands are the two preflight probes (mirror DNS + blocker-#7 loader fetch), ZERO mutations" "2" \
     "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
-assert_contains "26b: repeat (fresh log): that one command IS the mirror probe" \
+assert_contains "26b: repeat (fresh log): the mirror probe ran" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "nslookup dl-cdn.alpinelinux.org"
+assert_contains "26b: repeat (fresh log): the loader-binary fetch probe ran (blocker #7 preflight)" \
+    "$(cat "$ALPINE_FDE_TEST_LOG")" "apk fetch --quiet --stdout systemd-boot"
 # restore the succeeding probe
 make_stub nslookup
 
@@ -975,6 +1091,64 @@ run_install
 assert_eq "keydir: default run (no --keydir) rc 0" "0" "$RC"
 assert_contains "keydir: default run keeps the in-chroot ceremony" "$(cat "$ALPINE_FDE_TEST_LOG")" \
     "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys"
+
+# =============================================================================
+# ESP-fallback tail EXECUTION (user directives 1+3): with the reboot seam
+# DISABLED —
+#   deferred path (PK absent on the live efivars): the manual-import
+#     instructions print LAST, an EXPLICIT Enter confirmation is waited for,
+#     OsIndications bit 0 is SET, and the installer reboots INTO FIRMWARE
+#     SETUP (no direct disk reboot);
+#   success path (PK present): DIRECT reboot to disk — no instructions, no
+#     confirmation, no firmware trip.
+# =============================================================================
+ANSWERS5=$T/answers-confirm
+cat >"$ANSWERS5" <<'EOF'
+Fin4l-Rec0very-X9k2-!qmwjpz
+Fin4l-Rec0very-X9k2-!qmwjpz
+
+
+EOF
+rm -f "$ALPINE_FDE_EFIVARS_DIR"/PK-* "$ALPINE_FDE_EFIVARS_DIR"/OsIndications-*
+: >"$ALPINE_FDE_TEST_LOG"
+rm -rf "$ALPINE_FDE_INSTALL_MNT"
+ALPINE_FDE_INSTALL_NO_REBOOT=0
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS5" 2>&1)
+RC=$?
+assert_eq "deferred tail: install rc 0 (reboot seam disabled)" "0" "$RC"
+assert_contains "deferred tail: EXPLICIT Enter confirmation before the firmware reboot" "$OUT" \
+    "press Enter to reboot into firmware setup"
+assert_eq "deferred tail: OsIndications bit 0 SET for the firmware-setup reboot" "1" \
+    "$([ -f "$ALPINE_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL" ] && echo 1 || echo 0)"
+assert_eq "deferred tail: the reboot executed (into firmware setup, after the trip)" "1" \
+    "$(grep -c '^reboot ' "$ALPINE_FDE_TEST_LOG")"
+assert_contains "deferred tail: the instructions EXECUTED (printed last, line-anchored output)" "$OUT" \
+    "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys"
+assert_contains "deferred tail: the final message reports the refused enrollment" "$OUT" \
+    "firmware NVRAM enrollment was REFUSED"
+assert_not_contains "deferred tail: NO direct-disk reboot message on the deferred path" "$OUT" \
+    "direct reboot to disk (NVRAM enrollment succeeded)"
+
+# success path: PK enrolled (probe sees it) -> direct reboot, no trip
+mkvar PK 1
+: >"$ALPINE_FDE_TEST_LOG"
+rm -rf "$ALPINE_FDE_INSTALL_MNT"
+rm -f "$ALPINE_FDE_EFIVARS_DIR"/OsIndications-*
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS5" 2>&1)
+RC=$?
+assert_eq "success tail: install rc 0" "0" "$RC"
+assert_eq "success tail: NO OsIndications write (direct reboot, no firmware trip)" "0" \
+    "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
+assert_eq "success tail: the DIRECT reboot executed" "1" \
+    "$(grep -c '^reboot ' "$ALPINE_FDE_TEST_LOG")"
+assert_contains "success tail: final message reports the direct reboot" "$OUT" \
+    "direct reboot to disk (NVRAM enrollment succeeded)"
+assert_eq "success tail: NO deferred-instruction EXECUTION output (echo-side record text may appear; the branch must not run)" "0" \
+    "$(grep -c '^alpine-fde: Secure Boot key material is staged under' <<<"$OUT")"
+assert_eq "success tail: NO Enter-confirmation EXECUTION output" "0" \
+    "$(grep -c '^alpine-fde: review the manual-import instructions above' <<<"$OUT")"
+rm -f "$ALPINE_FDE_EFIVARS_DIR"/PK-*
+ALPINE_FDE_INSTALL_NO_REBOOT=1
 
 # =============================================================================
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort
