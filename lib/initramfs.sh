@@ -435,6 +435,19 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
         _ia_path=${_ia_line##* }
         [ -n "$_ia_path" ] || continue
         _ia_base=${_ia_path##*/}
+        # boot-lane finding #13: package tools are denied as EXECUTABLES by
+        # PATH (bin//sbin/) — mkinitfs's base layout creates an EMPTY etc/apk
+        # DIRECTORY in every initramfs (its init's own scratch dir), and a
+        # bare directory entry is not a tool. The basename-only deny would
+        # have read the directory as a package tool.
+        case $_ia_path in
+            bin/apk | bin/apk-* | sbin/apk | sbin/apk-* \
+                | */bin/apk | */bin/apk-* | */sbin/apk | */sbin/apk-* \
+                | */bin/apt | */bin/apt-* | */bin/dpkg | */bin/dpkg-* \
+                | bin/apt | bin/apt-* | bin/dpkg | bin/dpkg-*)
+                printf 'denied package tool: %s\n' "$_ia_path"
+                continue ;;
+        esac
         case $_ia_base in
             gcc | gcc-* | cc | clang | clang-* | tcc | make | gmake \
                 | ld | ld.gold | ld.bfd \
@@ -443,6 +456,10 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
                 printf 'denied compiler: %s\n' "$_ia_path"
                 ;;
             apt | apt-* | dpkg | dpkg-*)
+                printf 'denied package tool: %s\n' "$_ia_path"
+                ;;
+||||||| parent of bf928d3 (fix: initrd audit denies package tools by PATH, not basename (GREEN))
+            apk | apk-* | apt | apt-* | dpkg | dpkg-*)
                 printf 'denied package tool: %s\n' "$_ia_path"
                 ;;
             bash | zsh | dash | ksh | csh | tcsh | fish)
