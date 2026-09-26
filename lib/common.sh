@@ -245,6 +245,15 @@ require_pkgs() {
   # an accidental 127 from invoking an absent manager (ADR-15: loud failures)
   if command -v apk >/dev/null 2>&1; then
     _SP_PKGS_BACKEND=apk
+    # boot-lane finding #6 (s23 attempt 6): the live ISO's SYSTEM repositories
+    # are the install media's apks/ alone — a missing tool must be fetched
+    # from the OPERATOR'S mirror (ALPINE_FDE_MIRROR), or a fully provisioned
+    # mirror is useless the moment a preflight tool is absent from the media
+    # ("util-linux (no such package): required by: world[util-linux]").
+    _SP_APK_REPO=''
+    if [ -n "${ALPINE_FDE_MIRROR:-}" ]; then
+      _SP_APK_REPO="--repository $ALPINE_FDE_MIRROR"
+    fi
     if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
       info "apk update ..."
       apk update || die \
@@ -254,7 +263,7 @@ require_pkgs() {
     # shellcheck disable=SC2086  # package names never contain spaces
     for _sp_pkg in $_sp_pkgs; do
       info "installing missing package: $_sp_pkg"
-      apk add "$_sp_pkg" || \
+      apk add $_SP_APK_REPO "$_sp_pkg" || \
         die \
           "apk add $_sp_pkg failed — install manually: apk add$_sp_pkgs"
     done
