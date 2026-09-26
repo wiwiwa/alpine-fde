@@ -216,4 +216,119 @@ assert_eq "fresh-shell: artifact is encrypted (standalone keys.sh)" "0" \
 assert_eq "fresh-shell: no-argv usage still dies 64" "64" \
     "$( ( . "$REPO/lib/keys.sh" >/dev/null 2>&1; ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release >/dev/null 2>&1 ); echo $? )"
 
+
+# =============================================================================
+# real-server blocker #9a: keys_unlock consumes the CEREMONY-STAGED CACHE
+# (the 0600 tmpfs seam file `alpine-fde-release-pass.*` written by the
+# install's credential ceremony 3/3, blocker #8) BEFORE any prompt. The live
+# run asked the operator to re-type the release-key passphrase even though the
+# ceremony had just collected it ("asking password again after setting
+# password is not reasonable" - user directive). Contract pinned here:
+#   * order: ALPINE_FDE_KEY_PASSPHRASE env (RESOLVED-4) FIRST, then the staged
+#     cache, then the interactive no-echo prompt - never a prompt while a
+#     usable cache exists
+#   * cache sanity gate: only a regular, NON-EMPTY file with NO group/other
+#     permission bits (0600 as staged; 0400 etc. also accepted) is consumed -
+#     world/group-readable or empty candidates are warned about and SKIPPED,
+#     never used
+#   * a consumed-but-wrong cache passphrase is the distinct loud
+#     wrong-passphrase die
+#   * non-interactive stdin (no tty) with no env AND no usable cache still
+#     dies fail-closed with the actionable message (never hangs)
+# =============================================================================
+_cache_keydir=$T/keys-unlock-cache
+new_plaintext_keydir "$_cache_keydir"
+ALPINE_FDE_KEY_PASSPHRASE=$PASS_OK keys_encrypt_release "$_cache_keydir" >/dev/null 2>&1
+assert_eq "unlock-cache fixture: keydir release.pem is ADR-18 encrypted" "0" \
+    "$(call_rc keys_is_encrypted "$_cache_keydir/release.pem")"
+
+# stage_cache MODE CONTENT - write a ceremony-staged seam file under
+# ALPINE_FDE_TMPDIR; the path lands in $_STAGED_PF (nothing on stdout)
+_stage_n=0
+stage_cache() {
+    _stage_n=$((_stage_n + 1))
+    _STAGED_PF=$ALPINE_FDE_TMPDIR/alpine-fde-release-pass.stage$_stage_n
+    printf '%s' "$2" >"$_STAGED_PF"
+    chmod "$1" "$_STAGED_PF"
+}
+rm_cache() { rm -f "$ALPINE_FDE_TMPDIR"/alpine-fde-release-pass.* 2>/dev/null || :; }
+# unlock_rc_notty KEYDIR - keys_unlock with NO env passphrase and stdin
+# detached from any tty (the guest-record execution shape: a prompt must be
+# unreachable); prints the rc for assert_eq
+unlock_rc_notty() {
+    ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_unlock "$1" ) >/dev/null 2>&1 </dev/null
+    echo $?
+}
+
+# --- the headline pin: valid staged cache, NO env, NO tty -> unlock SUCCEEDS ---
+rm_cache
+stage_cache 600 "$PASS_OK"
+_cache_pf=$_STAGED_PF
+_unlock_rc=0
+_unlock_out=$( ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_unlock "$_cache_keydir" ) \
+    2>"$T/unlock-cache.err" </dev/null) || _unlock_rc=$?
+assert_eq "unlock: staged 0600 cache + no env + no tty -> rc 0 (no re-prompt, blocker 9a)" "0" "$_unlock_rc"
+case "$_unlock_out" in
+    "$ALPINE_FDE_TMPDIR"/alpine-fde-unlock.*) : ;;
+    *)
+        assert_eq "unlock: printed the unlocked tmpfs path" \
+            "an alpine-fde-unlock.* path under $ALPINE_FDE_TMPDIR" "${_unlock_out:-<empty>}"
+        ;;
+esac
+openssl pkcs8 -in "$_unlock_out" -passin "pass:$PASS_OK" -out /dev/null 2>/dev/null
+assert_eq "unlock: the unlocked copy decrypts with the CACHED passphrase" "0" "$?"
+keys_scrub "$_unlock_out"
+assert_contains "unlock: cache consumption is logged" "$(cat "$T/unlock-cache.err")" "alpine-fde-release-pass"
+# the cache file is CONSUMED, not destroyed: the install owns its scrub (I1 teardown)
+assert_eq "unlock: staged cache file left for the install teardown to scrub" "0" \
+    "$([ -f "$_cache_pf" ] && echo 0 || echo 1)"
+assert_eq "unlock: cache file content intact (no partial read)" "$PASS_OK" "$(cat "$_cache_pf")"
+rm_cache
+
+# --- env still wins: a WRONG env over a RIGHT cache -> wrong-passphrase die ---
+stage_cache 600 "$PASS_OK"
+assert_eq "unlock: env checked FIRST (wrong env beats right cache -> 64)" "64" \
+    "$(ALPINE_FDE_KEY_PASSPHRASE=definitely-wrong-pass unlock_rc_notty "$_cache_keydir")"
+rm_cache
+
+# --- sanity gate: world-readable (644) cache is refused, never consumed ------
+stage_cache 644 "$PASS_OK"
+assert_eq "unlock: world-readable staged cache -> 64 (refused, no tty fallback)" "64" \
+    "$(unlock_rc_notty "$_cache_keydir")"
+rm_cache
+
+# --- sanity gate: group-readable (640) cache refused --------------------------
+stage_cache 640 "$PASS_OK"
+assert_eq "unlock: group-readable staged cache -> 64 (refused)" "64" \
+    "$(unlock_rc_notty "$_cache_keydir")"
+rm_cache
+
+# --- sanity gate: 0600 but EMPTY cache refused --------------------------------
+stage_cache 600 ""
+assert_eq "unlock: empty staged cache -> 64 (non-empty gate)" "64" \
+    "$(unlock_rc_notty "$_cache_keydir")"
+rm_cache
+
+# --- bad candidates are SKIPPED while a valid one is still consumed -----------
+stage_cache 644 "$PASS_OK" # decoy: unsafe mode
+stage_cache 600 "$PASS_OK" # the real ceremony cache
+assert_eq "unlock: unsafe decoy skipped, valid 0600 cache consumed (no tty)" "0" \
+    "$(unlock_rc_notty "$_cache_keydir")"
+rm_cache
+
+# --- a consumed-but-wrong cache passphrase dies with the distinct message -----
+stage_cache 600 'right-shape-wrong-secret-xyz'
+assert_eq "unlock: wrong cached passphrase -> 64" "64" "$(unlock_rc_notty "$_cache_keydir")"
+assert_contains "unlock: wrong cached passphrase -> distinct wrong-passphrase message" \
+    "$( ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_unlock "$_cache_keydir" ) 2>&1 </dev/null)" \
+    "wrong passphrase"
+rm_cache
+
+# --- baseline: no env, NO cache, no tty -> fail-closed 64 (never hangs) -------
+assert_eq "unlock: no env + no cache + no tty -> 64 (fail-closed, unchanged)" "64" \
+    "$(unlock_rc_notty "$_cache_keydir")"
+assert_contains "unlock: no-credential message still actionable" \
+    "$( ( unset ALPINE_FDE_KEY_PASSPHRASE; keys_unlock "$_cache_keydir" ) 2>&1 </dev/null)" \
+    "passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively"
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
