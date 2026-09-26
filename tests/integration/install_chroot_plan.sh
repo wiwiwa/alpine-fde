@@ -1386,4 +1386,27 @@ assert_eq "cmdline extra: appended at PLAN time, whitespace-normalized (PCR-11 s
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 unset ALPINE_FDE_CMDLINE_EXTRA
 
+# =============================================================================
+# boot-lane finding #7 (attempt 7): hosts-based mirror names. The live ISO has
+# NO dnsd applet and the probe's nslookup is hosts-blind; the real consumer
+# (apk's fetcher over musl getaddrinfo) DOES honor /etc/hosts. Two contract
+# changes pinned here at execution level:
+#   * the preflight accepts a hosts-file match for the mirror host (loud
+#     record; nslookup failing but /etc/hosts carrying the name passes)
+#   * the plan seeds the TARGET's /etc/hosts from the live env alongside
+#     resolv.conf (item 26b) so the IN-CHROOT apk transaction resolves the
+#     same hosts-based name
+# =============================================================================
+mkdir -p "$T/stubfail"
+printf '#!/bin/sh\nexit 1\n' >"$T/stubfail/nslookup"
+chmod +x "$T/stubfail/nslookup"
+PATH="$T/stubfail:$PATH" ALPINE_FDE_MIRROR=http://desktop-0:8123/v3.24/main run_install </dev/null
+assert_eq "hosts-based mirror: failing nslookup + /etc/hosts entry -> install proceeds (rc 0)" \
+    "0" "$RC"
+assert_contains "hosts-based mirror: the probe names the hosts mechanism" "$OUT" \
+    "via /etc/hosts"
+assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_ETC/hosts"
+assert_contains "item 26b: the seeded hosts table carries the live entries" \
+    "$(cat "$MNT_ETC/hosts")" "desktop-0"
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
