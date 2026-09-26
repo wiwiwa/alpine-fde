@@ -35,26 +35,38 @@
 #       - all watchdogs/budgets (marked CALIBRATE below).
 #
 # ============================================================================
-# WHY the mirror rides a READ-ONLY VFAT DISK served by a GUEST-LOCAL httpd
-# (the documented decision, tests/lib/local-mirror.sh header):
+# WHY the mirror is served by the HOST loopback over qemu slirp (PIVOTED
+# 2026-09-26, boot lane; was: a read-only vfat disk + a GUEST-LOCAL httpd):
+#   * the guest-local design's premise is FALSE on the pinned set: the
+#     alpine-virt ISO's busybox carries NO httpd applet (httpd lives in
+#     busybox-extras — absent from the ISO's apks/ repo AND from the pinned
+#     mirror closure). Observed live: "-sh: httpd: not found" at the P1 leg
+#     (attempt 2, run ...-1790420269). No server package exists in either
+#     pinned set, and staging one would change the mirror pins.
 #   * file:// / bind-mount repositories CANNOT work under the chroot runner:
 #     the in-chroot `apk add` resolves repository paths against the TARGET
 #     root, and the installer binds only /proc /sys /dev (+ efivars) — there
 #     is no seam to bind the mirror into <mnt>. Any local-mirror design that
-#     needs a path inside the target root would require lib/ changes.
-#   * the guest-local busybox httpd over loopback needs NO slirp networking,
-#     no hostname DNS, and no ~1 GB RAM copy: the mirror disk mounts
-#     read-only at /srv/mirror and `busybox httpd -p 127.0.0.1:8123 -h
-#     /srv/mirror` serves BOTH apk phases (the live-env populate and the
-#     in-chroot transaction share the same kernel network namespace).
-#   * ALPINE_FDE_MIRROR=http://mirror.fde.internal:8123/<release>/main
+#     needs a path inside the target root would require lib/ changes. So the
+#     live-env populate and the in-chroot transaction MUST meet over HTTP
+#     one way or another.
+#   * the pivot uses the fixture's OWN optional seam — mirror_serve_start
+#     (tests/lib/local-mirror.sh, HOST loopback httpd: busybox if present,
+#     else python3 http.server) — plus a qemu slirp netdev. The guest
+#     addresses the host as 10.0.2.2 (slirp's host IP); NO external network
+#     is involved at any point.
+#   * ALPINE_FDE_MIRROR=http://mirror.fde.internal:8123/mirror/<release>/main
 #     (inst_repo_lines derives the community twin automatically). The name is
-#     /etc/hosts-backed + dnsd-answered, which reconciles the installer's
-#     DNS preflight with the network-free design: inst_preflight extracts the
-#     mirror HOST and nslookups it — mirror.fde.internal resolves in-guest
-#     from our own stub resolver, no upstream DNS ever consulted.
-#   * the tooling tree rides the SAME mirror disk (alpine-fde.tar.gz), so the
-#     guest needs NO network at all for the whole install.
+#     /etc/hosts-backed (-> 10.0.2.2) + dnsd-answered, which reconciles the
+#     installer's DNS preflight with the network-free design: inst_preflight
+#     extracts the mirror HOST and nslookups it — mirror.fde.internal
+#     resolves in-guest from our own stub resolver, no upstream DNS ever
+#     consulted. The in-chroot apk transaction resolves through the seeded
+#     resolv.conf -> the same dnsd (one kernel, one network namespace).
+#   * the tooling tree rides the SAME server (docroot/tooling), fetched with
+#     busybox wget; the docroot is a HARD-LINK tree of the pinned cache
+#     (cp -al, no data copy) under the run dir, so the shared cache is never
+#     touched and the manifest re-verification leg keeps its meaning.
 #
 # ============================================================================
 # CHOREOGRAPHY (per stage; every stage boundary sentinel/marker-corroborated
@@ -70,18 +82,22 @@
 #                        20 GiB target disk (the installer partitions it —
 #                        NO fixture LUKS/btrfs anywhere), a blank ESP-slot
 #                        placeholder (the positional qemu contract), a blank
-#                        export vfat, and the MIRROR DISK: vfat built with
-#                        mkfs.vfat+mtools from tests/.cache/local-mirror/
-#                        <release> (MANIFEST.sha256 + APKINDEXes + apks +
-#                        alpine-fde.tar.gz tooling tarball).
+#                        export vfat, and the MIRROR DOCROOT (host-side):
+#                        a HARD-LINK tree of tests/.cache/local-mirror/
+#                        <release> + the tooling tarball, served on
+#                        127.0.0.1:$MIRROR_PORT by mirror_serve_start
+#                        (MANIFEST.sha256 + APKINDEXes + apks + tooling).
 #   boot A (ISO)         qemu DIRECT KERNEL BOOT: q35 + OVMF(secboot) + the
 #                        ISO's own vmlinuz-virt/initramfs-virt (-kernel/
 #                        -initrd/-append console=ttyS0,115200) + the ISO as
-#                        AHCI CD (modloop source) + target=vdb, mirror=vdc,
-#                        export=vdd, swtpm tpm-crb. In-guest legs:
-#                        P1 resolver+httpd+hosts -> P2 mount mirror +
-#                        GUEST-SIDE `sha256sum -c MANIFEST.sha256` (the
-#                        mirror is tamper-evident end-to-end) -> P3 tooling
+#                        AHCI CD (modloop source) + slirp (guest 10.0.2.15,
+#                        host 10.0.2.2) + target=vdb, export=vdc, swtpm
+#                        tpm-crb. In-guest legs:
+#                        P1 slirp route + resolver+hosts -> P2 wget the
+#                        manifest + BOTH APKINDEXes and `sha256sum -c` them
+#                        (the mirror is tamper-evident end-to-end; the whole
+#                        closure is hash-checked by apk against the signed
+#                        index at install time) -> P3 tooling fetch +
 #                        extract -> P4 THE REAL INSTALLER:
 #                            ./bin/alpine-fde install --disk /dev/vdb
 #                              --user admin --yes --no-reboot
@@ -188,7 +204,12 @@ S23_USER='admin'
 DISK_MIB=$((20 * 1024))    # the real install sizes its own ESP + LUKS inside
 MIRROR_PORT=8123
 MIRROR_HOSTNAME="mirror.fde.internal"
-MIRROR_URL="http://$MIRROR_HOSTNAME:$MIRROR_PORT/$(mirror_release)/main"
+# the slirp host IP the guest addresses the host-side server at (NO external
+# network: slirp routes 10.0.2.2:<port> to the host's loopback)
+SLIRP_HOST_IP="10.0.2.2"
+SLIRP_GUEST_IP="10.0.2.15"
+# served under docroot/mirror (a hard-link tree of the pinned cache)
+MIRROR_URL="http://$MIRROR_HOSTNAME:$MIRROR_PORT/mirror/$(mirror_release)/main"
 CACHE_DIR="$TESTS/e2e/.cache/pristine-install-e2e"
 
 # Deep-check budgets (CALIBRATE — authored-untested; TCG-dominated).
@@ -268,6 +289,7 @@ _qemu_alive() {
 RUN="$TESTS/e2e/.runs/s23-install-e2e-$(date +%s)"
 mkdir -p "$RUN"
 CONSOLE="$RUN/console.log"
+DOCROOT="$RUN/docroot"   # the HOST-side mirror+tooling docroot (see the WHY header)
 
 # Sibling scenarios prune .runs to the 2 newest dirs GLOBALLY — keep THIS run
 # dir the newest while the (very long) boots run.
@@ -287,7 +309,7 @@ _exit_cleanup() {
         [[ -n "$d" ]] && swtpm_stop "$d" 2>/dev/null
     done
     kill "$REFRESHER" 2>/dev/null
-    mirror_serve_stop "$RUN/docroot" 2>/dev/null || true
+    mirror_serve_stop "$DOCROOT" 2>/dev/null || true
 }
 trap _exit_cleanup EXIT
 _exit_on_int() { _exit_cleanup; exit 130; }
@@ -356,20 +378,27 @@ run_stage export-drive 120 bash -c "truncate -s 64M '$RUN/export.img' && mkfs.vf
 # contract, inst_tooling_copy_cmd)
 run_stage tooling-tar 600 tar -C "$REPO" -czf "$RUN/alpine-fde.tar.gz" bin lib hooks docs
 
-# THE MIRROR DISK: vfat, populated with mtools (the esp_make idiom; no root
-# needed). Layout: <release>/<component>/x86_64/{APKINDEX.tar.gz,*.apk} +
-# MANIFEST.sha256 + mirror.json + alpine-fde.tar.gz. ~1 GB.
-build_mirror_disk() {
-    local img="$1"
-    truncate -s 1400M "$img"
-    mkfs.vfat -F 32 "$img" >/dev/null
-    mmd -i "$img" "::alpine-fde-media"
-    mcopy -i "$img" -s "$MIRROR_DIR/$(mirror_release)" "::alpine-fde-media/$(mirror_release)"
-    mcopy -i "$img" "$MIRROR_DIR/MANIFEST.sha256" "$MIRROR_DIR/mirror.json" "::alpine-fde-media/"
-    mcopy -i "$img" "$RUN/alpine-fde.tar.gz" "::alpine-fde-media/"
+# THE MIRROR DOCROOT (host-side; served by mirror_serve_start — see the WHY
+# header): a HARD-LINK tree of the pinned cache (cp -al — no data copy, the
+# shared cache is never written) + the tooling tarball. The guest reaches it
+# as http://10.0.2.2:$MIRROR_PORT/... via slirp, and as
+# http://mirror.fde.internal:$MIRROR_PORT/mirror/... through /etc/hosts+dnsd.
+build_docroot() {
+    local docroot="$1" rel
+    rel=$(mirror_release)
+    rm -rf "$docroot"
+    # the manifest pins paths RELATIVE to <cache>/<release>/ — serve the
+    # release dir one level below docroot/mirror so the URLs line up
+    mkdir -p "$docroot/mirror/$rel" "$docroot/tooling"
+    cp -al "$MIRROR_DIR/." "$docroot/mirror/$rel/"
+    cp "$RUN/alpine-fde.tar.gz" "$docroot/tooling/alpine-fde.tar.gz"
 }
-run_stage mirror-disk 1800 build_mirror_disk "$RUN/mirror.img"
-assert_file_exists "fixture: mirror disk image" "$RUN/mirror.img"
+run_stage mirror-docroot 600 build_docroot "$DOCROOT"
+run_stage mirror-serve 60 mirror_serve_start "$MIRROR_PORT" "$DOCROOT"
+_rearm_trap
+assert_file_exists "fixture: mirror docroot manifest" "$DOCROOT/mirror/$(mirror_release)/MANIFEST.sha256"
+# the server must answer before any guest leg runs
+run_stage mirror-selfcheck 60 bash -c "curl -fsS -o /dev/null 'http://127.0.0.1:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256'"
 
 # ============================================================================
 # STAGE 2 — BOOT A: the Alpine ISO live env (qemu DIRECT KERNEL BOOT from the
@@ -419,6 +448,10 @@ _qemu_run_iso() {
     args+=(-drive "file=$(iso_path),media=cdrom,readonly=on")
     args+=(-kernel "$RUN/iso/boot/vmlinuz-virt")
     args+=(-initrd "$RUN/iso/boot/initramfs-virt")
+    # the slirp netdev: the guest reaches the HOST-side mirror server at
+    # 10.0.2.2:$MIRROR_PORT (see the WHY header — the guest-local httpd is
+    # unachievable on the pinned ISO); NO external network is involved
+    args+=(-netdev user,id=mirror0 -device virtio-net-pci,netdev=mirror0)
     # Alpine's own virt-ISO append + our serial console (the kernel console is
     # what makes the WHOLE install leg sentinel-corroborable)
     args+=(-append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0,115200")
@@ -430,7 +463,7 @@ _qemu_run_iso() {
 }
 
 run_stage qemu_run-iso 120 _qemu_run_iso "$A" "$RUN/esp-blank.img" "$RUN/disk.img" \
-    "$RUN/vars.fd" "$RUN/tpm" "$RUN/mirror.img" "$RUN/export.img"
+    "$RUN/vars.fd" "$RUN/tpm" "" "$RUN/export.img"
 _qemu_alive "$A"
 _rearm_trap
 
@@ -441,31 +474,33 @@ wait_console "$A" "login:" 300
 feed_line "$A/serial.sock" "root"     # the live ISO logs root in with NO password
 wait_console "$A" "localhost:~#" 120
 
-# --- P1: guest-local serving + the DNS-preflight reconciliation --------------
-# /etc/hosts + dnsd make mirror.fde.internal (and the preflight's nslookup of
-# it) resolve WITHOUT any external network; busybox httpd serves the mirror
-# from the read-only disk on loopback.
+# --- P1: the slirp route + the DNS-preflight reconciliation ------------------
+# The mirror name resolves WITHOUT any external network: /etc/hosts maps it
+# to 10.0.2.2 (slirp's host IP = the host loopback where mirror_serve_start
+# listens), dnsd answers the installer's nslookup preflight, and the
+# in-chroot transaction reuses the same resolver through the seeded
+# resolv.conf. busybox wget fetches the mirror + tooling over that route.
 feed_line "$A/serial.sock" \
-    "printf '127.0.0.1 localhost\\n127.0.0.1 $MIRROR_HOSTNAME\\n' > /etc/hosts && printf 'nameserver 127.0.0.1\\n' > /etc/resolv.conf && echo P1-\$((40+1))-HOSTS"
+    "ip link set eth0 up && ip addr add $SLIRP_GUEST_IP/24 dev eth0 && ip route add default via $SLIRP_HOST_IP && printf '127.0.0.1 localhost\\n$SLIRP_HOST_IP $MIRROR_HOSTNAME\\n' > /etc/hosts && printf 'nameserver 127.0.0.1\\n' > /etc/resolv.conf && echo P1-\$((40+1))-HOSTS"
 wait_console "$A" "P1-41-HOSTS" 120
 feed_line "$A/serial.sock" \
     "dnsd -c /etc/hosts 2>/dev/null || dnsd /etc/hosts 2>/dev/null & sleep 1; nslookup $MIRROR_HOSTNAME >/dev/null 2>&1 && echo P1-\$((40+2))-DNS-OK || echo P1-\$((40+2))-DNS-FAIL"
 wait_console "$A" "P1-42-DNS-" 120
 feed_line "$A/serial.sock" \
-    "mkdir -p /srv/mirror && mount -t vfat /dev/vdc /srv/mirror && echo P1-\$((40+3))-MNT-OK"
-wait_console "$A" "P1-43-MNT-OK" 120
-feed_line "$A/serial.sock" \
-    "httpd -p 127.0.0.1:$MIRROR_PORT -h /srv/mirror && echo P1-\$((40+4))-HTTPD-OK"
-wait_console "$A" "P1-44-HTTPD-OK" 120
+    "wget -q -O /dev/null http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256 && echo P1-\$((40+3))-FETCH-OK || echo P1-\$((40+3))-FETCH-FAIL"
+wait_console "$A" "P1-43-FETCH-" 120
 
 # --- P2: the guest re-verifies the mirror manifest (tamper-evident e2e) ------
+# over the wire: fetch the manifest + BOTH pinned APKINDEXes, check the
+# pinned hashes (the full closure is hash-checked by apk itself on install —
+# every .apk is verified against this signed index)
 feed_line "$A/serial.sock" \
-    "cd /srv/mirror/alpine-fde-media && sha256sum -c MANIFEST.sha256 >/tmp/mirror-check.txt 2>&1 && echo P2-\$((40+5))-MANIFEST-OK || tail -3 /tmp/mirror-check.txt"
-wait_console "$A" "P2-45-MANIFEST-OK" 600
+    "mkdir -p /tmp/mchk/main/x86_64 /tmp/mchk/community/x86_64 && cd /tmp/mchk && wget -q http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256 && wget -q -O main/x86_64/APKINDEX.tar.gz http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/main/x86_64/APKINDEX.tar.gz && wget -q -O community/x86_64/APKINDEX.tar.gz http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/community/x86_64/APKINDEX.tar.gz && grep APKINDEX MANIFEST.sha256 > check.txt && sha256sum -c check.txt >/dev/null 2>&1 && echo P2-\$((40+5))-MANIFEST-OK || echo P2-\$((40+5))-MANIFEST-FAIL"
+wait_console "$A" "P2-45-MANIFEST-" 300
 
 # --- P3: the tooling tree -----------------------------------------------------
 feed_line "$A/serial.sock" \
-    "mkdir -p /root/alpine-fde && tar -xzf /srv/mirror/alpine-fde-media/alpine-fde.tar.gz -C /root/alpine-fde && test -x /root/alpine-fde/bin/alpine-fde && echo P3-\$((40+6))-TOOLING-OK"
+    "mkdir -p /root/alpine-fde && wget -q -O /root/tooling.tar.gz http://$SLIRP_HOST_IP:$MIRROR_PORT/tooling/alpine-fde.tar.gz && tar -xzf /root/tooling.tar.gz -C /root/alpine-fde && test -x /root/alpine-fde/bin/alpine-fde && echo P3-\$((40+6))-TOOLING-OK"
 wait_console "$A" "P3-46-TOOLING-OK" 300
 
 # --- P4: THE REAL INSTALLER + the credential ceremony feed --------------------
@@ -536,7 +571,7 @@ assert_eq "install: the REAL installer exited rc 0" "0" "$INSTALL_RC"
 
 # --- P5: controlled poweroff (the boot B handoff) ------------------------------
 feed_line "$A/serial.sock" \
-    "sync && umount /srv/mirror 2>/dev/null; poweroff -f; echo P5-\$((40+8))-BYE"
+    "sync; poweroff -f; echo P5-\$((40+8))-BYE"
 run_stage qemu_wait-a "$((QEMU_TIMEOUT + 120))" qemu_wait "$A" "$QEMU_TIMEOUT"
 CURRENT_QEMU_DIR=""
 
@@ -753,7 +788,7 @@ else
 fi
 
 # keep run dirs small
-rm -rf "$RUN/iso" "$RUN/mirror.img" "$RUN/esp-scan" "$RUN/alpine-fde.tar.gz"
+rm -rf "$RUN/iso" "$RUN/esp-scan" "$RUN/alpine-fde.tar.gz"
 
 _exit_cleanup
 trap - EXIT INT TERM
