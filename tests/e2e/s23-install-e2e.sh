@@ -572,6 +572,13 @@ _await_rc() {
 }
 INSTALL_RC=$(_await_rc "$A")
 assert_eq "install: the REAL installer exited rc 0" "0" "$INSTALL_RC"
+if [ "$INSTALL_RC" != "0" ]; then
+    echo "s23: the REAL installer failed (rc=$INSTALL_RC) — aborting: boot B cannot proceed; feeding poweroff so the guest exits"
+    feed_line "$A/serial.sock" "poweroff -f" 2>/dev/null
+    sleep 5
+    qemu_kill "$A" 2>/dev/null
+    exit 1
+fi
 
 # --- P5: controlled poweroff (the boot B handoff) ------------------------------
 feed_line "$A/serial.sock" \
