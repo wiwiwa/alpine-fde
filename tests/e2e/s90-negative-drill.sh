@@ -37,7 +37,7 @@
 # UNSEALED, NEVER an emergency shell, on any leg.
 #
 # Artifact-level verdicts of the absorbed scenarios are pinned ZERO-BOOT by
-# the wt-bootmin host suites (tests/unit/s03_stale_enrollment_host.sh,
+# the wt-bootmin host suites (tests/integration/s03_stale_enrollment_host.sh,
 # s13_token_tamper_host.sh, s18_foreign_pcrsig_host.sh) — the drill boots only
 # what a console can still teach. Full disposition table:
 # tests/unit/s90_negative_drill_contract.sh (COVERAGE_TABLE) — in particular

@@ -385,7 +385,7 @@ assert_ne "swtpm: swtpm_stop really stopped the stack" "0" "$RC"
 # multi-drive rows s19–s22 (LITERAL table rows, per run-e2e.sh's registry
 # notes). s90 (the unified fail-closed drill) is appended at runtime, not
 # literal; s18's artifacts are pinned zero-boot by
-# tests/unit/s18_foreign_pcrsig_host.sh (its row went with the drill
+# tests/integration/s18_foreign_pcrsig_host.sh (its row went with the drill
 # consolidation).
 # The pinned invariants are (a) the per-id coverage below, (b) no duplicate
 # rows and (c) the post-removal 10-row literal floor.

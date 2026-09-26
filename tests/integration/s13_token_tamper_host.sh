@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/s13_token_tamper_host.sh — ZERO-BOOT host-side migration of the
+# tests/integration/s13_token_tamper_host.sh — ZERO-BOOT host-side migration of the
 # offline negatives from tests/e2e/s13-token-tamper.sh (boot-min queue 30,
 # move 1): the §10/§12 token-tamper family (invariant I3 — "Token JSON is
 # untrusted: tampering with it can only break unseal, never forge it"),

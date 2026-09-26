@@ -73,7 +73,7 @@ The bootstrap chain now follows §12 S-00/S-00b exactly (wave of 2026-09-17):
   the scenario): the refusal/fallback chain is driven via the PCR 7 drift
   vector instead: refusal → bounded fallback (3 strikes) → PROMPT-FAILED →
   poweroff, never emergency.
-- **`s18-foreign-pcrsig.sh`** (RETIRED 2026-09-26 — absorbed by the `s90` drill's `leg5-foreign-sig` + `tests/unit/s18_foreign_pcrsig_host.sh`) — §6.1 signing negative control, foreign key
+- **`s18-foreign-pcrsig.sh`** (RETIRED 2026-09-26 — absorbed by the `s90` drill's `leg5-foreign-sig` + `tests/integration/s18_foreign_pcrsig_host.sh`) — §6.1 signing negative control, foreign key
   (G-T5): the payload `.pcrsig` carries the SAME (correct!) pol entries
   re-signed by a FOREIGN RSA key; the outer sbsign signature is ours so the
   firmware boots it (SB cannot see the payload drive). Host-side, the

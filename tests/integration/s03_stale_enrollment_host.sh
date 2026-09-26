@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/s03_stale_enrollment_host.sh — ZERO-BOOT host-side migration of
+# tests/integration/s03_stale_enrollment_host.sh — ZERO-BOOT host-side migration of
 # the offline negatives from tests/e2e/s03-stale-enrollment.sh (boot-min queue
 # 30, move 1): every assertion here runs against REAL artifacts (a real
 # file-backed LUKS2 container, a real swtpm via the fixture TCTI seam, real

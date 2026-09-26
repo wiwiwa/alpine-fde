@@ -38,9 +38,9 @@ source "$TESTS/lib/assert.sh"
 SCENARIO="$TESTS/e2e/s90-negative-drill.sh"
 RUNNER="$TESTS/run-e2e.sh"
 PAR_CONTRACT="$TESTS/unit/run_e2e_parallel_contract.sh"
-HOST_S03="$TESTS/unit/s03_stale_enrollment_host.sh"
-HOST_S13="$TESTS/unit/s13_token_tamper_host.sh"
-HOST_S18="$TESTS/unit/s18_foreign_pcrsig_host.sh"
+HOST_S03="$TESTS/integration/s03_stale_enrollment_host.sh"
+HOST_S13="$TESTS/integration/s13_token_tamper_host.sh"
+HOST_S18="$TESTS/integration/s18_foreign_pcrsig_host.sh"
 
 # --- part 0: artifacts present and parseable --------------------------------------
 assert_file_exists "s90 scenario present (tests/e2e/s90-negative-drill.sh)" "$SCENARIO"

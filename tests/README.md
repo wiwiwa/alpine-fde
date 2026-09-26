@@ -609,7 +609,7 @@ ONE shared enrolled base:
 
 **Absorption bookkeeping:** every absorbed assertion is either in the drill
 (leg-pinned), covered ZERO-BOOT by a wt-bootmin host suite
-(`tests/unit/s03_stale_enrollment_host.sh`, `s13_token_tamper_host.sh`,
+(`tests/integration/s03_stale_enrollment_host.sh`, `s13_token_tamper_host.sh`,
 `s18_foreign_pcrsig_host.sh` — the artifact-level verdicts: G-B6 gate
 refusals, token-tamper primitives, foreign-signer recipe controls), or
 DROPPED WITH THE REASON NAMED. The disposition table lives in

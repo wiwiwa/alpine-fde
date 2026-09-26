@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/unit/s18_foreign_pcrsig_host.sh — ZERO-BOOT host-side migration of the
+# tests/integration/s18_foreign_pcrsig_host.sh — ZERO-BOOT host-side migration of the
 # offline negatives from tests/e2e/s18-foreign-pcrsig.sh (boot-min queue 30,
 # move 1): the §6.1 signing negative controls (G-T5/G-E14, G-B4-11), replicated
 # against REAL artifacts (release-key-signed .pcrsig JSON in the systemd-measure
