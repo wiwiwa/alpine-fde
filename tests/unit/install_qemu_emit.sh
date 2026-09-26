@@ -313,6 +313,10 @@ assert_eq "blocker #9: the emitted build line NEVER references the host-tmpfs se
 # LIVE ISO kernel)
 assert_eq "guest: ukictl build (§9.1 step 5) — with the blocker #8/#9/#11 keydir export + in-target passphrase seam + derived target kver" "1" \
     "$(grep -c 'ukictl build "\$kv"' "$SCRIPT")"
+# blocker #12 follow-up: the emitted record exports ALPINE_FDE_ROOT=/ —
+# in-chroot the TARGET IS / (kernel-reality context for the initrd audit)
+assert_eq "blocker #12: the emitted build record exports ALPINE_FDE_ROOT=/" "1" \
+    "$(grep -c 'export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
     "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
@@ -351,6 +355,11 @@ assert_eq "item 27 lint (extended): the emitted seal/token choreography NEVER re
 S_KEYGEN=$(grep -n 'provision stage1 --mode in-chroot' "$SCRIPT" | cut -d: -f1)
 S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
 S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
+# blocker #12 ORDER GUARD: the features.d module-append staging precedes the
+# build record in the emitted script (mkinitfs must see the resolved paths)
+S_APPEND=$(grep -n '>> .*etc/mkinitfs/features.d/alpine-fde.files' "$SCRIPT" | head -1 | cut -d: -f1)
+assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
+    "$(( S_APPEND > 0 && S_APPEND < S_BUILD ? 1 : 0 ))"
 S_COPY=$(grep -n 'BOOTX64.EFI' "$SCRIPT" | head -1 | cut -d: -f1)
 assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL ? 1 : 0 ))"
 assert_eq "emitted order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \

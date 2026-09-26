@@ -261,6 +261,10 @@ assert_contains "plan: build record passes the derived kver to ukictl build (blo
     'ukictl build "$kv"'
 assert_contains "plan: build record fails closed when the target has NO module tree (blocker #11)" "$INS_OUT" \
     'no kernel module tree under /lib/modules'
+# blocker #12 follow-up: the record exports ALPINE_FDE_ROOT=/ — in-chroot the
+# TARGET IS / (kernel-reality context for the initrd audit)
+assert_contains "plan: build record exports ALPINE_FDE_ROOT=/ (blocker #12)" "$INS_OUT" \
+    'export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
 # real-server blocker #10: the conf persists the resolved TOPOLOGY (BCACHE=1
 # covered both bcache AND bcache-multi, which made crypttab_tpm2_check's
@@ -372,6 +376,11 @@ I_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
 I_COPY=$(line_no "$INS_OUT" "BOOTX64.EFI")
 I_HOOKS=$(line_no "$INS_OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
 I_BUILD=$(line_no "$INS_OUT" "ukictl build")
+# blocker #12 ORDER GUARD: the features.d module-append staging precedes the
+# build record in the plan (mkinitfs must see the resolved module paths)
+I_APPEND=$(line_no "$INS_OUT" '>> /mnt/etc/mkinitfs/features.d/alpine-fde.files')
+assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
+    "$(( I_APPEND > 0 && I_APPEND < I_BUILD ? 1 : 0 ))"
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
 I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
 # anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the

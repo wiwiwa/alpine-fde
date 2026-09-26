@@ -609,6 +609,18 @@ assert_contains "blocker #11: the build record PASSES the derived kver to ukictl
     'ukictl build "$kv"'
 assert_contains "blocker #11: the build record fails closed with an actionable message when the target has NO modules" "$BLD_LINE" \
     'no kernel module tree under /lib/modules'
+# blocker #12 follow-up: the record exports ALPINE_FDE_ROOT=/ — in-chroot the
+# TARGET IS /, and without it the initrd audit has no kernel-reality context
+# (its verdicts degraded to bare "missing" on the live run even after the
+# suffix-tolerance fix)
+assert_contains "blocker #12: the build record exports ALPINE_FDE_ROOT=/ (kernel-reality context for the audit)" "$BLD_LINE" \
+    'export ALPINE_FDE_ROOT=/'
+# ORDER GUARD: the features.d module-append staging (step 7 record) precedes
+# the build record — mkinitfs must see the resolved module paths when it runs
+O_APPEND=$(first_line_no "$OUT" "etc/mkinitfs/features.d/alpine-fde.files")
+O_BLD=$(first_line_no "$OUT" "guest: export ALPINE_FDE_ROOT=/")
+assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
+    "$(( O_APPEND > 0 && O_BLD > O_APPEND ? 1 : 0 ))"
 assert_eq "blocker #9: the build record NEVER references the host-tmpfs seam (invisible guest-side through the plain /dev bind)" "0" \
     "$(grep -c '/dev/shm/alpine-fde-release-pass' <<<"$BLD_LINE")"
 # blocker #9 EXECUTION-LEVEL: the ceremony really stages the seam file into
@@ -686,6 +698,7 @@ mkdir -p "$T/fakebin"
 cat >"$T/fakebin/alpine-fde" <<EOF
 #!/bin/sh
 printf 'keydir=%s\n' "\${ALPINE_FDE_KEYDIR-UNSET}" >"$FAKE_OUT"
+printf 'rootenv=%s\n' "\${ALPINE_FDE_ROOT-UNSET}" >>"$FAKE_OUT"
 printf 'pass=%s\n' "\${ALPINE_FDE_KEY_PASSPHRASE-UNSET}" >>"$FAKE_OUT"
 printf 'argv=%s\n' "\$*" >>"$FAKE_OUT"
 EOF
@@ -699,6 +712,8 @@ BLD_CMD=${BLD_CMD//\/lib\/modules/$ALPINE_FDE_INSTALL_MNT/lib/modules}
 sh -c "$BLD_CMD"
 assert_contains "blocker #8: the build sees the release-key dir via the environment" "$(cat "$FAKE_OUT")" \
     "keydir=/etc/alpine-fde/keys"
+assert_contains "blocker #12: the build sees ALPINE_FDE_ROOT=/ via the environment (kernel-reality context)" "$(cat "$FAKE_OUT")" \
+    "rootenv=/"
 assert_contains "blocker #8: the build decrypts via the passphrase from the environment (staged seam file)" "$(cat "$FAKE_OUT")" \
     "pass=Fin4l-Rec0very-X9k2-!qmwjpz"
 assert_contains "blocker #11: the derived TARGET kver reaches the build's argv (newest /lib/modules dir)" "$(cat "$FAKE_OUT")" \
