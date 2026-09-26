@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # tests/unit/pre_upgrade_ext4_skip.sh — `alpine-fde pre-upgrade` (§8.1, ADR-13):
 # Btrfs is the DEFAULT root (ADR-13, §4), so a btrfs root must produce a real
-# READ-ONLY snapshot — `btrfs subvolume snapshot -r /@ /.snapshots/<UTC-ts>`
-# (source per the mounted subvol layout; target under the @snapshots mount,
-# §9.1) — rc 0, naming the created snapshot. A missing /.snapshots is a loud
-# 64 with the layout hint (not a silent rc 3). ext4 and unknown roots keep the
-# graceful rc-0 skip (message unchanged).
+# READ-ONLY snapshot — `btrfs subvolume snapshot -r <src> /.snapshots/<UTC-ts>`
+# (source = the root's MOUNT POINT per the queue-30 finding — the subvolume is
+# snapshotted at the path where it is actually visible; a root absent from
+# mountinfo falls back to the root itself, which is what this suite's tmp root
+# exercises; target under the @snapshots mount, §9.1) — rc 0, naming the
+# created snapshot. A missing /.snapshots is a loud 64 with the layout hint
+# (not a silent rc 3). ext4 and unknown roots keep the graceful rc-0 skip
+# (message unchanged). Source RESOLUTION is pinned hermetically by
+# tests/unit/pre_upgrade_snapshot_src.sh.
 # Seams: ALPINE_FDE_ROOT_FSTYPE overrides `stat -f` detection for tests;
 # `btrfs` is a PATH stub recording argv and materializing the snapshot dir.
 
@@ -60,8 +64,8 @@ assert_contains "btrfs argv: read-only flag present" "$ARGV" " -r "
 TS=$(cd "$ROOT/.snapshots" && ls)
 assert_eq "timestamp shape: UTC YYYYMMDDTHHMMSSZ" "ok" \
     "$(printf '%s' "$TS" | grep -qE '^[0-9]{8}T[0-9]{6}Z$' && echo ok || echo bad)"
-assert_eq "btrfs argv: exact (subvolume snapshot -r /@ <root>/.snapshots/<ts>)" \
-    "subvolume snapshot -r /@ $ROOT/.snapshots/$TS" "$ARGV"
+assert_eq "btrfs argv: exact (subvolume snapshot -r <mount-point> <root>/.snapshots/<ts>)" \
+    "subvolume snapshot -r $ROOT $ROOT/.snapshots/$TS" "$ARGV"
 assert_contains "output names the created snapshot path" "$PU_OUT" "$ROOT/.snapshots/$TS"
 assert_file_exists "snapshot materialized under /.snapshots/<ts>" "$ROOT/.snapshots/$TS"
 

@@ -165,19 +165,26 @@ cmd_ukictl_build_main() {
         # booted target); else fail closed LISTING the available dirs.
         _uk_mods="${ALPINE_FDE_ROOT:-}/lib/modules"
         _uk_cands=''
+        _uk_n=0
         for _uk_d in "$_uk_mods"/*/; do
             [ -d "$_uk_d" ] || continue # unmatched glob / non-dir: skipped
             _uk_b=${_uk_d%/} # the glob's trailing slash would empty ##*/
             _uk_cands="$_uk_cands ${_uk_b##*/}"
+            _uk_n=$(( _uk_n + 1 )) # POSIX sh has no ${var//pat} replacement (SC3060)
         done
-        _uk_n=${_uk_cands//[^ ]/}
         _uk_run=$(uname -r 2>/dev/null)
-        if [ ${#_uk_n} -eq 1 ]; then
+        if [ "$_uk_n" -eq 1 ]; then
             _uk_kver=${_uk_cands# }
             _uk_kver=${_uk_kver% }
         elif [ -n "$_uk_run" ] && [ -d "${_uk_mods}/$_uk_run" ]; then
             _uk_kver=$_uk_run
         else
+            # ADR-8: this exit happens BEFORE the cleanup trap (and its marker
+            # write) is installed, so persist the marker here explicitly —
+            # `status` must see the failed build context
+            _ukictl_marker_write "${ALPINE_FDE_ROOT:-}/etc/alpine-fde/build-failed" \
+                "${ALPINE_FDE_ROOT:-}/etc/alpine-fde" "${_uk_kver:-}" \
+                "no kver given and no resolvable kernel module tree under $_uk_mods (real-server blocker #11)"
             err "ukictl build: no kver given and no resolvable kernel module tree under $_uk_mods (found:${_uk_cands:- none}; the running kernel '${_uk_run:-unknown}' is not installed there) — pass the target kernel version explicitly (real-server blocker #11)"
             exit 64
         fi

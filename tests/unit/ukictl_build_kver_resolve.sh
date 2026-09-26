@@ -20,6 +20,13 @@ REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
+# file-existence assert (unit/lib.sh has no helper; do NOT mix in
+# tests/lib/assert.sh — two `finish` implementations collide)
+assert_file_exists() { # <desc> <path>
+    test -e "$2"
+    assert_rc "$1" 0 $?
+}
+
 KEYDIR="$REPO/fixtures/keys"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
