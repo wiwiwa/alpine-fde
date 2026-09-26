@@ -18,6 +18,12 @@
 #   R5  bcache BACKING devices are whole-disk: no partition-suffix device
 #       (`[0-9]p[0-9]`) and no backing arg that is a digit/pN suffix of a
 #       device the script itself references (defect 4)
+#   R6  ZERO bootctl invocations anywhere in the script (real-server blocker
+#       #7: Alpine ships NO bootctl binary — the boot manager installs by
+#       guarded file copy; command-position match only, the loader package
+#       path /usr/share/systemd/bootctl/ legitimately contains the word)
+#   R7  every BOOTX64.EFI boot-manager copy is GUARDED: the record must carry
+#       the in-chroot loader probe (fail-closed), never a bare cp
 # Every pin EXERCISES the lint: the GREEN pins lint the captured artifacts;
 # the RED pins apply single-point mutations reproducing the pre-7619960 shapes
 # to a scratch copy and require the lint to flag the exact rule
@@ -69,7 +75,7 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
-    bootctl lsblk btrfs cryptsetup reboot make-bcache bcache-super-show; do
+    lsblk btrfs cryptsetup reboot make-bcache bcache-super-show; do
     make_stub "$s"
 done
 # openssl — deterministic 256-bit hex body (the staged ephemeral key, G-C23)
@@ -269,6 +275,28 @@ EOF
         done
     done < <(grep -oE -- 'make-bcache -B [^ ]+' "$f" | awk '{print $3}')
 
+    # --- R6 (real-server blocker #7): ZERO bootctl invocations anywhere —
+    #         Alpine ships NO bootctl binary; the boot manager installs by
+    #         guarded file copy (R7). Command-position match only: the
+    #         loader's own package path (/usr/share/systemd/bootctl/)
+    #         legitimately contains the word.
+    local r6pat='(^|[;&|][[:space:]]*)bootctl( |$)|bootctl install'
+    if grep -En -- "$r6pat" "$f" >/dev/null 2>&1; then
+        violate R6 "bootctl invocation present (Alpine ships no bootctl binary — blocker #7): $(grep -Enm1 -- "$r6pat" "$f")"
+    fi
+
+    # --- R7 (blocker #7): every BOOTX64.EFI boot-manager copy is GUARDED —
+    #         the record must carry the in-chroot loader probe (fail-closed
+    #         when no loader binary is installed by the package), never a
+    #         bare cp onto the firmware fallback path.
+    while IFS= read -r line; do
+        case $line in *BOOTX64.EFI*cp\ *|*cp\ *BOOTX64.EFI*) ;; *) continue ;; esac
+        case $line in
+        *'for p in /usr/share/systemd/bootctl/systemd-bootx64.efi'*) : ;;
+        *) violate R7 "unguarded BOOTX64.EFI copy (no fail-closed loader probe on the record): $line" ;;
+        esac
+    done <"$f"
+
     printf '%s' "$LINT_DIAG"
     return "$((bad > 0 ? 1 : 0))"
 }
@@ -365,6 +393,20 @@ lint_must_fail "$MUTATED" "R5:" "R5 RED: backing as /dev/sda1 (whole /dev/sda re
 mutated "$SCRIPT_BCACHE" "s|$DISKB|/dev/nvme0n1|g"
 DIAG=$(lint_guest_script "$MUTATED")
 assert_eq "R5 control: whole-disk /dev/nvme0n1 backing lints clean (rc 0)" "0" "$?"
+
+# R6 (blocker #7): reinject the retired bootctl invocation
+mutated "$SCRIPT_BCACHE" '/ldr=./a\
+bootctl install --esp-path=/efi --boot-path=/efi'
+lint_must_fail "$MUTATED" "R6:" "R6 RED: a bootctl invocation in the emitted script is flagged"
+
+# R6 negative control: the loader's own PACKAGE PATH may contain the word —
+# the guarded copy record itself must NOT trip R6
+DIAG=$(lint_guest_script "$SCRIPT_SINGLE")
+assert_eq "R6 control: the guarded copy record (package path contains the word) lints clean" "0" "$?"
+
+# R7 (blocker #7): replace the guarded copy with a BARE cp (no loader probe)
+mutated "$SCRIPT_BCACHE" 's|ldr=.*guarded file copy.*|cp /usr/share/systemd/bootctl/systemd-bootx64.efi /efi/EFI/BOOT/BOOTX64.EFI # bare unguarded copy|'
+lint_must_fail "$MUTATED" "R7:" "R7 RED: an unguarded BOOTX64.EFI copy (no fail-closed loader probe) is flagged"
 
 # --- soundness: the lint never mutates the artifact, and both captured
 #     artifacts still parse (the lint is read-only over the emitted script)
