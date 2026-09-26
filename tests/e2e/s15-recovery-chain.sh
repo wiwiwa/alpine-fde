@@ -86,9 +86,9 @@
 # "the drift is PCR 7 only" scoping. The unsealing legs (b0, b2, b4) carry
 # the signed prediction assert.
 #
-# Superseded scenarios (s15, s17) STAY in the tree and in the registry —
-# status `retired` (2026-09-25 retirement sweep): NOT in the default
-# selection, still invocable by name. This pipeline is a CHAIN member and
+# Superseded scenarios (s15, s17) are REMOVED (2026-09-26 removal sweep:
+# files AND registry rows gone) — this pipeline is their only home. This
+# pipeline is a CHAIN member and
 # runs in the runner's SEQUENTIAL hoist phase (s00 -> s00b -> s01c -> s15c),
 # see tests/run-e2e.sh.
 

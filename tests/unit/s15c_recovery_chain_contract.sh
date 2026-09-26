@@ -24,9 +24,8 @@
 #   5. COVERAGE TABLE — every assertion made by the absorbed scenarios
 #      (s15-pcr7-drift.sh, s17-tpm-clear.sh) is absorbed here or explicitly
 #      re-mapped (remaps named in the row). NONE silently dropped. The
-#      superseded scenarios STAY in the tree and in the registry (status
-#      `retired` since the 2026-09-25 retirement sweep: NOT in the default
-#      selection, still invocable by name).
+#      superseded scenarios are REMOVED since the 2026-09-26 removal sweep
+#      (files AND registry rows gone) — this pipeline is their only home.
 #   6. Runner wiring: s15c is a CHAIN MEMBER — the -j hoist list is
 #      s00 -> s00b -> s01c -> s15c, s15c is a state consumer
 #      (_STATE_CONSUMERS), and the registry resolves id s15c to
@@ -162,17 +161,15 @@ assert_contains "wiring: chain-phase order puts s15c after s01c" "$RN" "s00b -> 
 assert_contains "wiring: usage header names the s15c chain member" "$RN" "s15-recovery-chain.sh"
 assert_contains "parallel contract: s15c phase pin present" "$(cat "$PAR_CONTRACT")" "s15c"
 
-# --- part 4: absorbed scenarios retained -------------------------------------------
-# (retired 2026-09-25: the pipelines absorbed their boots — the files stay in
-# the tree and the ids stay registered, invocable by name, but the retired
-# rows are NOT in the default selection; see tests/run-e2e.sh REGISTRY)
-assert_file_exists "s15 stays in the tree (retired: absorbed by s15c)" \
-    "$TESTS/e2e/s15-pcr7-drift.sh"
-assert_file_exists "s17 stays in the tree (retired: absorbed by s15c)" \
-    "$TESTS/e2e/s17-tpm-clear.sh"
-assert_contains "s15 stays registered (retired — absent from the default selection)" "$RN" \
+# --- part 4: absorbed scenarios removed --------------------------------------------
+# (removed 2026-09-26: the pipelines absorbed their boots — the files are
+# DELETED from the tree and the ids are UNREGISTERED; naming one is a loud
+# `unknown` row, never a silent skip; see tests/run-e2e.sh REGISTRY)
+assert_rc "s15 file removed (absorbed by s15c)" 1 test -e "$TESTS/e2e/s15-pcr7-drift.sh"
+assert_rc "s17 file removed (absorbed by s15c)" 1 test -e "$TESTS/e2e/s17-tpm-clear.sh"
+assert_not_contains "s15 row removed (unregistered — naming it is `unknown`)" "$RN" \
     "s15	s15-pcr7-drift.sh"
-assert_contains "s17 stays registered (retired — absent from the default selection)" "$RN" \
+assert_not_contains "s17 row removed (unregistered — naming it is `unknown`)" "$RN" \
     "s17	s17-tpm-clear.sh"
 
 # --- summary -----------------------------------------------------------------------

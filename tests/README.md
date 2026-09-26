@@ -13,8 +13,8 @@ tests/run-unit.sh           # runs tests/unit/*.sh in parallel (default: nproc),
 tests/run-unit.sh -j 2      # explicit concurrency (or ALPINE_FDE_TEST_JOBS)
 tests/run-unit.sh 'pattern' # subset by filename glob, e.g. the swtpm smoke test
 tests/run-e2e.sh            # harness self-test, then the default scenario set (see below)
-tests/run-e2e.sh s01        # one scenario, incl. retired ids (runs the self-test first either way)
-tests/run-e2e.sh -j 2 s01 s05   # up to 2 scenarios concurrently (see below)
+tests/run-e2e.sh s05        # one scenario (runs the self-test first either way)
+tests/run-e2e.sh -j 2 s03 s05   # up to 2 scenarios concurrently (see below)
 ```
 
 `run-unit.sh` aggregates `ok` / `not ok` lines from each unit test; a test file
@@ -42,10 +42,10 @@ Runner contract details:
   order — currently 20 rows (the state chain `s00 -> s00b -> s01c -> s15c`,
   the standalone negative scenarios, and the `s19`-`s22` multi-drive rows).
   The six pipeline-absorbed scenarios (`s01`, `s02`, `s14`, `s15`, `s16`,
-  `s17`) carry status `retired`: they stay registered, their files stay in
-  the tree, and they still run when named explicitly — only the no-args
-  default skips them. Their invariants are covered by the merged pipelines
-  (see "Retirement of the absorbed scenarios" below).
+  `s17`) are REMOVED: their files are deleted from `tests/e2e/` AND their
+  registry rows are gone, so they cannot be selected or invoked — naming one
+  is a loud `unknown` row. Their invariants are covered by the merged
+  pipelines (see "Retirement of the absorbed scenarios" below).
 - **Guest shape**: every guest is `-machine q35 -m 2048 -smp $ALPINE_FDE_GUEST_SMP` (default 2): the in-guest phases under test (systemd, finalize, recovery drills) are multi-process, and a single vCPU serializes them on a multi-core host. Set `ALPINE_FDE_GUEST_SMP=1` for the historical shape.
 - **Accelerator (KVM autodetect)**: `tests/lib/qemu.sh` picks the QEMU
   accelerator from `ALPINE_FDE_ACCEL` (`kvm` | `tcg` | `auto`, default
@@ -330,17 +330,15 @@ plus the full `-j 2` registry with the pipeline hoisted (results in
 `tests/e2e/.runs/results-<ts>.json`).
 
 **Id / file:** registry id **`s01c`** -> `tests/e2e/s01-lifecycle-chain.sh`
-(the registry's script-name column resolves it; the `s01-` prefix itself
-still resolves to `s01-happy-lite.sh`). It consolidates the core of
+(resolved via the registry's script-name column). It consolidates the core of
 **`s00`**, **`s00b`**, **`s01`**, **`s14`**, **`s02`**, and **`s16`** into one
 progressive journey. Runner integration: `s01c` is a **chain member** — the
 `-j` hoist list is `s00 -> s00b -> s01c` (sequential phase; later extended
 to `s00 -> s00b -> s01c -> s15c` by pipeline 2), and `s01c` is
 also a state consumer (`ALPINE_FDE_E2E_STATE`): when the s00 -> s00b chain
 ran in the same invocation, the pipeline consumes that enrolled state and
-skips its install legs. The superseded scenarios STAY in the tree and
-invocable by name, but are RETIRED from the default selection (see
-"Retirement of the absorbed scenarios" below).
+skips its install legs. The superseded scenarios are REMOVED — files and
+registry rows gone (see "Retirement of the absorbed scenarios" below).
 
 **Boot map (as implemented — 4 logical stages, 6 physical launches):**
 
@@ -405,8 +403,8 @@ fixture mechanics (the pipeline enrolls via the same production CLI
 host-side; the dead-token recovery-path negative stays with s06/s13/s00b),
 s01-as-in-tree's SB-off 3-strike tamper boot and s16's post-revoke
 firmware-rejection boot (negative single-boot checks; the boot map has no
-negative launch slot — s01/s04/s16 remain in the tree, s01/s16 retired from
-the default set, s04 still in it), and
+negative launch slot — s01/s16 are removed, s04 remains a default-set
+scenario), and
 s14's stale-seal refusal boot (the pipeline re-seals BEFORE first boot of
 the new kernel; the refusal-mode invariant is exercised by b4's
 recovery-rejection leg instead).
@@ -516,18 +514,20 @@ With both pipelines merged and registry-proven green (the lifecycle
 pipeline `s01c` and the recovery pipeline `s15c` each verified standalone in
 full-from-install and from-cache modes, plus in the `-j` registry with the
 chain hoisted), the six standalone scenarios whose boots they absorbed are
-RETIRED from the default selection: `s01`, `s02`, `s14`, `s16` (absorbed by
-`s01c`) and `s15`, `s17` (absorbed by `s15c`). The no-args default run stops
-paying their duplicated fixture/enroll/audit boots — the pipelines assert the
-same invariants progressively against one advancing disk state — but the
-scenarios stay in the tree and in the registry (status `retired`), so a
-targeted run still works exactly as before: `tests/run-e2e.sh s15` (or
-several ids, with `-j`). Registry bookkeeping stays honest by the same
-token: retired ids leave the runner's state-consumer set (`s01` was the only
-one in it — the other five bootstrap in-scenario), the registry-completeness
-pins in `tests/unit/e2e_infra_smoke.sh` still see every row, and the
-default-set pins (contents, count, explicit invocation) live in
-`tests/unit/run_e2e_parallel_contract.sh`.
+REMOVED: `s01`, `s02`, `s14`, `s16` (absorbed by `s01c`) and `s15`, `s17`
+(absorbed by `s15c`). REMOVED means the scenario FILES are deleted from
+`tests/e2e/` and the registry ROWS are dropped from `tests/run-e2e.sh` —
+not merely deselected. The no-args default run stops paying their duplicated
+fixture/enroll/audit boots — the pipelines assert the same invariants
+progressively against one advancing disk state — and a targeted run of a
+removed id is no longer possible: naming one yields a loud `unknown` row
+(a removed id is unregistered, never silently skipped). Registry bookkeeping
+stays honest by the same token: the removed ids left the runner's
+state-consumer set (`s01` was the only one in it — the other five bootstrap
+in-scenario), the registry-completeness pins in
+`tests/unit/e2e_infra_smoke.sh` cover every SURVIVING row (16-row literal
+floor), and the default-set pins (contents, count, removed-ids-absent) live
+in `tests/unit/run_e2e_parallel_contract.sh`.
 
 ---
 
