@@ -269,6 +269,28 @@ fi
 assert_contains "s23 defines _track_swtpm (SWTPM_DIRS registration — no phantom call)" "$(_s23)" \
     '_track_swtpm() { SWTPM_DIRS+=("$1"); }'
 
+# --- 6c. the mirror serving seam (the boot lane's live finding #2) ------------
+# The authored guest-local busybox-httpd design is UNACHIEVABLE with the
+# pinned sets: the alpine-virt ISO's busybox has NO httpd applet (it lives in
+# busybox-extras, absent from both the ISO's apks/ repo and the pinned
+# mirror closure) — observed live: "-sh: httpd: not found" at the P1 leg
+# (attempt 2). The pivot: the fixture's OWN host-server seam
+# (mirror_serve_start, tests/lib/local-mirror.sh) + qemu slirp; the guest
+# reaches the host server at 10.0.2.2 (slirp's host IP), the
+# mirror.fde.internal name stays /etc/hosts + dnsd-backed for the installer's
+# DNS preflight.
+if grep -qE '"httpd -p|\| httpd ' "$SCENARIO"; then
+    _fail "s23 still feeds a guest httpd invocation (unachievable: no httpd applet on the pinned ISO)"
+else
+    _pass "s23 feeds NO guest httpd invocation (host-server seam instead)"
+fi
+assert_contains "s23 starts the HOST loopback mirror server (mirror_serve_start)" "$(_s23)" \
+    "mirror_serve_start"
+assert_contains "s23 attaches the slirp netdev for the mirror route" "$(_s23)" \
+    '-netdev user,id=mirror0'
+assert_contains "s23 maps the mirror name at the slirp host IP (10.0.2.2)" "$(_s23)" \
+    "10.0.2.2"
+
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then
     _fail "s23 is registered in run-e2e.sh — the orchestrator gates registration (boot verification first)"
