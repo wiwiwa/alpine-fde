@@ -12,7 +12,8 @@
 #   2. ukify build: assemble + offline PCR 11 prediction in one pass
 #      (--measure --json=short --pcr-banks=sha256 --phases=enter-initrd) and
 #      ukify-native .pcrsig/.pcrpkey embedding for Mechanism A'' (static-7 +
-#      signed-11)
+#      signed-11); the measure implementation is resolved by the blocker-#16
+#      guarded probe (real systemd-measure → lib/measure.sh shim → loud 64)
 #   3. combined {7,11} policy digest via lib/policy.sh (audit/display data;
 #      the A'' token pins only the release pubkey — no pcrsign under A'')
 #   4. sbsign (Secure Boot) + sbverify assertion
@@ -197,6 +198,7 @@ cmd_ukictl_build_main() {
     }
 
     _ukictl_lib common.sh
+    _ukictl_lib measure.sh
     _ukictl_lib policy.sh
     _ukictl_lib manifest.sh
     _ukictl_lib keys.sh
@@ -432,6 +434,26 @@ _uk_body() {
     # The argv accumulates in "$@" (POSIX set --) — config-derived paths with
     # spaces/globs stay single arguments (review MD-02; the old newline template
     # was deliberately word-split).
+    #
+    # real-server blocker #16: ukify's PCR-signing leg shells out to
+    # systemd-measure, which Alpine does NOT package (any branch/repo). On the
+    # live install this died as `FileNotFoundError: ... systemd-measure` inside
+    # ukify's call_systemd_measure. GUARDED PROBE (blocker-#7 idiom): a real
+    # systemd-measure (e2e-host/CI shape) wins untouched; otherwise a shim
+    # executable staged from lib/measure.sh (POSIX sh + openssl, differential-
+    # pinned byte-for-byte against the real binary) is handed to ukify via
+    # --tools=<dir>; NEITHER available → loud fail-closed here, BEFORE ukify
+    # runs (never the bare python FileNotFoundError again).
+    mkdir -p "$_uk_work/tools" || {
+        _uk_fail_reason="cannot create the measure shim staging dir $_uk_work/tools"
+        err "ukictl build: $_uk_fail_reason"
+        return 1
+    }
+    if ! _uk_measure_tools=$(measure_probe "$_uk_work/tools"); then
+        _uk_fail_reason="no PCR-signing implementation available (systemd-measure + lib/measure.sh both missing)"
+        err "ukictl build: $_uk_fail_reason"
+        return 1
+    fi
     set -- \
         "--linux=$_uk_kernel" \
         "--initrd=$_uk_work/initrd.img" \
@@ -444,6 +466,9 @@ _uk_body() {
         "--pcr-public-key=$_uk_keydir/release.pub" \
         --measure --json=short \
         "--output=$_uk_uki"
+    if [ -n "$_uk_measure_tools" ]; then
+        set -- "$@" "$_uk_measure_tools"
+    fi
     if [ -n "${STUB_PATH:-}" ]; then
         set -- "$@" "--stub=$STUB_PATH"
     fi
