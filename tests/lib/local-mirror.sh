@@ -359,7 +359,8 @@ mirror_manifest_write() {
   "upstream": "$(mirror_upstream)",
   "generated": "$(date -u +%Y-%m-%d)",
   "layout": "<release>/<component>/x86_64/APKINDEX.tar.gz + *.apk (upstream shape; inst_repo_lines' main/community twin resolves)",
-  "package_list_basis": "alpine-base + lib/cmd/install.sh install_package_list + topology union (e2fsprogs btrfs-progs bcache-tools)",
+  "package_list_basis": "alpine-base + lib/cmd/install.sh install_package_list + inst_live_tool_pairs union + topology union (e2fsprogs btrfs-progs bcache-tools)",
+  "package_list_sha256": "$(mirror_package_list | tr ' ' '\n' | sort | sha256sum | cut -d' ' -f1)",
   "pins": {
     "apkindex_main_sha256": "$MIRROR_PIN_MAIN_APKINDEX_SHA256",
     "apkindex_community_sha256": "$MIRROR_PIN_COMMUNITY_APKINDEX_SHA256",
@@ -370,7 +371,7 @@ mirror_manifest_write() {
     "main": $n_main,
     "community": $n_comm
   },
-  "serving": "guest-local busybox httpd over a read-only vfat mirror disk; ALPINE_FDE_MIRROR=http://mirror.fde.internal:<port>/<release>/main"
+  "serving": "HOST loopback mirror_serve_start (busybox httpd / python3 http.server) reached via qemu slirp at 10.0.2.2; ALPINE_FDE_MIRROR=http://mirror.fde.internal:<port>/mirror/<release>/main"
 }
 JSON
 }
@@ -414,6 +415,28 @@ _mirror_index_drift_check() {
     return "$rc"
 }
 
+# _mirror_list_basis_matches — rc 0 iff mirror.json's recorded
+# package_list_sha256 equals the CURRENT derivation. The manifest alone can
+# NOT detect a derivation change (it covers exactly what was fetched — a
+# smaller, older closure verifies perfectly), which is how the cache kept
+# missing the live tool set after install.sh's list grew (boot-lane finding
+# #4 tail). rc 1 with a loud reason = rebuild required.
+_mirror_list_basis_matches() {
+    local cdir want have
+    cdir=$(mirror_cache_dir)
+    want=$(mirror_package_list | tr ' ' '\n' | sort | sha256sum | cut -d' ' -f1)
+    have=$(jq -r '.package_list_sha256 // empty' "$cdir/mirror.json" 2>/dev/null) || have=''
+    if [[ -z "$have" ]]; then
+        echo "local-mirror: mirror.json records no package_list_sha256 (pre-basis cache) — rebuilding" >&2
+        return 1
+    fi
+    if [[ "$have" != "$want" ]]; then
+        echo "local-mirror: closure derivation CHANGED (package_list_sha256 $have -> $want) — rebuilding" >&2
+        return 1
+    fi
+    return 0
+}
+
 # mirror_ensure — the public entry point. Second call with an intact cache is
 # a NO-OP (manifest verify + index drift check only); a missing/tampered
 # cache triggers a full rebuild under a cache-wide lock (concurrent lanes
@@ -423,7 +446,7 @@ mirror_ensure() {
     local cdir
     cdir=$(mirror_cache_dir)
     mkdir -p "$cdir"
-    if mirror_manifest_verify; then
+    if mirror_manifest_verify && _mirror_list_basis_matches; then
         echo "local-mirror: cache verified (no-op): $cdir ($(grep -c '\.apk$' "$cdir/MANIFEST.sha256") apks, release $(mirror_release))" >&2
         _mirror_index_drift_check || {
             [[ "${ALPINE_FDE_MIRROR_ALLOW_DRIFT:-0}" == "1" ]] && return 0
@@ -436,7 +459,7 @@ mirror_ensure() {
     (
         flock -x 9
         # double-checked under the lock: a concurrent builder may have won
-        if mirror_manifest_verify; then
+        if mirror_manifest_verify && _mirror_list_basis_matches; then
             echo "local-mirror: cache appeared under the lock (another lane built it) — no-op" >&2
             exit 0
         fi
