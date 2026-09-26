@@ -255,8 +255,8 @@ else
 fi
 grep -q "fde_measure_main" "$REPO/lib/measure.sh" &&
     grep -q -- "--tools=" "$REPO/lib/cmd/ukictl-build.sh" &&
-    grep -q "measure_probe" "$REPO/lib/cmd/ukictl-build.sh"
-assert_rc "product provides the measure implementation (lib/measure.sh shim + --tools wiring)" 0 $?
+    grep -q "measure_resolve" "$REPO/lib/cmd/ukictl-build.sh"
+assert_rc "product provides the measure implementation (lib/measure.sh shim + measure_resolve/--tools wiring, blocker #17 centralization)" 0 $?
 
 # coverage guard: the extraction actually saw the guest build surface (a silent
 # extractor regression must not vacuate the pin)

@@ -92,6 +92,15 @@ if [ -z "${ALPINE_FDE_TOKEN_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$_sl_lib_dir/token.sh"
 fi
+# lib/measure.sh — the G-B6 recomputation source for anchor-less .pcrsig
+# entries (real-server blocker #17). GUARDED: a tree without the bundled
+# measure implementation (pre-blocker-#16 media) keeps sealing via the
+# legacy live-PCR oracle; the recomputation path dies loud+specific when the
+# implementation is absent — NEVER with a misleading stale/tampered verdict.
+if [ -z "${ALPINE_FDE_MEASURE_LOADED:-}" ] && [ -r "$_sl_lib_dir/measure.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$_sl_lib_dir/measure.sh"
+fi
 
 # --- constants (marshaled TPM 2.0 structures, sha256 bank) ----------------------
 # TPML_PCR_SELECTION for PCR 11 only: count=1, alg sha256(000b),
@@ -178,6 +187,11 @@ seal_pcrsig_field() {
 seal_verify_pcrsig() {
     [ $# -eq 4 ] || die "seal_verify_pcrsig: usage: <keydir> <pcrsig> <pcrs_csv> <fresh>"
     _svp_keydir=$1 _svp_sig=$2 _svp_sel=$3 _svp_fresh=$4
+    # real-server blocker #17: an empty/invalid computed side means the
+    # RECOMPUTATION could not run — a loud, specific refusal, NEVER a
+    # "stale/tampered" verdict over an empty comparison
+    policy_check_digest "$_svp_fresh" ||
+        die "seal: cannot recompute the anchored PCR-11 digest (no measure implementation) — computed side is '${_svp_fresh:-<empty>}'; refusing; this is NOT a tamper verdict"
     _svp_pol=$(seal_pcrsig_field "$_svp_sig" "$_svp_sel" pol)
     if [ -z "$_svp_pol" ]; then
         die "seal: the .pcrsig carries no pcrs=[$_svp_sel] entry — wrong-selection signature for this mode (refusing to embed)"
@@ -393,8 +407,10 @@ seal_unseal() {
 # .pcrsig presence, environment, signature verification (G-B6) — and only then
 # LUKS metadata reads and TPM operations.
 seal_enroll() {
-    [ $# -eq 5 ] || die "seal_enroll: usage: <keydir> <luks_dev> <pcrsig> <out_token> <mode>"
+    [ $# -ge 5 ] && [ $# -le 6 ] ||
+        die "seal_enroll: usage: <keydir> <luks_dev> <pcrsig> <out_token> <mode> [uki]"
     _se_keydir=$1 _se_dev=$2 _se_sig=$3 _se_out=$4 _se_mode=$5
+    _se_uki=${6:-}
     case $_se_mode in
         provisional) _se_sel=11 ;;
         finalized) _se_sel=7,11 ;;
@@ -414,29 +430,57 @@ seal_enroll() {
     # against a fixture swtpm whose live register is a designated RESEED —
     # extend-from-zero, never the booted value — so the live oracle refused
     # the seal's own correctly-signed policy; the real verification stays the
-    # token's boot-time PolicyPCR session). Entries predating the anchor
-    # fields keep the live-PCR oracle: the in-guest installer seals against
-    # the very TPM the machine booted with, where live d11 IS the postphase
-    # value.
+    # token's boot-time PolicyPCR session).
+    # REAL-SERVER BLOCKER #17: entries built by the bundled measure shim carry
+    # NO d11 anchor (the oracle sign output has pcrs/pkfp/pol/sig only) — for
+    # those the expected d11 is RECOMPUTED from the UKI's own sections via the
+    # centralized measure resolution (measure_pcr11_from_uki; the caller passes
+    # the UKI the .pcrsig was extracted from). A recomputation that CANNOT run
+    # is a loud, SPECIFIC fail-closed 64 — it must never reach the tamper
+    # compare as an empty computed side ("stale/tampered: signed X != computed
+    # " is a misleading failure mode on top of the functional one). Only a
+    # genuine mismatch of two VALID hex digests is stale/tampered.
     _se_fresh=''
     if [ "$_se_mode" = finalized ]; then
         _se_ad7=$(seal_pcrsig_field "$_se_sig" "$_se_sel" d7)
         _se_ad11=$(seal_pcrsig_field "$_se_sig" "$_se_sel" d11)
         if [ -n "$_se_ad7" ] && [ -n "$_se_ad11" ]; then
+            policy_check_digest "$_se_ad7" ||
+                die "seal: cannot recompute the anchored PCR-11 digest: the entry's d7 anchor is not a sha256 hex digest: '$_se_ad7'"
+            policy_check_digest "$_se_ad11" ||
+                die "seal: cannot recompute the anchored PCR-11 digest: the entry's d11 anchor is not a sha256 hex digest: '$_se_ad11'"
             _se_fresh=$(policy_digest "$_se_ad7" "$_se_ad11")
             info "seal: G-B6 digest-anchored over the entry's d7/d11 components (no live PCR read)"
         fi
     elif [ "$_se_mode" = provisional ]; then
         _se_ad11=$(seal_pcrsig_field "$_se_sig" "$_se_sel" d11)
         if [ -n "$_se_ad11" ]; then
+            policy_check_digest "$_se_ad11" ||
+                die "seal: cannot recompute the anchored PCR-11 digest: the entry's d11 anchor is not a sha256 hex digest: '$_se_ad11'"
             _se_fresh=$(seal_digest_11 "$_se_ad11")
             info "seal: G-B6 digest-anchored over the entry's d11 component (no live PCR read)"
+        elif [ -n "$_se_uki" ]; then
+            if ! command -v measure_pcr11_from_uki >/dev/null 2>&1; then
+                die "seal: cannot recompute the anchored PCR-11 digest (no measure implementation: lib/measure.sh missing) — refusing; this is NOT a tamper verdict"
+            fi
+            _se_ad11=$(measure_pcr11_from_uki "$_se_uki")
+            policy_check_digest "$_se_ad11" ||
+                die "seal: cannot recompute the anchored PCR-11 digest from the UKI ($_se_uki): got '${_se_ad11:-<none>}' — refusing; this is NOT a tamper verdict"
+            _se_fresh=$(seal_digest_11 "$_se_ad11")
+            info "seal: G-B6 recomputed over the UKI's own sections via the measure implementation (no live PCR read)"
         fi
     fi
     if [ -z "$_se_fresh" ]; then
+        # legacy live-PCR oracle (entries predating the anchors, sealed against
+        # the very TPM the machine booted with) — but a recomputation that
+        # cannot run is LOUD and SPECIFIC, never an empty computed side
         _se_d11=$(seal_pcrread 11)
+        policy_check_digest "$_se_d11" ||
+            die "seal: cannot recompute the anchored PCR-11 digest (no measure implementation and live PCR 11 unreadable: '${_se_d11:-<empty>}') — refusing; this is NOT a tamper verdict"
         if [ "$_se_mode" = finalized ]; then
             _se_d7=$(seal_pcrread 7)
+            policy_check_digest "$_se_d7" ||
+                die "seal: cannot recompute the anchored PCR-11 digest (live PCR 7 unreadable: '${_se_d7:-<empty>}') — refusing; this is NOT a tamper verdict"
             _se_fresh=$(policy_digest "$_se_d7" "$_se_d11")
         else
             _se_fresh=$(seal_digest_11 "$_se_d11")
@@ -491,10 +535,13 @@ seal_enroll() {
     return 0
 }
 
-# seal_provisional <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> —
-# ADR-20 Stage 1 step 6: PolicyAuthorize over the PCR-11-only signed policy.
+# seal_provisional <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> \
+#                  [uki] — ADR-20 Stage 1 step 6: PolicyAuthorize over the
+# PCR-11-only signed policy. The optional UKI path enables the blocker-#17
+# recomputation for anchor-less entries (shim-built .pcrsig): pass the UKI the
+# .pcrsig was extracted from.
 seal_provisional() {
-    seal_enroll "${1:-}" "${2:-}" "${3:-}" "${4:-}" provisional
+    seal_enroll "${1:-}" "${2:-}" "${3:-}" "${4:-}" provisional "${5:-}"
 }
 
 # seal_finalized <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> — the

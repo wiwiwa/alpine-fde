@@ -438,22 +438,20 @@ _uk_body() {
     # real-server blocker #16: ukify's PCR-signing leg shells out to
     # systemd-measure, which Alpine does NOT package (any branch/repo). On the
     # live install this died as `FileNotFoundError: ... systemd-measure` inside
-    # ukify's call_systemd_measure. GUARDED PROBE (blocker-#7 idiom): a real
-    # systemd-measure (e2e-host/CI shape) wins untouched; otherwise a shim
-    # executable staged from lib/measure.sh (POSIX sh + openssl, differential-
-    # pinned byte-for-byte against the real binary) is handed to ukify via
-    # --tools=<dir>; NEITHER available → loud fail-closed here, BEFORE ukify
+    # ukify's call_systemd_measure. Centralized resolution (blocker #17): ONE
+    # product-wide entry point — a real systemd-measure (e2e-host/CI shape)
+    # wins untouched; otherwise the shim is staged at the STABLE location
+    # (/opt/alpine-fde/.measure-tools — not this workdir, so seal.sh's G-B6
+    # recomputation resolves the SAME implementation) and handed to ukify via
+    # --tools=<dir>; NEITHER available -> loud fail-closed here, BEFORE ukify
     # runs (never the bare python FileNotFoundError again).
-    mkdir -p "$_uk_work/tools" || {
-        _uk_fail_reason="cannot create the measure shim staging dir $_uk_work/tools"
-        err "ukictl build: $_uk_fail_reason"
-        return 1
-    }
-    if ! _uk_measure_tools=$(measure_probe "$_uk_work/tools"); then
-        _uk_fail_reason="no PCR-signing implementation available (systemd-measure + lib/measure.sh both missing)"
+    if ! _uk_measure_impl=$(measure_resolve); then
+        _uk_fail_reason="no PCR-signing implementation available"
         err "ukictl build: $_uk_fail_reason"
         return 1
     fi
+    info "ukictl build: measure implementation: $_uk_measure_impl"
+    _uk_measure_tools=$(measure_tools_arg "$_uk_measure_impl")
     set -- \
         "--linux=$_uk_kernel" \
         "--initrd=$_uk_work/initrd.img" \
@@ -469,6 +467,7 @@ _uk_body() {
     if [ -n "$_uk_measure_tools" ]; then
         set -- "$@" "$_uk_measure_tools"
     fi
+
     if [ -n "${STUB_PATH:-}" ]; then
         set -- "$@" "--stub=$STUB_PATH"
     fi

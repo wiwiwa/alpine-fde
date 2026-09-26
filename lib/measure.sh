@@ -507,3 +507,88 @@ measure_probe() {
     done
     die "ukictl build: no PCR-signing implementation available: probed the system systemd-measure (command -v, ALPINE_FDE_MEASURE_BIN, /usr/lib/systemd/systemd-measure) AND the bundled lib/measure.sh (ALPINE_FDE_CMD_DIR, /opt/alpine-fde/lib) — Alpine ships no systemd-measure package (real-server blocker #16), so the bundled shim is the only guest-side implementation; repair the alpine-fde install tree"
 }
+
+# --- product-wide resolution (real-server blocker #17) ------------------------------
+
+# measure_stage_root — the STABLE staged-shim location. The ukictl workdir
+# tools dir dies with the workdir; every other consumer (seal.sh's G-B6
+# recomputation) must resolve the SAME implementation from a stable path.
+# ALPINE_FDE_MEASURE_STAGE wins when set (test seam).
+measure_stage_root() {
+    printf '%s\n' "${ALPINE_FDE_MEASURE_STAGE:-/opt/alpine-fde/.measure-tools}"
+}
+
+# measure_resolve [STAGING_DIR] — THE product-wide entry point: print the
+# path of the measure implementation (real binary, else the staged shim);
+# loud fail-closed 64 naming both candidates when neither exists. Every
+# consumer routes through here — never probe independently.
+measure_resolve() {
+    _mrv_dir=${1:-$(measure_stage_root)}
+    if [ -n "$(measure_system_bin)" ]; then
+        measure_system_bin
+        return 0
+    fi
+    for _mrv_sh in $(measure_lib_candidates); do
+        [ -f "$_mrv_sh" ] || continue
+        measure_stage_shim "$_mrv_dir" "$_mrv_sh"
+        printf '%s\n' "$_mrv_dir/systemd-measure"
+        return 0
+    done
+    die "measure: no PCR-signing implementation available: probed the system systemd-measure (command -v, ALPINE_FDE_MEASURE_BIN, /usr/lib/systemd/systemd-measure) AND the bundled lib/measure.sh (ALPINE_FDE_CMD_DIR, /opt/alpine-fde/lib) — Alpine ships no systemd-measure package (real-server blocker #16); repair the alpine-fde install tree"
+}
+
+# measure_tools_arg IMPL_PATH — the ukify argv addition for IMPL_PATH: empty
+# for the system binary (ukify's own find_tool finds it), --tools=<dir> for a
+# staged shim (ukify must not fall through to the hardcoded path).
+measure_tools_arg() {
+    case $1 in
+        */.measure-tools/* | */tools/*)
+            printf '%s\n' "--tools=$(dirname -- "$1")"
+            ;;
+        *)
+            : # system binary — no argv addition
+            ;;
+    esac
+}
+
+# measure_pcr11_from_uki UKI — recompute the expected enter-initrd PCR 11
+# value from a BUILT UKI: extract every measured section with objcopy (the
+# same faithful extraction lib/cmd/pcrsign.sh's --uki path is pinned on) and
+# run the oracle-verified measurement math over them in canonical order.
+# Prints the 64-hex digest; dies 64 loud+specific when it cannot run. This is
+# the G-B6 recomputation source for anchor-less .pcrsig entries built by the
+# shim (real-server blocker #17): the seal must never confuse "cannot
+# recompute" with "stale/tampered".
+measure_pcr11_from_uki() {
+    [ $# -eq 1 ] || die "measure_pcr11_from_uki: usage: measure_pcr11_from_uki <uki>"
+    _mpu_uki=$1
+    [ -f "$_mpu_uki" ] || die "measure_pcr11_from_uki: UKI not found: $_mpu_uki"
+    command -v objcopy >/dev/null 2>&1 ||
+        die "measure_pcr11_from_uki: objcopy not found (binutils) — cannot recompute the anchored PCR-11 digest from the UKI"
+    command -v measure_sha256_bin >/dev/null 2>&1 ||
+        die "measure_pcr11_from_uki: measure implementation not loaded (lib/measure.sh missing) — cannot recompute the anchored PCR-11 digest"
+    _mpu_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-measure-uki.XXXXXX") ||
+        die "measure_pcr11_from_uki: mktemp failed"
+    _mpu_supplied=0
+    for _mpu_sec in linux osrel cmdline initrd ucode splash dtb uname sbat pcrpkey profile dtbauto hwids efifw; do
+        _mpu_out="$_mpu_work/$_mpu_sec"
+        # absent sections fail objcopy — skipped, exactly like the builder's
+        # measure pass skipped sections it was never given
+        if objcopy -O binary --only-section=".$_mpu_sec" -- "$_mpu_uki" "$_mpu_out" 2>/dev/null && [ -s "$_mpu_out" ]; then
+            eval "_me_sections_$_mpu_sec=\$_mpu_out"
+            _mpu_supplied=1
+        else
+            rm -f "$_mpu_out"
+        fi
+    done
+    if [ "$_mpu_supplied" -eq 0 ]; then
+        rm -rf "$_mpu_work"
+        die "measure_pcr11_from_uki: no measured sections found in $_mpu_uki (not a UKI?) — cannot recompute the anchored PCR-11 digest"
+    fi
+    _me_phases='enter-initrd'
+    measure_sections_value "$_mpu_work"
+    measure_phase_value "$_mpu_work" enter-initrd
+    measure_bin_to_hex "$_mpu_work/pcr11.bin"
+    rm -rf "$_mpu_work"
+    return 0
+}

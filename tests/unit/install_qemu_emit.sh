@@ -319,7 +319,11 @@ assert_eq "blocker #12: the emitted build record exports ALPINE_FDE_ROOT=/" "1" 
     "$(grep -c 'export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys' "$SCRIPT")"
 # G-C24: the provisional seal guest line (lib-line pattern; PCR 11; keyslot 1)
 assert_eq "guest: provisional seal line (§9.1 step 6, lib-line pattern)" "1" \
-    "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && objcopy' "$SCRIPT")"
+    "$(grep -c 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && uki=$(ls' "$SCRIPT")"
+# real-server blocker #17: the seal record hands the UKI to seal_provisional —
+# the G-B6 gate recomputes the anchor-less .pcrsig's d11 from it
+assert_eq "blocker #17: the provisional seal record passes the UKI to seal_provisional" "1" \
+    "$(grep -cF '.json $uki && token_add_keyslot' "$SCRIPT")"
 assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRIPT")" \
     "only-section=.pcrsig"
 assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \
