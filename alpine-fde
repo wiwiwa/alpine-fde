@@ -11,6 +11,12 @@
 # ships — falling back to curl), unpacks it into a fresh mktemp dir, and forwards all
 # arguments to the payload's bin/alpine-fde, propagating its exit code.
 #
+# LOCAL CHECKOUTS never reach the network: run as a FILE (`./alpine-fde ...`)
+# with a product tree beside it (bin/alpine-fde + lib/ — possibly via a symlink),
+# this dispatcher execs that LOCAL product directly, with the same tty-seam
+# stdin, forwarded args, and exit code. Only a script with NO local tree (the
+# piped curl|sh shape, which has no $0 file at all) downloads.
+#
 # Seams (ALPINE_FDE_* env namespace, Architecture.md §8.1):
 #   ALPINE_FDE_BOOTSTRAP_TTY          terminal to reconnect stdin to
 #                                     (default /dev/tty)
@@ -54,6 +60,29 @@ _BOOTSTRAP_RC=0
 # Subshell probe: if the tty target cannot be opened, fail loudly naming it.
 if ! ( : <"$ALPINE_FDE_BOOTSTRAP_TTY" ) 2>/dev/null; then
     bootstrap_fail "cannot reconnect stdin to tty '$ALPINE_FDE_BOOTSTRAP_TTY' (no terminal?); run ./bin/alpine-fde directly from a clone instead"
+fi
+
+# --- 1b. local tree beside the script: run the product, never the network ----------
+# Invoked as a FILE (`./alpine-fde ...`) from a repo CHECKOUT, the real product
+# is already beside this dispatcher (bin/alpine-fde + lib/): hand off to it
+# directly — no fetch, no tarball, no mktemp, no payload dir. Resolve $0 through
+# any symlink (readlink -f — the busybox idiom) so a PATH symlinked install
+# finds the tree beside its TARGET. The guard requires $0 to name a REAL FILE:
+# under the piped `wget -qO- ... | sh -s --` shape this script has no script
+# file at all ($0 is the shell, which names nothing on disk), so detection
+# no-ops there by construction and the download path below runs — the curl|sh
+# invocation can never have a local tree "beside the script".
+# The tty reconnect is preserved exactly as on the fetch path (the product's
+# ceremony prompts need stdin); the ROOT REFUSAL is NOT duplicated — the
+# product enforces EUID itself per subcommand, so `./alpine-fde doctor` from a
+# clone works unprivileged.
+ALPINE_FDE_BOOTSTRAP_SELF=$(readlink -f "$0" 2>/dev/null) || ALPINE_FDE_BOOTSTRAP_SELF=$0
+[ -n "$ALPINE_FDE_BOOTSTRAP_SELF" ] || ALPINE_FDE_BOOTSTRAP_SELF=$0
+if [ -f "$ALPINE_FDE_BOOTSTRAP_SELF" ]; then
+    ALPINE_FDE_BOOTSTRAP_DIR=$(dirname "$ALPINE_FDE_BOOTSTRAP_SELF")
+    if [ -x "$ALPINE_FDE_BOOTSTRAP_DIR/bin/alpine-fde" ] && [ -d "$ALPINE_FDE_BOOTSTRAP_DIR/lib" ]; then
+        exec "$ALPINE_FDE_BOOTSTRAP_DIR/bin/alpine-fde" "$@" <"$ALPINE_FDE_BOOTSTRAP_TTY"
+    fi
 fi
 
 # --- 2. root precondition (before anything network or disk touching) -----------------

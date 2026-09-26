@@ -13,6 +13,14 @@
 #     ALPINE_FDE_BOOTSTRAP_EUID, so the contract is testable unprivileged)
 #   * cleanup: payload dir (mktemp pattern alpine-fde-bootstrap.*) is removed on
 #     success, kept+printed on failure
+#   * local-tree detection: invoked as a FILE from a checkout (bin/alpine-fde +
+#     lib/ beside the script, possibly via a symlink to it), the LOCAL product
+#     runs with the same tty-seam stdin and args/exit-code forwarding, and NO
+#     fetch is attempted — network is only for the piped wget|sh shape, which
+#     can never have a $0 file (a stdin-piped script has no script file, so the
+#     detection no-ops there). The local path runs unprivileged on purpose: the
+#     root precondition is NOT duplicated (`./alpine-fde doctor` from a clone
+#     must work as non-root); the tty reconnect IS kept (ceremony prompts)
 #   * hygiene: `sh -n` clean, executable, tracked as 100755 once committed
 
 set -u
@@ -169,6 +177,115 @@ run_piped install --disk /dev/nvme0n1
 assert_eq "wget-first happy path exits 0" "0" "$BOOT_RC"
 assert_contains "fetcher log records the wget attempt" "$(cat "$FETCH_LOG")" "wget"
 assert_not_contains "curl untouched when wget is available" "$(cat "$FETCH_LOG")" "curl"
+
+# --- 6. local-tree detection: ./alpine-fde from a checkout runs the LOCAL product ---
+# Sandbox mirrors a checkout: this dispatcher copied beside a STUB product
+# (bin/alpine-fde + lib/). Invoked as a FILE, never piped — $0 is real.
+local_sandbox=$T/local
+mkdir -p "$local_sandbox/bin" "$local_sandbox/lib"
+cp "$INSTALL" "$local_sandbox/alpine-fde"
+cat >"$local_sandbox/bin/alpine-fde" <<'EOF'
+#!/bin/sh
+printf 'LOCAL-STUB-RAN=1\n'
+printf 'LOCAL-STUB-ARGS=%s\n' "$*"
+printf 'LOCAL-STUB-STDIN-BEGIN\n'
+cat
+printf 'LOCAL-STUB-STDIN-END\n'
+exit "${LOCAL_RC:-0}"
+EOF
+chmod +x "$local_sandbox/bin/alpine-fde"
+
+run_local() { # SCRIPT ARGS... — invoke a dispatcher copy as a plain file
+    BOOT_RC=0
+    BOOT_OUT=$(env \
+        ALPINE_FDE_BOOTSTRAP_EUID=1000 \
+        ALPINE_FDE_BOOTSTRAP_TTY="$TTY" \
+        ALPINE_FDE_BOOTSTRAP_TARBALL_URL="file://$T/no-such-tarball.tar.gz" \
+        PATH="$T/bin:$PATH" \
+        LOCAL_RC="${LOCAL_RC:-0}" \
+        "$@" 2>&1
+    ) || BOOT_RC=$?
+}
+
+# 6a. local tree wins: stub runs (unprivileged — no root refusal duplicated),
+#     args forwarded verbatim, and NO fetch is attempted (fetch log stays empty
+#     even though the tarball URL points at a file that does not exist).
+: >"$FETCH_LOG"
+printf 'TTY-SECRET-PASSPHRASE\n' >"$TTY"
+run_local "$local_sandbox/alpine-fde" doctor --verbose
+assert_eq "local tree: stub product exit code 0 propagates" "0" "$BOOT_RC"
+assert_contains "local tree: the LOCAL stub runs, not a fetched payload" \
+    "$BOOT_OUT" "LOCAL-STUB-RAN=1"
+assert_contains "local tree: args forwarded verbatim to the local product" \
+    "$BOOT_OUT" "LOCAL-STUB-ARGS=doctor --verbose"
+assert_not_contains "local tree: no fetch/payload path taken" \
+    "$BOOT_OUT" "PAYLOAD-ARGS"
+assert_eq "local tree: nothing fetched (no network from a checkout)" \
+    "" "$(cat "$FETCH_LOG")"
+
+# 6b. stdin seam on the local path: same reconnect contract as the fetch path.
+stdin_block=${BOOT_OUT#*LOCAL-STUB-STDIN-BEGIN}
+stdin_block=${stdin_block%%LOCAL-STUB-STDIN-END*}
+assert_contains "local tree: product stdin is the tty-seam target" \
+    "$stdin_block" "TTY-SECRET-PASSPHRASE"
+
+# 6c. nonzero exit of the local product propagates verbatim.
+: >"$FETCH_LOG"
+LOCAL_RC=7 run_local "$local_sandbox/alpine-fde" install --disk /dev/nvme0n1
+assert_eq "local tree: stub exit code 7 propagates verbatim" "7" "$BOOT_RC"
+assert_eq "local tree: failure still fetched nothing" "" "$(cat "$FETCH_LOG")"
+
+# 6d. the script may be reached through a symlink (PATH install); $0 must be
+#     resolved to the copy that HAS the product tree beside it.
+ln -sf "$local_sandbox/alpine-fde" "$T/fde-link"
+: >"$FETCH_LOG"
+run_local "$T/fde-link" doctor
+assert_eq "symlinked dispatcher: local product runs through the link" "0" "$BOOT_RC"
+assert_contains "symlinked dispatcher: LOCAL stub reached" "$BOOT_OUT" "LOCAL-STUB-RAN=1"
+assert_eq "symlinked dispatcher: nothing fetched" "" "$(cat "$FETCH_LOG")"
+
+# 6e. invoked as a FILE but with NO local tree beside it -> the download path
+#     still runs (local detection is additive; the fetch shape is unchanged).
+nolocal=$T/nolocal
+mkdir -p "$nolocal"
+cp "$INSTALL" "$nolocal/alpine-fde"
+: >"$FETCH_LOG"
+printf 'TTY-SECRET-PASSPHRASE\n' >"$TTY"
+BOOT_RC=0
+BOOT_OUT=$(env \
+    ALPINE_FDE_BOOTSTRAP_EUID=0 \
+    ALPINE_FDE_BOOTSTRAP_TTY="$TTY" \
+    ALPINE_FDE_BOOTSTRAP_TARBALL_URL="file://$TARBALL" \
+    PATH="$T/bin:$PATH" \
+    PAYLOAD_RC=0 \
+    "$nolocal/alpine-fde" install --disk /dev/nvme0n1 2>&1
+) || BOOT_RC=$?
+assert_eq "no local tree: download path still boots the payload" "0" "$BOOT_RC"
+assert_contains "no local tree: fetched payload runs with forwarded args" \
+    "$BOOT_OUT" "PAYLOAD-ARGS=install --disk /dev/nvme0n1"
+assert_not_contains "no local tree: local stub never runs" "$BOOT_OUT" "LOCAL-STUB-RAN"
+assert_contains "no local tree: fetch was attempted" "$(cat "$FETCH_LOG")" "wget"
+
+# 6f. the piped `wget|sh` shape can NEVER take the local branch, even with the
+#     shell's cwd inside a checkout that has a product tree: a stdin-piped
+#     script has no $0 file ($0 is 'sh', naming no real file), so detection
+#     must no-op and the fetch path must run.
+: >"$FETCH_LOG"
+printf 'TTY-SECRET-PASSPHRASE\n' >"$TTY"
+BOOT_RC=0
+BOOT_OUT=$(cd "$local_sandbox" && cat "$INSTALL" | env \
+    ALPINE_FDE_BOOTSTRAP_EUID=0 \
+    ALPINE_FDE_BOOTSTRAP_TTY="$TTY" \
+    ALPINE_FDE_BOOTSTRAP_TARBALL_URL="file://$TARBALL" \
+    PATH="$T/bin:$PATH" \
+    PAYLOAD_RC=0 \
+    sh -s -- install --disk /dev/nvme0n1 2>&1
+) || BOOT_RC=$?
+assert_eq "piped shape inside a checkout dir: fetch path still wins" "0" "$BOOT_RC"
+assert_contains "piped shape: fetched payload ran (local branch no-ops)" \
+    "$BOOT_OUT" "PAYLOAD-ARGS=install --disk /dev/nvme0n1"
+assert_not_contains "piped shape: local stub never runs" "$BOOT_OUT" "LOCAL-STUB-RAN"
+assert_contains "piped shape: fetch was attempted" "$(cat "$FETCH_LOG")" "wget"
 
 # --- 5. script hygiene pins ---------------------------------------------------------
 rc=0; sh -n "$INSTALL" 2>"$T/shn.err" || rc=$?
