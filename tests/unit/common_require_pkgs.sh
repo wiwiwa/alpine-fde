@@ -213,6 +213,23 @@ assert_eq "require_pkgs: apk update ran once per process" "1" "$(grep -c '^updat
 assert_eq "require_pkgs: apk add per package (first)" "1" "$(grep -c '^add pkg-apk2$' "$FAKE_APK_LOG")"
 assert_eq "require_pkgs: apk add per package (second)" "1" "$(grep -c '^add pkg-apk3$' "$FAKE_APK_LOG")"
 
+# --- ALPINE_FDE_MIRROR: the missing tool is fetched from the OPERATOR'S mirror
+# repository, never the live ISO's system repo (boot-lane finding #6, attempt
+# 6: the virt ISO's system repo is the CD alone, so the preflight's
+# "apk add util-linux" died with "no such package" even though the pinned
+# mirror was fully provisioned) ---
+reset_log
+reset_apk_log
+FAKE_INSTALL_MAKES="pkg-apkm:apktoolm"
+out=$(
+    PATH="$APKPATH"
+    export PATH
+    ALPINE_FDE_MIRROR=http://mirror.test/v3.24/main require_pkgs apktoolm:pkg-apkm 2>&1
+) || rc=$?
+assert_rc "require_pkgs: apk backend with ALPINE_FDE_MIRROR set succeeds" "0" "$rc"
+assert_eq "require_pkgs: apk add consumes the OPERATOR'S mirror repository" \
+    "1" "$(grep -c '^add --repository http://mirror.test/v3.24/main pkg-apkm$' "$FAKE_APK_LOG")"
+
 # apk update failure -> 64 with the apk manual line; add never attempted
 reset_log
 reset_apk_log
