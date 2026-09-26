@@ -754,6 +754,15 @@ inst_preflight() {
   if command -v nslookup >/dev/null 2>&1; then
     if nslookup "$_if_mhost" >/dev/null 2>&1; then
       info "install: live env resolves the mirror host $_if_mhost (DNS preflight ok)"
+    elif awk -v h="$_if_mhost" 'f { next } { for (_i = 2; _i <= NF; _i++) if ($_i == h) { f = 1; exit } } END { exit f ? 0 : 1 }' /etc/hosts 2>/dev/null; then
+      # boot-lane finding #7: a hosts-based mirror name is LEGITIMATE — the
+      # actual consumer (apk's fetcher over musl getaddrinfo) consults
+      # /etc/hosts, so nslookup-only is stricter than the real resolver chain
+      # and false-negatives a working hosts-based setup (the s23 canary pins
+      # the mirror name in the live env's /etc/hosts). Loud record; the name
+      # must still reach the IN-CHROOT transaction — the plan seeds the
+      # target's /etc/hosts alongside resolv.conf (item 26b).
+      info "install: live env resolves the mirror host $_if_mhost (via /etc/hosts — hosts-based mirror name, no resolver consulted)"
     else
       die "install: live env cannot resolve $_if_mhost — configure networking (DHCP/DNS) before installing"
     fi
@@ -1687,6 +1696,11 @@ cmd_install_main() {
   # no-op + warn when the live env has no resolv.conf (the preflight probe
   # above already covered the live side).
   inst_plan_run host "if [ -f /etc/resolv.conf ]; then mkdir -p $_im_mnt/etc && cp /etc/resolv.conf $_im_mnt/etc/resolv.conf && echo 'alpine-fde: info: seeded target /etc/resolv.conf from the live env (in-chroot apk needs DNS)'; else echo 'alpine-fde: warn: live env has no /etc/resolv.conf — target DNS seed skipped (in-chroot apk may fail to resolve the mirror)'; fi || : # item 26b: seed the target resolver before the in-chroot transaction"
+  # boot-lane finding #7 (companion to the hosts-aware preflight probe): a
+  # hosts-based mirror name resolves through /etc/hosts, NOT the resolver —
+  # seed the live env's hosts table too, or the IN-CHROOT transaction (which
+  # resolves via the TARGET's files) cannot see it.
+  inst_plan_run host "if [ -f /etc/hosts ]; then mkdir -p $_im_mnt/etc && cp /etc/hosts $_im_mnt/etc/hosts && echo 'alpine-fde: info: seeded target /etc/hosts from the live env (in-chroot apk resolves hosts-based mirror names)'; else echo 'alpine-fde: warn: live env has no /etc/hosts — target hosts seed skipped (in-chroot apk may fail to resolve a hosts-based mirror)'; fi || : # item 26b: seed the target hosts table before the in-chroot transaction"
   inst_plan_run guest "apk add --no-cache $(install_package_list)"
   # step 1b (§8.2/ADR-13): register the `alpine-fde` mkinitfs feature in the
   # target's /etc/mkinitfs/mkinitfs.conf. mkinitfs packs a feature's

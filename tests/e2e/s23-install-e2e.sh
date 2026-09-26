@@ -29,7 +29,7 @@
 #         keeps console=ttyS0,115200 under OUR control, so the WHOLE install
 #         leg is sentinel-corroborable. The -cdrom GRUB path cannot promise a
 #         serial console (the ISO's grub.cfg terminal settings are upstream's).
-#       - the in-guest resolver trick (dnsd + /etc/hosts) that makes the
+#       - the in-guest /etc/hosts mapping that makes the
 #         installer's DNS preflight (inst_preflight nslookup of the mirror
 #         host) pass with NO external network.
 #       - all watchdogs/budgets (marked CALIBRATE below).
@@ -57,12 +57,13 @@
 #     is involved at any point.
 #   * ALPINE_FDE_MIRROR=http://mirror.fde.internal:8123/mirror/<release>/main
 #     (inst_repo_lines derives the community twin automatically). The name is
-#     /etc/hosts-backed (-> 10.0.2.2) + dnsd-answered, which reconciles the
-#     installer's DNS preflight with the network-free design: inst_preflight
-#     extracts the mirror HOST and nslookups it — mirror.fde.internal
-#     resolves in-guest from our own stub resolver, no upstream DNS ever
-#     consulted. The in-chroot apk transaction resolves through the seeded
-#     resolv.conf -> the same dnsd (one kernel, one network namespace).
+#     /etc/hosts-backed (-> 10.0.2.2), which reconciles the installer's DNS
+#     preflight with the network-free design. The busybox on the ISO has NO
+#     dnsd applet either (attempt 7: dnsd -> Done(127)), and nslookup is
+#     hosts-blind — but the real consumer (apk's fetcher over musl
+#     getaddrinfo) honors /etc/hosts, and the installer's preflight accepts a
+#     hosts-file match (boot-lane finding #7) and seeds the TARGET's
+#     /etc/hosts so the in-chroot transaction resolves the same name.
 #   * the tooling tree rides the SAME server (docroot/tooling), fetched with
 #     busybox wget; the docroot is a HARD-LINK tree of the pinned cache
 #     (cp -al, no data copy) under the run dir, so the shared cache is never
@@ -382,7 +383,7 @@ run_stage tooling-tar 600 tar -C "$REPO" -czf "$RUN/alpine-fde.tar.gz" bin lib h
 # header): a HARD-LINK tree of the pinned cache (cp -al — no data copy, the
 # shared cache is never written) + the tooling tarball. The guest reaches it
 # as http://10.0.2.2:$MIRROR_PORT/... via slirp, and as
-# http://mirror.fde.internal:$MIRROR_PORT/mirror/... through /etc/hosts+dnsd.
+# http://mirror.fde.internal:$MIRROR_PORT/mirror/... through /etc/hosts.
 build_docroot() {
     local docroot="$1" rel
     rel=$(mirror_release)
@@ -477,18 +478,21 @@ wait_console "$A" "localhost:~#" 120
 # --- P1: the slirp route + the DNS-preflight reconciliation ------------------
 # The mirror name resolves WITHOUT any external network: /etc/hosts maps it
 # to 10.0.2.2 (slirp's host IP = the host loopback where mirror_serve_start
-# listens), dnsd answers the installer's nslookup preflight, and the
+# listens); the NAME-based wget leg below proves /etc/hosts resolution works
+# for the real consumer (musl getaddrinfo), and the installer's preflight
 # in-chroot transaction reuses the same resolver through the seeded
 # resolv.conf. busybox wget fetches the mirror + tooling over that route.
 feed_line "$A/serial.sock" \
     "ip link set eth0 up && ip addr add $SLIRP_GUEST_IP/24 dev eth0 && ip route add default via $SLIRP_HOST_IP && printf '127.0.0.1 localhost\\n$SLIRP_HOST_IP $MIRROR_HOSTNAME\\n' > /etc/hosts && printf 'nameserver 127.0.0.1\\n' > /etc/resolv.conf && echo P1-\$((40+1))-HOSTS"
 wait_console "$A" "P1-41-HOSTS" 120
 feed_line "$A/serial.sock" \
-    "dnsd -c /etc/hosts 2>/dev/null || dnsd /etc/hosts 2>/dev/null & sleep 1; nslookup $MIRROR_HOSTNAME >/dev/null 2>&1 && echo P1-\$((40+2))-DNS-OK || echo P1-\$((40+2))-DNS-FAIL"
-wait_console "$A" "P1-42-DNS-" 120
+    "wget -q -O /dev/null http://$MIRROR_HOSTNAME:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256 && echo P1-\$((40+2))-DNS-OK || echo P1-\$((40+2))-DNS-FAIL"
+# EXACT marker: the loose 'P1-42-DNS-' prefix also matched DNS-FAIL and
+# masked the dead-dnsd finding (attempt 7)
+wait_console "$A" "P1-42-DNS-OK" 120
 feed_line "$A/serial.sock" \
     "wget -q -O /dev/null http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256 && echo P1-\$((40+3))-FETCH-OK || echo P1-\$((40+3))-FETCH-FAIL"
-wait_console "$A" "P1-43-FETCH-" 120
+wait_console "$A" "P1-43-FETCH-OK" 120
 
 # --- P2: the guest re-verifies the mirror manifest (tamper-evident e2e) ------
 # over the wire: fetch the manifest + BOTH pinned APKINDEXes, check the
@@ -496,7 +500,7 @@ wait_console "$A" "P1-43-FETCH-" 120
 # every .apk is verified against this signed index)
 feed_line "$A/serial.sock" \
     "mkdir -p /tmp/mchk/main/x86_64 /tmp/mchk/community/x86_64 && cd /tmp/mchk && wget -q http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256 && wget -q -O main/x86_64/APKINDEX.tar.gz http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/main/x86_64/APKINDEX.tar.gz && wget -q -O community/x86_64/APKINDEX.tar.gz http://$SLIRP_HOST_IP:$MIRROR_PORT/mirror/$(mirror_release)/community/x86_64/APKINDEX.tar.gz && grep APKINDEX MANIFEST.sha256 > check.txt && sha256sum -c check.txt >/dev/null 2>&1 && echo P2-\$((40+5))-MANIFEST-OK || echo P2-\$((40+5))-MANIFEST-FAIL"
-wait_console "$A" "P2-45-MANIFEST-" 300
+wait_console "$A" "P2-45-MANIFEST-OK" 300
 
 # --- P3: the tooling tree -----------------------------------------------------
 feed_line "$A/serial.sock" \

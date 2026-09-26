@@ -461,6 +461,27 @@ else
     _fail "executed record wrong: rc=$LIVE_RC err=$(printf '%s' "$LIVE_ERR" | head -1)"
 fi
 
+# --- 6f. in-guest DNS hygiene (the boot lane's live finding #7, attempt 7) ----
+# The virt ISO's busybox has NO dnsd applet (observed: 'dnsd ... Done(127)'),
+# and the loose wait prefix 'P1-42-DNS-' ALSO matched DNS-FAIL — masking the
+# dead resolver. Pinned: no dnsd feed anywhere; the DNS leg waits on the
+# EXACT OK marker and proves hosts-based resolution the way the real
+# consumer (musl getaddrinfo) sees it — a NAME-based wget.
+if grep -E 'dnsd' "$SCENARIO" | grep -q 'feed_line\|^feed_line'; then
+    _fail "s23 still feeds a dnsd invocation (no dnsd applet on the pinned ISO)"
+else
+    _pass "s23 feeds NO dnsd invocation (hosts-based resolution instead)"
+fi
+assert_contains "s23 waits on the EXACT DNS-OK marker (no loose prefix)" "$(_s23)" \
+    'wait_console "$A" "P1-42-DNS-OK"'
+if grep -q '"P1-42-DNS-"' "$(_s23 2>/dev/null)" || grep -q 'P1-42-DNS-"' "$SCENARIO"; then
+    _fail "s23 still uses a loose P1-42-DNS- wait prefix (matches DNS-FAIL too)"
+else
+    _pass "s23 has no loose P1-42-DNS- wait prefix"
+fi
+assert_contains "s23 proves name resolution with a NAME-based wget leg" "$(_s23)" \
+    'http://$MIRROR_HOSTNAME:$MIRROR_PORT/mirror/$(mirror_release)/MANIFEST.sha256'
+
 # --- 7. registration gate: NOT in the default selection yet -------------------------
 if grep -qE $'^s23\t' "$TESTS/run-e2e.sh"; then
     _fail "s23 is registered in run-e2e.sh — the orchestrator gates registration (boot verification first)"
