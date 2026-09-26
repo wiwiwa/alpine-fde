@@ -304,6 +304,11 @@ _assert_refusal_tail() {
         "$(sentinel_of unseal_3strike)"
     assert_contains "[$label] fail-closed poweroff (no shell is offered)" "$log" \
         "$(sentinel_of unseal_poweroff)"
+    # task-2 re-pin (99e57d1, s12/s15c lane): the terminal CONSOLE action of a
+    # refusal boot is the HOOK's fail-closed poweroff — the harness POWEROFF
+    # sentinel (the init's clean-exit line) never prints on a refusal leg
+    assert_not_contains "[$label] the harness POWEROFF sentinel never prints (the terminal action is the hook's fail-closed poweroff)" \
+        "$log" "$(sentinel_of harness_poweroff)"
     assert_not_contains "[$label] never unlocked via the TPM token" "$log" \
         "$(sentinel_of unseal_unlocked)"
     assert_not_contains "[$label] never unlocked via the recovery passphrase" "$log" \

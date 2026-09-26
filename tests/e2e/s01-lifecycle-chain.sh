@@ -1168,25 +1168,21 @@ _liveops_session() {
         'printf %s w2-Live0ps-Rotate9zkq | cryptsetup open --test-passphrase --key-slot 0 /dev/vdb >/dev/null 2>&1 && echo LIV7B-OK || echo LIV7B-DIAG' \
         'LIV7B-(OK|DIAG)'
     # --- pre-upgrade: the btrfs snapshot op (§8.1 C-G16), then cleaned up ------
-    # pre-upgrade: LIVE-FOUND PRODUCT DEFECT (queue 30 report): the CLI derives
-    # its snapshot source from /proc/self/mountinfo's fs-root ("/@"), but the
-    # booted root IS the @ subvolume mount — "/@" does not exist inside its own
-    # namespace, so the CLI's snapshot fails closed (rc 64) on the §9.1 layout
-    # it installs itself. lib/ is outside this lane's ownership: the leg pins
-    # the CURRENT fail-closed behavior (rc 64 + the btrfs fstype detection)
-    # AND proves the snapshot capability end-to-end via the same btrfs seam
-    # with the corrected source path ("/" — the snapper layout).
+    # The CLI snapshots the root subvolume at its MOUNT POINT (the live-found
+    # mountinfo fs-root defect — the §9.1 layout mounts subvol=@ as / and
+    # "/@" does not exist inside its own namespace — fixed in
+    # lib/cmd/pre-upgrade.sh _pu_snapshot_src; unit pin
+    # tests/unit/pre_upgrade_snapshot_src.sh). The CLI prints the snapshot
+    # path on stdout; the leg asserts rc 0 + the read-only snapshot exists,
+    # then deletes it (no residual state rides the committed overlay).
     _liv_feed "$dir" \
-        '/opt/alpine-fde/bin/alpine-fde pre-upgrade >/tmp/liv-pu.out 2>&1; echo LIV8-RC=$?; cut -c1-72 /tmp/liv-pu.out | head -4; echo LIV8-DIAG-END' \
-        'LIV8-DIAG-END'
+        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/tmp/liv-pu.err); echo LIV8-RC=$?' \
+        'LIV8-RC=0'
     _liv_feed "$dir" \
-        '/usr/local/bin/btrfs subvolume snapshot -r / /.snapshots/w2-liveops >/dev/null 2>&1 && echo LIV8B-OK' \
+        '[ -n "$SNAP" ] && /usr/local/bin/btrfs subvolume show "$SNAP" 2>/dev/null | grep -F "Read-only" >/dev/null && echo LIV8B-OK || { cat /tmp/liv-pu.err | cut -c1-72 | head -3; echo LIV8B-DIAG; }' \
         'LIV8B-OK'
     _liv_feed "$dir" \
-        '/usr/local/bin/btrfs subvolume show /.snapshots/w2-liveops 2>/dev/null | grep -F "Read-only" >/dev/null && echo LIV8C-OK' \
-        'LIV8C-OK'
-    _liv_feed "$dir" \
-        '/usr/local/bin/btrfs subvolume delete /.snapshots/w2-liveops >/dev/null 2>&1; echo LIV9-RC=$?' \
+        '/usr/local/bin/btrfs subvolume delete "$SNAP" >/dev/null 2>&1; echo LIV9-RC=$?' \
         'LIV9-RC=0'
     _liv_feed "$dir" 'sync; poweroff -f' 'reboot: Power down|Power down|acpi_power_off'
 }
@@ -1279,8 +1275,7 @@ assert_contains "[boot1-login] the installed system's getty banner (real Alpine 
 # --- the in-guest LIVE-OPS suite (every marker corroborated in-console) ------
 for _liv in 'LIV1-RC=0' 'LIV1B-45-OK' 'LIV2-42-OK' 'LIV3-RC=0' 'LIV3B-OK' \
     'LIV3C-OK' 'LIV4-RC=0' 'LIV4B-OK' 'LIV5-RC=' 'LIV5B-OK' 'LIV6-RC=0' \
-    'LIV6B-OK' 'LIV7B-OK' 'LIV8-RC=64' 'LIV8-DIAG-END' 'LIV8B-OK' \
-    'LIV8C-OK' 'LIV9-RC=0'; do
+    'LIV6B-OK' 'LIV7B-OK' 'LIV8-RC=0' 'LIV8B-OK' 'LIV9-RC=0'; do
     assert_contains "[liveops] session marker $_liv" "$LOG_C" "$_liv"
 done
 unset _liv

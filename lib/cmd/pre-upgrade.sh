@@ -15,6 +15,33 @@ if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
+# _pu_snapshot_src MOUNTINFO ROOT — resolve the btrfs snapshot SOURCE for
+# the root mount from mountinfo. Prints the path + rc 0 when the root mount
+# is btrfs; rc 1 (no path) = no resolution, the caller falls back.
+#
+# THE CONTRACT (queue-30 live finding, s01c live-ops leg 2026-09-26): the
+# §9.1 layout mounts subvol=@ AS /, and mountinfo's FS-ROOT field for that
+# mount reads "/@" — the subvolume's path in the FILESYSTEM's namespace.
+# From INSIDE the mount the same subvolume is visible at the MOUNT POINT;
+# "/@" does not exist inside the @ mount, so snapshotting the fs-root path
+# failed closed on the exact layout the product installs. The snapshot
+# source is therefore always the mount point (the snapper layout: snapshot
+# the subvolume at the path where it is actually visible).
+_pu_snapshot_src() {
+    _pss_mif=$1 _pss_root=$2
+    _pss_mp=${_pss_root%/}
+    [ -n "$_pss_mp" ] || _pss_mp=/
+    _pss_fstype=$(awk -v mp="$_pss_mp" '{
+        fs = ""
+        for (i = 7; i <= NF; i++) if ($i == "-") { fs = $(i + 1); break }
+        if ($5 == mp && fs == "btrfs") { print fs; exit }
+    }' "$_pss_mif" 2>/dev/null) || _pss_fstype=""
+    [ "$_pss_fstype" = "btrfs" ] || return 1
+    # the mount point IS the subvolume (the §9.1 layout mounts subvol=@ as /)
+    printf '%s\n' "$_pss_mp"
+    return 0
+}
+
 cmd_pre_upgrade_main() {
     strict_mode
 
@@ -80,20 +107,17 @@ EOF
         err "pre-upgrade: $_pu_snapdir missing — expected the §9.1 layout with the @snapshots subvolume mounted at /.snapshots"
         return "$ALPINE_FDE_FAIL_CLOSED"
     fi
-    # Source subvolume path: the live mounted layout wins (/proc/self/mountinfo
-    # fs-root of the root mount, e.g. /@); fall back to the fstab subvol=
-    # option; default /@ (the §4 standard layout). The ALPINE_FDE_ROOT_FSTYPE
-    # test seam pins the default so stub tests assert a deterministic argv.
-    _pu_src=/@
+    # Source subvolume path: resolved by _pu_snapshot_src (the root mount's
+    # MOUNT POINT — see the helper's contract comment); the fstab subvol=
+    # option is the last resort when mountinfo carries no btrfs root mount
+    # (practically unreachable: the fstype gate above already required a
+    # btrfs root). The ALPINE_FDE_ROOT_FSTYPE test seam pins the default so
+    # stub tests assert a deterministic argv.
+    _pu_src=${ALPINE_FDE_ROOT:-}/
+    [ "$_pu_src" = "/" ] || _pu_src=${_pu_src%/}
     if [ -z "${ALPINE_FDE_ROOT_FSTYPE:-}" ]; then
-        _pu_mi=$(awk -v mp="${ALPINE_FDE_ROOT:-}/" '{
-            fs = ""
-            for (i = 7; i <= NF; i++) if ($i == "-") { fs = $(i + 1); break }
-            if ($5 == mp && fs == "btrfs") { print $4; exit }
-        }' /proc/self/mountinfo 2>/dev/null) || _pu_mi=""
-        if [ -n "$_pu_mi" ]; then
-            _pu_src=$_pu_mi
-        else
+        if ! _pu_src=$(_pu_snapshot_src "${ALPINE_FDE_MOUNTINFO:-/proc/self/mountinfo}" "${ALPINE_FDE_ROOT:-}"); then
+            _pu_src=""
             _pu_sv=$(awk '!/^[[:space:]]*#/ && $4 ~ /subvol=/ {
                 n = split($4, o, ",")
                 for (i = 1; i <= n; i++) {
