@@ -403,12 +403,15 @@ initrd audit: artifact verdicts:$_ia_verdicts — in-initrd/built-in = satisfied
         return 1
     fi
 
-    # required: the TPM udev rule (creates /dev/tpmrm0) — per-line match
+    # the TPM udev rule (creates /dev/tpmrm0) — per-line match. boot-lane
+    # finding #11: DOWNGRADED to a loud warn. devtmpfs creates /dev/tpmrm0
+    # in-kernel (the mkinitfs init runs devtmpfs/mdev, not udev), and NOTHING
+    # in the pinned Alpine closure ships a *tpm*.rules file — the hard
+    # requirement was unsatisfiable on real installs and failed the audit
+    # after every genuinely-required artifact had passed.
     _ia_rule=$(printf '%s\n' "$_ia_inv" | grep -E 'rules\.d/[^[:space:]]*tpm[^[:space:]]*\.rules' | head -n 1)
     if [ -z "$_ia_rule" ]; then
-        _initrd_audit_reason="initrd audit: TPM udev rule (tpmrm0) missing (§8.2)"
-        err "$_initrd_audit_reason"
-        return 1
+        warn "initrd audit: TPM udev rule (tpmrm0) absent from the initramfs (§8.2) — devtmpfs creates the node in-kernel; continuing"
     fi
 
     # deny rules: compilers / package tools / foreign shells. Parse the
