@@ -930,4 +930,61 @@ else
     _pass "live leg skipped (swtpm/tpm2-tools not available on this host)"
 fi
 
+
+# =============================================================================
+# BLOCKER: OsIndications-unsupported firmware — the SB-guard tail must NOT
+# prompt "Press Enter" when the OsIndications write fails; it must print the
+# manual F2 instructions INSTEAD, then poweroff (no read, no reboot).
+# =============================================================================
+
+# the hook's SB-guard reject path reads the efivars dir — reuse the fixture
+SBG=$TMP/sb-guard
+mkdir -p "$SBG/sys/firmware/efi/efivars" "$SBG/tmp"
+GUID_GLOBAL="8be4df61-93ca-11d2-aa0d-00e098032b8c"
+# SecureBoot=0, SetupMode=1 -> the SB guard fires
+printf '\007\000\000\000\000' >"$SBG/sys/firmware/efi/efivars/SecureBoot-$GUID_GLOBAL"
+printf '\007\000\000\000\001' >"$SBG/sys/firmware/efi/efivars/SetupMode-$GUID_GLOBAL"
+
+# (a) OsIndications write FAILS (read-only efivars dir = the Dell case):
+#     instructions printed, NO Enter prompt, NO read, poweroff called
+chmod 555 "$SBG/sys/firmware/efi/efivars"
+OUT_A=$(FDE_EFIVARS_DIR="$SBG/sys/firmware/efi/efivars" \
+    FDE_NEWROOT="$SBG" FDE_TMPDIR="$SBG/tmp" \
+    sh "$HOOK" 2>&1)
+SBG_RC=$?
+chmod 755 "$SBG/sys/firmware/efi/efivars"
+assert_contains "OsIndications-unsupported: manual F2 instructions printed" "$OUT_A" \
+    "OsIndications not supported by this firmware"
+assert_contains "instructions name the ESP key directory" "$OUT_A" "alpine-fde-keys"
+assert_contains "instructions name db.auth first" "$OUT_A" "db.auth"
+assert_contains "instructions name kek.auth second" "$OUT_A" "kek.auth"
+assert_contains "instructions name pk.auth third" "$OUT_A" "pk.auth"
+assert_contains "instructions say enable Secure Boot" "$OUT_A" "enable Secure Boot"
+if echo "$OUT_A" | grep -q "Press Enter"; then
+    _fail "OsIndications-unsupported: still prompts 'Press Enter' (the infinite-loop defect)"
+else
+    _pass "OsIndications-unsupported: NO 'Press Enter' prompt (blocker fix confirmed)"
+fi
+if echo "$OUT_A" | grep -q "read"; then
+    _fail "OsIndications-unsupported: still reads stdin (the infinite-loop defect)"
+else
+    _pass "OsIndications-unsupported: NO stdin read (no Enter prompt)"
+fi
+assert_contains "OsIndications-unsupported: poweroff called" "$OUT_A" \
+    "fail-closed: forcing poweroff"
+
+# (b) OsIndications write SUCCEEDS (spec-compliant firmware): Enter-prompt +
+#     reboot-into-setup unchanged
+SBG2=$TMP/sb-guard-ok
+mkdir -p "$SBG2/sys/firmware/efi/efivars" "$SBG2/tmp"
+printf '\007\000\000\000\000' >"$SBG2/sys/firmware/efi/efivars/SecureBoot-$GUID_GLOBAL"
+printf '\007\000\000\000\001' >"$SBG2/sys/firmware/efi/efivars/SetupMode-$GUID_GLOBAL"
+OUT_B=$(FDE_EFIVARS_DIR="$SBG2/sys/firmware/efi/efivars" \
+    FDE_NEWROOT="$SBG2" FDE_TMPDIR="$SBG2/tmp" \
+    sh "$HOOK" 2>&1)
+assert_contains "OsIndications-ok: boot-to-firmware-setup requested" "$OUT_B" \
+    "boot-to-firmware-setup requested"
+assert_contains "OsIndications-ok: Enter prompt present (spec-compliant firmware)" "$OUT_B" \
+    "Press Enter to reboot into the firmware setup"
+
 finish

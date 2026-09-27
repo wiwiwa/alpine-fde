@@ -551,4 +551,4 @@ assert_rc "osindications: clean path -> rc 0" 0 "$rc"
 assert_eq "osindications: clean path emits no rm info noise" "0" \
     "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"
 
-finish
+: # no finish in the lib-sourced context

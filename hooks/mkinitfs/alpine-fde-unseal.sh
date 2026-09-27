@@ -163,19 +163,31 @@ if [ "$_fdh_sb" != "1" ] || [ "$_fdh_sm" != "0" ]; then
     _fdh_osind="$FDE_EFIVARS_DIR/OsIndications-$FW_GUID_GLOBAL"
     rm -f "$_fdh_osind" 2>/dev/null || :
     if printf '\007\000\000\000\002\000\000\000\000\000\000\000' >"$_fdh_osind" 2>/dev/null; then
+        # OsIndications accepted — spec-compliant firmware: Enter-prompt +
+        # reboot-into-setup works (the operator can reach the firmware UI)
         _msg "OsIndications: boot-to-firmware-setup requested"
+        _msg "Press Enter to reboot into the firmware setup (the container was NOT unlocked; no passphrase was requested)"
+        IFS= read -r _fdh_enter || _fdh_enter=''
+        _msg "rebooting into the firmware setup (Secure Boot must be enabled)"
+        if reboot -f; then
+            # not reached on real firmware: the machine resets under the hook
+            exit 0
+        fi
+        # a refused reboot must never fall through into an unauthenticated boot
+        _fdh_poweroff "reboot refused — fail-closed poweroff (Secure Boot is OFF; §8.2)"
     else
-        _msg "OsIndications: could not be written — enter the firmware setup manually on the next boot"
+        # REAL-SERVER blocker (Samuel's Dell): OsIndications is NOT supported
+        # (some firmwares lack the capability entirely — SetupMode=1 but the
+        # OsIndications SetVariable is refused or silently ignored). A reboot
+        # here would LOOP back into this guard forever with the user pressing
+        # Enter uselessly. Print the FULL manual instructions INSTEAD, then
+        # poweroff cleanly: the user powers on and presses F2 manually.
+        _msg "OsIndications not supported by this firmware — at the next power-on, enter the firmware setup (usually F2) and:"
+        _msg "  1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order) or verify they are present"
+        _msg "  2. enable Secure Boot"
+        _msg "  3. save and exit"
+        _fdh_poweroff "OsIndications unsupported — manual firmware-setup key enrollment required (§8.2)"
     fi
-    _msg "Press Enter to reboot into the firmware setup (the container was NOT unlocked; no passphrase was requested)"
-    IFS= read -r _fdh_enter || _fdh_enter=''
-    _msg "rebooting into the firmware setup (Secure Boot must be enabled)"
-    if reboot -f; then
-        # not reached on real firmware: the machine resets under the hook
-        exit 0
-    fi
-    # a refused reboot must never fall through into an unauthenticated boot
-    _fdh_poweroff "reboot refused — fail-closed poweroff (Secure Boot is OFF; §8.2)"
 fi
 _msg "Secure Boot guard: secureboot=1 setup_mode=0 — verified boot confirmed (pre-unseal guard, ADR-20)"
 
