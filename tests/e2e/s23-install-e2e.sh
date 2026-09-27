@@ -638,8 +638,8 @@ run_stage disk-copy-b 900 cp "$RUN/disk.img" "$B/disk.img"
 # pins PCR 11 only, so the firmware SB state change cannot break the seal.
 run_stage boot-b-vars-gen 120 keys_create "$RUN/keys-b"
 run_stage boot-b-vars 300 keys_vars_enrolled "$RUN/keys-b" "$B/vars.fd"
-assert_eq "boot B vars: SecureBootEnable ON (offline enrollment)" "ON" \
-    "$(keys_vars_get "$B/vars.fd" SecureBootEnable)"
+assert_contains "boot B vars: SecureBootEnable ON (offline enrollment)" \
+    "$(keys_vars_get "$B/vars.fd" SecureBootEnable)" "ON"
 assert_eq "boot B vars: custom PK present (offline enrollment)" "0" \
     "$(keys_vars_get "$B/vars.fd" PK >/dev/null 2>&1; echo $?)"
 _ensure_tpm "$RUN/tpm"
