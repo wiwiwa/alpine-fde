@@ -346,8 +346,20 @@ assert_contains "plan: direct reboot record, runtime-gated on the success path (
     "reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
 assert_contains "plan: efivars bound into the target (§9.1)" "$INS_OUT" \
     "mount --bind /sys/firmware/efi/efivars /mnt/sys/firmware/efi/efivars"
-assert_contains "plan: teardown includes the efivars umount" "$INS_OUT" \
-    "umount /mnt/dev /mnt/sys /mnt/proc /mnt/sys/firmware/efi/efivars"
+# blocker-#23-era reconciliation: the teardown is ONE record, child-before-parent
+# (efivars first) with lazy -l fallbacks and the mapped-container close last
+assert_contains "plan: teardown includes the efivars umount (child first, lazy -l)" "$INS_OUT" \
+    "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null || :"
+TD_LINE=$(printf '%s\n' "$INS_OUT" | grep -F 'umount /mnt/sys/firmware/efi/efivars 2>/dev/null' | head -n 1)
+IE=$(awk -v l="$TD_LINE" 'BEGIN { print index(l, "/sys/firmware/efi/efivars 2>/dev/null") }')
+ID=$(awk -v l="$TD_LINE" 'BEGIN { print index(l, "umount /mnt/dev") }')
+IP=$(awk -v l="$TD_LINE" 'BEGIN { print index(l, "umount /mnt/proc") }')
+IR=$(awk -v l="$TD_LINE" 'BEGIN { print index(l, "umount -R /mnt") }')
+assert_eq "plan: teardown order efivars < dev < proc < recursive umount -R" "1" \
+    "$(( IE > 0 && ID > IE && IP > ID && IR > IP ? 1 : 0 ))"
+LAZY=$(grep -oF '|| umount -l' <<<"$TD_LINE" | wc -l)
+assert_eq "plan: teardown lazy -l fallback for every umount (never a hard failure)" "1" \
+    "$(( LAZY >= 4 ? 1 : 0 ))"
 # G-IL8: NO host-side signing machinery anywhere in the plan (the §3.3 target
 # package names legitimately CONTAIN the substrings — pin the command records)
 assert_eq "plan: zero sbsign command records (in-chroot build)" "0" \
@@ -385,7 +397,7 @@ I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
 I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
 # anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the
 # reset block also carries a bare `umount -R /mnt` (earlier in the plan)
-I_TEARDOWN=$(line_no "$INS_OUT" "&& umount -R /mnt")
+I_TEARDOWN=$(line_no "$INS_OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
 I_SCRUB=$(line_no "$INS_OUT" "rm -f <ephemeral-keyfile>")
 I_PROBE=$(line_no "$INS_OUT" "INST_SB_ENROLLED=1")
 I_SBINSTR=$(line_no "$INS_OUT" "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys")

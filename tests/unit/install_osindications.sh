@@ -60,7 +60,10 @@ assert_eq "G-C26: the trip record is RUNTIME-CONDITIONAL (else-branch of the liv
 assert_eq "G-C26: the trip record names the firmware-setup boot (OsIndications bit 0)" "1" \
     "$(grep -c 'enters firmware setup (OsIndications bit 0)' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
+# blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
+# record: efivars (child) first, then dev/sys/proc parents, then the recursive
+# umount with -l fallbacks, then the mapped-container close
+I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 I_PROBE=$(line_no "$OUT" "if fw_var_present")
 I_INSTR=$(line_no "$OUT" "Secure Boot key material is staged under")
@@ -82,8 +85,24 @@ assert_eq "scrub record is a HOST step (the staged key lives host-side, I1)" "1"
     "$(grep -cE '^PLAN  host +rm -f <ephemeral-keyfile>' <<<"$OUT")"
 assert_contains "enrolled path keeps a PLAIN direct reboot to disk (ADR-20)" "$OUT" \
     "direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
-assert_contains "teardown umounts the efivars bind" "$OUT" \
-    "umount /mnt/dev /mnt/sys /mnt/proc /mnt/sys/firmware/efi/efivars"
+# child-before-parent + lazy -l fallbacks + the mapped close, all on the ONE
+# teardown record line (order pinned by index on that line, not a flat haystack)
+TEARDOWN_LINE=$(printf '%s\n' "$OUT" | grep -F 'umount /mnt/sys/firmware/efi/efivars 2>/dev/null' | head -n 1)
+IE=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "/sys/firmware/efi/efivars 2>/dev/null") }')
+ID=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount /mnt/dev") }')
+IS=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount /mnt/sys 2>/dev/null") }')
+IP=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount /mnt/proc") }')
+IR=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount -R /mnt") }')
+IC=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "cryptsetup close") }')
+assert_eq "teardown record: efivars (child) unmounted BEFORE the dev/sys/proc parents" "1" \
+    "$(( IE > 0 && ID > IE && IS > ID && IP > IS ? 1 : 0 ))"
+assert_eq "teardown record: recursive umount -R AFTER the child unmounts" "1" \
+    "$(( IP > 0 && IR > IP ? 1 : 0 ))"
+assert_eq "teardown record: mapped-container close LAST" "1" \
+    "$(( IR > 0 && IC > IR ? 1 : 0 ))"
+LAZY=$(grep -oF '|| umount -l' <<<"$TEARDOWN_LINE" | wc -l)
+assert_eq "teardown record: lazy -l fallback for every umount (never a hard failure)" "1" \
+    "$(( LAZY >= 4 ? 1 : 0 ))"
 
 # =============================================================================
 # NO_REBOOT seams (env + flag): the confirm + firmware trip + direct reboot
@@ -115,7 +134,10 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISK2" 2>&1)
 assert_eq "raid1 dry-run rc 0" "0" "$?"
 assert_eq "raid1: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
+# blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
+# record: efivars (child) first, then dev/sys/proc parents, then the recursive
+# umount with -l fallbacks, then the mapped-container close
+I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "raid1: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "raid1: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -126,7 +148,10 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --bcache "$CACHE" 2>&1)
 assert_eq "bcache dry-run rc 0" "0" "$?"
 assert_eq "bcache: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
+# blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
+# record: efivars (child) first, then dev/sys/proc parents, then the recursive
+# umount with -l fallbacks, then the mapped-container close
+I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "bcache: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "bcache: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -137,7 +162,10 @@ OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISKB" --bcache "$C
 assert_eq "bcache-multi dry-run rc 0" "0" "$?"
 assert_eq "bcache-multi: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 I_STATE=$(line_no "$OUT" "inst_state_write installed")
-I_UMOUNT=$(line_no "$OUT" "umount -R /mnt && cryptsetup close")
+# blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
+# record: efivars (child) first, then dev/sys/proc parents, then the recursive
+# umount with -l fallbacks, then the mapped-container close
+I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
 assert_eq "bcache-multi: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
 assert_eq "bcache-multi: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"

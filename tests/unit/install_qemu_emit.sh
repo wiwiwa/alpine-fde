@@ -422,8 +422,13 @@ assert_eq "host step emitted as comment: /proc bind (H-02)" "1" \
     "$(grep -c '^# HOST: .*mount -t proc proc' "$SCRIPT")"
 assert_eq "host step emitted as comment: efivars bind (§9.1)" "1" \
     "$(grep -c '^# HOST: .*mount --bind /sys/firmware/efi/efivars' "$SCRIPT")"
-assert_eq "host step emitted as comment: bind teardown (H-02)" "1" \
-    "$(grep -cF "# HOST: umount $ALPINE_FDE_INSTALL_MNT/dev $ALPINE_FDE_INSTALL_MNT/sys $ALPINE_FDE_INSTALL_MNT/proc" "$SCRIPT")"
+# blocker-#23-era reconciliation: the bind teardown is now ONE record,
+# child-before-parent (efivars first) with lazy -l fallbacks and the
+# mapped-container close last
+assert_eq "host step emitted as comment: bind teardown (H-02, child-before-parent + lazy -l)" "1" \
+    "$(grep -cF "# HOST: umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars 2>/dev/null || umount -l" "$SCRIPT")"
+assert_eq "bind teardown: the parent /mnt recursive umount still closes the plan" "1" \
+    "$(grep -cF 'umount -R '"$ALPINE_FDE_INSTALL_MNT"' 2>/dev/null || umount -l '"$ALPINE_FDE_INSTALL_MNT" "$SCRIPT")"
 
 # --- conf drop (§4 topology + CR-01) -------------------------------------------------
 assert_contains "conf drop emitted: ROOT_FS=btrfs (§4)" "$(cat "$SCRIPT")" "ROOT_FS=btrfs"

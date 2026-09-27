@@ -110,6 +110,7 @@ MIRROR_PIN_ALPINE_KEYS_SHA256="dd211936d544f4050924ce8aec078d24e7b1b036ae70b30bd
 # shellcheck disable=SC2034  # pins of record (consumed by
 # tests/unit/live_tool_pairs_shape.sh and mirror manifest provenance)
 MIRROR_PIN_BCACHE_TOOLS_UDEV_VERSION="1.1-r5"
+# shellcheck disable=SC2034  # pin of record (tests/unit/live_tool_pairs_shape.sh hashes the spool apk against it)
 MIRROR_PIN_BCACHE_TOOLS_UDEV_SHA256="${ALPINE_FDE_MIRROR_BCACHE_TOOLS_UDEV_SHA256:-215386db953e2579eb5a67656afdf8848516892ac4718c28749f1f6c1afec37d}"
 
 # ISO pin (flavor alpine-virt; see header)
