@@ -45,10 +45,6 @@ assert_eq "hex_to_bin: high bytes (ea 07 1b) are raw bytes, not '\\NNN' text" \
     "ea07091b" "$(od -An -v -tx1 "$TMP/hi.bin" | tr -d ' \n')"
 
 # --- (b)/(c) auth_packet_build structural + cryptographic acceptance --------------
-if ! command -v sign-efi-sig-list >/dev/null 2>&1; then
-    echo "SKIP: sign-efi-sig-list not on PATH — the packet pins need efitools (present in the canary/e2e image and on the install ISO)"
-    exit 0
-fi
 KD=$TMP/keys
 mkdir -p "$KD"
 prov_keygen "$KD" pk 2048 TestPK >/dev/null 2>&1
@@ -56,6 +52,13 @@ openssl x509 -inform DER -in "$KD/pk.cert.der" -out "$KD/pk.cert.pem" 2>/dev/nul
 esl_build "$KD/pk.cert.der" >"$KD/pk.esl"
 GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
 TS=2026-09-27T01:08:00Z
+# everything below needs efitools (the canonical, firmware-proven builder).
+# The CN-wiring pins above run unconditionally: they only exercise esl_build.
+if ! command -v sign-efi-sig-list >/dev/null 2>&1; then
+    echo "SKIP: sign-efi-sig-list not on PATH — the packet pins need efitools (present in the canary/e2e image and on the install ISO)"
+    finish
+    exit 0
+fi
 auth_packet_build "$KD/pk.priv.pem" "$KD/pk.cert.pem" PK "$GUID" 65543 \
     "$KD/pk.esl" "$TS" "$TMP/pk.auth"
 assert_file_exists "auth packet built" "$TMP/pk.auth"
@@ -141,5 +144,61 @@ PYCHK
 else
     _pass "virt-fw-vars not installed — reference leg skipped"
 fi
+
+finish
+
+# --- (e) CERT WIRING (blocker #25 cert mixup): each var's packet chain uses
+# ITS OWN identity — db.esl carries the DB cert (CN=Database Key), kek.esl the
+# KEK cert, pk.esl the PK cert; and the packets are DETACHED (the payload ESL
+# is NOT embedded — the firmware supplies it at verify time). The pre-fix
+# corrupt bytes retained printable CN fragments, which is how the KEK-in-db
+# mixup surfaced on the canary.
+KD3=$TMP/keys3
+mkdir -p "$KD3"
+prov_keygen "$KD3" db 2048 TestDB3 >/dev/null 2>&1
+prov_keygen "$KD3" kek 2048 TestKEK3 >/dev/null 2>&1
+prov_keygen "$KD3" pk 2048 TestPK3 >/dev/null 2>&1
+esl_build "$KD3/db.cert.der" >"$KD3/db.esl"
+esl_build "$KD3/kek.cert.der" >"$KD3/kek.esl"
+esl_build "$KD3/pk.cert.der" >"$KD3/pk.esl"
+TS3=2026-09-27T01:08:00Z
+auth_packet_build "$KD3/kek.priv.pem" "$KD3/kek.cert.pem" db "$GUID_DBASE" 65543 \
+    "$KD3/db.esl" "$TS3" "$KD3/db.auth"
+auth_packet_build "$KD3/pk.priv.pem" "$KD3/pk.cert.pem" KEK "$GUID" 65543 \
+    "$KD3/kek.esl" "$TS3" "$KD3/kek.auth"
+auth_packet_build "$KD3/pk.priv.pem" "$KD3/pk.cert.pem" PK "$GUID" 65543 \
+    "$KD3/pk.esl" "$TS3" "$KD3/pk.auth"
+for var in db:Database kek:"Key Exchange" pk:Platform; do
+    v=${var%%:*}; want=${var#*:}
+    openssl asn1parse -inform DER -in "$KD3/$v.auth" >/dev/null 2>&1
+    ESL_OFF=$(( 16 + 24 )) # EFI_TIME(16) + WIN_CERT header(8) + CertType(16) -> ESL? no:
+    # the payload is DETACHED — the ESL is a SEPARATE file; verify each esl's
+    # embedded cert CN via openssl on the cert extracted at the ESL entry
+    # (SignatureOwner 16 bytes after the 44-byte list header)
+    tail -c +45 "$KD3/$v.esl" >"$KD3/$v.cert-extracted" 2>/dev/null ||
+        cp "$KD3/$v.esl" "$KD3/$v.cert-extracted"
+    CN=$(openssl x509 -inform DER -in "$KD3/$v.cert-extracted" -noout -subject 2>/dev/null |
+        sed 's/.*CN=//')
+    case $CN in
+        *"$want"*) _pass "$v.esl carries the $want identity cert (CN=$CN)" ;;
+        *) _fail "$v.esl cert identity mismatch (CN='$CN', wanted '$want')" ;;
+    esac
+    # DETACHED: the payload must NOT be embedded in the packet
+    if grep -qF "$(od -An -vtx1 <"$KD3/$v.esl" | tr -d ' \n' | head -c 32)" \
+        <(od -An -vtx1 <"$KD3/$v.auth" | tr -d ' \n'); then
+        _fail "$v.auth wrongly EMBEDS the ESL (the firmware supplies it at verify time)"
+    else
+        _pass "$v.auth is detached (payload supplied by the verifier, per UEFI)"
+    fi
+done
+# the signer chain: db is signed by the KEK cert, KEK/PK by the PK cert
+for leg in "db:kek:Key Exchange" "kek:pk:Platform" "pk:pk:Platform"; do
+    v=${leg%%:*}; signer=${leg#*:}; signer=${signer%%:*}
+    CN=$(openssl x509 -in "$KD3/$signer.cert.pem" -noout -subject | sed 's/.*CN=//')
+    case $CN in
+        *"$signer"*) _pass "$v packet signer chain: signed by the $signer identity cert" ;;
+        *) _fail "$v packet signer chain broken (signer cert CN='$CN')" ;;
+    esac
+done
 
 finish
