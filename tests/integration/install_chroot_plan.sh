@@ -969,8 +969,9 @@ assert_contains "H-02: /dev bound into the target" "$LOG" \
 L_EFIMNT=$(first_line_no "$LOG" "mount -t efivarfs")
 assert_eq "boot-lane #25: the plan mounts efivarfs in the live env (NVRAM enrollment path)" "1" \
     "$([ -n "$L_EFIMNT" ] && echo 1 || echo 0)"
+L_BINDIV=$(first_line_no "$LOG" "mount --bind /sys/firmware/efi/efivars")
 assert_eq "boot-lane #25: the efivarfs mount precedes the chroot efivars bind" "1" \
-    "$(( L_EFIMNT > 0 && L_BINDT > 0 && L_EFIMNT < L_BINDT ? 1 : 0 ))"
+    "$(( L_EFIMNT > 0 && L_BINDIV > 0 && L_EFIMNT < L_BINDIV ? 1 : 0 ))"
 assert_contains "§9.1: efivars bound into the target" "$LOG" \
     "mount --bind /sys/firmware/efi/efivars $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars"
 L_BINDT=$(first_line_no "$LOG" "mount --bind /dev")
@@ -981,7 +982,6 @@ assert_eq "H-02: binds torn down before umount -R" "1" "$(( L_BINDT > 0 && L_BIN
 # and every one carries the lazy (-l) fallback — a busy host bind (the live
 # env's TPM device references on the /dev bind) must not fail a COMPLETED
 # install.
-printf '%s\n' "DBG-TEARDOWN-FULL: $(grep 'efivars' <<<"$LOG" | head -c 600)" >&2
 # L-04b: guest steps never see ALPINE_FDE_DISK_PASSPHRASE (defensive strip stays)
 assert_contains "L-04b: chroot invocation strips the passphrase variable" \
     "$LOG" "-u ALPINE_FDE_DISK_PASSPHRASE"
