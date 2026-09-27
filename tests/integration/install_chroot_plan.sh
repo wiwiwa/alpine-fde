@@ -80,7 +80,8 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
-    rc-update btrfs reboot chroot modprobe mdev nslookup; do
+    rc-update btrfs reboot chroot modprobe mdev nslookup \
+    cert-to-efi-sig-list sign-efi-sig-list efi-updatevar; do
     make_stub "$s"
 done
 
@@ -592,7 +593,11 @@ COPY_LOG=$(grep -m1 'BOOTX64.EFI' "$ALPINE_FDE_TEST_LOG")
 assert_contains "blocker #7: boot manager installed by guarded file copy (loader probed fail-closed in-chroot)" "$COPY_LOG" \
     'for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi'
 assert_contains "blocker #7: the copy record targets BOTH ESP homes (canonical + removable-media fallback)" "$COPY_LOG" \
-    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+    'BOOTX64.EFI && cp'
+assert_contains "blocker #7: the copy record installs the canonical systemd home" "$COPY_LOG" \
+    'systemd-bootx64.efi'
+assert_contains "blocker #26 addendum: the boot manager is RELEASE-SIGNED before the copy (sbsign in the record)" "$COPY_LOG" \
+    'sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt'
 assert_contains "blocker #7: the copy record dies fail-closed when no loader binary exists" "$COPY_LOG" \
     'no systemd-boot loader EFI binary found in-chroot'
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the run" "0" \

@@ -262,12 +262,12 @@ auth_packet_build() {
         command -v sign-efi-sig-list >/dev/null 2>&1 || {
         die "auth_packet_build: efitools not installed (cert-to-efi-sig-list / sign-efi-sig-list missing) — apk add efitools (real-server blocker #25: hand-rolled packets are refused by firmware)"
     }
-    cert-to-efi-sig-list "$_ap_cert" "$_ap_out.esl" ||
-        die "auth_packet_build: cert-to-efi-sig-list failed for $_ap_var"
+    # the caller's PAYLOAD (the EFI_SIGNATURE_LIST) is the DETACHED signed
+    # content — NEVER re-derive an ESL from the signer cert here (that was
+    # the blocker-#25 cert mixup: db.auth staged with the KEK identity)
     sign-efi-sig-list -g "$_ap_guid" -c "$_ap_cert" -k "$_ap_key" \
         "$_ap_var" "$_ap_out.esl" "$_ap_out" >/dev/null 2>&1 ||
         die "auth_packet_build: sign-efi-sig-list failed for var $_ap_var"
-    rm -f "$_ap_out.esl"
     return 0
 }
 
@@ -463,10 +463,14 @@ prov_stage1() {
     _s1_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     info "building EFI_SIGNATURE_LISTs and authenticated update packets"
     # db is authenticated by the KEK, KEK by the PK, PK by itself (self-signed)
-    esl_build "$_s1_keydir/db.cert.der" >"$_s1_keydir/db.esl"
+    # blocker #25 cert-mixup fix: db authorizes BOOT-IMAGE signers — its ESL
+    # carries the RELEASE cert (the UKI sbsign identity), not the db-
+    # enrollment key's own cert (standard UEFI: PK self-signed -> KEK -> db)
+    esl_build "$_s1_keydir/release.cert.der" >"$_s1_keydir/db.esl"
     esl_build "$_s1_keydir/kek.cert.der" >"$_s1_keydir/kek.esl"
     esl_build "$_s1_keydir/pk.cert.der" >"$_s1_keydir/pk.esl"
-    # db is authenticated by the KEK, KEK by the PK, PK by itself (self-signed)
+    # signer chain: db update signed by the KEK key, KEK update by the PK key,
+    # PK update self-signed (standard UEFI practice)
     auth_packet_build "$_s1_keydir/kek.priv.pem" "$_s1_keydir/kek.cert.pem" \
         db "$PROV_GUID_DBASE" "$PROV_EFI_ATTRS" "$_s1_keydir/db.esl" "$_s1_ts" "$_s1_keydir/db.auth"
     auth_packet_build "$_s1_keydir/pk.priv.pem" "$_s1_keydir/pk.cert.pem" \

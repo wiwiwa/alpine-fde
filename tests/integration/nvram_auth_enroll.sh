@@ -27,13 +27,26 @@ source "$REPO/lib/cmd/provision.sh"
 source "$REPO/lib/firmware.sh"
 
 T=$(mktemp -d /tmp/alpine-fde-nvram-auth.XXXXXX)
-cleanup() { rm -rf "$T"; }
+cleanup() { [ -n "${KEEP_TMP:-}" ] && echo "KEEP_TMP=$T" || rm -rf "$T"; }
 trap cleanup EXIT
 
 GUID_GLOBAL='8be4df61-93ca-11d2-aa0d-00e098032b8c'
 GUID_DBASE='d719b2cb-3d3a-4596-a3bc-dad00e67656f'
 
 # --- fixture builders ----------------------------------------------------------
+
+# efi-updatevar stub (blocker #26 final): fw_var_write_try writes via
+# efi-updatevar — the stub records the invocation and succeeds
+EUV_LOG="$T/euvar.log"
+mkdir -p "$T/eu"
+cat >"$T/eu/efi-updatevar" <<'STUB'
+#!/bin/sh
+printf 'efi-updatevar %s\n' "$*" >>"$EUV_LOG"
+exit 0
+STUB
+chmod +x "$T/eu/efi-updatevar"
+export EUV_LOG
+export PATH="$T/eu:$PATH"
 
 hexbin() { # HEXSTRING — raw bytes on stdout (POSIX printf, no xxd dependency)
     local h=$1 out='' b
@@ -110,13 +123,10 @@ mkauth "$T/db.auth" db "$GUID_DBASE" 'DB-AUTH-PACKET-BYTES' "$MKAUTH_KEY" "$MKAU
 fw_var_write "$E1" db "$GUID_DBASE" "$T/db.auth"
 assert_eq "fw_var_write happy: rc 0 (no die)" "0" "$?"
 
-assert_file_exists "fw_var_write: variable file created in target namespace" \
-    "$E1/db-$GUID_DBASE"
-assert_eq "fw_var_write: attrs header is u32le 0x00010007 (auth bit, bit 16)" "07000100" \
-    "$(head -c 4 "$E1/db-$GUID_DBASE" | od -An -vtx1 | tr -d ' \n')"
-assert_eq "fw_var_write: .auth packet follows the attrs header verbatim" \
-    "$(cat "$T/db.auth" | od -An -vtx1 | tr -d ' \n')" \
-    "$(tail -c +5 "$E1/db-$GUID_DBASE" | od -An -vtx1 | tr -d ' \n')"
+# blocker #26 final: the write is efi-updatevar's (libefivar efivarfs
+# semantics) — the old raw attrs-prefix cat write is gone
+assert_contains "fw_var_write: the write goes through efi-updatevar -f" \
+    "$(cat "$EUV_LOG")" "efi-updatevar -f $T/db.auth db"
 
 # SANITY (blocker #25 scope cut): fw_var_write_try enforces only the minimal
 # spec sanity — non-empty + plausible EFI_TIME year (202x). The FIRMWARE is
@@ -192,11 +202,126 @@ mkdir -p "$RTM/efivars"
 mkauth "$RTM/db.auth" db "$GUID_DBASE" 'ROUND-TRIP-PAYLOAD' "$MKAUTH_KEY" "$MKAUTH_CERT"
 assert_eq "mkauth writer round-trip: rc 0" "0" \
     "$( fw_var_write "$RTM/efivars" db "$GUID_DBASE" "$RTM/db.auth" >/dev/null 2>&1; echo $? )"
-assert_file_exists "mkauth writer round-trip: variable written" "$RTM/efivars/db-$GUID_DBASE"
+assert_contains "mkauth writer round-trip: efi-updatevar invoked for the packet" \
+    "$(cat "$EUV_LOG")" "efi-updatevar -f $RTM/db.auth db"
 # SCOPE CUT (blocker #25): the old 'KEK packet refused for db' pin contradicts
 # the UEFI trust model — db is AUTHENTICATED BY the KEK, so a KEK-signed db
 # update is exactly what firmware accepts. The name binding lives in the
 # signed digest; firmware is the final arbiter.
+
+# =============================================================================
+# POLLUTED EFIVARS (blocker #25 addendum, Dell live-proven sequence): a
+# pre-existing AUTHENTICATED var (attrs 0x00010007) is S_IMMUTABLE and the
+# firmware refuses an unauthenticated delete even in Setup Mode (plain rm ->
+# EINVAL). fw_auth_enroll must: chattr -i -> rm -> SIGNED-EMPTY delete
+# (sign-efi-sig-list over /dev/null + efi-updatevar -f) -> verify gone.
+# Stub efitools binaries on PATH observe the exact invocation shape.
+# =============================================================================
+E4=$T/polluted
+mkdir -p "$E4" "$T/psb"
+GUID_G=8be4df61-93ca-11d2-aa0d-00e098032b8c
+# pre-existing AUTH vars: attrs u32le 0x00010007 + non-empty body.
+# db is a DIRECTORY: `rm -f` cannot remove it (same failure class as the
+# efivarfs S_IMMUTABLE refusal) -> the signed-empty delete branch MUST fire.
+printf '\007\000\000\000\001' >"$E4/SecureBoot-$GUID_G"
+printf '\007\000\000\000\000' >"$E4/SetupMode-$GUID_G" # SetupMode=0: user mode
+mkdir "$E4/db-$GUID_DBASE"
+printf '\007\000\001\000STALE-AUTH-BODY' >"$E4/KEK-$GUID_G"
+printf '\007\000\001\000STALE-AUTH-BODY' >"$E4/PK-$GUID_G"
+cat >"$T/psb/chattr" <<'STUB'
+#!/bin/sh
+echo "chattr $*" >>"$CHATTR_LOG"
+exit 0
+STUB
+cat >"$T/psb/efi-updatevar" <<'STUB'
+#!/bin/sh
+echo "efi-updatevar $*" >>"$UPDATE_LOG"
+exit 0
+STUB
+cat >"$T/psb/sign-efi-sig-list" <<'STUB'
+#!/bin/sh
+# argv: -g GUID -c CERT -k KEY VAR /dev/null OUT — write a canned packet to
+# the LAST argument (the .auth output) and log the payload argument
+for a in "$@"; do out=$a; done
+printf 'SIGNED-EMPTY-PACKET' > "$out"
+exit 0
+STUB
+chmod +x "$T/psb"/*
+CHATTR_LOG="$T/chattr.log"; UPDATE_LOG="$T/update.log"
+export CHATTR_LOG UPDATE_LOG
+export PATH="$T/psb:$PATH"
+
+# fw_auth_enroll needs SetupMode=1 + SecureBoot readable + staged packets
+mkdir -p "$E4/sys"
+printf '\007\000\000\000\001' >"$E4/SecureBoot-$GUID_G"
+printf '\007\000\000\000\000' >"$E4/SetupMode-$GUID_G" # SetupMode=0: user mode
+KD4=$T/keys4
+mkdir -p "$KD4"
+for v in db kek pk; do
+    printf 'CERT-DER-%s' "$v" >"$KD4/$v.cert.der"
+    printf '%s-ESL-BYTES' "$v" >"$KD4/$v.esl"
+    printf '%s-PRIV' "$v" >"$KD4/$v.priv.pem"
+    printf '%s-CERT-PEM' "$v" >"$KD4/$v.cert.pem"
+    # the staged .auth packets (blocker #25: built by sign-efi-sig-list at
+    # stage1; EFI_TIME 2026 + WIN_CERT_UEFI_GUID header + stub PKCS7)
+    { printf '\352\007\033\t\000\000\000\000\000\000\000\000\000\000\000\000'
+      printf '\x2a\x00\x00\x00\x00\x02\xf7\x0e'
+      printf 'STUB-PKCS7-BYTES'
+    } >"$KD4/$v.auth"
+done
+printf 'release-priv' >"$KD4/release.priv.pem"
+printf 'CERT-DER-release' >"$KD4/release.cert.der"
+printf 'release-pub' >"$KD4/release.pub.pem"
+
+ENROLL_OUT=$( ( fw_auth_enroll "$E4" "$KD4" ) 2>&1 )
+ENROLL_RC=$?
+[ "$ENROLL_RC" -eq 0 ] || printf '%s\n' "$ENROLL_OUT" >&2
+assert_eq "polluted efivars: fw_auth_enroll clears + enrolls end-to-end rc 0" "0" "$ENROLL_RC"
+assert_contains "the cleanup ran chattr -i per variable" "$(cat "$CHATTR_LOG" 2>/dev/null)" "-i"
+assert_contains "the signed-empty delete went through efi-updatevar -f"     "$(cat "$UPDATE_LOG" 2>/dev/null)" "-f"
+assert_contains "the signed-empty delete payload is /dev/null (empty packet)"     "$(grep -oF "/dev/null" "$UPDATE_LOG" | head -1)" "/dev/null"
+for v in db KEK PK; do
+    lf=$(printf '%s' "$v" | tr 'A-Z' 'a-z')
+    assert_contains "polluted efivars: $v enrolled via efi-updatevar"     "$(grep -F "keys4/$lf.auth $v" "$UPDATE_LOG" | head -1)" "keys4/$lf.auth $v"
+        "$(cat "$UPDATE_LOG")" "keys4/$v.auth"
+done
+[ -e "$E4/KEK-$GUID_G" ] && grep -q "STALE-AUTH-BODY" "$E4/KEK-$GUID_G" 2>/dev/null &&
+    _fail "stale auth body survived the cleanup" ||
+    _pass "stale auth bodies were replaced (cleared + re-enrolled)"
+
+# --- Leg B: STUBBORN vars (the rm physically fails) -> the SIGNED-EMPTY
+# delete branch fires: sign-efi-sig-list over /dev/null + efi-updatevar -f
+E5=$T/polluted-ro
+mkdir -p "$E5"
+printf '\007\000\000\000\001' >"$E5/SecureBoot-$GUID_G"
+printf '\007\000\000\000\000' >"$E5/SetupMode-$GUID_G" # SetupMode=0: user mode (PK present)
+for v in db KEK PK; do
+    printf '\007\000\001\000STALE-AUTH-BODY' >"$E5/$v-$GUID_G"
+done
+UPDATE_LOG2="$T/update2.log"; CHATTR_LOG2="$T/chattr2.log"
+export UPDATE_LOG2 CHATTR_LOG2
+chmod 555 "$E5" # the stale vars cannot be removed (simulated immutable bit)
+ENROLL2_OUT=$( ( PATH="$T/psb:$PATH" fw_auth_enroll "$E5" "$KD4" ) 2>&1 )
+ENROLL2_RC=$?
+chmod 755 "$E5"
+# the stubborn-var residue is REFUSED fail-closed (the stub efi-updatevar
+# cannot really remove NVRAM vars — the survived-cleanup die is the contract)
+assert_eq "stubborn vars: residue refused fail-closed 64" "64" "$ENROLL2_RC"
+assert_contains "signed-empty delete: sign-efi-sig-list over /dev/null" \
+    "$(cat "$UPDATE_LOG")" "/dev/null"
+assert_contains "signed-empty delete: efi-updatevar -f applies the del packet" \
+    "$(cat "$UPDATE_LOG")" "-f"
+assert_contains "stubborn-var cleanup: chattr -i ran per variable" \
+    "$(cat "$CHATTR_LOG")" "-i"
+assert_contains "stubborn-var residue die names the cleanup" \
+    "$ENROLL2_OUT" "survived the cleanup"
+
+# the chattr requirement is pinned textually: targets where chattr is absent
+# (busybox-only initramfs/minimal chroots) get the loud remedy naming the
+# package, from fw_auth_enroll's own cleanup path
+grep -qF 'apk add e2fsprogs' "$REPO/lib/firmware.sh" &&
+    _pass "the chattr remedy names 'apk add e2fsprogs' (source-pinned)" ||
+    _fail "the chattr remedy text is missing from lib/firmware.sh"
 
 # =============================================================================
 # fw_auth_enroll — SetupMode gate + strict db → KEK → PK (last) order,

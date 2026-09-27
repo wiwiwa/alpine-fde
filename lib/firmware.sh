@@ -161,23 +161,23 @@ fw_var_write_try() {
     # minimal sanity (blocker #25): the packet MUST start with a plausible
     # EFI_TIME — the year's HIGH byte is 0x07 for the 202x era. The old
     # hand-rolled/hybrid packets started with zeros (or escape text) and are
-    # refused here. The firmware is the final arbiter of everything else; the
-    # try-form surfaces its verdict verbatim.
+    # refused here.
     _fwv_year_hi=$(tail -c +2 "$_fwv_auth" | head -c 1 | od -An -v -tx1 | tr -d ' \n')
     [ "$_fwv_year_hi" = "07" ] ||
         die "firmware: $_fwv_auth is not a spec EFI_VARIABLE_AUTHENTICATION_2 packet (EFI_TIME year is not 202x) — refusing to program $_fwv_name"
-    # REAL-SERVER blocker #25 addendum: efivarfs marks AUTHENTICATED variables'
-    # inodes S_IMMUTABLE at creation — a re-run against OUR OWN previously
-    # enrolled variables dies on EPERM at rm/open. Clear the bit best-effort
-    # (quiet when the file does not exist or chattr is unavailable).
+    # efivarfs marks AUTHENTICATED variables' inodes S_IMMUTABLE at creation —
+    # clear the bit best-effort before the write (re-runs against OUR OWN
+    # previously enrolled variables die EPERM at open otherwise).
     chattr -i "$_fwv_dir/$_fwv_name-$_fwv_guid" >/dev/null 2>&1 || :
-    # ONE write() of attrs+packet: the kernel's efivarfs performs SetVariable
-    # on the first write to the file (writing attrs and packet separately
-    # fails with EIO on real firmware, 2026-09-20 live metal). Attrs
-    # 0x00010007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS (u32le),
-    # matching the attributes sign-efi-sig-list signs into the packet.
-    { printf '\007\000\001\000'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
-        return 1
+    # REAL-SERVER blocker #26 (final precision fix): the RAW cat-style write
+    # (4-byte attrs prefix + packet in one write) is REFUSED by real firmware
+    # (Dell: all three authenticated writes) while efi-updatevar -f with the
+    # same-class packets is ACCEPTED — libefivar implements the proper
+    # efivarfs open/attrs semantics. The write is therefore ALWAYS
+    # efi-updatevar's; no native cat fallback.
+    command -v efi-updatevar >/dev/null 2>&1 ||
+        die "firmware: the authenticated write of $_fwv_name requires efi-updatevar — apk add efitools (the raw efivarfs write is refused by real firmware, blocker #26 final)"
+    efi-updatevar -f "$_fwv_auth" "$_fwv_name" >/dev/null 2>&1 || return 1
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
     return 0
 }
@@ -274,8 +274,20 @@ fw_auth_enroll() {
     _fae_esp=${3:-/efi}
     _fae_setup=$(fw_var_u8 "$_fae_dir" SetupMode) ||
         die "firmware: SetupMode state unknown at $_fae_dir — refusing to enroll (§9.1 preflight: clear the vendor PK in BIOS setup first)"
-    [ "$_fae_setup" = "1" ] ||
-        die "firmware: not in Setup Mode (setup_mode=$_fae_setup) — refusing to enroll (§9.1: clear the vendor PK in BIOS setup first)"
+    # blocker #25 addendum (Samuel's amendment): BOTH modes are supported —
+    #   SetupMode=1  fresh install: no PK enrolled, the UNAUTHENTICATED rm
+    #                path is correct (a signed delete would be pointless —
+    #                clean NVRAM has nothing to delete).
+    #   SetupMode=0  re-enrollment/rotation: a PK exists (user mode) and the
+    #                on-disk chain keys (pk.priv / kek.priv) sign the
+    #                SIGNED-EMPTY deletes. This is the only mode where the
+    #                efivarfs S_IMMUTABLE + authenticated-delete dance runs.
+    # SetupMode unknown -> die (unchanged).
+    case $_fae_setup in
+        1) _fae_usermode=0; info "firmware: Setup Mode — fresh-install enrollment (unauthenticated pre-existing-var cleanup)" ;;
+        0) _fae_usermode=1; info "firmware: user mode (PK present) — re-enrollment: pre-existing vars cleared via SIGNED-EMPTY deletes (blocker #25 addendum)" ;;
+        *) die "firmware: SetupMode state is '$_fae_setup' (expected 0 or 1) — refusing to enroll" ;;
+    esac
     _fae_failed=''
     for _fae_v in db KEK PK; do
         _fae_guid=$FW_GUID_GLOBAL
@@ -293,13 +305,50 @@ fw_auth_enroll() {
         # fail-closed gate above, and the db -> KEK -> PK order protects the
         # half-enrolled trust root.
         if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-            info "firmware: removing pre-existing vendor $_fae_v — Setup Mode permits it"
-            # blocker #25 addendum: OUR OWN previously enrolled auth variables
-            # carry the efivarfs S_IMMUTABLE bit — clear it best-effort before
-            # the rm (a plain rm dies EPERM on re-enrollment/re-provision)
+            info "firmware: removing pre-existing vendor $_fae_v ($_fae_usermode)"
+            # REAL-SERVER blocker #25 addendum (Dell, live-proven): efivarfs
+            # marks AUTHENTICATED variables' inodes S_IMMUTABLE at creation.
+            # chattr -i is required before ANY removal attempt.
+            command -v chattr >/dev/null 2>&1 ||
+                die "firmware: clearing the pre-existing $_fae_v requires chattr — apk add e2fsprogs (efivarfs marks authenticated variables immutable; blocker #25 addendum)"
             chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-            rm -f "$_fae_dir/$_fae_v-$_fae_guid" ||
-                warn "firmware: could not remove pre-existing vendor $_fae_v — attempting the authenticated write anyway (its failure will report the real error)"
+            rm -f "$_fae_dir/$_fae_v-$_fae_guid" 2>/dev/null || :
+            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ] && [ "$_fae_usermode" -eq 1 ]; then
+                # USER MODE (SetupMode=0, PK present): SIGNED-EMPTY delete —
+                # efitools signs the EMPTY payload and efi-updatevar -f
+                # performs the authenticated remove. Chain: db-del by the KEK
+                # key, KEK/PK-del by the PK key.
+                command -v efi-updatevar >/dev/null 2>&1 &&
+                    command -v sign-efi-sig-list >/dev/null 2>&1 ||
+                    die "firmware: the firmware refuses an unauthenticated delete of $_fae_v and the signed-delete tools are missing — efi-updatevar/sign-efi-sig-list missing, apk add efitools (blocker #25 addendum)"
+                case $_fae_v in
+                    db)  _fae_dkey="$_fae_keys/kek.priv.pem"; _fae_dcert="$_fae_keys/kek.cert.pem" ;;
+                    kek) _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
+                    *)   _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
+                esac
+                if [ ! -f "$_fae_dkey" ] || [ ! -f "$_fae_dcert" ]; then
+                    die "firmware: the signed-empty delete of $_fae_v needs the on-disk chain keys ($_fae_dkey, $_fae_dcert) — both missing; re-provision first (blocker #25 addendum)"
+                fi
+                chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
+                sign-efi-sig-list -g "$_fae_guid" -c "$_fae_dcert" -k "$_fae_dkey" \
+                    "$_fae_v" /dev/null "$_fae_dir/$_fae_v-del.auth" >/dev/null 2>&1 ||
+                    die "firmware: sign-efi-sig-list failed for the $_fae_v signed-empty delete (blocker #25 addendum)"
+                chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
+                efi-updatevar -f "$_fae_dir/$_fae_v-del.auth" "$_fae_v" >/dev/null 2>&1 ||
+                    warn "firmware: efi-updatevar refused the $_fae_v signed-empty delete (blocker #25 addendum)"
+            elif [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
+                # FRESH INSTALL (SetupMode=1): the unauthenticated rm was
+                # refused — log LOUD and continue (clean NVRAM has nothing to
+                # delete; the shared verify below is the final gate)
+                warn "firmware: the firmware refused the unauthenticated delete of $_fae_v (Setup Mode) — continuing; enrollment will fail loudly if the variable truly blocks the write"
+            fi
+            # SHARED final gate: the variable MUST be gone before enrolling —
+            # never enroll over a live trust anchor
+            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
+                rm -rf "$_fae_dir/$_fae_v-$_fae_guid" 2>/dev/null || :
+                [ -e "$_fae_dir/$_fae_v-$_fae_guid" ] &&
+                    die "firmware: $_fae_v survived the cleanup — refusing to enroll over a live trust anchor (blocker #25 addendum)"
+            fi
         fi
         # provision stage1 ships the packets as db.auth / kek.auth / pk.auth
         _fae_lc=$(printf '%s' "$_fae_v" | tr '[:upper:]' '[:lower:]')

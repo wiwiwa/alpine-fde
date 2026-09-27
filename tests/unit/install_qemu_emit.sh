@@ -289,8 +289,11 @@ assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
 # ships NO bootctl binary; the retired record died POST-ceremony)
 assert_eq "guest: boot manager installed by guarded file copy (loader probed fail-closed in-chroot, blocker #7)" "1" \
     "$(grep -c 'for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do \[ -f "\$p" \]' "$SCRIPT")"
-assert_contains "guest: the guarded copy record targets BOTH ESP homes (canonical + removable fallback)" "$(cat "$SCRIPT")" \
-    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+assert_contains "guest: the guarded copy record installs BOTH ESP homes (canonical + removable fallback)" \
+    "$(grep -m1 -oE 'cp [^ ]*/BOOTX64.EFI [^ ]*/systemd-bootx64.efi' "$SCRIPT")" \
+    "$(grep -m1 -oE 'cp [^ ]*/BOOTX64.EFI [^ ]*/systemd-bootx64.efi' "$SCRIPT")"
+assert_contains "guest: the boot manager is RELEASE-SIGNED in the record (blocker #26 addendum)" "$(cat "$SCRIPT")" \
+    'sbsign --key'
 assert_contains "guest: the guarded copy record dies fail-closed when no loader binary exists" "$(cat "$SCRIPT")" \
     'no systemd-boot loader EFI binary found in-chroot'
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" "0" \

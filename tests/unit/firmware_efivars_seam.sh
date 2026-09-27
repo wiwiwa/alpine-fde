@@ -256,6 +256,23 @@ done
 exit 0
 STUB
 chmod +x "$tmp/stub-bin/sign-efi-sig-list"
+cat >"$tmp/stub-bin/efi-updatevar" <<'STUB'
+#!/bin/sh
+# efi-updatevar stub (blocker #26 final): models the kernel result —
+# -f AUTH VARNAME writes attrs(0x00010007) + AUTH body into the efivars dir
+# the seam exports (well-known per-var GUIDs: db=d719b2cb…, KEK/PK=8be4df61…)
+auth=$2
+name=$3
+dir=${ALPINE_FDE_SEAM_EFIVARS:-}
+[ -n "$dir" ] || exit 0
+case $name in
+    db) guid=d719b2cb-3d3a-4596-a3bc-dad00e67656f ;;
+    *) guid=8be4df61-93ca-11d2-aa0d-00e098032b8c ;;
+esac
+{ printf '\007\000\001\000'; cat "$auth"; } > "$dir/$name-$guid"
+exit 0
+STUB
+chmod +x "$tmp/stub-bin/efi-updatevar"
 export PATH="$tmp/stub-bin:$PATH"
 
 # mkauth FILE NAME GUID PAYLOAD — minimal EFI_VARIABLE_AUTHENTICATION_2 packet
@@ -307,7 +324,7 @@ printf '\007\000\000\000VENDORKEK' >"$fa/KEK-$GUID"
 printf '\007\000\000\000VENDORPK' >"$fa/PK-$GUID"
 rc=0
 if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
+    out=$(ALPINE_FDE_SEAM_EFIVARS="$fa" fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
 else
     _pass "fw_auth_enroll leg skipped (efitools not on this host)"
 fi
@@ -336,6 +353,16 @@ assert_eq "enroll: PK re-created with auth attrs prefix" "07000100" \
 # prints the instructions ONCE), and the install CONTINUES.
 fb="$tmp/enroll-rm-fails"
 mkdir -p "$fb"
+# a failing efi-updatevar stub models the real firmware refusing the write
+# (blocker #26 final: the write is efi-updatevar's; the refusal is NON-FATAL
+# -> the ESP fallback stages the manual-import kit and the install continues)
+mkdir -p "$tmp/stub-fail"
+cat >"$tmp/stub-fail/efi-updatevar" <<'STUB'
+#!/bin/sh
+echo "efi-updatevar: firmware refused the authenticated write" >&2
+exit 1
+STUB
+chmod +x "$tmp/stub-fail/efi-updatevar"
 mkvar_byte "$fb" SetupMode 1
 # a DIRECTORY at the variable path: rm -f fails (EISDIR) and the subsequent
 # write redirection fails too — models an unremovable stubborn variable
@@ -343,19 +370,21 @@ mkdir "$fb/db-$DBXGUID"
 rm -rf "$tmp/esp-b"
 rc=0
 if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
+    out=$(PATH="$tmp/stub-fail:$PATH" ALPINE_FDE_SEAM_EFIVARS="$fb" fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
 else
     _pass "fw_auth_enroll leg skipped (efitools not on this host)"
 fi
 assert_rc "enroll: write refusal -> ESP fallback, install continues (rc 0)" 0 "$rc"
-assert_contains "enroll: rm failure warns (non-fatal)" "$out" \
-    "could not remove pre-existing vendor db"
+assert_contains "enroll: rm failure warns (non-fatal, blocker #25 fresh-mode)" "$out" \
+    "the firmware refused the unauthenticated delete of db (Setup Mode)"
+# the write is efi-updatevar's (blocker #26 final); with the stub refusing,
+# the NON-FATAL warn + ESP fallback fire and the install continues
 assert_contains "enroll: refused db write warns (non-fatal, no die)" "$out" \
     "cannot write $fb/db-$DBXGUID"
-assert_contains "enroll: KEK write still attempted after the db refusal" "$out" \
-    "enrolled KEK"
-assert_contains "enroll: PK write still attempted after the db refusal" "$out" \
-    "enrolled PK"
+assert_contains "enroll: KEK write still attempted after the db refusal (blocker #26: writes are efi-updatevar's)" "$out" \
+    "cannot write $fb/KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+assert_contains "enroll: PK write still attempted after the db refusal (blocker #26: writes are efi-updatevar's)" "$out" \
+    "cannot write $fb/PK-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 # user directive (ESP staging declutter): the user-facing import directory
 # stages EXACTLY the three import files + a README.txt with the numbered
 # steps — NO .esl/.dbx/.cert material (that stays on the target's
@@ -424,7 +453,7 @@ mkdir -p "$fc"
 mkvar_byte "$fc" SetupMode 1
 rc=0
 if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
+    out=$(ALPINE_FDE_SEAM_EFIVARS="$fc" fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
 else
     _pass "fw_auth_enroll leg skipped (efitools not on this host)"
 fi
@@ -444,10 +473,16 @@ assert_eq "enroll: clean path prints no manual instructions" "0" \
 fd="$tmp/enroll-readonly"
 mkdir -p "$fd"
 mkvar_byte "$fd" SetupMode 1
-chmod 555 "$fd"
+mkdir -p "$tmp/stub-readonly"
+cat >"$tmp/stub-readonly/efi-updatevar" <<'STUB'
+#!/bin/sh
+echo "efi-updatevar: firmware refused the authenticated write" >&2
+exit 1
+STUB
+chmod +x "$tmp/stub-readonly/efi-updatevar"
 rm -rf "$tmp/esp-d"
 rc=0
-out=$(fw_auth_enroll "$fd" "$FAKEYS_DBX" "$tmp/esp-d" 2>&1) || rc=$?
+out=$(PATH="$tmp/stub-readonly:$PATH" fw_auth_enroll "$fd" "$FAKEYS_DBX" "$tmp/esp-d" 2>&1) || rc=$?
 chmod 755 "$fd"
 assert_rc "enroll: read-only efivars -> fallback, install continues (rc 0)" 0 "$rc"
 assert_eq "enroll: ALL THREE write attempts made and refused" "3" \
@@ -471,18 +506,21 @@ assert_not_contains "enroll: total refusal prints NO numbered instructions mid-f
 assert_contains "enroll: final WARN after total refusal" "$out" \
     "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
 
-# (e) fw_var_write split: the TRY form returns rc 1 on a refused write (no
-# die — the identity preflight still dies), the wrapper keeps the die.
+# (e) fw_var_write split (blocker #26 final): the write is ALWAYS efi-updatevar's;
+# on a read-only efivars dir the try returns rc 1 (non-die), the wrapper dies 64.
 fwro="$tmp/varwrite-ro"
-mkdir -p "$fwro"
+mkdir -p "$fwro" "$tmp/stub-ro2"
+printf '#!/bin/sh\nexit 1\n' >"$tmp/stub-ro2/efi-updatevar"
+chmod +x "$tmp/stub-ro2/efi-updatevar"
 chmod 555 "$fwro"
+# the failing efi-updatevar stub models the firmware refusing the write
 rc=0
-out=$(fw_var_write_try "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
+out=$(PATH="$tmp/stub-ro2:$PATH" fw_var_write_try "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
 assert_rc "fw_var_write_try: refused write -> rc 1, no die" 1 "$rc"
 assert_eq "fw_var_write_try: nothing written to the read-only dir" "0" \
     "$([ -e "$fwro/db-$DBXGUID" ] && echo 1 || echo 0)"
 rc=0
-out=$(fw_var_write "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
+out=$(PATH="$tmp/stub-ro2:$PATH" fw_var_write "$fwro" db "$DBXGUID" "$FAKEYS/db.auth" 2>&1) || rc=$?
 assert_rc "fw_var_write wrapper: refused write -> fail-closed 64" 64 "$rc"
 assert_contains "fw_var_write wrapper: die names the variable path" "$out" \
     "cannot write $fwro/db-$DBXGUID"

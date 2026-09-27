@@ -75,7 +75,8 @@ EOF
     chmod +x "$T/stub/$1"
 }
 for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
-    lsblk btrfs cryptsetup reboot make-bcache bcache-super-show; do
+    lsblk btrfs cryptsetup reboot make-bcache bcache-super-show \
+    cert-to-efi-sig-list sign-efi-sig-list; do
     make_stub "$s"
 done
 # openssl — deterministic 256-bit hex body (the staged ephemeral key, G-C23)
