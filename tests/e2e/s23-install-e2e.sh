@@ -655,20 +655,21 @@ extract_guest_platform_certs() {
     for f in db.auth kek.auth pk.auth; do
         [ -f "$kd/espkeys/alpine-fde-keys/$f" ] || return 1
         name=${f%.auth}
-        # EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + WIN_CERT_UEFI_GUID
-        # (8B hdr + 16B type GUID) + EFI_SIGNATURE_LIST (44B) + owner GUID
-        # (16B) -> the X509 DER cert follows; locate and validate via openssl.
-        python3 - "$kd/espkeys/alpine-fde-keys/$f" "$kd/$name.der" <<'PYE'
-import sys
+        # EFI_VARIABLE_AUTHENTICATION_2 = EFI_TIME(16) + WIN_CERTIFICATE_
+        # UEFI_GUID(22B hdr) whose CertData is a PKCS7 SignedData carrying
+        # the X509 cert. Extract CertData, then pull the cert out of the
+        # PKCS7 (efitools-built packets, blocker #25 pipeline).
+        python3 - "$kd/espkeys/alpine-fde-keys/$f" "$kd/$name.p7" <<'PYE'
+import struct, sys
 data=open(sys.argv[1],'rb').read()
-pos=16
-while True:
-    i=data.find(b'\x30\x82', pos)
-    if i < 0: sys.exit(1)
-    der=data[i:i+4+int.from_bytes(data[i+2:i+4],'big')]
-    open(sys.argv[2],'wb').write(der)
-    r=sys.exit(0)
+W=16
+dw=struct.unpack_from('<I',data,W)[0]
+open(sys.argv[2],'wb').write(data[W+22:W+dw])
 PYE
+        openssl pkcs7 -inform DER -in "$kd/$name.p7" -print_certs 2>/dev/null |
+            sed -n '/BEGIN CERT/,/END CERT/p' >"$kd/$name.pem"
+        head -1 "$kd/$name.pem" >/dev/null 2>&1 || return 1
+        openssl x509 -in "$kd/$name.pem" -out "$kd/$name.crt" 2>/dev/null || return 1
         openssl x509 -inform DER -in "$kd/$name.der" -noout >/dev/null 2>&1 || return 1
         openssl x509 -inform DER -in "$kd/$name.der" -out "$kd/$name.crt" 2>/dev/null || return 1
     done
