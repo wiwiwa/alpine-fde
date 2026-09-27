@@ -39,6 +39,16 @@ Before beginning installation, your target machine must be configured in UEFI se
    > Authenticated NVRAM variable writes (`PK`, `KEK`, `db`) require `SetupMode == 1`. If the vendor PK is not cleared, installation preflight will abort (`exit 64`) to prevent write errors or bricked firmware states.
 3. **Boot Live Installation Media:** Boot an official Alpine Linux Standard live USB on the target machine.
 
+### Dell PowerEdge Real-Hardware Prerequisites
+
+Findings from a live Dell PowerEdge install (2026-09). The installer and boot hook already adapt to this firmware automatically where they can; the firmware-side prerequisites below **cannot** be automated and must be satisfied by the operator.
+
+1. **No software reboot-to-firmware-setup (`OsIndications` unsupported).** This firmware exposes no `OsIndicationsSupported` variable, so the UEFI-defined software boot-to-setup mechanism is impossible — nothing an OS writes can make it reboot straight into setup. Enter firmware setup with **F2 during POST**. The early-boot Secure Boot guard detects the missing support at boot, prints the full manual steps (import `db.auth`, `kek.auth`, `pk.auth` from the ESP's `alpine-fde-keys` in that order, enable Secure Boot, save and exit), prompts *Press Enter to reboot*, and reboots plainly — press **F2 during the next POST** to reach the firmware UI (see [§3 Step 3](#step-3-first-boot--automated-trust-finalization)).
+2. **Key import goes through `efi-updatevar`, not raw efivarfs writes.** This firmware refused `sign-efi-sig-list`-format packets written directly to `efivarfs`, but accepts the native `EFI_VARIABLE_AUTHENTICATION_2` packets the installer emits via `efi-updatevar` (efitools). Authenticated **deletes** additionally need signed-empty packets plus `chattr -i` on the efivarfs node first — efivarfs marks authenticated variables immutable at creation, so any removal attempt dies `EPERM` without it. The installer handles all of this; the operator takeaways are: make sure `efitools` (`efi-updatevar`) and `e2fsprogs` (`chattr`) are available on the live host, and never hand-write the variables with `cat`/`printf` redirection.
+3. **Flash SB-capable PERC and NIC firmware BEFORE enabling Secure Boot.** With Secure Boot enforced under a custom-only db, out-of-band device firmware — NIC PXE option ROMs and the Integrated RAID Controller (PERC) option ROM — can fail the firmware's UEFI0072 Secure Boot policy checks at POST. In the verified failure, the PERC option ROM's refusal blocked the RAID controller from initializing (disks invisible to the installer). **Prerequisite: flash current, SB-capable PERC and NIC firmware via iDRAC before enabling Secure Boot.** If it bites anyway, the POST screen offers **F1 (continue)** / **F2 (setup)**.
+4. **OPEN decision — db contents.** The custom db currently contains ONLY the Alpine FDE release certificate. Whether vendor/Microsoft certificates must be APPENDED to db for option-ROM authorization is an **open decision that has not been made** — this guide deliberately does not present an answer; when decided, this section will record the outcome.
+5. **Boot entry is created for you.** `install` creates the firmware boot entry labeled **`Alpine FDE`** (capitalized), targeting the ESP's `\EFI\BOOT\BOOTX64.EFI`, first in `BootOrder` (idempotent: re-installs reuse or recreate it — no manual `efibootmgr` run is needed).
+
 ---
 
 ## 2. Installation Ceremonies
@@ -114,6 +124,7 @@ The installer executes all heavy system, package, and firmware setup operations 
 4. **Firmware NVRAM Enrollment:** Enrolls your custom platform keys into UEFI NVRAM (`db → KEK → PK`), closing Setup Mode.
 5. **Bootloader & UKI Build:** Builds and Authenticode-signs `systemd-boot` and the initial Unified Kernel Image (UKI).
 6. **Initial TPM Sealing:** Seals an initial TPM 2.0 token to the signed UKI measurement (PCR 11), ensuring the upcoming reboot unlocks without manual password intervention.
+7. **UEFI Boot Entry:** Creates the firmware boot entry **`Alpine FDE`** (capitalized) pointing at `\EFI\BOOT\BOOTX64.EFI` on the ESP, first in `BootOrder` — previously the operator ran `efibootmgr` by hand after every fresh install (on firmware with no EFI variable support, the step prints the exact manual command instead of failing).
 
 > [!TIP]
 > **Fast Fail-Debug Loop:** All disk operations, package downloads, firmware writes, and UKI signing execute before asking for credentials. If any hardware, network, or firmware step fails, the installer aborts immediately so failures are discovered fast during setup without wasting time re-typing passwords.
@@ -132,7 +143,7 @@ The installer then scrubs temporary keys from memory, unmounts the filesystems, 
 Upon reboot, the machine boots from the target disk:
 1. **Early-Boot Secure Boot Guard in initrd (Refuses to Boot if Secure Boot is Disabled):**
    - In the initrd/initramfs, the early-boot hook verifies the firmware Secure Boot state (`secureboot == 1 && setup_mode == 0`) **before** attempting to unseal or unlock the root disk.
-   - **If Secure Boot is OFF / disabled:** The initrd **strictly refuses to boot**. It aborts the boot process immediately with a fatal security error, never evaluates the TPM token, never prompts for any passphrase, and never unseals the root filesystem. It prints an explicit notice on the console instructing the user that Secure Boot must be enabled in UEFI setup, waits for user confirmation (*Press Enter to reboot*), and reboots directly into UEFI firmware setup. The initrd will completely refuse to boot the operating system until Secure Boot is active.
+   - **If Secure Boot is OFF / disabled:** The initrd **strictly refuses to boot**. It aborts the boot process immediately with a fatal security error, never evaluates the TPM token, never prompts for any passphrase, and never unseals the root filesystem. It prints an explicit notice on the console instructing the user that Secure Boot must be enabled in UEFI setup, waits for user confirmation (*Press Enter to reboot*), and reboots. How the next boot reaches firmware setup depends on the firmware: if it supports the UEFI `OsIndications` boot-to-setup mechanism, the reboot enters setup automatically; if not (e.g. Dell PowerEdge, where `OsIndicationsSupported` is absent — see [§1](#1-prerequisites--firmware-preparation)), the guard instead prints the manual **F2-during-POST** instructions (import the `.auth` keys from the ESP, enable Secure Boot, save and exit) and reboots plainly, leaving you to catch F2 during POST. The initrd will completely refuse to boot the operating system until Secure Boot is active.
    - **If Secure Boot is ON / enabled:** The initrd proceeds to evaluate the TPM 2.0 token against PCR 11, unsealing the root container **100% automatically with zero password prompts**.
 2. **Automated Finalization (Runs on First Boot Until Success):**
    - The standalone OpenRC service (`alpine-fde-finalize`) runs automatically before reaching the login prompt:
@@ -293,6 +304,16 @@ If the machine boots while Secure Boot is disabled in firmware setup during the 
 :: You must enable Secure Boot in your UEFI/BIOS firmware setup.
 ::
 Press Enter to reboot into UEFI Firmware Setup...
+```
+
+On firmware **without** the `OsIndications` boot-to-setup mechanism (e.g. Dell PowerEdge — the `OsIndicationsSupported` variable is absent, so no OS request can reboot straight into setup), the tail of the exchange differs: the guard prints the manual import/enable steps and reboots plainly instead of expecting the firmware to auto-enter setup:
+
+```text
+:: OsIndications not supported by this firmware — at the next boot, press F2 during POST to enter the firmware setup and:
+::   1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order, or the .cer certificates) or verify they are present
+::   2. enable Secure Boot
+::   3. save and exit
+:: Press Enter to reboot (press F2 during POST to enter the firmware setup)
 ```
 
 #### 3. Boot-Time Firmware Drift Warning (`alpine-fde-audit` OpenRC Service)
