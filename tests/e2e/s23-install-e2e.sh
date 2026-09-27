@@ -653,12 +653,12 @@ extract_guest_platform_certs() {
     mcopy -i "$espimg" -s -n ::/alpine-fde-keys "$kd/espkeys/" 2>/dev/null
     echo "# s23 dbg: extracted: $(ls "$kd/espkeys/" "$kd/espkeys/alpine-fde-keys/" 2>/dev/null | tr '\n' ' ')" >&2
     for f in db.auth kek.auth pk.auth; do
-        [ -f "$kd/espkeys/$f" ] || return 1
+        [ -f "$kd/espkeys/alpine-fde-keys/$f" ] || return 1
         name=${f%.auth}
         # EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + WIN_CERT_UEFI_GUID
         # (8B hdr + 16B type GUID) + EFI_SIGNATURE_LIST (44B) + owner GUID
         # (16B) -> the X509 DER cert follows; locate and validate via openssl.
-        python3 - "$kd/espkeys/$f" "$kd/$name.der" <<'PYE'
+        python3 - "$kd/espkeys/alpine-fde-keys/$f" "$kd/$name.der" <<'PYE'
 import sys
 data=open(sys.argv[1],'rb').read()
 pos=16
