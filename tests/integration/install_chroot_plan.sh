@@ -961,6 +961,16 @@ assert_contains "H-02: /sys bound into the target" "$LOG" \
     "mount --bind /sys $ALPINE_FDE_INSTALL_MNT/sys"
 assert_contains "H-02: /dev bound into the target" "$LOG" \
     "mount --bind /dev $ALPINE_FDE_INSTALL_MNT/dev"
+# boot-lane finding #25 (s23 attempt 24): the LIVE env must have efivarfs
+# MOUNTED before the chroot binds it — otherwise the in-chroot NVRAM
+# enrollment writes hit an empty sysfs dir and the enrollment is deferred
+# ("staged kek.auth ... ESP fallback"; PK absent). Pin the mount record and
+# its order BEFORE the bind.
+L_EFIMNT=$(first_line_no "$LOG" "mount -t efivarfs")
+assert_eq "boot-lane #25: the plan mounts efivarfs in the live env (NVRAM enrollment path)" "1" \
+    "$([ -n "$L_EFIMNT" ] && echo 1 || echo 0)"
+assert_eq "boot-lane #25: the efivarfs mount precedes the chroot efivars bind" "1" \
+    "$(( L_EFIMNT > 0 && L_BINDT > 0 && L_EFIMNT < L_BINDT ? 1 : 0 ))"
 assert_contains "§9.1: efivars bound into the target" "$LOG" \
     "mount --bind /sys/firmware/efi/efivars $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars"
 L_BINDT=$(first_line_no "$LOG" "mount --bind /dev")
