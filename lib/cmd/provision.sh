@@ -246,36 +246,49 @@ esl_verify() {
 }
 
 # auth_packet_build PRIVKEY CERT VARNAME VARGUID ATTRS PAYLOADFILE TIMESTAMP OUT
-# Authenticated variable update packet via the CANONICAL efitools pipeline
-# (real-server blocker #25, live-proven on real hardware: cert-to-efi-sig-list
-# + sign-efi-sig-list packets import; EVERY hand-rolled variant was refused
-# with EINVAL/EACCES by two independent firmwares). The variable identity is
-# bound by sign-efi-sig-list itself (-g GUID, --var name); the firmware is the
-# final arbiter. TIMESTAMP is accepted for API compatibility (sign-efi-sig-list
-# stamps the current EFI_TIME itself).
+# EFI_VARIABLE_AUTHENTICATION_2 packet in the PLATFORM-VERIFIED hybrid format:
+#   EFI_TIME(16) + EFI_VARIABLE_DATA{VariableGuid(16, LE), DataSize u32le,
+#   UnicodeName(UTF-16LE, NUL-terminated)} + WIN_CERTIFICATE_UEFI_GUID
+#   (dwLength u32le = 8 + len(PKCS7), wRevision u16le 0x0200,
+#   wCertificateType u16le 0x0EF7) + PKCS#7 detached over
+#   name+guid+attrs+time+payload.
+# EMPIRICAL (blocker #26/27, Samuel's real Dell, boot-2): THIS hybrid layout
+# is ACCEPTED by the firmware via efi-updatevar (db/KEK/PK imported, X509
+# verified); the sign-efi-sig-list spec-layout packets were REFUSED (EINVAL,
+# all three, pristine NVRAM, SetupMode=1). The only true defect in the
+# original builder was hex_to_bin's escape corruption (blocker #25, fixed) —
+# clean hybrid bytes are the platform-accepted format.
 auth_packet_build() {
     _ap_key=$1 _ap_cert=$2 _ap_var=$3 _ap_guid=$4 _ap_attrs=$5 _ap_pay=$6 _ap_ts=$7 _ap_out=$8
     for _ap_f in "$_ap_key" "$_ap_cert" "$_ap_pay"; do
         [ -f "$_ap_f" ] || die "auth_packet_build: missing input: $_ap_f"
     done
-    command -v cert-to-efi-sig-list >/dev/null 2>&1 &&
-        command -v sign-efi-sig-list >/dev/null 2>&1 || {
-        die "auth_packet_build: efitools not installed (cert-to-efi-sig-list / sign-efi-sig-list missing) — apk add efitools (real-server blocker #25: hand-rolled packets are refused by firmware)"
-    }
-    # the caller's PAYLOAD (the EFI_SIGNATURE_LIST, $_ap_pay) is the DETACHED
-    # signed content — NEVER re-derive an ESL from the signer cert here (that
-    # was the blocker-#25 cert mixup: db.auth staged with the KEK identity),
-    # and never invent an "$_ap_out.esl" input path (the real-server blocker
-    # #32: sign-efi-sig-list was handed a nonexistent file and the failure was
-    # silenced). sign-efi-sig-list usage: <Var> <ESL> <OUT> — errors surface.
-    if ! sign-efi-sig-list -g "$_ap_guid" -c "$_ap_cert" -k "$_ap_key" \
-        "$_ap_var" "$_ap_pay" "$_ap_out" 2>"$_ap_out.err"; then
-        _ap_err=$(tail -n 1 "$_ap_out.err" 2>/dev/null)
-        rm -f "$_ap_out.err"
-        die "auth_packet_build: sign-efi-sig-list failed for var $_ap_var: ${_ap_err:-unknown error}"
+    _ap_desc_hex=$(ascii_utf16le_hex "$_ap_var")$(guid_le_hex "$_ap_guid")$(le32_hex "$_ap_attrs")$(efi_time_hex "$_ap_ts")
+    _ap_tmp=${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}
+    _ap_desc=$(mktemp "$_ap_tmp/alpine-fde-desc.XXXXXX")
+    _ap_p7=$(mktemp "$_ap_tmp/alpine-fde-p7.XXXXXX")
+    {
+        printf '%s' "$_ap_desc_hex" | hex_to_bin
+        cat "$_ap_pay"
+    } >"$_ap_desc"
+    if ! openssl smime -sign -binary -in "$_ap_desc" -signer "$_ap_cert" -inkey "$_ap_key" \
+        -outform DER -out "$_ap_p7" >/dev/null 2>&1; then
+        rm -f "$_ap_desc" "$_ap_p7"
+        die "auth_packet_build: openssl smime -sign failed for var $_ap_var"
     fi
-    rm -f "$_ap_out.err"
-    return 0
+    _ap_p7sz=$(($(wc -c <"$_ap_p7") + 0))
+    _ap_name_hex=$(ascii_utf16le_hex "$_ap_var")0000 # UTF-16LE + NUL terminator
+    _ap_name_bytes=$(( (${#_ap_var} + 1) * 2 ))
+    _ap_data_sz_hex=$(le32_hex $(( _ap_name_bytes + 8 + _ap_p7sz )))
+    {
+        efi_time_hex "$_ap_ts" | hex_to_bin                 # EFI_TIME
+        guid_le_hex "$_ap_guid" | hex_to_bin                # VariableGuid
+        printf '%s' "$_ap_data_sz_hex" | hex_to_bin         # EFI_VARIABLE_DATA.DataSize
+        printf '%s' "$_ap_name_hex" | hex_to_bin            # UnicodeName + NUL
+        printf '%s%s%s' "$(le32_hex $((8 + _ap_p7sz)))" "$(le16_hex 512)" "$(le16_hex 3831)" | hex_to_bin
+        cat "$_ap_p7"
+    } >"$_ap_out"
+    rm -f "$_ap_desc" "$_ap_p7"
 }
 
 # --- stage 1: key ceremony ------------------------------------------------------
