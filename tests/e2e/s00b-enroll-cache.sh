@@ -801,7 +801,7 @@ rm -rf "$TOOLING" "$RUN/tooling.tar.gz"
 mkdir -p "$TOOLING/opt/alpine-fde" "$TOOLING/etc/alpine-fde/keys" "$TOOLING/usr/bin" \
     "$TOOLING/opt/jqbin/lib" "$TOOLING/opt/tpm/bin" "$TOOLING/opt/flockbin/lib" \
     "$TOOLING/opt/sslbin/lib"
-for d in bin lib hooks docs; do
+for d in bin lib hooks docs certs; do
     run_stage "tooling-copy:$d" 120 cp -r "$REPO/$d" "$TOOLING/opt/alpine-fde/$d"
 done
 run_stage tooling-baseline 60 cp "$RUN/baseline-guest.json" "$TOOLING/etc/alpine-fde/baseline.json"

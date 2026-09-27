@@ -387,7 +387,7 @@ run_stage export-drive 120 bash -c "truncate -s 64M '$RUN/export.img' && mkfs.vf
 
 # the tooling tarball (repo product tree only — the installer's own copy
 # contract, inst_tooling_copy_cmd)
-run_stage tooling-tar 600 tar -C "$REPO" -czf "$RUN/alpine-fde.tar.gz" bin lib hooks docs
+run_stage tooling-tar 600 tar -C "$REPO" -czf "$RUN/alpine-fde.tar.gz" bin lib hooks docs certs
 
 # THE MIRROR DOCROOT (host-side; served by mirror_serve_start — see the WHY
 # header): a HARD-LINK tree of the pinned cache (cp -al — no data copy, the

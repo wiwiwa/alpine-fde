@@ -309,10 +309,32 @@ mk_efivars() { # DIR SETUPMODE_BYTE
     # octal ESCAPE TEXT, the outer printf interprets it as the raw byte
     printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$1/SetupMode-$E5_GUID_GLOBAL"
 }
+# efitools stub (hermetic leg): the REAL packets are built by stage1; the
+# stub models the KERNEL side of efi-updatevar (create the var file with the
+# auth attrs prefix) so the enrollment legs are observable on hosts without
+# efitools. Real-efitools behavior is covered by the canary/e2e images.
+E5_STUB=$T/stub-efitools
+mkdir -p "$E5_STUB"
+cat >"$E5_STUB/efi-updatevar" <<'STUB'
+#!/bin/sh
+# argv: -f AUTHFILE NAME — write attrs u32le 0x00010007 + packet body
+auth=$2
+name=$3
+dir=${E5_EFIVARS_DIR:-}
+[ -n "$dir" ] || exit 0
+case $name in
+    db|dbx) guid=d719b2cb-3d3a-4596-a3bc-dad00e67656f ;;
+    *) guid=8be4df61-93ca-11d2-aa0d-00e098032b8c ;;
+esac
+{ printf '\007\000\001\000'; cat "$auth"; } >"$dir/$name-$guid"
+exit 0
+STUB
+chmod +x "$E5_STUB/efi-updatevar"
 # leg 1: explicit DIR, SetupMode=1 -> rc 0, all three vars enrolled, PK last
 E5=$T/enroll-efivars
 mk_efivars "$E5" 1
-E5_OUT=$(env -u ALPINE_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR "$REPO/bin/alpine-fde" \
+E5_OUT=$(env -u ALPINE_FDE_EFIVARS_DIR -u ALPINE_FDE_EFIVARS_DIR \
+    PATH="$E5_STUB:$PATH" E5_EFIVARS_DIR="$E5" "$REPO/bin/alpine-fde" \
     provision stage1 --keydir "$T/keys-e5" --enroll-efivars "$E5" 2>&1)
 E5_RC=$?
 assert_eq "stage1 --enroll-efivars DIR rc 0" "0" "$E5_RC"
@@ -334,6 +356,7 @@ fi
 E5B=$T/enroll-efivars-env
 mk_efivars "$E5B" 1
 E5B_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5B" \
+    PATH="$E5_STUB:$PATH" E5_EFIVARS_DIR="$E5B" \
     "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-e5b" --enroll-efivars ) \
     >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --enroll-efivars (no DIR) uses ALPINE_FDE_EFIVARS_DIR" "0" "$E5B_RC"
@@ -343,6 +366,7 @@ assert_file_exists "env-seam leg: PK enrolled into the env directory" \
 E5C=$T/enroll-efivars-alpine
 mk_efivars "$E5C" 1
 E5C_RC=$( ( env -u ALPINE_FDE_EFIVARS_DIR ALPINE_FDE_EFIVARS_DIR="$E5C" \
+    PATH="$E5_STUB:$PATH" E5_EFIVARS_DIR="$E5C" \
     "$REPO/bin/alpine-fde" provision stage1 --keydir "$T/keys-e5c" --enroll-efivars ) \
     >/dev/null 2>&1; echo $? )
 assert_eq "stage1 --enroll-efivars honors ALPINE_FDE_EFIVARS_DIR" "0" "$E5C_RC"

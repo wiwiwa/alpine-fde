@@ -241,17 +241,21 @@ inst_hooks_dir() { printf '%s\n' "${ALPINE_FDE_HOOKS_DIR:-$(inst_tree)/hooks}"; 
 sp_keydir() { printf '%s\n' "${ALPINE_FDE_KEYDIR:-}"; }
 
 # inst_tooling_copy_cmd TREE MNT — the §8.1 self-contained tooling copy: ship
-# ONLY the product script tree (bin/ lib/ hooks/ docs/) into <mnt>/opt/alpine-fde.
-# Explicit per-directory copies (§3.3): never descends into VCS/harness residue
-# (.git, tests/, fixtures/, caches, run dirs — a dirty checkout holds 100MB+
-# blobs and root-owned device nodes that a whole-tree `cp -r` copies or dies
-# on); plain per-dir `cp -r src/. dst/` is POSIX/busybox-ash and rerun-safe.
+# ONLY the product tree (bin/ lib/ hooks/ docs/ certs/) into
+# <mnt>/opt/alpine-fde. Explicit per-directory copies (§3.3): never descends
+# into VCS/harness residue (.git, tests/, fixtures/, caches, run dirs — a
+# dirty checkout holds 100MB+ blobs and root-owned device nodes that a
+# whole-tree `cp -r` copies or dies on); plain per-dir `cp -r src/. dst/` is
+# POSIX/busybox-ash and rerun-safe. certs/ ships the vendor trust anchors
+# (certs/vendor, e.g. Microsoft Option ROM UEFI CA 2023) — the in-chroot
+# stage1 ceremony resolves them at /opt/alpine-fde/certs/vendor for the
+# combined db.esl (db reset + release+vendor rebuild, DECIDED 2026-09-27).
 inst_tooling_copy_cmd() {
   _itc_tree=$1
   _itc_mnt=$2
   _itc_mkdir="mkdir -p $_itc_mnt/opt $_itc_mnt/usr/local/bin"
   _itc_cps=''
-  for _itc_d in bin lib hooks docs; do
+  for _itc_d in bin lib hooks docs certs; do
     _itc_mkdir="$_itc_mkdir $_itc_mnt/opt/alpine-fde/$_itc_d"
     _itc_cps="$_itc_cps && cp -r $_itc_tree/$_itc_d/. $_itc_mnt/opt/alpine-fde/$_itc_d/"
   done

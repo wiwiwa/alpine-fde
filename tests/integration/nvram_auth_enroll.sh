@@ -224,7 +224,7 @@ GUID_G=8be4df61-93ca-11d2-aa0d-00e098032b8c
 # db is a DIRECTORY: `rm -f` cannot remove it (same failure class as the
 # efivarfs S_IMMUTABLE refusal) -> the signed-empty delete branch MUST fire.
 printf '\007\000\000\000\001' >"$E4/SecureBoot-$GUID_G"
-printf '\007\000\000\000\000' >"$E4/SetupMode-$GUID_G" # SetupMode=0: user mode
+printf '\007\000\000\000\001' >"$E4/SetupMode-$GUID_G" # SetupMode=1: Setup Mode
 mkdir "$E4/db-$GUID_DBASE"
 printf '\007\000\001\000STALE-AUTH-BODY' >"$E4/KEK-$GUID_G"
 printf '\007\000\001\000STALE-AUTH-BODY' >"$E4/PK-$GUID_G"
@@ -236,12 +236,29 @@ STUB
 cat >"$T/psb/efi-updatevar" <<'STUB'
 #!/bin/sh
 echo "efi-updatevar $*" >>"$UPDATE_LOG"
+# model the KERNEL result, not just the rc: the authenticated delete
+# (-f ...-del.auth) removes the variable; the enrollment write creates it
+# (attrs u32le 0x00010007 + packet body). PSB_EFIVARS_DIR names the seam dir.
+dir=${PSB_EFIVARS_DIR:-}
+[ -n "$dir" ] || exit 0
+auth=$2
+name=$3
+case $name in
+    db) guid=d719b2cb-3d3a-4596-a3bc-dad00e67656f ;;
+    *) guid=8be4df61-93ca-11d2-aa0d-00e098032b8c ;;
+esac
+case $auth in
+    *-del.auth) rm -rf "$dir/$name-$guid" 2>/dev/null ;;
+    *) { printf '\007\000\001\000'; cat "$auth"; } >"$dir/$name-$guid" ;;
+esac
 exit 0
 STUB
 cat >"$T/psb/sign-efi-sig-list" <<'STUB'
 #!/bin/sh
-# argv: -g GUID -c CERT -k KEY VAR /dev/null OUT — write a canned packet to
-# the LAST argument (the .auth output) and log the payload argument
+# argv: -g GUID -c CERT -k KEY VAR /dev/null OUT — log the invocation (the
+# /dev/null payload IS the signed-empty contract) and write a canned packet to
+# the LAST argument (the .auth output)
+echo "sign-efi-sig-list $*" >>"$UPDATE_LOG"
 for a in "$@"; do out=$a; done
 printf 'SIGNED-EMPTY-PACKET' > "$out"
 exit 0
@@ -251,10 +268,11 @@ CHATTR_LOG="$T/chattr.log"; UPDATE_LOG="$T/update.log"
 export CHATTR_LOG UPDATE_LOG
 export PATH="$T/psb:$PATH"
 
-# fw_auth_enroll needs SetupMode=1 + SecureBoot readable + staged packets
+# fw_auth_enroll needs SetupMode=1 (Setup Mode — the DECIDED 2026-09-27 db
+# reset + release+vendor rebuild gate) + SecureBoot readable + staged packets
 mkdir -p "$E4/sys"
 printf '\007\000\000\000\001' >"$E4/SecureBoot-$GUID_G"
-printf '\007\000\000\000\000' >"$E4/SetupMode-$GUID_G" # SetupMode=0: user mode
+printf '\007\000\000\000\001' >"$E4/SetupMode-$GUID_G" # SetupMode=1: Setup Mode
 KD4=$T/keys4
 mkdir -p "$KD4"
 for v in db kek pk; do
@@ -273,7 +291,7 @@ printf 'release-priv' >"$KD4/release.priv.pem"
 printf 'CERT-DER-release' >"$KD4/release.cert.der"
 printf 'release-pub' >"$KD4/release.pub.pem"
 
-ENROLL_OUT=$( ( fw_auth_enroll "$E4" "$KD4" ) 2>&1 )
+ENROLL_OUT=$( ( PSB_EFIVARS_DIR="$E4" fw_auth_enroll "$E4" "$KD4" ) 2>&1 )
 ENROLL_RC=$?
 [ "$ENROLL_RC" -eq 0 ] || printf '%s\n' "$ENROLL_OUT" >&2
 assert_eq "polluted efivars: fw_auth_enroll clears + enrolls end-to-end rc 0" "0" "$ENROLL_RC"
@@ -282,8 +300,8 @@ assert_contains "the signed-empty delete went through efi-updatevar -f"     "$(c
 assert_contains "the signed-empty delete payload is /dev/null (empty packet)"     "$(grep -oF "/dev/null" "$UPDATE_LOG" | head -1)" "/dev/null"
 for v in db KEK PK; do
     lf=$(printf '%s' "$v" | tr 'A-Z' 'a-z')
-    assert_contains "polluted efivars: $v enrolled via efi-updatevar"     "$(grep -F "keys4/$lf.auth $v" "$UPDATE_LOG" | head -1)" "keys4/$lf.auth $v"
-        "$(cat "$UPDATE_LOG")" "keys4/$v.auth"
+    assert_contains "polluted efivars: $v enrolled via efi-updatevar" \
+        "$(grep -F "keys4/$lf.auth $v" "$UPDATE_LOG" | head -1)" "keys4/$lf.auth $v"
 done
 [ -e "$E4/KEK-$GUID_G" ] && grep -q "STALE-AUTH-BODY" "$E4/KEK-$GUID_G" 2>/dev/null &&
     _fail "stale auth body survived the cleanup" ||
@@ -294,25 +312,27 @@ done
 E5=$T/polluted-ro
 mkdir -p "$E5"
 printf '\007\000\000\000\001' >"$E5/SecureBoot-$GUID_G"
-printf '\007\000\000\000\000' >"$E5/SetupMode-$GUID_G" # SetupMode=0: user mode (PK present)
+printf '\007\000\000\000\001' >"$E5/SetupMode-$GUID_G" # SetupMode=1: Setup Mode
 for v in db KEK PK; do
     printf '\007\000\001\000STALE-AUTH-BODY' >"$E5/$v-$GUID_G"
 done
 UPDATE_LOG2="$T/update2.log"; CHATTR_LOG2="$T/chattr2.log"
 export UPDATE_LOG2 CHATTR_LOG2
 chmod 555 "$E5" # the stale vars cannot be removed (simulated immutable bit)
-ENROLL2_OUT=$( ( PATH="$T/psb:$PATH" fw_auth_enroll "$E5" "$KD4" ) 2>&1 )
+ENROLL2_OUT=$( ( PATH="$T/psb:$PATH" UPDATE_LOG="$UPDATE_LOG2" PSB_EFIVARS_DIR="$E5" fw_auth_enroll "$E5" "$KD4" ) 2>&1 )
 ENROLL2_RC=$?
 chmod 755 "$E5"
 # the stubborn-var residue is REFUSED fail-closed (the stub efi-updatevar
 # cannot really remove NVRAM vars — the survived-cleanup die is the contract)
 assert_eq "stubborn vars: residue refused fail-closed 64" "64" "$ENROLL2_RC"
 assert_contains "signed-empty delete: sign-efi-sig-list over /dev/null" \
-    "$(cat "$UPDATE_LOG")" "/dev/null"
+    "$(cat "$UPDATE_LOG2")" "/dev/null"
+assert_contains "signed-empty delete: the chain key signs the KEK delete (KEK-del is PK-signed)" \
+    "$(cat "$UPDATE_LOG2")" "keys4/pk.priv.pem"
 assert_contains "signed-empty delete: efi-updatevar -f applies the del packet" \
-    "$(cat "$UPDATE_LOG")" "-f"
+    "$(cat "$UPDATE_LOG2")" "-f"
 assert_contains "stubborn-var cleanup: chattr -i ran per variable" \
-    "$(cat "$CHATTR_LOG")" "-i"
+    "$(cat "$CHATTR_LOG2" 2>/dev/null || cat "$CHATTR_LOG")" "-i"
 assert_contains "stubborn-var residue die names the cleanup" \
     "$ENROLL2_OUT" "survived the cleanup"
 
@@ -350,7 +370,7 @@ assert_eq "fw_auth_enroll: absent SetupMode enrolled nothing" "0" \
 E4=$T/enroll-happy
 mkdir -p "$E4"
 mkvar "$E4" SetupMode "$GUID_GLOBAL" 1
-fw_auth_enroll "$E4" "$T/keys"
+PSB_EFIVARS_DIR="$E4" fw_auth_enroll "$E4" "$T/keys"
 assert_eq "fw_auth_enroll happy: rc 0" "0" "$?"
 assert_file_exists "fw_auth_enroll: db enrolled (image-security namespace)" \
     "$E4/db-$GUID_DBASE"
@@ -366,8 +386,9 @@ mkvar "$E5" SetupMode "$GUID_GLOBAL" 1
 mkdir -p "$T/keys-partial"
 mkauth "$T/keys-partial/db.auth" db "$GUID_DBASE" 'DB1' "$MKAUTH_KEY" "$MKAUTH_CERT"
 mkauth "$T/keys-partial/pk.auth" PK "$GUID_GLOBAL" 'PK1' "$MKAUTH_KEY" "$MKAUTH_CERT"
+e5_abort_run() { PSB_EFIVARS_DIR="$E5" fw_auth_enroll "$@"; }
 assert_rc "fw_auth_enroll: missing KEK packet -> fail-closed 64 (abort)" 64 \
-    die_rc fw_auth_enroll "$E5" "$T/keys-partial"
+    die_rc e5_abort_run "$E5" "$T/keys-partial"
 assert_file_exists "fw_auth_enroll: db already enrolled before the abort" \
     "$E5/db-$GUID_DBASE"
 assert_eq "fw_auth_enroll: PK never enrolled after the abort (db -> KEK -> PK last)" "0" \

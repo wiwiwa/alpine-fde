@@ -1138,12 +1138,12 @@ assert_eq "raid1/item 27: zero luksAddKey records target /dev/mapper" "0" \
 
 # =============================================================================
 # G4/F-1 (§8.1/§3.3): the tooling copy into /opt/alpine-fde ships ONLY the
-# product script tree (bin/ lib/ hooks/ docs/) — NEVER VCS/harness residue.
+# product tree (bin/ lib/ hooks/ docs/ certs/) — NEVER VCS/harness residue.
 # Residue is seeded in a THROWAWAY tree — never the real tests/ dirs.
 # =============================================================================
 ALPINE_FDE_TREE=$T/tree
 mkdir -p "$ALPINE_FDE_TREE"
-for d in bin lib hooks docs; do
+for d in bin lib hooks docs certs; do
     cp -r "$REPO/$d" "$ALPINE_FDE_TREE/$d"
 done
 mkdir -p "$ALPINE_FDE_TREE/.git/objects" "$ALPINE_FDE_TREE/tests/e2e/.runs/soak-run" \

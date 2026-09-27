@@ -228,6 +228,28 @@ fw_auth_esp_fallback() {
             die "firmware: cannot stage $_fef_keys/$_fef_f -> $_fef_dst/$_fef_f (ESP fallback)"
         info "firmware: staged $_fef_f into $_fef_dst (ESP fallback)"
     done
+    # DECIDED 2026-09-27 (db reset + release+vendor rebuild, UEFI0072): stage
+    # every vendor .cer under its basename alongside the import files — on
+    # boards where our NVRAM writes cannot run, the db.auth alone carries the
+    # combined db, but an operator repairing via the firmware UI may need to
+    # append the vendor anchors (e.g. Microsoft Option ROM UEFI CA 2023 for
+    # NIC PXE / PERC option ROMs) individually. The .esl/.dbx material is
+    # still NOT staged (the declutter directive stands for repair lists).
+    _fef_vcerts=''
+    if [ "${ALPINE_FDE_DB_VENDOR:-all}" != "none" ]; then
+        _fef_vdir=$(db_vendor_dir)
+        if [ -d "$_fef_vdir" ]; then
+            while IFS= read -r _fef_c; do
+                [ -n "$_fef_c" ] || continue
+                cp "$_fef_c" "$_fef_dst/$(basename "$_fef_c")" ||
+                    die "firmware: cannot stage $_fef_c -> $_fef_dst (ESP fallback, vendor cert)"
+                info "firmware: staged vendor cert $(basename "$_fef_c") into $_fef_dst (ESP fallback)"
+                _fef_vcerts="$_fef_vcerts $(basename "$_fef_c")"
+            done <<EOF
+$(find "$_fef_vdir" -maxdepth 1 -type f -name '*.cer' | LC_ALL=C sort)
+EOF
+        fi
+    fi
     : >"$_fef_dst/!import_all_auth_files"
     cat >"$_fef_dst/README.txt" <<'EOF'
 alpine-fde — Secure Boot key import (the firmware refused NVRAM enrollment)
@@ -247,25 +269,41 @@ Then set an administrator (supervisor) password while still in setup.
 Reboot: the first boot unlocks via the sealed TPM token and auto-finalizes
 under Secure Boot; it REFUSES to boot until the keys are imported (that is
 the design, ADR-20).
+
+Vendor certificates: the db.auth above already carries the vendor trust
+anchors (db is rebuilt as release cert + vendor certs, e.g. Microsoft
+Option ROM UEFI CA 2023 for NIC PXE / storage option ROMs). The .cer files
+in this directory are the same vendor certs — append them via the firmware
+UI ONLY if your board's db ends up release-cert-only (ALPINE_FDE_DB_VENDOR
+=none) and device option ROMs fail the Secure Boot policy (UEFI0072).
 EOF
-    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware (staged: db.auth kek.auth pk.auth README.txt !import_all_auth_files — nothing else)"
+    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware (staged: db.auth kek.auth pk.auth README.txt !import_all_auth_files${_fef_vcerts:+; vendor certs:$_fef_vcerts})"
     info "firmware: the manual-import instructions are DEFERRED to the very end of the install (after every other step, immediately before the final confirm/reboot) — the install continues"
     warn "firmware enrollment incomplete — first boot stays guarded until the keys are imported; the manual-import instructions print at the end of the install"
     return 0
 }
 
 # fw_auth_enroll EFIVARS_DIR KEYDIR [ESP_DIR] — the §9.1 Stage-1 step-4
-# enrollment: authenticated updates into NVRAM in strict order db → KEK → PK
-# (last) from KEYDIR's .auth packets (db in the image-security database
-# namespace, KEK/PK in EFI_GLOBAL_VARIABLE). Gated: requires SetupMode==1
-# (fail-closed 64 — authenticated writes outside setup mode fail or, worse,
-# brick the boot entry). A REFUSED write (firmware EINVAL even with correct
-# attrs, queue 26 ext) is no longer fatal: every remaining variable is still
-# attempted (same firmware refuses them identically — harmless and
-# diagnostic), then the key material is staged to ESP_DIR (default /efi, the
-# in-chroot ESP mount) via fw_auth_esp_fallback (silently — the manual-import
-# instructions are DEFERRED to the very end of the install, the plan tail);
-# the install continues. A missing/mismatched
+# enrollment: db RESET + authenticated updates into NVRAM in strict order
+# reset-db → db → KEK → PK (last) from KEYDIR's .auth packets (db in the
+# image-security database namespace, KEK/PK in EFI_GLOBAL_VARIABLE).
+# DECIDED (Samuel, 2026-09-27, UEFI0072): db is first RESET — the existing db
+# content is deleted (authenticated-delete machinery: chattr -i + rm, the
+# SIGNED-EMPTY efitools delete as the fallback) while Setup Mode is still
+# active — then REBUILT as ONE combined authenticated write from db.auth
+# (release cert + vendor certs; stage1 composes the ESL, no APPEND_ATTRIBUTE
+# write, so re-installs never accumulate duplicates). dbx is NEVER targeted:
+# it is the revocation list and stays exactly as the vendor/operator set it.
+# Gated: requires SetupMode==1 — fail-closed 64 otherwise (resetting db
+# outside Setup Mode requires different authorization and is not this flow's
+# job; authenticated writes outside setup mode fail or, worse, brick the boot
+# entry). A REFUSED write (firmware EINVAL even with correct attrs, queue 26
+# ext) is no longer fatal: every remaining variable is still attempted (same
+# firmware refuses them identically — harmless and diagnostic), then the key
+# material is staged to ESP_DIR (default /efi, the in-chroot ESP mount) via
+# fw_auth_esp_fallback (silently — the manual-import instructions are
+# DEFERRED to the very end of the install, the plan tail); the install
+# continues. A missing/mismatched
 # PACKET still dies fail-closed (fw_var_write_try preflight): that is a bug,
 # not a firmware quirk.
 fw_auth_enroll() {
@@ -274,20 +312,16 @@ fw_auth_enroll() {
     _fae_esp=${3:-/efi}
     _fae_setup=$(fw_var_u8 "$_fae_dir" SetupMode) ||
         die "firmware: SetupMode state unknown at $_fae_dir — refusing to enroll (§9.1 preflight: clear the vendor PK in BIOS setup first)"
-    # blocker #25 addendum (Samuel's amendment): BOTH modes are supported —
-    #   SetupMode=1  fresh install: no PK enrolled, the UNAUTHENTICATED rm
-    #                path is correct (a signed delete would be pointless —
-    #                clean NVRAM has nothing to delete).
-    #   SetupMode=0  re-enrollment/rotation: a PK exists (user mode) and the
-    #                on-disk chain keys (pk.priv / kek.priv) sign the
-    #                SIGNED-EMPTY deletes. This is the only mode where the
-    #                efivarfs S_IMMUTABLE + authenticated-delete dance runs.
-    # SetupMode unknown -> die (unchanged).
-    case $_fae_setup in
-        1) _fae_usermode=0; info "firmware: Setup Mode — fresh-install enrollment (unauthenticated pre-existing-var cleanup)" ;;
-        0) _fae_usermode=1; info "firmware: user mode (PK present) — re-enrollment: pre-existing vars cleared via SIGNED-EMPTY deletes (blocker #25 addendum)" ;;
-        *) die "firmware: SetupMode state is '$_fae_setup' (expected 0 or 1) — refusing to enroll" ;;
-    esac
+    # DECIDED 2026-09-27: the db reset + release+vendor rebuild runs ONLY in
+    # Setup Mode. SetupMode != 1 (a PK — vendor or ours — is enrolled) is
+    # fail-closed 64 with the remedy: authenticated deletes/rewrites of the
+    # trust databases under an enrolled PK need chain-key signatures the
+    # install flow deliberately does not hold at this point (stage1 shredded
+    # them), so re-enrollment is NOT this flow's job.
+    if [ "$_fae_setup" != "1" ]; then
+        die "firmware: SetupMode is $_fae_setup (user mode — a platform key is enrolled) — refusing the db reset + enrollment: this flow resets and rebuilds db ONLY in Setup Mode (reboot into BIOS setup, 'Clear Secure Boot Keys' to remove the vendor PK so SetupMode becomes 1, keep Secure Boot OFF, then re-run); resetting db outside Setup Mode requires different authorization and is not this flow's job"
+    fi
+    info "firmware: Setup Mode — db reset + release+vendor rebuild, then KEK -> PK (PK last)"
     _fae_failed=''
     for _fae_v in db KEK PK; do
         _fae_guid=$FW_GUID_GLOBAL
@@ -301,11 +335,18 @@ fw_auth_enroll() {
         # by the gate above). CI never hits this: it enrolls via offline
         # virt-fw-vars on a fresh OVMF_VARS, where no variable pre-exists.
         # Remove any pre-existing variable of the same name/GUID before the
-        # authenticated write. Safe by construction: SetupMode==1 is a
-        # fail-closed gate above, and the db -> KEK -> PK order protects the
-        # half-enrolled trust root.
+        # authenticated write — for db this IS the decided db RESET (the
+        # rebuild replaces the whole variable, so no APPEND_ATTRIBUTE write is
+        # ever needed and re-installs never accumulate duplicates). Safe by
+        # construction: SetupMode==1 is a fail-closed gate above, and the
+        # reset-db -> db -> KEK -> PK order protects the half-enrolled trust
+        # root.
         if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-            info "firmware: removing pre-existing vendor $_fae_v ($_fae_usermode)"
+            if [ "$_fae_v" = "db" ]; then
+                info "firmware: db RESET — deleting the pre-existing db before the release+vendor rebuild (authenticated delete, Setup Mode)"
+            else
+                info "firmware: removing pre-existing vendor $_fae_v"
+            fi
             # REAL-SERVER blocker #25 addendum (Dell, live-proven): efivarfs
             # marks AUTHENTICATED variables' inodes S_IMMUTABLE at creation.
             # chattr -i is required before ANY removal attempt.
@@ -313,34 +354,35 @@ fw_auth_enroll() {
                 die "firmware: clearing the pre-existing $_fae_v requires chattr — apk add e2fsprogs (efivarfs marks authenticated variables immutable; blocker #25 addendum)"
             chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
             rm -f "$_fae_dir/$_fae_v-$_fae_guid" 2>/dev/null || :
-            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ] && [ "$_fae_usermode" -eq 1 ]; then
-                # USER MODE (SetupMode=0, PK present): SIGNED-EMPTY delete —
+            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
+                # SIGNED-EMPTY delete fallback (the blocker #25 addendum
+                # machinery, REUSED for the db reset — no separate deleter):
                 # efitools signs the EMPTY payload and efi-updatevar -f
                 # performs the authenticated remove. Chain: db-del by the KEK
-                # key, KEK/PK-del by the PK key.
-                command -v efi-updatevar >/dev/null 2>&1 &&
-                    command -v sign-efi-sig-list >/dev/null 2>&1 ||
-                    die "firmware: the firmware refuses an unauthenticated delete of $_fae_v and the signed-delete tools are missing — efi-updatevar/sign-efi-sig-list missing, apk add efitools (blocker #25 addendum)"
-                case $_fae_v in
-                    db)  _fae_dkey="$_fae_keys/kek.priv.pem"; _fae_dcert="$_fae_keys/kek.cert.pem" ;;
-                    kek) _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
-                    *)   _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
-                esac
-                if [ ! -f "$_fae_dkey" ] || [ ! -f "$_fae_dcert" ]; then
-                    die "firmware: the signed-empty delete of $_fae_v needs the on-disk chain keys ($_fae_dkey, $_fae_dcert) — both missing; re-provision first (blocker #25 addendum)"
+                # key, KEK/PK-del by the PK key. The chain keys are usually
+                # already shredded at this point of the install (stage1
+                # custody) — when they are absent the attempt degrades to the
+                # write below + the shared final gate, never a silent skip.
+                if command -v efi-updatevar >/dev/null 2>&1 &&
+                    command -v sign-efi-sig-list >/dev/null 2>&1; then
+                    case $_fae_v in
+                        db)  _fae_dkey="$_fae_keys/kek.priv.pem"; _fae_dcert="$_fae_keys/kek.cert.pem" ;;
+                        *)   _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
+                    esac
+                    if [ -f "$_fae_dkey" ] && [ -f "$_fae_dcert" ]; then
+                        chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
+                        sign-efi-sig-list -g "$_fae_guid" -c "$_fae_dcert" -k "$_fae_dkey" \
+                            "$_fae_v" /dev/null "$_fae_dir/$_fae_v-del.auth" >/dev/null 2>&1 ||
+                            die "firmware: sign-efi-sig-list failed for the $_fae_v signed-empty delete (blocker #25 addendum)"
+                        chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
+                        efi-updatevar -f "$_fae_dir/$_fae_v-del.auth" "$_fae_v" >/dev/null 2>&1 ||
+                            warn "firmware: efi-updatevar refused the $_fae_v signed-empty delete (blocker #25 addendum)"
+                    else
+                        warn "firmware: the $_fae_v delete was refused and the signed-delete chain keys ($_fae_dkey) are not on disk (shredded after stage1, ADR-18) — attempting the authenticated write anyway; the shared gate below refuses to enroll over a surviving variable"
+                    fi
+                else
+                    warn "firmware: the unauthenticated delete of $_fae_v was refused and the signed-delete tools (efitools) are missing — attempting the authenticated write anyway; the shared gate below refuses to enroll over a surviving variable"
                 fi
-                chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-                sign-efi-sig-list -g "$_fae_guid" -c "$_fae_dcert" -k "$_fae_dkey" \
-                    "$_fae_v" /dev/null "$_fae_dir/$_fae_v-del.auth" >/dev/null 2>&1 ||
-                    die "firmware: sign-efi-sig-list failed for the $_fae_v signed-empty delete (blocker #25 addendum)"
-                chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-                efi-updatevar -f "$_fae_dir/$_fae_v-del.auth" "$_fae_v" >/dev/null 2>&1 ||
-                    warn "firmware: efi-updatevar refused the $_fae_v signed-empty delete (blocker #25 addendum)"
-            elif [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-                # FRESH INSTALL (SetupMode=1): the unauthenticated rm was
-                # refused — log LOUD and continue (clean NVRAM has nothing to
-                # delete; the shared verify below is the final gate)
-                warn "firmware: the firmware refused the unauthenticated delete of $_fae_v (Setup Mode) — continuing; enrollment will fail loudly if the variable truly blocks the write"
             fi
             # SHARED final gate: the variable MUST be gone before enrolling —
             # never enroll over a live trust anchor
@@ -386,6 +428,25 @@ fw_osindications_set() {
         die "firmware: cannot write $_fod_dir/OsIndications-$FW_GUID_GLOBAL"
     info "firmware: OsIndications bit 0 set — next boot enters BIOS setup (§9.1)"
     return 0
+}
+
+# db_vendor_dir — resolve the vendor-cert directory for the db reset+rebuild
+# (DECIDED 2026-09-27, UEFI0072 option-ROM authorization). Resolution order:
+#   1. $ALPINE_FDE_DB_VENDOR_DIR (explicit override)
+#   2. "certs/vendor" next to the lib tree — one relative shape covers the
+#      repo checkout (lib/cmd -> <repo>/certs/vendor), the installed tree
+#      (/usr/share/alpine-fde/lib/cmd -> /usr/share/alpine-fde/certs/vendor)
+#      and the in-target tooling copy (/opt/alpine-fde likewise)
+# The directory may be absent: an empty vendor set simply means a
+# release-cert-only db (the old behavior). Consumers decide whether that is
+# an error for their flow. Only *.cer (DER) files are consumed.
+db_vendor_dir() {
+    if [ -n "${ALPINE_FDE_DB_VENDOR_DIR:-}" ]; then
+        printf '%s\n' "$ALPINE_FDE_DB_VENDOR_DIR"
+        return 0
+    fi
+    _dvd_cmd=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
+    printf '%s\n' "${_dvd_cmd%/*}/../certs/vendor"
 }
 
 # fw_sb_state — print "secureboot=N setup_mode=N pk=N".

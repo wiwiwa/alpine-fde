@@ -17,7 +17,7 @@
 #
 # Pinned invariants:
 #   P1  a repo-tree content digest helper exists and digests the exact dirs
-#       the payload embeds (bin lib hooks docs);
+#       the payload embeds (bin lib hooks docs certs);
 #   P2  the helper is stable + well-formed (functional: 64-hex, repeatable);
 #   P3  the payload sidecar carries BOTH digests (payload sha + tree digest);
 #   P4  reuse is gated on the tree digest matching, and a stale cache is
@@ -45,8 +45,8 @@ SC=$(cat "$S00B")
 
 # --- P1: the tree-digest helper exists and digests the embedded dirs ---------
 assert_contains "P1: rootfs_payload_tree_digest defined" "$LIBC" "rootfs_payload_tree_digest() {"
-assert_contains "P1: digest covers exactly the embedded tree (bin lib hooks docs)" "$LIBC" \
-    "find bin lib hooks docs -type f -print0"
+assert_contains "P1: digest covers exactly the embedded tree (bin lib hooks docs certs)" "$LIBC" \
+    "find bin lib hooks docs certs -type f -print0"
 
 # --- P2: functional — stable, 64-hex (isolated cache dir, no downloads) ------
 DIGEST_A=$(ALPINE_FDE_ARTIFACT_CACHE_DIR="$(mktemp -d)" bash -c \

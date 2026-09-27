@@ -228,20 +228,32 @@ esl_le32_at() {
     }'
 }
 
-# esl_verify FILE — structural sanity of a signature list (sizes consistent);
-# rc 0 ok. Layout: type(16) listsize(4@16) headersize(4@20) sigsize(4@24) data,
-# where data holds N >= 1 fixed-size signatures (28 + N*sigsize == total).
+# esl_verify FILE — structural sanity of a signature-list BLOB (each list's
+# sizes consistent); rc 0 ok. Layout per list: type(16) listsize(4@16)
+# headersize(4@20) sigsize(4@24) data, where data holds N >= 1 fixed-size
+# signatures (28 + N*sigsize == listsize). The db reset+rebuild design
+# (DECIDED 2026-09-27) makes db.esl a CONCATENATION of per-cert lists (release
+# cert + vendor certs — different cert sizes forbid one shared SignatureSize),
+# so this verifier WALKS the SignatureListSize chain instead of demanding a
+# single list covering the file; a single-list file (kek.esl/pk.esl/dbx.esl)
+# is the N=1 case of the same walk.
 esl_verify() {
     _esv_f=$1
     [ -s "$_esv_f" ] || return 1
-    _esv_hex=$(bin_to_hex <"$_esv_f")
     _esv_total=$(wc -c <"$_esv_f")
-    _esv_list=$(esl_le32_at "$_esv_hex" 33)
-    _esv_ssig=$(esl_le32_at "$_esv_hex" 49)
-    [ "$_esv_list" -eq "$((_esv_total + 0))" ] || return 1
-    [ "$_esv_ssig" -gt 16 ] || return 1
-    [ $(( (_esv_total - 28) % _esv_ssig )) -eq 0 ] || return 1
-    [ $(( (_esv_total - 28) / _esv_ssig )) -ge 1 ] || return 1
+    _esv_off=0
+    while [ "$_esv_off" -lt "$_esv_total" ]; do
+        _esv_hex=$(tail -c +"$((_esv_off + 1))" "$_esv_f" | bin_to_hex)
+        _esv_list=$(esl_le32_at "$_esv_hex" 33)
+        _esv_ssig=$(esl_le32_at "$_esv_hex" 49)
+        [ "$_esv_list" -gt 28 ] || return 1
+        [ "$_esv_ssig" -gt 16 ] || return 1
+        [ "$_esv_list" -le "$((_esv_total - _esv_off))" ] || return 1
+        [ $(( (_esv_list - 28) % _esv_ssig )) -eq 0 ] || return 1
+        [ $(( (_esv_list - 28) / _esv_ssig )) -ge 1 ] || return 1
+        _esv_off=$((_esv_off + _esv_list))
+    done
+    [ "$_esv_off" -eq "$_esv_total" ] || return 1
     return 0
 }
 
@@ -305,6 +317,9 @@ stage1  key ceremony (ADR-18):
             keypairs; EFI_SIGNATURE_LISTs + authenticated update packets;
             firmware enrollment guidance; writes the PENDING baseline
             (expected_pcr7 pending until first boot in the final SB state).
+            db.esl = release cert + vendor certs (certs/vendor; default:
+            Microsoft Option ROM UEFI CA 2023) as one combined blob —
+            ALPINE_FDE_DB_VENDOR=none for a minimal release-cert-only db.
         --mode in-chroot
             the §9.1 step-3 ceremony on the target's encrypted root volume:
             keydir defaults to $ALPINE_FDE_ROOT/etc/alpine-fde/keys; after the
@@ -349,6 +364,57 @@ prov_keygen() {
     openssl x509 -in "$_pk_dir/$_pk_prefix.cert.pem" -outform DER -out "$_pk_dir/$_pk_prefix.cert.der" ||
         die "prov_keygen: openssl x509 -outform DER failed for $_pk_prefix"
     chmod 600 "$_pk_dir/$_pk_prefix.priv.pem"
+}
+
+# prov_db_esl_build KEYDIR OUT — the combined db EFI_SIGNATURE_LIST blob
+# (DECIDED 2026-09-27, UEFI0072 option-ROM authorization): the release cert
+# ESL + one ESL per vendor cert in db_vendor_dir, CONCATENATED (a single
+# authenticated write later replaces the whole db variable — no
+# APPEND_ATTRIBUTE write; reset-first + replace-with-combined gives idempotent
+# append semantics, so re-installs never accumulate duplicates). Composition
+# is deterministic: LC_ALL=C sorted *.cer basenames. Knobs:
+#   ALPINE_FDE_DB_VENDOR=none    minimal db (release cert ONLY — the old
+#                                behavior; option-ROM firmware NOT authorized)
+#   ALPINE_FDE_DB_VENDOR=all     default: include every vendor *.cer
+#   ALPINE_FDE_DB_VENDOR_DIR=DIR alternative vendor directory (db_vendor_dir)
+# Every vendor file is validated as a DER certificate before it enters the
+# blob — a malformed file dies loudly (ADR-8), never a silent skip.
+prov_db_esl_build() {
+    _pdb_keys=$1
+    _pdb_out=$2
+    [ -f "$_pdb_keys/release.cert.der" ] ||
+        die "prov_db_esl_build: release cert missing: $_pdb_keys/release.cert.der"
+    esl_build "$_pdb_keys/release.cert.der" >"$_pdb_out"
+    case ${ALPINE_FDE_DB_VENDOR:-all} in
+        all) : ;;
+        none)
+            info "db.esl: release cert ONLY (ALPINE_FDE_DB_VENDOR=none — minimal db, option-ROM firmware NOT authorized)"
+            return 0
+            ;;
+        *)
+            die "prov_db_esl_build: ALPINE_FDE_DB_VENDOR must be 'all' or 'none' (got: ${ALPINE_FDE_DB_VENDOR:-})"
+            ;;
+    esac
+    _pdb_dir=$(db_vendor_dir)
+    _pdb_n=0
+    if [ -d "$_pdb_dir" ]; then
+        while IFS= read -r _pdb_c; do
+            [ -n "$_pdb_c" ] || continue
+            if ! openssl x509 -inform DER -in "$_pdb_c" -noout >/dev/null 2>&1; then
+                die "prov_db_esl_build: vendor cert $_pdb_c is not a valid DER certificate (.cer must be DER) — remove or fix it in the vendor dir"
+            fi
+            esl_build "$_pdb_c" >>"$_pdb_out"
+            _pdb_n=$((_pdb_n + 1))
+        done <<EOF
+$(find "$_pdb_dir" -maxdepth 1 -type f -name '*.cer' | LC_ALL=C sort)
+EOF
+    fi
+    if [ "$_pdb_n" -eq 0 ]; then
+        info "db.esl: release cert ONLY (no vendor certs found in $_pdb_dir — option-ROM firmware NOT authorized)"
+    else
+        info "db.esl: release cert + $_pdb_n vendor cert(s) from $_pdb_dir (one combined authenticated write; dbx untouched)"
+    fi
+    return 0
 }
 
 prov_stage1() {
@@ -486,7 +552,14 @@ prov_stage1() {
     # blocker #25 cert-mixup fix: db authorizes BOOT-IMAGE signers — its ESL
     # carries the RELEASE cert (the UKI sbsign identity), not the db-
     # enrollment key's own cert (standard UEFI: PK self-signed -> KEK -> db)
-    esl_build "$_s1_keydir/release.cert.der" >"$_s1_keydir/db.esl"
+    # DECIDED 2026-09-27 (db reset + release+vendor rebuild): the db ESL is
+    # the RELEASE cert + every vendor cert (default: Microsoft Option ROM
+    # UEFI CA 2023) as ONE combined blob — at enroll time db is reset first
+    # and then replaced by this combined list in a single authenticated
+    # write, so signed option-ROM firmware (NIC PXE, PERC) passes the
+    # firmware's UEFI0072 Secure Boot policy. ALPINE_FDE_DB_VENDOR=none
+    # restores the minimal release-cert-only db.
+    prov_db_esl_build "$_s1_keydir" "$_s1_keydir/db.esl"
     esl_build "$_s1_keydir/kek.cert.der" >"$_s1_keydir/kek.esl"
     esl_build "$_s1_keydir/pk.cert.der" >"$_s1_keydir/pk.esl"
     # signer chain: db update signed by the KEK key, KEK update by the PK key,
@@ -498,11 +571,15 @@ prov_stage1() {
     auth_packet_build "$_s1_keydir/pk.priv.pem" "$_s1_keydir/pk.cert.pem" \
         PK "$PROV_GUID_GLOBAL" "$PROV_EFI_ATTRS" "$_s1_keydir/pk.esl" "$_s1_ts" "$_s1_keydir/pk.auth"
 
-    # §6 (PCR 7 row): "provision removes vendor certs from db so the expected
-    # value is fully ours" — our db.esl holds ONLY our cert (an authenticated
-    # db update REPLACES the whole variable), and each --revoke-cert is
+    # §6 (PCR 7 row), as amended by the db reset+rebuild decision (2026-09-27):
+    # provision now seeds db with the release cert + the SHIPPED vendor trust
+    # anchors (certs/vendor, default: Microsoft Option ROM UEFI CA 2023) so
+    # signed option ROMs pass the firmware's SB policy; the composition is
+    # fully ours and deterministic (sorted vendor dir), so the expected PCR 7
+    # value is still exactly knowable in advance. Each --revoke-cert is
     # additionally revoked via a dbx EFI_CERT_X509_SHA256 entry (KEK-signed,
-    # sha256 of the cert's TBS), so firmware rejects it even if re-added.
+    # sha256 of the cert's TBS), so firmware rejects it even if re-added —
+    # dbx itself is NEVER reset or rewritten by this flow.
     if [ -n "$_s1_revoke" ]; then
         info "building dbx revocation list (vendor certs, EFI_CERT_X509_SHA256)"
         _s1_rev_hashes=''

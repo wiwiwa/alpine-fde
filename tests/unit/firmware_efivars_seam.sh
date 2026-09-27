@@ -329,8 +329,8 @@ else
     _pass "fw_auth_enroll leg skipped (efitools not on this host)"
 fi
 assert_rc "enroll: pre-existing vendor vars -> rc 0" 0 "$rc"
-assert_contains "enroll: info line for pre-existing vendor db" "$out" \
-    "removing pre-existing vendor db"
+assert_contains "enroll: info line announces the db RESET for pre-existing db" "$out" \
+    "db RESET — deleting the pre-existing db before the release+vendor rebuild"
 assert_contains "enroll: info line for pre-existing vendor KEK" "$out" \
     "removing pre-existing vendor KEK"
 assert_contains "enroll: info line for pre-existing vendor PK" "$out" \
@@ -376,7 +376,7 @@ else
 fi
 assert_rc "enroll: write refusal -> ESP fallback, install continues (rc 0)" 0 "$rc"
 assert_contains "enroll: rm failure warns (non-fatal, blocker #25 fresh-mode)" "$out" \
-    "the firmware refused the unauthenticated delete of db (Setup Mode)"
+    "the db delete was refused and the signed-delete chain keys"
 # the write is efi-updatevar's (blocker #26 final); with the stub refusing,
 # the NON-FATAL warn + ESP fallback fire and the install continues
 assert_contains "enroll: refused db write warns (non-fatal, no die)" "$out" \
@@ -423,8 +423,10 @@ assert_eq "enroll: the marker is EMPTY (a reminder, not an importable)" "0" \
     "$(wc -c <"$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" | tr -d '[:space:]')"
 assert_eq "enroll: the marker sorts FIRST in the firmware file browser" \
     "!import_all_auth_files" "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | head -n 1)"
-assert_eq "enroll: staged-file set is EXACTLY db.auth kek.auth pk.auth README.txt !import_all_auth_files" "5" \
+assert_eq "enroll: staged-file set is db.auth kek.auth pk.auth README.txt !import_all_auth_files + the shipped vendor certs" "6" \
     "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | wc -l)"
+assert_eq "enroll: the shipped Microsoft Option ROM UEFI CA 2023 .cer is staged (DECIDED 2026-09-27)" "1" \
+    "$([ -f "$tmp/esp-b/alpine-fde-keys/microsoft-option-rom-uefi-ca-2023.cer" ] && echo 1 || echo 0)"
 assert_contains "enroll: fallback names the staging directory" "$out" \
     "$tmp/esp-b/alpine-fde-keys"
 assert_contains "enroll: fallback per-file cp info line" "$out" \

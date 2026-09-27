@@ -1193,7 +1193,7 @@ esp_make() {
 # Cache: <alpine-artifact cache>/alpine-fde-payload-rootustar.tar.gz.
 
 # rootfs_payload_tree_digest — content digest of the repo tree the payload
-# embeds (bin lib hooks docs). The payload sidecar sha proves the CACHED BYTES
+# embeds (bin lib hooks docs certs). The payload sidecar sha proves the CACHED BYTES
 # intact, never that they are CURRENT: the 2026-09-26 registry (results-
 # 20260926T093432Z.nZzWyQ.json, s01c LIV3 RC=127) died on a payload cached
 # 2026-09-21 whose embedded tree still used the pre-rename /opt/debian-fde
@@ -1201,7 +1201,7 @@ esp_make() {
 # shipped file contains any more. Every reuse decision therefore re-digests
 # the tree (~0.8 MB of scripts) and the sidecar carries BOTH digests.
 rootfs_payload_tree_digest() {
-    (cd "$_HERE/../.." && find bin lib hooks docs -type f -print0 2>/dev/null \
+    (cd "$_HERE/../.." && find bin lib hooks docs certs -type f -print0 2>/dev/null \
         | LC_ALL=C sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}')
 }
 
@@ -1233,12 +1233,12 @@ rootfs_payload_image() {
             return 1
         fi
         # 2. the alpine-fde tooling tree — the production inst_tooling_copy_cmd
-        #    shape (explicit per-dir copies: bin lib hooks docs; never descends
+        #    shape (explicit per-dir copies: bin lib hooks docs certs; never descends
         #    into VCS/harness residue)
         local tree="$tmp/tree" d repo_root
         repo_root=$(cd "$_HERE/../.." && pwd)
         mkdir -p "$tree/opt/alpine-fde" "$tree/usr/local/bin"
-        for d in bin lib hooks docs; do
+        for d in bin lib hooks docs certs; do
             mkdir -p "$tree/opt/alpine-fde/$d"
             if ! cp -r "$repo_root/$d/." "$tree/opt/alpine-fde/$d/"; then
                 rm -rf "$tmp"
