@@ -669,8 +669,13 @@ inst_live_tool_pairs() {
   if [ "$(inst_bcache)" = "1" ]; then
     # blocker #14b (main): bcache-tools-udev carries the udev integration
     # (69-bcache.rules + bcache-register/probe-bcache) — TARGET-side only
-    # (delivered by the in-chroot apk txn; NO host tool to probe)
-    printf '%s\n' make-bcache:bcache-tools bcache-tools-udev
+    # (delivered by the in-chroot apk txn; NO host tool to probe). It is
+    # deliberately NOT a live pair: every line here MUST be binary:package
+    # (require_pkgs probes the binary — bcache-tools-udev ships only rules +
+    # helpers, so a bare entry dies the live install at the first probe,
+    # real-server blocker #19). The package stays pinned in the MIRROR
+    # closure (tests/lib/local-mirror.sh mirror_package_list).
+    printf '%s\n' make-bcache:bcache-tools
   fi
 }
 
