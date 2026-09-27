@@ -636,7 +636,8 @@ run_stage disk-copy-b 900 cp "$RUN/disk.img" "$B/disk.img"
 # unseal hook's SB guard passes and the provisional token unseals
 # passwordless. The TPM state (swtpm dir) is untouched: the provisional token
 # pins PCR 11 only, so the firmware SB state change cannot break the seal.
-run_stage boot-b-vars 300 bash -c "keys_create '$RUN/keys-b' && keys_vars_enrolled '$RUN/keys-b' '$B/vars.fd'"
+run_stage boot-b-vars-gen 120 keys_create "$RUN/keys-b"
+run_stage boot-b-vars 300 keys_vars_enrolled "$RUN/keys-b" "$B/vars.fd"
 assert_eq "boot B vars: SecureBootEnable ON (offline enrollment)" "ON" \
     "$(keys_vars_get "$B/vars.fd" SecureBootEnable)"
 assert_eq "boot B vars: custom PK present (offline enrollment)" "0" \
