@@ -639,10 +639,12 @@ run_stage disk-copy-b 900 cp "$RUN/disk.img" "$B/disk.img"
 extract_guest_platform_certs() {
     local img=$1 kd=$2 espimg start f
     rm -rf "$kd"; mkdir -p "$kd/espkeys"
-    start=$(sfdisk -d "$img" 2>/dev/null | awk '/start=/ && /C12A7328/ {print substr($0, RSTART+6, RLENGTH-6); exit}')
-    [ -n "$start" ] || return 1
+    # sfdisk -d: "<dev>1 : start=  2048, size=  524288, type= C12A7328-..."
+    start=$(sfdisk -d "$img" 2>/dev/null | awk -F'start=' '/start=/ && /C12A7328/ {n=$2+0; print n; exit}')
+    size=$(sfdisk -d "$img" 2>/dev/null | awk -F'size=' '/C12A7328/ {n=$2+0; print n; exit}')
+    [ -n "$start" ] && [ -n "$size" ] || return 1
     espimg="$kd/esp.img"
-    dd if="$img" of="$espimg" bs=512 skip="$start" status=none
+    dd if="$img" of="$espimg" bs=512 skip="$start" count="$size" status=none
     mcopy -i "$espimg" -s -n ::/efi/alpine-fde-keys "$kd/espkeys/" 2>/dev/null
     for f in db.auth kek.auth pk.auth; do
         [ -f "$kd/espkeys/$f" ] || return 1
@@ -755,10 +757,7 @@ assert_eq "[boot B host] recovery keyslot 0 still argon2id" "argon2id" \
 ESP_IMG="$RUN/esp-extract.img"
 extract_esp() {
     local start
-    start=$(sfdisk -d "$1" 2>/dev/null | awk '
-    /start=/ && (/UEFI/ || /C12A7328/ || /EFI System/ || /type: uefi/) {
-        if (match($0, /start=[0-9]+/)) { print substr($0, RSTART + 6, RLENGTH - 6); exit }
-    }')
+    start=$(sfdisk -d "$1" 2>/dev/null | awk -F'start=' '/start=/ && /C12A7328/ {n=$2+0; print n; exit}')
     [[ -n "$start" ]] || { echo "s23: cannot resolve the ESP start sector"; return 1; }
     dd if="$1" of="$2" bs=512 skip="$start" status=none
     mdir -i "$2" ::/ >/dev/null
