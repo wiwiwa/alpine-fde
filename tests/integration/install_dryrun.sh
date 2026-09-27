@@ -237,9 +237,11 @@ assert_contains "plan: ESP fstab line" "$INS_OUT" "PARTUUID=<esp-partuuid> /efi 
 assert_not_contains "plan: no ext4 fstab root line under btrfs default" "$INS_OUT" "/ ext4 defaults 0 1"
 # real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
 # the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
-# ships NO bootctl binary; the retired record died POST-ceremony)
-assert_contains "plan: boot manager via guarded file copy, BOTH ESP homes (blocker #7)" "$INS_OUT" \
-    'cp "$ldr" /efi/EFI/systemd/systemd-bootx64.efi && cp "$ldr" /efi/EFI/BOOT/BOOTX64.EFI'
+# ships NO bootctl binary; the retired record died POST-ceremony).
+# Post-cc3f280 the copy is a RELEASE-SIGN: sbsign writes BOOTX64.EFI with the
+# release key/cert and the canonical home is copied from that signed output.
+assert_contains "plan: boot manager RELEASE-SIGNED into BOTH ESP homes (blocker #7 + #26 addendum)" "$INS_OUT" \
+    'sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt "$ldr" --output /efi/EFI/BOOT/BOOTX64.EFI && cp /efi/EFI/BOOT/BOOTX64.EFI /efi/EFI/systemd/systemd-bootx64.efi'
 assert_contains "plan: the guarded copy probes the loader binary in-chroot, fail-closed" "$INS_OUT" \
     '/usr/share/systemd/bootctl/systemd-bootx64.efi'
 assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no bootctl binary)" "0" \
@@ -360,16 +362,19 @@ assert_eq "plan: teardown order efivars < dev < proc < recursive umount -R" "1" 
 LAZY=$(grep -oF '|| umount -l' <<<"$TD_LINE" | wc -l)
 assert_eq "plan: teardown lazy -l fallback for every umount (never a hard failure)" "1" \
     "$(( LAZY >= 4 ? 1 : 0 ))"
-# G-IL8: NO host-side signing machinery anywhere in the plan (the §3.3 target
-# package names legitimately CONTAIN the substrings — pin the command records)
-assert_eq "plan: zero sbsign command records (in-chroot build)" "0" \
+# G-IL8: NO host-side signing machinery in the plan EXCEPT the boot-manager
+# release-sign (post-cc3f280: inst_bootmgr_copy_line sbsigns BOOTX64.EFI with
+# the release identity; the §3.3 target package names legitimately CONTAIN the
+# substrings — pin the command records). Exactly ONE record: removing the
+# bootmgr sbsign OR adding any other sbsign to the plan both fail this.
+assert_eq "plan: exactly ONE sbsign record — the boot-manager release-sign (rest is in-chroot build)" "1" \
     "$(grep -Ec 'PLAN  (host|guest) .*sbsign --' <<<"$INS_OUT")"
 assert_eq "plan: zero ukify command records (in-chroot build)" "0" \
     "$(grep -Ec 'PLAN  (host|guest) .*ukify build' <<<"$INS_OUT")"
 assert_eq "plan: zero sbverify records" "0" \
     "$(grep -Ec 'PLAN  (host|guest) .*sbverify' <<<"$INS_OUT")"
 assert_not_contains "plan: no <signing-medium> placeholder" "$INS_OUT" "<signing-medium>"
-assert_eq "plan: release.pem named ONLY by the ceremony record" "1" \
+assert_eq "plan: release.pem named by exactly TWO records (ceremony + bootmgr release-sign, post-cc3f280)" "2" \
     "$(grep -c 'release.pem' <<<"$INS_OUT")"
 # plan-order discipline (§9.1 + user flow directives): baseline pending BEFORE
 # the key ceremony; EVERY MECHANICAL step (NVRAM enrollment, boot-manager
@@ -869,8 +874,8 @@ assert_contains "esp: mount plan creates the flag mount point" "$INS_OUT" \
     "mkdir -p /mnt/home /mnt/.snapshots /mnt/boot/efi"
 assert_contains "esp: ESP mounted at the flag mount point" "$INS_OUT" \
     "mount $FAKEDISK"$(printf '%s' "1")" /mnt/boot/efi"
-assert_contains "esp: guarded boot-manager copy record targets the flag mount point (blocker #7)" "$INS_OUT" \
-    'cp "$ldr" /boot/efi/EFI/BOOT/BOOTX64.EFI'
+assert_contains "esp: guarded boot-manager RELEASE-SIGN targets the flag mount point (blocker #7, post-cc3f280)" "$INS_OUT" \
+    'sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt "$ldr" --output /boot/efi/EFI/BOOT/BOOTX64.EFI'
 assert_contains "esp: NVRAM enrollment record passes the flag ESP (fallback staging dir)" \
     "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /boot/efi"
 assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
