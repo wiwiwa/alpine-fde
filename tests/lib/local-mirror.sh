@@ -109,6 +109,12 @@ MIRROR_PIN_ALPINE_KEYS_SHA256="dd211936d544f4050924ce8aec078d24e7b1b036ae70b30bd
 # dl-cdn v3.24/main apk (bcache-tools-udev-1.1-r5.apk, 5882 bytes).
 # shellcheck disable=SC2034  # pins of record (consumed by
 # tests/unit/live_tool_pairs_shape.sh and mirror manifest provenance)
+# efitools pin (blocker #25): cert-to-efi-sig-list + sign-efi-sig-list are the
+# CANONICAL authenticated-packet builder (live-proven on real hardware)
+MIRROR_PIN_EFITOOLS_VERSION="1.9.2-r13"
+# shellcheck disable=SC2034  # pin of record (spool apk hashed by the mirror verify)
+MIRROR_PIN_EFITOOLS_SHA256="6466d3536cf59579d795a139c3dca5f16a628c4eee333fff40efaaa8e4972c4e"
+# shellcheck disable=SC2034  # pin of record (tests/unit/live_tool_pairs_shape.sh asserts the spool apk version)
 MIRROR_PIN_BCACHE_TOOLS_UDEV_VERSION="1.1-r5"
 # shellcheck disable=SC2034  # pin of record (tests/unit/live_tool_pairs_shape.sh hashes the spool apk against it)
 MIRROR_PIN_BCACHE_TOOLS_UDEV_SHA256="${ALPINE_FDE_MIRROR_BCACHE_TOOLS_UDEV_SHA256:-215386db953e2579eb5a67656afdf8848516892ac4718c28749f1f6c1afec37d}"
@@ -171,7 +177,7 @@ mirror_package_list() {
     # topology union (dedup): whatever install_package_list's --fs/--bcache
     # conditionals left out is appended, so one mirror serves every topology
     local p
-    for p in btrfs-progs e2fsprogs bcache-tools bcache-tools-udev; do
+    for p in btrfs-progs e2fsprogs bcache-tools bcache-tools-udev efitools; do
         case " $list " in
             *" $p "*) : ;;
             *) list="$list $p" ;;

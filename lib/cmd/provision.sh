@@ -50,18 +50,23 @@ bin_to_hex() {
 # UTF-8-encodes under gawk in a UTF-8 locale; '%b' + \ooo is byte-exact and
 # keeps NULs because the intermediate is ASCII text, never raw NUL bytes).
 hex_to_bin() {
-    _h2b_esc=$(awk '{
+    # REAL-SERVER BLOCKER #25: the previous shape emitted each byte as a
+    # \NNN octal ESCAPE and expanded it with shell printf %b — but POSIX %b
+    # expands only \0ddd (LEADING ZERO): every byte >= 0x80 (\2xx/\3xx — no
+    # leading zero) stayed in the packet as LITERAL backslash-octal TEXT.
+    # Every .auth packet and .esl list was therefore corrupt garbage and both
+    # tested firmwares (real Dell + OVMF) refused the authenticated write.
+    # The LC_ALL=C awk + %c form is the repo-proven idiom (policy.sh, the
+    # same one behind the golden + live-TPM cross-checked policy pins).
+    LC_ALL=C awk '{
         s = tolower($0)
         h = "0123456789abcdef"
-        out = ""
         for (i = 1; i + 1 <= length(s); i += 2) {
             hi = index(h, substr(s, i, 1)) - 1
             lo = index(h, substr(s, i + 1, 1)) - 1
-            out = out sprintf("\\%03o", hi * 16 + lo)
+            printf "%c", hi * 16 + lo
         }
-        printf "%s", out
-    }')
-    printf '%b' "$_h2b_esc"
+    }'
 }
 
 # le16_hex N / le32_hex N — little-endian hex encoding of an integer
@@ -241,47 +246,29 @@ esl_verify() {
 }
 
 # auth_packet_build PRIVKEY CERT VARNAME VARGUID ATTRS PAYLOADFILE TIMESTAMP OUT
-# Full UEFI EFI_VARIABLE_AUTHENTICATION_2 — what efivarfs/firmware/KeyTool
-# parse for a time-based authenticated update:
-#   EFI_TIME(16) + EFI_VARIABLE_DATA{VariableGuid(16, LE), DataSize u32le,
-#   UnicodeName(UTF-16LE, NUL-terminated)} + WIN_CERTIFICATE_UEFI_GUID
-#   (dwLength u32le = 8 + p7, wRevision u16le 0x0200, wCertificateType u16le
-#   0x0EF7) + PKCS#7 SignedData (DETACHED — the verifier supplies the
-#   descriptor, exactly like efitools KeyTool / shim verify EFI updates).
-# The signed descriptor covers name+guid+attrs+time+payload; the envelope
-# (GUID/DataSize/name) is what firmware and fw_var_write's identity preflight
-# read — without it the packet is unparsable (refused as identity mismatch).
+# Authenticated variable update packet via the CANONICAL efitools pipeline
+# (real-server blocker #25, live-proven on real hardware: cert-to-efi-sig-list
+# + sign-efi-sig-list packets import; EVERY hand-rolled variant was refused
+# with EINVAL/EACCES by two independent firmwares). The variable identity is
+# bound by sign-efi-sig-list itself (-g GUID, --var name); the firmware is the
+# final arbiter. TIMESTAMP is accepted for API compatibility (sign-efi-sig-list
+# stamps the current EFI_TIME itself).
 auth_packet_build() {
     _ap_key=$1 _ap_cert=$2 _ap_var=$3 _ap_guid=$4 _ap_attrs=$5 _ap_pay=$6 _ap_ts=$7 _ap_out=$8
     for _ap_f in "$_ap_key" "$_ap_cert" "$_ap_pay"; do
         [ -f "$_ap_f" ] || die "auth_packet_build: missing input: $_ap_f"
     done
-    _ap_desc_hex=$(ascii_utf16le_hex "$_ap_var")$(guid_le_hex "$_ap_guid")$(le32_hex "$_ap_attrs")$(efi_time_hex "$_ap_ts")
-    _ap_tmp=${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}
-    _ap_desc=$(mktemp "$_ap_tmp/alpine-fde-desc.XXXXXX")
-    _ap_p7=$(mktemp "$_ap_tmp/alpine-fde-p7.XXXXXX")
-    {
-        printf '%s' "$_ap_desc_hex" | hex_to_bin
-        cat "$_ap_pay"
-    } >"$_ap_desc"
-    if ! openssl smime -sign -binary -in "$_ap_desc" -signer "$_ap_cert" -inkey "$_ap_key" \
-        -outform DER -out "$_ap_p7" >/dev/null 2>&1; then
-        rm -f "$_ap_desc" "$_ap_p7"
-        die "auth_packet_build: openssl smime -sign failed for var $_ap_var"
-    fi
-    _ap_p7sz=$(($(wc -c <"$_ap_p7") + 0))
-    _ap_name_hex=$(ascii_utf16le_hex "$_ap_var")0000 # UTF-16LE + NUL terminator
-    _ap_name_bytes=$(( (${#_ap_var} + 1) * 2 ))
-    _ap_data_sz_hex=$(le32_hex $(( _ap_name_bytes + 8 + _ap_p7sz )))
-    {
-        efi_time_hex "$_ap_ts" | hex_to_bin                 # EFI_TIME
-        guid_le_hex "$_ap_guid" | hex_to_bin                # VariableGuid
-        printf '%s' "$_ap_data_sz_hex" | hex_to_bin         # EFI_VARIABLE_DATA.DataSize
-        printf '%s' "$_ap_name_hex" | hex_to_bin            # UnicodeName + NUL
-        printf '%s%s%s' "$(le32_hex $((8 + _ap_p7sz)))" "$(le16_hex 512)" "$(le16_hex 3831)" | hex_to_bin
-        cat "$_ap_p7"
-    } >"$_ap_out"
-    rm -f "$_ap_desc" "$_ap_p7"
+    command -v cert-to-efi-sig-list >/dev/null 2>&1 &&
+        command -v sign-efi-sig-list >/dev/null 2>&1 || {
+        die "auth_packet_build: efitools not installed (cert-to-efi-sig-list / sign-efi-sig-list missing) — apk add efitools (real-server blocker #25: hand-rolled packets are refused by firmware)"
+    }
+    cert-to-efi-sig-list "$_ap_cert" "$_ap_out.esl" ||
+        die "auth_packet_build: cert-to-efi-sig-list failed for $_ap_var"
+    sign-efi-sig-list -g "$_ap_guid" -c "$_ap_cert" -k "$_ap_key" \
+        "$_ap_var" "$_ap_out.esl" "$_ap_out" >/dev/null 2>&1 ||
+        die "auth_packet_build: sign-efi-sig-list failed for var $_ap_var"
+    rm -f "$_ap_out.esl"
+    return 0
 }
 
 # --- stage 1: key ceremony ------------------------------------------------------

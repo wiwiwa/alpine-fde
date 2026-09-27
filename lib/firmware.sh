@@ -156,28 +156,26 @@ fw_var_write_try() {
         die "firmware: no efivars directory $_fwv_dir — cannot enroll $_fwv_name (UEFI boot required)"
     [ -f "$_fwv_auth" ] ||
         die "firmware: authenticated update packet missing: $_fwv_auth (run the key ceremony first)"
-    _fwv_hex=$(od -An -vtx1 "$_fwv_auth" | tr -d ' \n')
-    # EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME (16 bytes) then EFI_VARIABLE_DATA:
-    # GUID (16 bytes) at offset 16, DataSize u32le at 32, UnicodeName at 36.
-    _fwv_got_guid=$(printf '%s\n' "$_fwv_hex" | cut -c33-64)
-    [ "$_fwv_got_guid" = "$(fw_guid_le_hex "$_fwv_guid")" ] ||
-        die "firmware: $_fwv_auth does not name GUID $_fwv_guid — refusing to program $_fwv_name (packet identity mismatch)"
-    _fwv_datasize=$(fw_hex_le_dec "$(printf '%s\n' "$_fwv_hex" | cut -c65-72)")
-    _fwv_size=$(wc -c <"$_fwv_auth" | tr -d '[:space:]')
-    [ "$_fwv_size" -ge $((_fwv_datasize + 36)) ] ||
-        die "firmware: $_fwv_auth truncated (DataSize $_fwv_datasize > packet body) — refusing to program $_fwv_name"
-    _fwv_got_name=$(printf '%s\n' "$_fwv_hex" | cut -c73-$((72 + 4 * ${#_fwv_name})))
-    [ "$_fwv_got_name" = "$(fw_name_utf16_hex "$_fwv_name")" ] ||
-        die "firmware: $_fwv_auth does not name variable $_fwv_name — refusing to program it (packet identity mismatch)"
+    [ -s "$_fwv_auth" ] ||
+        die "firmware: $_fwv_auth is empty — refusing to program $_fwv_name"
+    # minimal sanity (blocker #25): the packet MUST start with a plausible
+    # EFI_TIME — the year's HIGH byte is 0x07 for the 202x era. The old
+    # hand-rolled/hybrid packets started with zeros (or escape text) and are
+    # refused here. The firmware is the final arbiter of everything else; the
+    # try-form surfaces its verdict verbatim.
+    _fwv_year_hi=$(tail -c +2 "$_fwv_auth" | head -c 1 | od -An -v -tx1 | tr -d ' \n')
+    [ "$_fwv_year_hi" = "07" ] ||
+        die "firmware: $_fwv_auth is not a spec EFI_VARIABLE_AUTHENTICATION_2 packet (EFI_TIME year is not 202x) — refusing to program $_fwv_name"
+    # REAL-SERVER blocker #25 addendum: efivarfs marks AUTHENTICATED variables'
+    # inodes S_IMMUTABLE at creation — a re-run against OUR OWN previously
+    # enrolled variables dies on EPERM at rm/open. Clear the bit best-effort
+    # (quiet when the file does not exist or chattr is unavailable).
+    chattr -i "$_fwv_dir/$_fwv_name-$_fwv_guid" >/dev/null 2>&1 || :
     # ONE write() of attrs+packet: the kernel's efivarfs performs SetVariable
-    # on the first write to the file — writing the 4-byte attrs header and
-    # then appending the packet would attempt to create the variable with an
-    # EMPTY body and fail with EIO on real firmware (2026-09-20 live metal).
-    # Attrs 0x00010007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS
-    # (u32le, bit 16 — UEFI spec; 0x01000000 is ENHANCED_AUTHENTICATED_ACCESS,
-    # refused with EINVAL on most firmware): without the auth bit firmware
-    # refuses an authenticated update outright; the value must match the attrs
-    # signed into the packet descriptor (provision PROV_EFI_ATTRS).
+    # on the first write to the file (writing attrs and packet separately
+    # fails with EIO on real firmware, 2026-09-20 live metal). Attrs
+    # 0x00010007 = NV+BS+RT + TIME_BASED_AUTHENTICATED_WRITE_ACCESS (u32le),
+    # matching the attributes sign-efi-sig-list signs into the packet.
     { printf '\007\000\001\000'; cat "$_fwv_auth"; } >"$_fwv_dir/$_fwv_name-$_fwv_guid" ||
         return 1
     info "firmware: enrolled $_fwv_name ($_fwv_guid) from $_fwv_auth"
@@ -296,6 +294,10 @@ fw_auth_enroll() {
         # half-enrolled trust root.
         if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
             info "firmware: removing pre-existing vendor $_fae_v — Setup Mode permits it"
+            # blocker #25 addendum: OUR OWN previously enrolled auth variables
+            # carry the efivarfs S_IMMUTABLE bit — clear it best-effort before
+            # the rm (a plain rm dies EPERM on re-enrollment/re-provision)
+            chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
             rm -f "$_fae_dir/$_fae_v-$_fae_guid" ||
                 warn "firmware: could not remove pre-existing vendor $_fae_v — attempting the authenticated write anyway (its failure will report the real error)"
         fi

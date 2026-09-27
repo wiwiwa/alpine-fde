@@ -216,6 +216,9 @@ assert_eq "fw_var_sha256: sha256 of payload after attrs header" "$KEK_SHA" \
     "$(fw_var_sha256 KEK)"
 
 # --- fw_auth_enroll / fw_osindications_set: pre-existing variable clearing ---
+# blocker #25: fw_auth_enroll now builds packets via the efitools pipeline —
+# this leg requires cert-to-efi-sig-list/sign-efi-sig-list on the host (the
+# canary/e2e image and the install ISO ship them); skipped loudly elsewhere.
 # Real-server blocker (bcache-multi live run, SetupMode==1 verified by the
 # function's own gate): `fw_var_write db` -> write error: Invalid argument.
 # The write shape was correct; the vendor db (and KEK/PK) variable still
@@ -230,6 +233,31 @@ assert_eq "fw_var_sha256: sha256 of payload after attrs header" "$KEK_SHA" \
 # contract through the info/warn lines and the re-created variable's attrs
 # header, plus the enriched die message's manual-enrollment remedy.
 
+# efitools stubs (blocker #25): fw_auth_enroll shells out to cert-to-efi-sig-list
+# + sign-efi-sig-list — this seam tests the ENROLL choreography (rm-first,
+# chattr -i, attrs header), not the packet bytes, so canned stubs suffice.
+mkdir -p "$tmp/stub-bin"
+cat >"$tmp/stub-bin/cert-to-efi-sig-list" <<'STUB'
+#!/bin/sh
+OUT=""
+for a in "$@"; do OUT=$a; done
+printf 'STUB-ESL' > "$OUT"
+STUB
+chmod +x "$tmp/stub-bin/cert-to-efi-sig-list"
+cat >"$tmp/stub-bin/sign-efi-sig-list" <<'STUB'
+#!/bin/sh
+OUT=""
+prev=""
+for a in "$@"; do
+    [ "$prev" = "-k" ] && { printf 'STUB-AUTH-PACKET-BYTES' > "$a"; }
+    prev=$a
+    OUT=$a
+done
+exit 0
+STUB
+chmod +x "$tmp/stub-bin/sign-efi-sig-list"
+export PATH="$tmp/stub-bin:$PATH"
+
 # mkauth FILE NAME GUID PAYLOAD — minimal EFI_VARIABLE_AUTHENTICATION_2 packet
 # (EFI_TIME 16 zero bytes + EFI_VARIABLE_DATA{GUID, DataSize u32le,
 # UnicodeName UTF-16LE} + payload) that clears fw_var_write's identity
@@ -240,7 +268,7 @@ mkauth() {
     _ma_guid=$3
     _ma_payload=$4
     _ma_size=$(( ${#_ma_name} * 2 + ${#_ma_payload} ))
-    _ma_hex=$(printf '%032d' 0)"$(fw_guid_le_hex "$_ma_guid")"
+    _ma_hex=$(printf '%032x' 0 | sed 's/^../ea07/')"$(fw_guid_le_hex "$_ma_guid")"  # EFI_TIME 2026 (year LE ea07)
     _ma_hex=$_ma_hex$(printf '%08x' "$_ma_size" | fold -w2 | tac | tr -d '\n')
     _ma_hex=$_ma_hex$(fw_name_utf16_hex "$_ma_name")
     _ma_hex=$_ma_hex$(printf '%s' "$_ma_payload" | od -An -vtx1 | tr -d ' \n')
@@ -278,7 +306,11 @@ printf '\007\000\000\000VENDORDB' >"$fa/db-$DBXGUID"
 printf '\007\000\000\000VENDORKEK' >"$fa/KEK-$GUID"
 printf '\007\000\000\000VENDORPK' >"$fa/PK-$GUID"
 rc=0
-out=$(fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
+if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
+    out=$(fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
+else
+    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
+fi
 assert_rc "enroll: pre-existing vendor vars -> rc 0" 0 "$rc"
 assert_contains "enroll: info line for pre-existing vendor db" "$out" \
     "removing pre-existing vendor db"
@@ -310,7 +342,11 @@ mkvar_byte "$fb" SetupMode 1
 mkdir "$fb/db-$DBXGUID"
 rm -rf "$tmp/esp-b"
 rc=0
-out=$(fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
+if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
+    out=$(fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
+else
+    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
+fi
 assert_rc "enroll: write refusal -> ESP fallback, install continues (rc 0)" 0 "$rc"
 assert_contains "enroll: rm failure warns (non-fatal)" "$out" \
     "could not remove pre-existing vendor db"
@@ -387,7 +423,11 @@ fc="$tmp/enroll-clean"
 mkdir -p "$fc"
 mkvar_byte "$fc" SetupMode 1
 rc=0
-out=$(fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
+if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
+    out=$(fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
+else
+    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
+fi
 assert_rc "enroll: clean path -> rc 0" 0 "$rc"
 assert_eq "enroll: clean path emits no rm info noise" "0" \
     "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"

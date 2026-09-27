@@ -190,7 +190,7 @@ make_stub() {
     printf '#!/bin/sh\nexit 0\n' >"$T/stub/$1"
     chmod +x "$T/stub/$1"
 }
-for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update \
+for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update cert-to-efi-sig-list sign-efi-sig-list \
     bootctl lsblk btrfs cryptsetup; do
     make_stub "$s"
 done

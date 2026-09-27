@@ -78,7 +78,7 @@ exit 0
 EOF
     chmod +x "$T/stub/$1"
 }
-for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup \
+for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup cert-to-efi-sig-list sign-efi-sig-list cert-to-efi-sig-list sign-efi-sig-list \
     rc-update btrfs reboot chroot modprobe mdev nslookup; do
     make_stub "$s"
 done
