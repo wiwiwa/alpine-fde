@@ -178,15 +178,21 @@ if [ "$_fdh_sb" != "1" ] || [ "$_fdh_sm" != "0" ]; then
     else
         # REAL-SERVER blocker (Samuel's Dell): OsIndications is NOT supported
         # (some firmwares lack the capability entirely — SetupMode=1 but the
-        # OsIndications SetVariable is refused or silently ignored). A reboot
-        # here would LOOP back into this guard forever with the user pressing
-        # Enter uselessly. Print the FULL manual instructions INSTEAD, then
-        # poweroff cleanly: the user powers on and presses F2 manually.
-        _msg "OsIndications not supported by this firmware — at the next power-on, enter the firmware setup (usually F2) and:"
-        _msg "  1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order) or verify they are present"
+        # OsIndications SetVariable is refused or silently ignored). Print the
+        # FULL manual instructions, then STILL reboot: the reboot is useful
+        # (the operator catches F2 during the next POST to enter the firmware
+        # setup manually) while a bare poweroff strands the machine.
+        _msg "OsIndications not supported by this firmware — at the next boot, press F2 during POST to enter the firmware setup and:"
+        _msg "  1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order, or the .cer certificates) or verify they are present"
         _msg "  2. enable Secure Boot"
         _msg "  3. save and exit"
-        _fdh_poweroff "OsIndications unsupported — manual firmware-setup key enrollment required (§8.2)"
+        _msg "Press Enter to reboot (press F2 during POST to enter the firmware setup)"
+        IFS= read -r _fdh_enter || _fdh_enter=''
+        _msg "rebooting — press F2 during POST to enter the firmware setup"
+        if reboot -f; then
+            exit 0
+        fi
+        _fdh_poweroff "reboot refused — fail-closed poweroff (Secure Boot is OFF; §8.2)"
     fi
 fi
 _msg "Secure Boot guard: secureboot=1 setup_mode=0 — verified boot confirmed (pre-unseal guard, ADR-20)"

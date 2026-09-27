@@ -960,18 +960,12 @@ assert_contains "instructions name db.auth first" "$OUT_A" "db.auth"
 assert_contains "instructions name kek.auth second" "$OUT_A" "kek.auth"
 assert_contains "instructions name pk.auth third" "$OUT_A" "pk.auth"
 assert_contains "instructions say enable Secure Boot" "$OUT_A" "enable Secure Boot"
-if echo "$OUT_A" | grep -q "Press Enter"; then
-    _fail "OsIndications-unsupported: still prompts 'Press Enter' (the infinite-loop defect)"
-else
-    _pass "OsIndications-unsupported: NO 'Press Enter' prompt (blocker fix confirmed)"
-fi
-if echo "$OUT_A" | grep -q "read"; then
-    _fail "OsIndications-unsupported: still reads stdin (the infinite-loop defect)"
-else
-    _pass "OsIndications-unsupported: NO stdin read (no Enter prompt)"
-fi
-assert_contains "OsIndications-unsupported: poweroff called" "$OUT_A" \
-    "fail-closed: forcing poweroff"
+assert_contains "write-fails: Enter prompt present (reboot is useful — catch F2 during POST)" \
+    "$OUT_A" "Press Enter to reboot"
+assert_contains "write-fails: plain reboot instruction (F2 during POST, no setup auto-entry)" \
+    "$OUT_A" "press F2 during POST"
+assert_contains "write-fails: reboot -f called (not poweroff)" "$OUT_A" \
+    "rebooting — press F2 during POST"
 
 # (b) OsIndications write SUCCEEDS (spec-compliant firmware): Enter-prompt +
 #     reboot-into-setup unchanged
