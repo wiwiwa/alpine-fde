@@ -47,7 +47,9 @@ build_initrd() {
     rm -rf "$w"
     mkdir -p "$w/usr/share/mkinitfs" "$w/usr/share/alpine-fde/mkinitfs" \
         "$w/usr/bin" "$w/usr/lib" "$w/lib/modules" "$w/etc"
-    cp "$STOCK_INIT" "$w/usr/share/mkinitfs/initramfs-init"
+    # the REAL archive path: stock mkinitfs installs the init at /init
+    # (initfs_base: install -m755 "$init" "$tmpdir/init")
+    cp "$STOCK_INIT" "$w/init"
     cp "$HOOK" "$w/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
     : >"$w/usr/bin/cryptsetup"
     : >"$w/usr/bin/openssl"
@@ -86,10 +88,10 @@ assert_rc "splice rc 0 over the stock initramfs-init" 0 "$SPLICE_RC"
 W="$TMP/extract-a"
 mkdir -p "$W"
 gzip -dc "$IMG" | cpio --quiet -idm -D "$W" 2>/dev/null
-INIT=$W/usr/share/mkinitfs/initramfs-init
+INIT=$W/init
 [ -f "$INIT" ] || INIT=""
 if [ -z "$INIT" ]; then
-    _fail "spliced archive does not contain usr/share/mkinitfs/initramfs-init"
+    _fail "spliced archive does not contain the initramfs /init"
     finish
 fi
 assert_eq "splice marker appears exactly twice (open+close) after ONE splice" "2" \
@@ -122,7 +124,7 @@ assert_rc "idempotent re-run rc 0" 0 $?
 W2="$TMP/extract-b"
 mkdir -p "$W2"
 gzip -dc "$IMG" | cpio --quiet -idm -D "$W2" 2>/dev/null
-INIT2=$W2/usr/share/mkinitfs/initramfs-init
+INIT2=$W2/init
 assert_eq "idempotent re-run: marker count UNCHANGED (no double splice)" \
     "$marks_before" "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$INIT2")"
 assert_eq "idempotent re-run: the hook invocations still exactly 2 (unseal + state-flip)" "2" \

@@ -195,7 +195,7 @@ initramfs_build() {
 
 INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
 INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
-INITRAMFS_INIT_PATH='usr/share/mkinitfs/initramfs-init'
+INITRAMFS_INIT_PATH='init'
 INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
 
 # initramfs_detect_comp FILE — print the compression name (gzip|xz|zstd|lz4|
@@ -282,7 +282,7 @@ _initramfs_splice_block() {
 
 INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
 INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
-INITRAMFS_INIT_PATH='usr/share/mkinitfs/initramfs-init'
+INITRAMFS_INIT_PATH='init'
 INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
 
 # initramfs_detect_comp FILE — print the compression name (gzip|xz|zstd|lz4|
