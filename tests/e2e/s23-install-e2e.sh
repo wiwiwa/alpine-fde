@@ -668,8 +668,13 @@ ss=struct.unpack_from('<I',p,24)[0]
 open(sys.argv[2],'wb').write(p[44:44+(ss-16)])
 PYE
         echo "# s23 dbg: parsed $f (der $(wc -c <"$kd/$name.der") bytes)" >&2
-        openssl x509 -inform DER -in "$kd/$name.der" -out "$kd/$name.crt" 2>/dev/null || { echo "# s23 dbg: x509 FAIL $f" >&2; return 1; }
-        echo "# s23 dbg: cert $name.crt ok" >&2
+        case $name in
+            db) crt=db.crt ;;
+            kek) crt=KEK.crt ;;
+            pk) crt=PK.crt ;;
+        esac
+        openssl x509 -inform DER -in "$kd/$name.der" -out "$kd/$crt" 2>/dev/null || { echo "# s23 dbg: x509 FAIL $f" >&2; return 1; }
+        echo "# s23 dbg: cert $crt ok" >&2
     done
     [ -f "$kd/db.crt" ] && [ -f "$kd/KEK.crt" ] && [ -f "$kd/PK.crt" ]
 }
