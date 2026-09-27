@@ -262,12 +262,19 @@ auth_packet_build() {
         command -v sign-efi-sig-list >/dev/null 2>&1 || {
         die "auth_packet_build: efitools not installed (cert-to-efi-sig-list / sign-efi-sig-list missing) — apk add efitools (real-server blocker #25: hand-rolled packets are refused by firmware)"
     }
-    # the caller's PAYLOAD (the EFI_SIGNATURE_LIST) is the DETACHED signed
-    # content — NEVER re-derive an ESL from the signer cert here (that was
-    # the blocker-#25 cert mixup: db.auth staged with the KEK identity)
-    sign-efi-sig-list -g "$_ap_guid" -c "$_ap_cert" -k "$_ap_key" \
-        "$_ap_var" "$_ap_out.esl" "$_ap_out" >/dev/null 2>&1 ||
-        die "auth_packet_build: sign-efi-sig-list failed for var $_ap_var"
+    # the caller's PAYLOAD (the EFI_SIGNATURE_LIST, $_ap_pay) is the DETACHED
+    # signed content — NEVER re-derive an ESL from the signer cert here (that
+    # was the blocker-#25 cert mixup: db.auth staged with the KEK identity),
+    # and never invent an "$_ap_out.esl" input path (the real-server blocker
+    # #32: sign-efi-sig-list was handed a nonexistent file and the failure was
+    # silenced). sign-efi-sig-list usage: <Var> <ESL> <OUT> — errors surface.
+    if ! sign-efi-sig-list -g "$_ap_guid" -c "$_ap_cert" -k "$_ap_key" \
+        "$_ap_var" "$_ap_pay" "$_ap_out" 2>"$_ap_out.err"; then
+        _ap_err=$(tail -n 1 "$_ap_out.err" 2>/dev/null)
+        rm -f "$_ap_out.err"
+        die "auth_packet_build: sign-efi-sig-list failed for var $_ap_var: ${_ap_err:-unknown error}"
+    fi
+    rm -f "$_ap_out.err"
     return 0
 }
 
