@@ -645,7 +645,10 @@ extract_guest_platform_certs() {
     [ -n "$start" ] && [ -n "$size" ] || return 1
     espimg="$kd/esp.img"
     dd if="$img" of="$espimg" bs=512 skip="$start" count="$size" status=none
+    echo "# s23 dbg: esp=$espimg bytes=$(wc -c <"$espimg")" >&2
+    mdir -i "$espimg" ::/ 2>&1 | head -8 >&2
     mcopy -i "$espimg" -s -n ::/efi/alpine-fde-keys "$kd/espkeys/" 2>/dev/null
+    echo "# s23 dbg: extracted: $(ls "$kd/espkeys/" 2>/dev/null | tr '\n' ' ')" >&2
     for f in db.auth kek.auth pk.auth; do
         [ -f "$kd/espkeys/$f" ] || return 1
         name=${f%.auth}
