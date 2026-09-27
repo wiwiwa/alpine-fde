@@ -571,6 +571,25 @@ assert_rc "ukictl build: Alpine flavor-named kernel (/boot/vmlinuz-lts) resolves
 assert_file_exists "ukictl build: UKI produced for the flavor-named kernel kver" \
     "$ESP/EFI/Linux/alpine-fde-$KVER2.efi"
 
+# --- boot-lane finding (s23 attempt 44): with Secure Boot enforced, OVMF
+# rejects the UNSIGNED Alpine loader — the build must sbsign the INSTALLED
+# boot managers with the release key (§8.3), or boot B never boots the UKI.
+mkdir -p "$ROOT/efi/EFI/systemd" "$ROOT/efi/EFI/BOOT"
+# boot-lane finding (s23 attempt 44): with Secure Boot enforced, OVMF rejects
+ Bedroom the UNSIGNED Alpine loader - the build must sbsign the INSTALLED boot
+ managers with the release key, or boot B never reaches the UKI.
+mkdir -p "$ROOT/efi/EFI/systemd" "$ROOT/efi/EFI/BOOT"
+# a valid PE stand-in: the SIGNED UKI from build 1
+cp "$ESP/EFI/Linux/alpine-fde-$KVER.efi" "$ROOT/efi/EFI/systemd/systemd-bootx64.efi"
+cp "$ESP/EFI/Linux/alpine-fde-$KVER.efi" "$ROOT/efi/EFI/BOOT/BOOTX64.EFI"
+out_bm=$(alpine-fde ukictl build "$KVER" 2>&1); rc_bm=$?
+printf '%s\n' "$(printf '%s' "$out_bm" | tail -8 | tr '\n' '|')" >&2
+assert_rc "boot managers: build rc 0 with boot managers present" 0 $rc_bm
+sbverify --cert "$KEYDIR/release.crt" "$ROOT/efi/EFI/systemd/systemd-bootx64.efi" >/dev/null 2>&1
+assert_rc "boot managers: systemd-bootx64.efi is SB-signed" 0 $?
+sbverify --cert "$KEYDIR/release.crt" "$ROOT/efi/EFI/BOOT/BOOTX64.EFI" >/dev/null 2>&1
+assert_rc "boot managers: BOOTX64.EFI is SB-signed" 0 $?
+
 finish
 
 

@@ -533,6 +533,26 @@ _uk_body() {
     # --- 5. atomic ESP install -------------------------------------------------------
     esp_install_uki "$_uk_uki_signed" "$_uk_kver"
 
+    # --- 5b. §8.3: the INSTALLED boot managers must be SIGNED too -------------
+    # The guarded copy record installs the Alpine loader UNSIGNED; with Secure
+    # Boot enforced OVMF rejects it ("Access Denied") and the machine never
+    # boots the UKI (s23 attempt 44, boot B). Sign both boot-manager homes
+    # with the same release key when they exist on the ESP.
+    _uk_bm_signed=0
+    for _uk_bm in "$_uk_root/efi/EFI/systemd/systemd-bootx64.efi" \
+                  "$_uk_root/efi/EFI/BOOT/BOOTX64.EFI"; do
+        if [ -f "$_uk_bm" ]; then
+            sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
+                --output "$_uk_bm" "$_uk_bm" || {
+                err "ukictl build: sbsign failed for boot manager $_uk_bm"
+                return 1
+            }
+            _uk_bm_signed=$((_uk_bm_signed + 1))
+        fi
+    done
+    [ "$_uk_bm_signed" -gt 0 ] &&
+        info "ukictl build: signed $_uk_bm_signed boot manager image(s) (Secure Boot)"
+
     # --- 6. manifest upsert + meta ----------------------------------------------------
     # MD-01: the signing-bucket contract for policy_pubkey_fp is "empty stdout +
     # rc 1 on failure" — consume defensively, never record a silent empty fp.
