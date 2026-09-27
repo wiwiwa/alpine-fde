@@ -632,7 +632,7 @@ inst_resolve_target_metadata() {
 # NO zram-init (item 26a, ADR-7 AMENDED): zram is removed from the design —
 # the queued --swap feature (task 4) is the only swap story going forward.
 install_package_list() {
-  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas'
+  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas efitools'
   case $(inst_root_fs) in
   ext4) _ipl="$_ipl e2fsprogs" ;;
   *) _ipl="$_ipl btrfs-progs" ;;
@@ -644,7 +644,7 @@ install_package_list() {
     # the target and the initrd audit's rules requirement can never pack.
     # NOTE: any future 'required rules file' must check the -udev subpackage,
     # not just the base package.
-    _ipl="$_ipl bcache-tools bcache-tools-udev efitools"
+    _ipl="$_ipl bcache-tools bcache-tools-udev"
   fi
   printf '%s\n' "$_ipl"
 }
@@ -666,10 +666,6 @@ inst_live_tool_pairs() {
   ext4) printf '%s\n' mkfs.ext4:e2fsprogs ;;
   *) printf '%s\n' mkfs.btrfs:btrfs-progs ;;
   esac
-  # efitools (blocker #25): the ceremony's authenticated packets are built by
-  # the firmware-proven sign-efi-sig-list (live-side require_pkgs probes the
-  # two tools; the target package list carries efitools itself)
-  printf '%s\n' cert-to-efi-sig-list:efitools sign-efi-sig-list:efitools
   if [ "$(inst_bcache)" = "1" ]; then
     # blocker #14b (main): bcache-tools-udev carries the udev integration
     # (69-bcache.rules + bcache-register/probe-bcache) — TARGET-side only

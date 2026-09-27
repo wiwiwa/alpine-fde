@@ -475,7 +475,7 @@ assert_eq "fstab: zero swap lines (ADR-7: no disk swap)" "0" \
     "$(grep -c 'swap' "$MNT_ETC/fstab")"
 # §3.1 additions set lands in the in-guest apk transaction
 CHROOT_TXN=$(grep -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG")
-for want in mkinitfs py3-pefile doas ukify-kernel-hook; do
+for want in mkinitfs py3-pefile doas ukify-kernel-hook efitools; do
     assert_contains "apk txn includes $want (§3.1, executed)" "$CHROOT_TXN" "$want"
 done
 assert_not_contains "apk txn has NO zram-init (item 26a, ADR-7 amended)" "$CHROOT_TXN" "zram-init"
