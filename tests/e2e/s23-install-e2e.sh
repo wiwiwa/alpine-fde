@@ -674,6 +674,7 @@ PYE
     [ -s "$kd/db.crt" ] || return 1
     return 0
 }
+run_stage boot-b-vars-ident 120 keys_create "$RUN/keys-b"   # PK/KEK fixture identity
 run_stage boot-b-vars-gen 300 extract_guest_platform_certs "$B/disk.img" "$RUN/keys-b"
 # build the offline vars: PK/KEK from the fixture identity, db = the release
 # cert extracted from the guest's SIGNED UKI
