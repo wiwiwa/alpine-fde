@@ -656,7 +656,7 @@ extract_guest_platform_certs() {
     echo "# s23 dbg: uki=$uki bytes=$(wc -c <"$uki")" >&2
     # db entry = the RELEASE cert extracted from the SIGNED UKI's
     # Authenticode table (the cert OVMF must have in db to verify it).
-    python3 - "$uki" "$kd/uki-cert.der" <<'PYE'
+    python3 - "$uki" "$kd/uki-auth.der" <<'PYE'
 import struct, sys
 d=open(sys.argv[1],'rb').read()
 pe=struct.unpack_from('<I',d,0x3c)[0]
@@ -666,14 +666,17 @@ ddir=opt+(112 if magic==0x20b else 96)
 rva,size=struct.unpack_from('<II',d,ddir+32)
 open(sys.argv[2],'wb').write(d[rva+8:rva+size])
 PYE
-    openssl x509 -inform DER -in "$kd/uki-cert.der" -out "$kd/uki.crt" 2>/dev/null || return 1
-    [ -s "$kd/uki.crt" ] || { echo "# s23 dbg: empty uki cert" >&2; return 1; }
+    # the Authenticode blob is a PKCS7 SignedData; the FIRST embedded cert is
+    # the release signer - exactly the identity that must sit in the offline
+    # vars' db entry.
+    openssl pkcs7 -inform DER -in "$kd/uki-auth.der" -print_certs 2>/dev/null |
+        sed -n '/BEGIN CERT/,/END CERT/p' >"$kd/db.crt"
+    [ -s "$kd/db.crt" ] || return 1
     return 0
 }
 run_stage boot-b-vars-gen 300 extract_guest_platform_certs "$B/disk.img" "$RUN/keys-b"
 # build the offline vars: PK/KEK from the fixture identity, db = the release
 # cert extracted from the guest's SIGNED UKI
-cp "$RUN/keys-b/uki.crt" "$RUN/keys-b/db.crt"
 run_stage boot-b-vars 300 keys_vars_enrolled "$RUN/keys-b" "$B/vars.fd"
 assert_contains "boot B vars: SecureBootEnable ON (offline enrollment)" \
     "$(keys_vars_get "$B/vars.fd" SecureBootEnable)" "ON"
