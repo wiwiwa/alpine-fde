@@ -647,11 +647,12 @@ extract_guest_platform_certs() {
     dd if="$img" of="$espimg" bs=512 skip="$start" count="$size" status=none
     # pull the SIGNED UKI off the ESP: its Authenticode certificate is the
     # release cert that OVMF's db entry must carry to verify the boot chain.
-    mcopy -i "$espimg" -s -n ::/EFI/Linux "$kd/espkeys/" 2>"$kd/mcopy.err" ||
+    cp "$espimg" /tmp/s23-esp-keep.img 2>/dev/null   # escape .runs pruning for forensics
+    mcopy -n -i "$espimg" "::/EFI/Linux/alpine-fde-*.efi" "$kd/espkeys/uki.efi" 2>"$kd/mcopy.err" ||
         echo "# s23 dbg: mcopy rc=$? err=$(cat "$kd/mcopy.err" 2>/dev/null | head -1)" >&2
-    uki=$(ls "$kd/espkeys/EFI/Linux/"alpine-fde-*.efi 2>/dev/null | head -1)
-    [ -n "$uki" ] || { echo "# s23 dbg: no signed UKI on the ESP" >&2; return 1; }
-    cp "$uki" /tmp/s23-uki-keep.efi 2>/dev/null   # survive .runs pruning for forensics
+    uki="$kd/espkeys/uki.efi"
+    [ -s "$uki" ] || { echo "# s23 dbg: no signed UKI on the ESP" >&2; return 1; }
+    cp "$uki" /tmp/s23-uki-keep.efi 2>/dev/null
     echo "# s23 dbg: uki=$uki bytes=$(wc -c <"$uki")" >&2
     # db entry = the RELEASE cert extracted from the SIGNED UKI's
     # Authenticode table (the cert OVMF must have in db to verify it).
