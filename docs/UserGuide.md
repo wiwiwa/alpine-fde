@@ -268,28 +268,31 @@ Alpine FDE provides high-visibility console warnings across all critical failure
 
 #### 1. Early-Boot TPM Unseal Failure (Initramfs Console)
 
-When hardware, firmware, or boot components change, the TPM refuses to release the volume encryption key. The early-boot initramfs hook halts the automated boot sequence, displays the exact diagnostic failure reason and a security warning, and prompts for the recovery passphrase:
+When hardware, firmware, or boot components change, the TPM refuses to release the volume encryption key. The early-boot initramfs hook never prompts blind: before the recovery-passphrase prompt it prints a **reason preamble** — one canonical sentence mapped from the refusal class the hook actually detected — followed by a remediation closing line, and the prompt itself carries a bounded `(attempt N of 3)` counter (§8.2 step 5):
 
 ```text
-:: Alpine FDE: TPM unseal failed!
-:: REASON: TPM policy authorization failed (PCR 7 / PCR 11 mismatch).
-::
-:: WARNING: Boot integrity verification failed!
-:: This typically occurs due to:
-::   1. A legitimate firmware/BIOS update or Secure Boot key modification (PCR 7 changed).
-::   2. A modified or corrupted kernel / UKI boot image (PCR 11 changed).
-::   3. An unauthorized physical tampering attempt (Evil Maid attack).
-::
-:: If you did NOT recently update firmware or install system updates,
-:: do NOT enter your passphrase. Power off immediately and inspect your machine!
-::
-Enter recovery passphrase for /dev/nvme0n1p2 (attempt 1 of 3): [no-echo]
+alpine-fde-unseal: the TPM refused the sealed blob under the current PCR state (drift / foreign TPM / DA lock) — recovery passphrase path (§8.2)
+alpine-fde-unseal: the expected firmware/Secure Boot configuration changed — if this was you (firmware update, SB toggle), this is expected
+alpine-fde-unseal: after boot, run: audit, then reseal to restore passwordless unlock
+alpine-fde-unseal: (attempt 1 of 3) enter the recovery passphrase for root (keyslot 0):
 ```
 
+**The three refusal classes and the preamble each prints** (these are the SAME sentences the hook prints — the wording is pinned identical between this guide, [Architecture.md §8.2 step 5](Architecture.md#82-unlock-path--initramfs-hook), and the shipped hook):
+
+| Refusal class | When the hook detects it | Preamble printed before the prompt |
+|---|---|---|
+| `seal_refused` (PCR 7 drift) | The TPM refused the sealed blob under the current PCR state — a firmware/BIOS update, Secure Boot key change, or other firmware configuration change moved PCR 7 | the expected firmware/Secure Boot configuration changed — if this was you (firmware update, SB toggle), this is expected |
+| `sig_refused` (signature/PCR 11 mismatch) | The boot entry's release-key `.pcrsig` signature is missing or fails verification at the I3 gate, before any TPM session is opened | the booted kernel image failed signature/PCR policy — likely a foreign or unsigned UKI |
+| `token_missing` (TPM cleared / seal gone) | No `systemd-tpm2` token exists on any container, or the TPM is absent from / refused by the machine | the TPM seal is absent — the TPM may have been cleared |
+
+Every class also prints the same closing line before the prompt: `after boot, run: audit, then reseal to restore passwordless unlock`. See [Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update) for the post-firmware-update recovery sequence.
+
+**Honest caveat:** the preamble is an anti-footgun for the legitimate operator, not anti-tamper. It is the hook's own classification of a refusal it genuinely detected — it tells *you* that a passwordless-unlock failure has an expected, fixable cause — but it is not a trusted statement about an attacker: an attacker who controls the boot chain controls the console too, and can print anything.
+
 **Key Security Guarantees During Unseal Failure:**
-1. **Diagnostic Failure Reason:** The initramfs hook explicitly identifies whether unseal failed due to PCR 7 drift (firmware/NVRAM changes), PCR 11 drift (kernel/cmdline tampering), or TPM communication/lockout errors.
-2. **Evil-Maid Security Advisory:** Warns the operator that an unexpected recovery prompt may indicate an evil-maid attack or physical tampering, instructing them to power off if unexpected.
-3. **Fail-Closed 3-Strike Rule:** The operator is granted a maximum of 3 attempts to enter the Keyslot 0 recovery passphrase. If the 3rd attempt fails, the system executes **`poweroff -f` immediately**. Dropping into an interactive rescue shell is strictly blocked, preventing dictionary attacks and memory inspection.
+1. **Diagnostic Failure Reason (warn-before-prompt):** The hook identifies the refusal class it actually detected — PCR 7 drift (firmware/Secure Boot configuration), signature/PCR 11 mismatch (foreign or unsigned boot image), or an absent token/TPM — and prints that class's preamble before asking for the passphrase (§8.2 step 5).
+2. **Evil-Maid Security Advisory:** An unexpected recovery prompt may indicate an evil-maid attack or physical tampering. The preamble is guidance, not proof of legitimacy — if you did NOT recently update firmware or change Secure Boot configuration, do NOT enter your passphrase; power off and inspect the machine.
+3. **Fail-Closed 3-Strike Rule:** The operator is granted a maximum of 3 attempts to enter the Keyslot 0 recovery passphrase (counted across all RAID1 members — each prompt shows `(attempt N of 3)`). If the 3rd attempt fails, the system executes **`poweroff -f` immediately**. Dropping into an interactive rescue shell is strictly blocked, preventing dictionary attacks and memory inspection.
 
 #### 2. Initrd Refuses to Boot When Secure Boot Is Disabled (Initramfs Console)
 

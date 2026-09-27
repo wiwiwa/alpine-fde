@@ -34,9 +34,13 @@
 #      lib/seal.sh seal_unseal argv-for-argv.
 #   4. Fail-closed: TPM absent/refused, tampered token, missing /.extra
 #      artifacts, or an empty unsealed secret fall back to a BOUNDED keyslot-0
-#      recovery-passphrase prompt — 3 strikes total (shared across RAID1
-#      members) end in `poweroff -f`. This hook NEVER spawns an interactive
-#      shell; no interactive fallback of any kind exists here by construction.
+#      recovery-passphrase prompt — each refusal class first prints its
+#      warn-before-prompt REASON preamble + the audit/reseal remediation line
+#      (§8.2 step 5; the SAME sentences docs/UserGuide.md §5 quotes), the
+#      prompt carries the "(attempt N of 3)" counter, and 3 strikes total
+#      (shared across RAID1 members) end in `poweroff -f`. This hook NEVER
+#      spawns an interactive shell; no interactive fallback of any kind exists
+#      here by construction.
 #   5. After a successful unlock, flips the ADR-20 install-state marker on the
 #      mounted NEWROOT from `installed` to `provisional-booted` (direct JSON
 #      write, atomic tmp+mv, only when the state file says `installed`).
@@ -57,8 +61,34 @@ FDE_TMPDIR=${FDE_TMPDIR:-/tmp}
 FDE_MAX_ATTEMPTS=3
 FDE_PCR_PHASE=enter-initrd
 
+# Warn-before-prompt REASON preambles (user decision queue item 8, §8.2 step
+# 5): ONE canonical sentence per refusal class, printed verbatim by the branch
+# that detects that class, immediately BEFORE the bounded keyslot-0 recovery
+# passphrase fallback. docs/UserGuide.md §5 ("The Console Experience When
+# Something Is Wrong") and docs/Architecture.md §8.2 step 5 quote the SAME
+# sentences — the hook↔docs wording identity is pinned by
+# tests/unit/unseal_warn_preamble.sh and the unseal_warn_* sentinels
+# (tests/sentinels-260.2.txt). The closing line names the audit/reseal CLI
+# verbs (the decided rename — new names even while the rename lane is in
+# flight).
+FDE_WARN_SEAL_REFUSED='the expected firmware/Secure Boot configuration changed — if this was you (firmware update, SB toggle), this is expected'
+FDE_WARN_SIG_REFUSED='the booted kernel image failed signature/PCR policy — likely a foreign or unsigned UKI'
+FDE_WARN_TOKEN_MISSING='the TPM seal is absent — the TPM may have been cleared'
+FDE_WARN_CLOSING='after boot, run: audit, then reseal to restore passwordless unlock'
+
 _msg() { printf 'alpine-fde-unseal: %s\n' "$1" >&2; }
 _err() { _msg "error: $1"; }
+
+# _fdh_warn REASON — the warn-before-prompt preamble: the refusal class's
+# reason sentence, then the remediation closing line, both BEFORE the
+# recovery-passphrase prompt (§8.2 step 5). ANTI-FOOTGUN, NOT ANTI-TAMPER:
+# the sentence is the hook's own classification of a refusal it genuinely
+# detected — guidance for the legitimate operator, not a trusted statement
+# (an attacker who controls the boot chain controls the console too).
+_fdh_warn() {
+    _msg "$1"
+    _msg "$FDE_WARN_CLOSING"
+}
 
 # _fdh_poweroff REASON — the terminal fail-closed action (§8.2): loud reason,
 # forced poweroff, nonzero exit. The ONLY interactive-adjacent state this hook
@@ -245,10 +275,15 @@ _fdh_resolve_dev() {
     esac
 }
 
-# _fdh_prompt_pass TARGET — read the keyslot-0 recovery passphrase from the
-# console (echo off when the console tty allows it; best-effort).
+# _fdh_prompt_pass TARGET ATTEMPT — read the keyslot-0 recovery passphrase from
+# the console (echo off when the console tty allows it; best-effort). The
+# prompt carries the bounded-loop counter "(attempt N of 3)" (§8.2 step 5,
+# status-spec decision 10b): N is 1-based and counted across ALL members
+# (3 strikes TOTAL). The counter PREFIXES the pinned prompt shape (sentinel
+# unseal_prompt_re still matches the "enter the recovery passphrase …(keyslot
+# 0):" suffix).
 _fdh_prompt_pass() {
-    _msg "enter the recovery passphrase for $1 (keyslot 0): "
+    _msg "(attempt $2 of $FDE_MAX_ATTEMPTS) enter the recovery passphrase for $1 (keyslot 0): "
     _fdh_echo_off=0
     if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
         stty -echo 2>/dev/null && _fdh_echo_off=1
@@ -269,6 +304,8 @@ if [ "$_fdh_tpm_ok" = 1 ]; then
     _msg "extended '$FDE_PCR_PHASE' into PCR 11 (ukify --measure phase alignment)"
 else
     _msg "TPM absent or refused the PCR 11 extend — recovery passphrase path (§8.2)"
+    # token_missing class: no TPM path exists at all (§8.2 step 5)
+    _fdh_warn "$FDE_WARN_TOKEN_MISSING"
 fi
 
 # --- §8.2 steps 2+3: token path -------------------------------------------------
@@ -377,6 +414,9 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
 
         if [ "$_fdh_rc" -ne 0 ]; then
             _msg "token/signature verification refused (no release-key-signed .pcrsig entry for the token's PCR selection) — recovery passphrase path (I3)"
+            # sig_refused class: the entry signature/PCR policy gate refused
+            # BEFORE any TPM session (I3) — a foreign or unsigned UKI
+            _fdh_warn "$FDE_WARN_SIG_REFUSED"
         else
             # in-TPM signature verification -> ticket for PolicyAuthorize.
             # The verifying key MUST be loaded into the OWNER hierarchy (-C o,
@@ -433,10 +473,16 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
                 _fdh_pass_file=$_fdh_w/pass.bin
             else
                 _msg "the TPM refused the sealed blob under the current PCR state (drift / foreign TPM / DA lock) — recovery passphrase path (§8.2)"
+                # seal_refused class: the live PCR state no longer matches the
+                # sealed policy (PCR 7 firmware/SB drift — the expected,
+                # anti-footgun case after a firmware update or SB toggle)
+                _fdh_warn "$FDE_WARN_SEAL_REFUSED"
             fi
         fi
     else
         _msg "no systemd-tpm2 token found on any crypttab member — recovery passphrase path (§8.2)${_fdh_exp_err:+ [last export refusal: $_fdh_exp_err]}"
+        # token_missing class: the seal is gone from the containers (§8.2 step 2)
+        _fdh_warn "$FDE_WARN_TOKEN_MISSING"
     fi
 fi
 
@@ -499,7 +545,7 @@ for _fdh_wd in $_fdh_members; do
         if [ "$_fdh_tries" -ge "$FDE_MAX_ATTEMPTS" ]; then
             _fdh_poweroff "$FDE_MAX_ATTEMPTS failed recovery passphrase attempts — giving up (§8.2 fail-closed)"
         fi
-        _fdh_cached=$(_fdh_prompt_pass "$_fdh_target")
+        _fdh_cached=$(_fdh_prompt_pass "$_fdh_target" "$((_fdh_tries + 1))")
         _fdh_tries=$((_fdh_tries + 1))
     done
 done

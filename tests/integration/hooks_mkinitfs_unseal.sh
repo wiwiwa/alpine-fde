@@ -51,6 +51,14 @@
 #      entry. The token's tpm2-signature is INERT metadata under this
 #      semantic: corrupting it can only fail closed elsewhere (the entry's
 #      own signature is what the gate verifies), never grant unseal.
+#  10. warn-before-prompt (§8.2 step 5; user decision queue #8): each refusal
+#      class prints its mapped REASON preamble + the audit/reseal closing line
+#      BEFORE the passphrase prompt — seal_refused at the sealed-blob refusal,
+#      sig_refused at the I3 gate refusal, token_missing at BOTH no-token-path
+#      branches (TPM absent/refused; no systemd-tpm2 token on any member) —
+#      and every passphrase prompt carries the "(attempt N of 3)" counter.
+#      A partial member-open failure is NOT a refusal class (the blob
+#      verified) and prompts unwarned; the success path prints no preamble.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -327,6 +335,17 @@ reset_leg() {
     rm -f "$TMP/out.log"
 }
 
+# assert_precedes <desc> <file> <needle-a> <needle-b-ERE> — line-ordered
+# console pin: needle-a's FIRST occurrence (fixed string) sits on an EARLIER
+# line than needle-b's first occurrence (EXTENDED regex — the prompt sentinels
+# are regex-shaped, unseal_prompt_re discipline)
+assert_precedes() {
+    local a b
+    a=$(grep -nF "$3" "$2" 2>/dev/null | head -n 1 | cut -d: -f1)
+    b=$(grep -nE "$4" "$2" 2>/dev/null | head -n 1 | cut -d: -f1)
+    assert_eq "$1" "1" "$([ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] && echo 1 || echo 0)"
+}
+
 # =============================================================================
 # 0. artifact shape — the hook's initramfs staging path is pinned to a SINGLE
 #    canonical constant, derived from the path hooks/mkinitfs/features.d/
@@ -419,6 +438,10 @@ assert_eq "token success: no leftover temp state documents" "" \
     "$(find "$TMP/newroot/etc/alpine-fde" -name '.*' -print)"
 assert_eq "token success: success path never runs a shell (recorded argv)" "" \
     "$(grep -nE 'sh +-c|(^| )exec |rescue|ash +-c' "$LOG" || true)"
+assert_eq "token success: NO warn-before-prompt preamble (passwordless boot prints no refusal reason)" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
+assert_eq "token success: NO attempt counter (no prompt at all)" "0" \
+    "$(grep -cE "$(sentinel_of unseal_attempt_re)" "$TMP/out.log" || true)"
 
 # =============================================================================
 # 1b. token parked at a HIGH token-id (17) — the scan must cover the full
@@ -468,6 +491,41 @@ assert_contains "tpm absent: open used the prompted passphrase" \
 assert_eq "tpm absent: no poweroff on first-correct passphrase" "0" "$(argv_count '^poweroff')"
 assert_contains "tpm absent: marker still written (unlock succeeded)" \
     "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+# warn-before-prompt (§8.2 step 5): the TPM-absent branch is a token_missing
+# class leg — the mapped preamble + closing line precede the countered prompt
+assert_contains "tpm absent: token_missing warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_token_missing)"
+assert_contains "tpm absent: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "tpm absent: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_token_missing)" "$(sentinel_of unseal_prompt_re)"
+assert_precedes "tpm absent: closing line precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_reclose)" "$(sentinel_of unseal_prompt_re)"
+assert_contains "tpm absent: prompt carries the (attempt 1 of 3) counter" \
+    "$(cat "$TMP/out.log")" "(attempt 1 of 3) enter the recovery passphrase"
+assert_eq "tpm absent: exactly ONE preamble+closing emission (no repetition per strike)" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
+
+# =============================================================================
+# 3b. token_missing class (§8.2 step 2): the token scan exhausts the FULL
+#     LUKS2 range 0..31 with NO systemd-tpm2 token on any member -> the
+#     token_missing warn preamble + closing line, then the bounded prompt
+# =============================================================================
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin-rec" FDE_TEST_TOKEN_MIN_ID=32)
+assert_rc "token missing: recovery passphrase still unlocks" 0 "$rc"
+assert_contains "token missing: the no-token refusal sentinel is printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_token_missing)"
+assert_contains "token missing: token_missing warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_token_missing)"
+assert_contains "token missing: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "token missing: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_token_missing)" "$(sentinel_of unseal_prompt_re)"
+assert_contains "token missing: prompt carries the (attempt 1 of 3) counter" \
+    "$(cat "$TMP/out.log")" "(attempt 1 of 3) enter the recovery passphrase"
+assert_eq "token missing: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
 
 # =============================================================================
 # 4. 3-STRIKE -> poweroff -f exactly once, rc != 0 (§8.2 fail-closed)
@@ -480,6 +538,19 @@ assert_ne "3-strike: hook rc nonzero" "0" "$rc"
 assert_eq "3-strike: poweroff -f called exactly once" "1" "$(argv_count '^poweroff')"
 assert_contains "3-strike: poweroff is forced" "$(grep '^poweroff' "$LOG")" "-f"
 assert_eq "3-strike: attempts bounded to exactly 3 opens" "3" "$(argv_count '^cryptsetup open')"
+# warn-before-prompt (§8.2 step 5): one preamble, EVERY prompt countered
+assert_contains "3-strike: token_missing preamble printed before the strikes" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_token_missing)"
+assert_contains "3-strike: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "3-strike: preamble precedes the first prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_token_missing)" "$(sentinel_of unseal_prompt_re)"
+assert_eq "3-strike: prompts carry (attempt 1..3 of 3) counters" "1 1 1" \
+    "$(grep -cF '(attempt 1 of 3)' "$TMP/out.log" || true) $(grep -cF '(attempt 2 of 3)' "$TMP/out.log" || true) $(grep -cF '(attempt 3 of 3)' "$TMP/out.log" || true)"
+assert_eq "3-strike: exactly 3 countered prompts (bounded)" "3" \
+    "$(grep -cE "$(sentinel_of unseal_attempt_re)" "$TMP/out.log" || true)"
+assert_eq "3-strike: exactly ONE preamble emission (printed once, not per strike)" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
 assert_eq "3-strike: no state write after failing" "installed" \
     "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
 
@@ -545,6 +616,11 @@ assert_eq "selection mismatch {7,11}vs[11]: pol extraction failed -> no verifysi
 assert_eq "selection mismatch {7,11}vs[11]: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
 assert_eq "selection mismatch {7,11}vs[11]: bounded to 3 prompt attempts then poweroff once" \
     "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+# warn-before-prompt: selection mismatch refuses at the I3 gate -> sig_refused
+assert_contains "selection mismatch {7,11}vs[11]: sig_refused warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_sig_refused)"
+assert_precedes "selection mismatch {7,11}vs[11]: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_sig_refused)" "$(sentinel_of unseal_prompt_re)"
 
 # 5c (inverse): token pins {11} but .pcrsig carries only [7,11]
 reset_leg
@@ -576,6 +652,15 @@ assert_eq "forged entry sig: openssl gate refused -> no verifysignature" "0" \
 assert_eq "forged entry sig: tpm2_unseal never attempted" "0" "$(argv_count '^tpm2_unseal')"
 assert_eq "forged entry sig: bounded to 3 prompt attempts then poweroff once" \
     "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+# warn-before-prompt (§8.2 step 5): the I3 gate refusal is a sig_refused leg
+assert_contains "forged entry sig: sig_refused warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_sig_refused)"
+assert_contains "forged entry sig: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "forged entry sig: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_sig_refused)" "$(sentinel_of unseal_prompt_re)"
+assert_eq "forged entry sig: NO other class's preamble (seal_refused absent — the TPM was never entered)" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_seal_refused)" "$TMP/out.log" || true)"
 
 # 5e: swapped /.extra pubkey (valid foreign key)
 reset_leg
@@ -618,6 +703,20 @@ assert_rc "empty unseal: recovery passphrase unlocks" 0 "$rc"
 assert_contains "empty unseal: open used the prompted passphrase (not empty)" \
     "$(cat "$LOG")" "cryptsetup-pass recovery-pass"
 assert_eq "empty unseal: no poweroff" "0" "$(argv_count '^poweroff')"
+# warn-before-prompt (§8.2 step 5): the I3 gate PASSED and the TPM refused the
+# sealed blob under the live PCR state — the seal_refused (PCR 7 drift) leg
+assert_contains "empty unseal: the sealed-blob refusal sentinel is printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_seal_refused)"
+assert_contains "empty unseal: seal_refused warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_seal_refused)"
+assert_contains "empty unseal: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "empty unseal: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_seal_refused)" "$(sentinel_of unseal_prompt_re)"
+assert_eq "empty unseal: NO sig_refused preamble (the gate passed — the seal is what refused)" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_sig_refused)" "$TMP/out.log" || true)"
+assert_contains "empty unseal: prompt carries the (attempt 1 of 3) counter" \
+    "$(cat "$TMP/out.log")" "(attempt 1 of 3) enter the recovery passphrase"
 
 # =============================================================================
 # 8. RAID1 — token path: ONE unseal, EVERY member opened; prompt path: ONE
@@ -663,6 +762,13 @@ assert_eq "raid1 partial token: 3 opens total (2 token attempts + 1 prompt)" "3"
 assert_eq "raid1 partial token: no poweroff" "0" "$(argv_count '^poweroff')"
 assert_contains "raid1 partial token: marker written (pool complete)" \
     "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+# warn-before-prompt scope decision: a partial member-open failure is NOT one
+# of the three refusal classes (the sealed blob verified and unsealed — no
+# class is detectable), so the member falls into the prompt loop UNWARNED
+assert_eq "raid1 partial token: NO refusal-class preamble (member-open failure is not a refusal class)" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
+assert_contains "raid1 partial token: the prompted member still sees the (attempt 1 of 3) counter" \
+    "$(cat "$TMP/out.log")" "(attempt 1 of 3) enter the recovery passphrase"
 
 # --- 8c. same partial failure, but the passphrase never works: the bounded
 #     strikes still end in exactly one forced poweroff (fail-closed, §8.2)

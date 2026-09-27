@@ -61,6 +61,22 @@ unseal_sb_guard_enter	Press Enter to reboot into the firmware setup
 unseal_sb_guard_osind	OsIndications: boot-to-firmware-setup requested
 unseal_sb_guard_reboot	rebooting into the firmware setup (Secure Boot must be enabled)
 #
+# Warn-before-prompt preambles (§8.2 step 5; user decision queue #8): each
+# refusal class prints its canonical reason sentence + the audit/reseal
+# remediation closing line BEFORE the bounded keyslot-0 recovery-passphrase
+# prompt. The stored strings are the FULL sentences verbatim — the hook ↔
+# docs wording identity (hook == docs/UserGuide.md §5 == docs/Architecture.md
+# §8.2 step 5) is pinned by tests/unit/unseal_warn_preamble.sh; these
+# sentinels make the same bytes greppable from the scenarios. The prompt
+# counter is stored as the anchored regex shape (unseal_prompt_re discipline):
+# the hook prefixes "(attempt N of $FDE_MAX_ATTEMPTS)" (N 1-based, 3 strikes
+# TOTAL across RAID1 members) in front of the pinned prompt line.
+unseal_warn_seal_refused	the expected firmware/Secure Boot configuration changed — if this was you (firmware update, SB toggle), this is expected
+unseal_warn_sig_refused	the booted kernel image failed signature/PCR policy — likely a foreign or unsigned UKI
+unseal_warn_token_missing	the TPM seal is absent — the TPM may have been cleared
+unseal_warn_reclose	after boot, run: audit, then reseal to restore passwordless unlock
+unseal_attempt_re	\(attempt [0-9]+ of 3\) enter the recovery passphrase
+#
 # ===========================================================================
 # Section 2 — systemd-boot 260.2 console anchors (ADR-1: Alpine ≥ 3.24 ships
 # systemd-boot 260.2 in main). Byte-extracted (strings) from the pinned apk:

@@ -246,9 +246,13 @@ The following components are invoked strictly by internal scripts, hooks, or sys
     3. Starts a TPM policy session evaluating `PolicyPCR` (PCR 7 + PCR 11) and `PolicyAuthorize` (matching `/.extra/tpm2-pcr-signature.json`).
     4. Unseals the keyslot-1 secret and unlocks the container via `cryptsetup open`.
     5. If the TPM policy fails:
-       - Displays the exact **diagnostic failure reason** (e.g. `PCR 7 / PCR 11 mismatch` or communication fault).
-       - Prints the **security warning** alerting the operator that boot integrity verification failed and unexpected prompts may indicate an evil-maid attack.
-       - Prompts for the keyslot 0 recovery passphrase with a bounded retry counter (`attempt 1 of 3`).
+       - **Warn-before-prompt (user decision queue #8):** classifies the refusal and prints a REASON preamble — ONE canonical sentence per refusal class, emitted by the hook branch that detects that class, BEFORE the recovery-passphrase prompt. The SAME sentences docs/UserGuide.md §5 quotes; the hook ↔ docs wording identity is pinned by `tests/unit/unseal_warn_preamble.sh` and the `unseal_warn_*` sentinels (§12):
+         - `seal_refused` (PCR 7 drift — the TPM refused the sealed blob under the current PCR state: firmware update, Secure Boot key change): *the expected firmware/Secure Boot configuration changed — if this was you (firmware update, SB toggle), this is expected*
+         - `sig_refused` (signature/PCR 11 mismatch — the boot entry's release-key `.pcrsig` signature failed the I3 gate before any TPM session): *the booted kernel image failed signature/PCR policy — likely a foreign or unsigned UKI*
+         - `token_missing` (TPM cleared / seal gone — no `systemd-tpm2` token on any container, or the TPM absent/refused): *the TPM seal is absent — the TPM may have been cleared*
+       - Every class closes with the same remediation line before the prompt: *after boot, run: audit, then reseal to restore passwordless unlock* (the audit/reseal verb names — the decided CLI rename).
+       - Honest caveat: the preamble is an **anti-footgun for the legitimate operator, not anti-tamper** — the hook's own classification of a refusal it genuinely detected, not a trusted statement (an attacker controlling the boot chain controls the console too).
+       - Prompts for the keyslot 0 recovery passphrase with a bounded retry counter — the prompt line carries the `(attempt N of 3)` prefix (`N` 1-based, counted across ALL RAID1 members; `FDE_MAX_ATTEMPTS=3`).
 - **Fail-Closed Security Guarantee (Anti Evil-Maid):**
   - If passphrase attempts fail (bounded to 3 strikes), the hook executes **`poweroff -f` immediately**.
   - Dropping into an interactive BusyBox ash rescue shell is **strictly prevented**, eliminating local dictionary attacks, kernel memory inspection, and ESP tampering vectors.
