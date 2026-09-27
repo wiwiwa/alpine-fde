@@ -307,6 +307,212 @@ inst_bootmgr_copy_line() {
   printf '%s\n' "ldr=''; for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do [ -f \"\$p\" ] && { ldr=\"\$p\"; break; }; done; [ -n \"\$ldr\" ] || { echo 'alpine-fde: ERROR: no systemd-boot loader EFI binary found in-chroot (probed /usr/share/systemd/bootctl/systemd-bootx64.efi, /usr/lib/systemd/boot/efi/systemd-bootx64.efi) — the systemd-boot package is missing or incomplete; the boot manager cannot be installed; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; mkdir -p $_bcl_esp/EFI/systemd $_bcl_esp/EFI/BOOT && sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt \"\$ldr\" --output $_bcl_esp/EFI/BOOT/BOOTX64.EFI && cp $_bcl_esp/EFI/BOOT/BOOTX64.EFI $_bcl_esp/EFI/systemd/systemd-bootx64.efi && echo \"alpine-fde: info: boot manager RELEASE-SIGNED (blocker #26 addendum: the firmware verifies the FIRST loaded image — an unsigned BOOTX64.EFI dies before the UKI is ever reached) -> $_bcl_esp/EFI/BOOT/BOOTX64.EFI + $_bcl_esp/EFI/systemd/systemd-bootx64.efi (removable-media fallback path, no NVRAM dependency; §8.3)\" # boot manager via guarded file copy of the systemd-boot loader binary (fail-closed probe; real-server blocker #7)"
 }
 
+# --- UEFI boot entry (NVRAM; task #27, real-server follow-up) -----------------
+# The install ends with the firmware pointing at the staged ESP: an NVRAM boot
+# entry labeled "Alpine FDE" (capitalized, user decision after the real Dell
+# PowerEdge install — Boot0005) targeting HD(1,GPT,<esp-part-guid>) ->
+# \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder. Before this existed, the operator
+# ran efibootmgr BY HAND after every fresh install, and after a RE-partition
+# the hand-made entry kept the OLD partition GUID and died "Boot Failed" — so
+# the ensure below is IDEMPOTENT: same-label entries pointing at the CURRENT
+# ESP partition GUID + loader are reused (never duplicated), same-label
+# entries pointing anywhere else are deleted and recreated.
+#
+# The record runs IN-GUEST (chroot runner): the ESP is mounted at the §8.1
+# --esp path and the live NVRAM is reachable through the §9.1 efivars bind —
+# exactly how the step-4 fw_auth_enroll NVRAM writes work. When efibootmgr
+# reports NO EFI variable support (non-EFI host / test container), the step
+# SKIPS with the exact manual command instead of failing the install.
+
+# inst_bootentry_label — the NVRAM boot-entry label (capitalized, user decision)
+inst_bootentry_label() { printf '%s\n' 'Alpine FDE'; }
+
+# inst_bootentry_loader — the loader path the entry points at (the §8.3
+# removable-media fallback home; the SAME binary the firmware loads with no
+# NVRAM dependency, so the entry only ADDS an explicit boot-manager pick)
+inst_bootentry_loader() { printf '%s\n' '\EFI\BOOT\BOOTX64.EFI'; }
+
+# inst_efibootmgr — the efibootmgr binary (test seam, ALPINE_FDE_EFIBOOTMGR;
+# a real run resolves the PATH binary delivered by the §3.3 package set +
+# the guest record's require_pkgs probe)
+inst_efibootmgr() { printf '%s\n' "${ALPINE_FDE_EFIBOOTMGR:-efibootmgr}"; }
+
+# inst_part_split DEV — print "DISK PARTNUM" for a partition device (the
+# inverse of inst_part): /dev/sda1 -> "/dev/sda 1",
+# /dev/nvme0n1p1 -> "/dev/nvme0n1p1" minus p1 = "/dev/nvme0n1 1". rc 1 when
+# DEV does not name a partition.
+inst_part_split() {
+  case $1 in
+  *[0-9]p[0-9]*)
+    _ips_n=${1##*p}
+    printf '%s %s\n' "${1%p$_ips_n}" "$_ips_n"
+    ;;
+  *[0-9])
+    _ips_n=${1##*[!0-9]}
+    printf '%s %s\n' "${1%$_ips_n}" "$_ips_n"
+    ;;
+  *) return 1 ;;
+  esac
+}
+
+# inst_bootentry_parse LABEL — stdin: `efibootmgr -v` output; stdout: ONE line
+# per boot entry "NUM GUID LOADER OURS" (num + guid lowercased; guid "-" when
+# the device path carries no HD(…,GPT,…); OURS=1 iff the entry's label is
+# exactly LABEL). efibootmgr -v entry lines: "Boot<4hex><*|space> <label>
+# <device path>" — the label starts at column 11; the -v device path is what
+# carries HD(1,GPT,<guid>,…)/File(\EFI\BOOT\BOOTX64.EFI) (plain efibootmgr
+# prints no paths — the parse MUST consume -v output).
+inst_bootentry_parse() {
+  awk -v lbl="$1" '
+        tolower($0) ~ /^boot[0-9a-f][0-9a-f][0-9a-f][0-9a-f][* ]/ {
+            num = tolower(substr($0, 5, 4))
+            lc = tolower($0)
+            rest = substr($0, 11)
+            sub(/^[ \t]+/, "", rest)
+            ours = 0
+            if (index(rest, lbl) == 1) {
+                after = substr(rest, length(lbl) + 1, 1)
+                if (after == "" || after == " " || after == "\t") ours = 1
+            }
+            guid = "-"
+            if (match(lc, /hd\([0-9]+,gpt,[0-9a-f][0-9a-f-]*,/)) {
+                piece = substr(lc, RSTART, RLENGTH)
+                sub(/^hd\([0-9]+,gpt,/, "", piece)
+                sub(/,$/, "", piece)
+                guid = piece
+            }
+            loader = (lc ~ /file\(\\efi\\boot\\bootx64\.efi\)/) ? 1 : 0
+            printf "%s %s %d %d\n", num, guid, loader, ours
+        }
+    '
+}
+
+# inst_bootentry_find LIST LC_GUID — the first (of LIST, inst_bootentry_parse
+# form) entry labeled for us that already points at LC_GUID + our loader (the
+# reuse case); empty when none does.
+inst_bootentry_find() {
+  _ibf_lcguid=$2
+  printf '%s\n' "$1" | while IFS=' ' read -r _ibf_n _ibf_g _ibf_l _ibf_o; do
+    if [ "$_ibf_o" = "1" ] && [ "$_ibf_g" = "$_ibf_lcguid" ] && [ "$_ibf_l" = "1" ]; then
+      printf '%s\n' "$_ibf_n"
+      break
+    fi
+  done
+  return 0
+}
+
+# inst_bootentry_ensure ESPDEV ESP_MNT — the in-guest executor (idempotent,
+# crash-resume safe; re-runs converge). ESPDEV is the ESP partition device
+# (§4.1 layout, e.g. /dev/sda1 — visible in-guest through the /dev bind),
+# ESP_MNT the §8.1 ESP mount under the target root (/). The partition GUID the
+# entry pins comes from the §8.4 target metadata (target.esp_partuuid in the
+# on-target baseline — the SAME GUID fstab pins), NOT a fresh probe: the
+# in-guest closure carries no lsblk (util-linux is live-side only).
+inst_bootentry_ensure() {
+  _ibe_esp=$1
+  _ibe_espdir=$2
+  _ibe_eb=$(inst_efibootmgr)
+  _ibe_lbl=$(inst_bootentry_label)
+  _ibe_ldr=$(inst_bootentry_loader)
+  # fail-closed: the loader the entry points at must already be staged (§8.3
+  # boot-manager copy + the ukictl build's re-sign run BEFORE this record)
+  [ -f "$_ibe_espdir/EFI/BOOT/BOOTX64.EFI" ] ||
+    die "install: $_ibe_espdir/EFI/BOOT/BOOTX64.EFI is missing — refusing to create the '$_ibe_lbl' boot entry before the ESP is staged (the §8.3 boot-manager copy and the ukictl build must run first)"
+  _ibe_bl=$(sp_baseline_file)
+  [ -f "$_ibe_bl" ] ||
+    die "install: no baseline at $_ibe_bl — cannot resolve the ESP partition the '$_ibe_lbl' boot entry must point at"
+  _ibe_pu=$(baseline_get_in "$_ibe_bl" target esp_partuuid)
+  [ -n "$_ibe_pu" ] ||
+    die "install: no target.esp_partuuid in $_ibe_bl — cannot resolve the ESP partition the '$_ibe_lbl' boot entry must point at (the §8.4 target-metadata step must run first)"
+  _ibe_lcpu=$(printf '%s' "$_ibe_pu" | tr '[:upper:]' '[:lower:]')
+  _ibe_split=$(inst_part_split "$_ibe_esp") ||
+    die "install: cannot split the ESP device into disk + partition number: $_ibe_esp"
+  # shellcheck disable=SC2086  # exactly two words: DISK PARTNUM
+  set -- $_ibe_split
+  _ibe_disk=$1
+  _ibe_pn=$2
+  # NO EFI variable support (non-EFI host / test container): SKIP with the
+  # exact manual command — the removable-media loader path still boots, and a
+  # hard failure here would strand the whole install after it completed
+  _ibe_vars=$(fw_efivars_dir)
+  _ibe_skip=0
+  _ibe_list=''
+  if [ ! -d "$_ibe_vars" ]; then
+    _ibe_skip=1
+  elif ! _ibe_list=$("$_ibe_eb" -v 2>&1); then
+    case $_ibe_list in
+    *"not supported"*) _ibe_skip=1 ;;
+    *) die "install: efibootmgr -v failed: $_ibe_list" ;;
+    esac
+  fi
+  if [ "$_ibe_skip" = "1" ]; then
+    warn "install: no EFI variable support ($_ibe_vars) — SKIPPING the NVRAM boot entry (the removable-media path $_ibe_ldr still boots); create the entry manually:"
+    warn "install:   efibootmgr -c -d $_ibe_disk -p $_ibe_pn -L '$_ibe_lbl' -l '$_ibe_ldr'   (then 'efibootmgr -o <NUM>,...' with the new number FIRST, pointing at the ESP partition GUID $_ibe_pu)"
+    return 0
+  fi
+  # stale same-label entries FIRST (a re-partitioned ESP leaves the OLD
+  # partition GUID in NVRAM — the real server booted them into "Boot
+  # Failed"), and extra DUPLICATES of an already-matching entry (a re-run
+  # pile-up) — then reuse-or-create against the CURRENT ESP partition
+  _ibe_stale=''
+  _ibe_keep=''
+  while IFS=' ' read -r _ibe_n _ibe_g _ibe_l _ibe_o; do
+    [ -n "${_ibe_n:-}" ] || continue
+    [ "$_ibe_o" = "1" ] || continue
+    if [ "$_ibe_g" = "$_ibe_lcpu" ] && [ "$_ibe_l" = "1" ]; then
+      if [ -z "$_ibe_keep" ]; then
+        _ibe_keep=$_ibe_n
+      else
+        _ibe_stale="$_ibe_stale $_ibe_n"
+      fi
+      continue
+    fi
+    _ibe_stale="$_ibe_stale $_ibe_n"
+  done <<EOF
+$(printf '%s\n' "$_ibe_list" | inst_bootentry_parse "$_ibe_lbl")
+EOF
+  for _ibe_n in $_ibe_stale; do
+    "$_ibe_eb" -b "$_ibe_n" -B >/dev/null ||
+      die "install: cannot delete the stale boot entry Boot$_ibe_n (label '$_ibe_lbl', partition GUID differs from the ESP's $_ibe_pu — a stale GUID boots \"Boot Failed\")"
+    info "install: deleted stale boot entry Boot$_ibe_n (label '$_ibe_lbl', old partition GUID or duplicate) — the entry now resolves against the current ESP ($_ibe_pu)"
+  done
+  _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
+  _ibe_mine=$_ibe_keep
+  if [ -n "$_ibe_mine" ]; then
+    info "install: reusing boot entry Boot$_ibe_mine '$_ibe_lbl' (already points at HD(1,GPT,$_ibe_pu) $_ibe_ldr) — no duplicate created"
+  else
+    "$_ibe_eb" -c -d "$_ibe_disk" -p "$_ibe_pn" -L "$_ibe_lbl" -l "$_ibe_ldr" >/dev/null ||
+      die "install: efibootmgr -c failed — the '$_ibe_lbl' boot entry ($_ibe_disk -p $_ibe_pn -> $_ibe_ldr) could not be created"
+    _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
+    _ibe_mine=$(inst_bootentry_find "$_ibe_fresh" "$_ibe_lcpu")
+    [ -n "$_ibe_mine" ] ||
+      die "install: the '$_ibe_lbl' boot entry was created but is not in the efibootmgr listing — refusing to guess the entry number"
+    info "install: created boot entry Boot$_ibe_mine '$_ibe_lbl' -> HD(1,GPT,$_ibe_pu) $_ibe_ldr"
+  fi
+  # FIRST in BootOrder: the previous order preserved behind us (still-existing
+  # entries only — the deletes above do not rewrite BootOrder), entries the
+  # listing has but BootOrder never mentioned appended defensively
+  _ibe_all=$(printf '%s\n' "$_ibe_fresh" | awk 'NF { print $1 }' | tr '\n' ' ')
+  _ibe_obo=$("$_ibe_eb" -v 2>/dev/null | awk '/^BootOrder:/ { sub(/^BootOrder:[ \t]*/, ""); print tolower($0) }' | tr ',' ' ')
+  _ibe_new=" $_ibe_mine "
+  for _ibe_n in $_ibe_obo $_ibe_all; do
+    if [ "$_ibe_n" = "$_ibe_mine" ]; then continue; fi
+    case $_ibe_new in
+    *" $_ibe_n "*) continue ;;
+    esac
+    case " $_ibe_all " in
+    *" $_ibe_n "*) _ibe_new="$_ibe_new$_ibe_n " ;;
+    esac
+  done
+  _ibe_new=${_ibe_new% }
+  _ibe_new=${_ibe_new# }
+  _ibe_csv=$(printf '%s' "$_ibe_new" | tr ' ' ',')
+  "$_ibe_eb" -o "$_ibe_csv" >/dev/null ||
+    die "install: efibootmgr -o $_ibe_csv failed — '$_ibe_lbl' (Boot$_ibe_mine) could not be placed FIRST in BootOrder"
+  info "install: Boot$_ibe_mine '$_ibe_lbl' is FIRST in BootOrder ($_ibe_csv)"
+  return 0
+}
+
 install_usage() {
   cat >&2 <<'EOF'
 Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
@@ -344,6 +550,12 @@ Enter confirmation, and a reboot INTO FIRMWARE SETUP (OsIndications) for the
 manual key import: the first boot unlocks via the provisional token and
 alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
 `alpine-fde finalize` is the guided/crash-resume entry point (Stage 3).
+The UEFI boot entry (NVRAM, "Alpine FDE" -> the ESP partition's
+HD(1,GPT,<guid>) -> \EFI\BOOT\BOOTX64.EFI) is created IN-GUEST after the
+build — idempotently (same-GUID entries reused, stale-GUID entries replaced),
+FIRST in BootOrder, and SKIPPED with the exact manual efibootmgr command when
+no EFI variable support exists (task #27: the entry used to be typed by hand
+on the real server after every install).
 
 Topologies (§4.1): --disk repeatable for Btrfs RAID1 (primary ESP+LUKS,
 secondaries LUKS only); --bcache CACHE_DEV for hybrid acceleration (ESP+cache
@@ -632,7 +844,12 @@ inst_resolve_target_metadata() {
 # NO zram-init (item 26a, ADR-7 AMENDED): zram is removed from the design —
 # the queued --swap feature (task 4) is the only swap story going forward.
 install_package_list() {
-  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas efitools'
+  # efibootmgr (task #27): the NVRAM boot entry ("Alpine FDE" -> the ESP
+  # partition's HD(1,GPT,<guid>) -> \EFI\BOOT\BOOTX64.EFI) is created IN-GUEST
+  # after the build (inst_bootentry_ensure) — the target must ship the tool
+  # (efivar-libs rides as its apk dependency), and the mirror closure derives
+  # from this list, so the pair can never under-approximate.
+  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool efibootmgr openssl jq doas efitools'
   case $(inst_root_fs) in
   ext4) _ipl="$_ipl e2fsprogs" ;;
   *) _ipl="$_ipl btrfs-progs" ;;
@@ -1879,6 +2096,20 @@ cmd_install_main() {
   # "no usable TPM via TCTI '<default>'" after a successful UKI build.
   inst_plan_run host "modprobe tpm_crb 2>/dev/null; modprobe tpm_tis 2>/dev/null; : # blocker #18 companion: ensure the live kernel's TPM driver is loaded (host-side; the in-chroot modprobe resolves the target's module tree)"
   inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_containers)"
+  # step 6b (task #27, real-server follow-up): the UEFI BOOT ENTRY — the
+  # install must end with the firmware pointing at the staged ESP, not leave
+  # efibootmgr to the operator (done BY HAND on the real Dell PowerEdge after
+  # the fresh install: Boot0005 "Alpine FDE" -> HD(1,GPT,<part-guid>) ->
+  # \EFI\BOOT\BOOTX64.EFI, first in BootOrder). IN-GUEST (the ESP is mounted
+  # and the live NVRAM is reachable through the §9.1 efivars bind, exactly
+  # like the step-4 enrollment), AFTER the build (the loader is staged) and
+  # BEFORE the teardown (the chroot still sees the ESP). Idempotent: a
+  # same-label entry at the CURRENT ESP partition GUID + loader is REUSED,
+  # same-label entries at dead/old GUIDs are deleted + recreated (a
+  # re-partitioned ESP leaves entries that boot "Boot Failed"). No EFI
+  # variable support (container): the record SKIPS with the exact manual
+  # command instead of failing the completed install.
+  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt # task #27: the Alpine FDE NVRAM boot entry -> HD(1,GPT,<esp-part-guid>) \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder (idempotent; stale-GUID entries replaced)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
   # Operationally AFTER the ceremony + secret-dependent steps (the guest build
