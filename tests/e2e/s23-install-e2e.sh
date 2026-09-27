@@ -629,14 +629,44 @@ assert_eq "[boot A host] the provisional token pins PCR 11 ONLY (ADR-20 step 6)"
 B="$RUN/boot-b"
 mkdir -p "$B"
 run_stage disk-copy-b 900 cp "$RUN/disk.img" "$B/disk.img"
-# boot-B vars: OFFLINE key enrollment (virt-fw-vars, the keys-fixture idiom).
-# The runtime NVRAM-enrollment path is being fixed on the measure lane (OVMF
-# refused the authenticated SetVariable, attempts 22-30); until it lands, boot
-# B gets a vars store with OUR PK/KEK/db + Secure Boot ON, so the spliced
-# unseal hook's SB guard passes and the provisional token unseals
-# passwordless. The TPM state (swtpm dir) is untouched: the provisional token
-# pins PCR 11 only, so the firmware SB state change cannot break the seal.
-run_stage boot-b-vars-gen 120 keys_create "$RUN/keys-b"
+# boot-B vars: OFFLINE enrollment (virt-fw-vars) with the GUEST'S OWN certs.
+# The runtime NVRAM path is being fixed on the fw/keys lane (OVMF refused the
+# authenticated SetVariable, attempts 22-30); until it lands, boot B needs a
+# vars store whose db contains the SAME release cert that signed the UKI —
+# otherwise OVMF (SB now enforced) rejects the boot "Access Denied". The
+# certs are extracted from the ESP fallback staging the installer itself
+# wrote (/efi/alpine-fde-keys: db.auth/kek.auth/pk.auth).
+extract_guest_platform_certs() {
+    local img=$1 kd=$2 espimg start f
+    rm -rf "$kd"; mkdir -p "$kd/espkeys"
+    start=$(sfdisk -d "$img" 2>/dev/null | awk '/start=/ && /C12A7328/ {print substr($0, RSTART+6, RLENGTH-6); exit}')
+    [ -n "$start" ] || return 1
+    espimg="$kd/esp.img"
+    dd if="$img" of="$espimg" bs=512 skip="$start" status=none
+    mcopy -i "$espimg" -s -n ::/efi/alpine-fde-keys "$kd/espkeys/" 2>/dev/null
+    for f in db.auth kek.auth pk.auth; do
+        [ -f "$kd/espkeys/$f" ] || return 1
+        name=${f%.auth}
+        # EFI_VARIABLE_AUTHENTICATION_2: EFI_TIME(16) + WIN_CERT_UEFI_GUID
+        # (8B hdr + 16B type GUID) + EFI_SIGNATURE_LIST (44B) + owner GUID
+        # (16B) -> the X509 DER cert follows; locate and validate via openssl.
+        python3 - "$kd/espkeys/$f" "$kd/$name.der" <<'PYE'
+import sys
+data=open(sys.argv[1],'rb').read()
+pos=16
+while True:
+    i=data.find(b'\x30\x82', pos)
+    if i < 0: sys.exit(1)
+    der=data[i:i+4+int.from_bytes(data[i+2:i+4],'big')]
+    open(sys.argv[2],'wb').write(der)
+    r=sys.exit(0)
+PYE
+        openssl x509 -inform DER -in "$kd/$name.der" -noout >/dev/null 2>&1 || return 1
+        openssl x509 -inform DER -in "$kd/$name.der" -out "$kd/$name.crt" 2>/dev/null || return 1
+    done
+    [ -f "$kd/db.crt" ] && [ -f "$kd/KEK.crt" ] && [ -f "$kd/PK.crt" ]
+}
+run_stage boot-b-vars-gen 300 extract_guest_platform_certs "$B/disk.img" "$RUN/keys-b"
 run_stage boot-b-vars 300 keys_vars_enrolled "$RUN/keys-b" "$B/vars.fd"
 assert_contains "boot B vars: SecureBootEnable ON (offline enrollment)" \
     "$(keys_vars_get "$B/vars.fd" SecureBootEnable)" "ON"
