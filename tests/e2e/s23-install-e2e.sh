@@ -638,7 +638,9 @@ run_stage disk-copy-b 900 cp "$RUN/disk.img" "$B/disk.img"
 # wrote (/efi/alpine-fde-keys: db.auth/kek.auth/pk.auth).
 extract_guest_platform_certs() {
     local img=$1 kd=$2 espimg start f
-    rm -rf "$kd"; mkdir -p "$kd/espkeys"
+    # do NOT wipe the whole dir: keys_create's PK/KEK (written before this
+    # stage) must survive; only the ESP dump is refreshed
+    rm -rf "$kd/espkeys"; mkdir -p "$kd/espkeys"
     # sfdisk -d: "<dev>1 : start=  2048, size=  524288, type= C12A7328-..."
     start=$(sfdisk -d "$img" 2>/dev/null | awk -F'start=' '/start=/ && /C12A7328/ {n=$2+0; print n; exit}')
     size=$(sfdisk -d "$img" 2>/dev/null | awk -F'size=' '/C12A7328/ {n=$2+0; print n; exit}')
