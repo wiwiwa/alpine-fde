@@ -22,6 +22,18 @@ for want in virtio ata nvme scsi; do
         *) _fail "pinned feature set is missing the storage driver family: $want (got: $feat)" ;;
     esac
 done
+# boot-lane finding #26 (s23 attempt 53): the spliced init MOUNTS efivarfs —
+# without the module packed, the mount fails and the SB guard reads
+# 'secureboot=unreadable' and refuses (designed ADR-20 refusal on a healthy
+# boot). efivarfs.ko.gz ships in the lts kernel package.
+modules_list="$REPO/hooks/mkinitfs/features.d/alpine-fde.modules"
+case "$(cat "$modules_list" 2>/dev/null)" in
+    *kernel/fs/efivarfs*)
+        _pass "alpine-fde.modules packs efivarfs (the SB guard needs it mounted)" ;;
+    *)
+        _fail "alpine-fde.modules does not pack efivarfs — the SB guard runs blind" ;;
+esac
+
 for want in base cryptsetup btrfs alpine-fde; do
     case " $feat " in
         *" $want "*) _pass "pinned feature set keeps: $want" ;;

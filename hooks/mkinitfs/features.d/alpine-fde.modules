@@ -16,6 +16,7 @@
 # what the audit's ANY-of interface-driver requirement resolves against
 # (blocker #12 refinement).
 kernel/drivers/char/tpm
+kernel/fs/efivarfs
 kernel/fs/btrfs
 kernel/fs/ext4
 kernel/fs/jbd2
