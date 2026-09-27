@@ -106,16 +106,18 @@ keys_require() {
     fi
 }
 
-# --- ADR-16 release-key strength gate (RSA >= 3072) ------------------------------
-# ADR-16 pins the release key at RSA-3072 (RSA-2048 for PK/KEK/db): the one
-# identity that signs UKIs, lives in db, and anchors every PCR policy. Nothing
-# validated the SIZE before — a sub-3072 release key would seal/enroll without
-# complaint. Fail-closed AT ENROLL (orchestrator decision, usage-class rc 2):
-# the enroll path entry refuses before any TPM or LUKS2 state is touched.
-# Deliberately NOT inside keys_check: that is the completeness contract
-# (ukictl build's loud-fail marker) and stays size-blind.
+# --- ADR-16 release-key strength gate (RSA >= 2048; ADR-11 amendment) ------------
+# ADR-16 originally pinned the release key at RSA-3072 (RSA-2048 for PK/KEK/db).
+# REAL-SERVER BLOCKER #26 (live Dell): tpm2_loadexternal of a 3072-bit release
+# pubkey fails on real TPMs (Esys 0x2C4 parameter out of range — many TPM2s
+# support only RSA-2048 LoadExternal), killing keys_keyname_verifying and the
+# provisional seal. ADR-11 AMENDED: the release key is RSA-2048 — 2048 is the
+# PORTABLE bound (industry practice: Microsoft PK/KEK/db are RSA-2048). The
+# size gate stays fail-closed at the enroll path entry (rc 2), floor 2048;
+# deliberately NOT inside keys_check (stays the size-blind completeness
+# contract).
 
-KEYS_MIN_RSA_BITS=3072 # ADR-16 floor for the release key
+KEYS_MIN_RSA_BITS=2048 # ADR-16 floor for the release key (ADR-11 amendment, blocker #26)
 
 # keys_rsa_bits FILE — RSA modulus size in bits of a public key PEM (same
 # modulus-based method as keys_tpmt_public); rc 1 if FILE is not a parseable
@@ -130,6 +132,7 @@ keys_rsa_bits() {
 }
 
 # keys_rsa3072_guard KEYDIR — ADR-16 fail-closed gate for the enroll path
+# (name retained; the floor is the ADR-11-amended 2048 — blocker #26)
 # entry: die rc 2 (usage-class, the operator's key configuration is the
 # defect) naming ADR-16 unless <KEYDIR>/release.pub is an RSA key of at least
 # $KEYS_MIN_RSA_BITS bits.
@@ -137,14 +140,14 @@ keys_rsa3072_guard() {
     _keys_gd=${1:-$(keys_dir)}
     _keys_gpub="$_keys_gd/release.pub"
     [ -n "$_keys_gd" ] ||
-        die -r "$ALPINE_FDE_USAGE" "release key: no key directory configured — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS release-key floor"
+        die -r "$ALPINE_FDE_USAGE" "release key: no key directory configured — cannot apply the ADR-16/ADR-11 RSA-$KEYS_MIN_RSA_BITS release-key floor"
     [ -f "$_keys_gpub" ] ||
-        die -r "$ALPINE_FDE_USAGE" "release key: release public key not found: $_keys_gpub — cannot apply the ADR-16 RSA-$KEYS_MIN_RSA_BITS floor"
+        die -r "$ALPINE_FDE_USAGE" "release key: release public key not found: $_keys_gpub — cannot apply the ADR-16/ADR-11 RSA-$KEYS_MIN_RSA_BITS floor"
     _keys_gbits=$(keys_rsa_bits "$_keys_gpub") ||
-        die -r "$ALPINE_FDE_USAGE" "release key: cannot read an RSA modulus from $_keys_gpub (not a valid RSA public key?) — ADR-16 requires RSA >= $KEYS_MIN_RSA_BITS for the release key"
+        die -r "$ALPINE_FDE_USAGE" "release key: cannot read an RSA modulus from $_keys_gpub (not a valid RSA public key?) — ADR-16/ADR-11 requires RSA >= $KEYS_MIN_RSA_BITS for the release key"
     if [ "$_keys_gbits" -lt "$KEYS_MIN_RSA_BITS" ]; then
         die -r "$ALPINE_FDE_USAGE" \
-            "release key is RSA-$_keys_gbits ($_keys_gpub) — ADR-16 requires an RSA-$KEYS_MIN_RSA_BITS (or larger) release key (db/UKI/PCR-policy identity): refusing to enroll. Generate a >= $KEYS_MIN_RSA_BITS-bit release key, re-sign the artifacts, and re-run"
+            "release key is RSA-$_keys_gbits ($_keys_gpub) — ADR-16/ADR-11 requires an RSA-$KEYS_MIN_RSA_BITS (or larger) release key (db/UKI/PCR-policy identity; 2048 is the portable bound — real TPMs refuse LoadExternal of larger keys, blocker #26): refusing to enroll. Generate a >= $KEYS_MIN_RSA_BITS-bit release key, re-sign the artifacts, and re-run"
     fi
     return 0
 }
@@ -600,10 +603,14 @@ keys_keyname_verifying() {
     [ -n "$1" ] && [ -f "$1" ] || die "keys_keyname_verifying: public key PEM not found: ${1:-<none>}"
     _keys_v_tmp=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-keyname-verifying.XXXXXX") \
         || die "keys: mktemp failed"
+    # blocker #26: surface the tpm2 stderr — the real-server failure was
+    # Esys 0x2C4 'parameter(2) value out of range' (a 3072-bit key a real TPM
+    # refuses to LoadExternal) and the silenced output hid it
     if ! tpm loadexternal -C n -G rsa -u "$1" -c "$_keys_v_tmp/pub.ctx" \
-        -n "$_keys_v_tmp/pub.name" >/dev/null 2>&1; then
+        -n "$_keys_v_tmp/pub.name" >"$_keys_v_tmp/err" 2>&1; then
+        _keys_v_err=$(tail -n 1 "$_keys_v_tmp/err" 2>/dev/null)
         rm -rf "$_keys_v_tmp"
-        die "keys_keyname_verifying: tpm2_loadexternal failed for $1 (TCTI: ${ALPINE_FDE_TCTI:-default})"
+        die "keys_keyname_verifying: tpm2_loadexternal failed for $1 (TCTI: ${ALPINE_FDE_TCTI:-default})${_keys_v_err:+ — tpm2: $_keys_v_err}"
     fi
     tpm flushcontext "$_keys_v_tmp/pub.ctx" >/dev/null 2>&1 || tpm flushcontext -t >/dev/null 2>&1 || true
     _keys_v_hex=$(od -An -v -tx1 "$_keys_v_tmp/pub.name" | tr -d ' \n')

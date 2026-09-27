@@ -3,7 +3,7 @@
 # seeding (§8.1, §9.1; gaps C-G2/C-G3).
 #
 #   provision stage1 [--keydir D] [--force]
-#       On the OFFLINE signing medium (I4): release keypair RSA-3072 + cert
+#       On the OFFLINE signing medium (I4): release keypair RSA-2048 + cert
 #       (one identity for UKI sbsign AND policy signatures, ADR-11), plus
 #       enrollment-only PK/KEK/db keypairs; builds EFI_SIGNATURE_LIST blobs and
 #       authenticated variable update packets (WIN_CERTIFICATE_EFI_PKCS) for
@@ -280,7 +280,7 @@ Usage: alpine-fde provision stage1 [--keydir DIR] [--mode in-chroot|offline] [--
 
 stage1  key ceremony (ADR-18):
         --mode offline (default)
-            on the OFFLINE signing medium (I4): release keypair (RSA-3072,
+            on the OFFLINE signing medium (I4): release keypair (RSA-2048,
             signs UKIs and policy digests, ADR-11) + PK/KEK/db enrollment
             keypairs; EFI_SIGNATURE_LISTs + authenticated update packets;
             firmware enrollment guidance; writes the PENDING baseline
@@ -441,8 +441,8 @@ prov_stage1() {
     fi
     mkdir -p "$_s1_keydir"
 
-    info "generating release key (RSA-3072; the one identity for UKI + policy signatures, ADR-11)"
-    prov_keygen "$_s1_keydir" release 3072 "Alpine FDE Release Key"
+    info "generating release key (RSA-2048; the one identity for UKI + policy signatures, ADR-11 as amended: the key MUST be LoadExternal-able by REAL TPMs, most of which cap external RSA at 2048 — real-server blocker #26)"
+    prov_keygen "$_s1_keydir" release 2048 "Alpine FDE Release Key"
     # release key also under the keys.sh convention (keys_check/sbsign/enroll
     # read release.pem/release.crt/release.pub — ADR-11 single identity)
     cp "$_s1_keydir/release.priv.pem" "$_s1_keydir/release.pem"

@@ -162,17 +162,27 @@ mkvar SetupMode 0
 BL_PCR0="$D7" BL_PCR1="$D7" BL_PCR2="$D7" BL_PCR3="$D7" BL_PCR7="$D7" \
     BL_TARGET_LUKS_UUID="$UUID" baseline_write "$(sp_baseline_file)"
 
+# ADR-11 AMENDMENT (real-server blocker #26): 2048 is the PORTABLE floor —
+# real TPMs refuse LoadExternal of larger keys, so the amended ADR-16 accepts
+# the 2048-bit release key at the enroll path entry.
 ALPINE_FDE_KEYDIR=$KEY2048
-PRE2048_OUT=$(enrl_preconditions 2>&1)
-PRE2048_RC=$?
-assert_eq "enroll path entry: 2048-bit release key -> refuse rc 2 (ADR-16)" "2" "$PRE2048_RC"
-assert_contains "enroll-path refusal cites ADR-16" "$PRE2048_OUT" "ADR-16"
-assert_contains "enroll-path refusal names the offending key size" "$PRE2048_OUT" "2048"
-assert_contains "enroll-path refusal states the floor" "$PRE2048_OUT" "3072"
+enrl_preconditions 2>"$TMP/pre2048.err"
+assert_rc "enroll path entry: 2048-bit release key PASSES (ADR-11 amendment, blocker #26)" 0 $?
+assert_eq "resolved pubkey is the 2048-bit keydir's release.pub" "$KEY2048/release.pub" "$ENRL_PRE_PUB"
+
+# the floor still refuses a SUB-2048 key, fail-closed rc 2 citing ADR-16
+mkdir -p "$TMP/keys1024"
+openssl genrsa -out "$TMP/keys1024/release.pub" 1024 2>/dev/null
+PRE1024_OUT=$(ALPINE_FDE_KEYDIR=$TMP/keys1024 enrl_preconditions 2>&1)
+PRE1024_RC=$?
+assert_rc "enroll path entry: 1024-bit release key -> refuse rc 2 (fail-closed)" 2 "$PRE1024_RC"
+assert_contains "enroll-path refusal cites ADR-16" "$PRE1024_OUT" "ADR-16"
+assert_contains "enroll-path refusal names the offending key size" "$PRE1024_OUT" "1024"
+assert_contains "enroll-path refusal states the floor" "$PRE1024_OUT" "2048"
 
 ALPINE_FDE_KEYDIR=$KEY3072
 enrl_preconditions 2>"$TMP/pre3072.err"
-assert_rc "enroll path entry: 3072-bit release key passes" 0 $?
+assert_rc "enroll path entry: 3072-bit release key passes (>= floor)" 0 $?
 assert_eq "resolved pubkey is the 3072-bit keydir's release.pub" "$KEY3072/release.pub" "$ENRL_PRE_PUB"
 
 swtpm_stop "$TPMDIR" || true
