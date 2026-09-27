@@ -406,6 +406,11 @@ initramfs_splice_unseal() {
         die "initramfs splice: $INITRAMFS_INIT_PATH not found in $_isu_img — not a stock mkinitfs initramfs?"
     }
 
+    # boot-lane finding #24 (s23 attempt 27): the splice rewrites the init via
+    # awk (> file), which recreates it with umask perms — the EXECUTABLE bit is
+    # lost and boot B dies "Failed to execute /init (error -13)". Preserve the
+    # original mode and restore it after the rewrite.
+    _isu_mode=$(stat -c '%a' "$_isu_init")
     if [ "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$_isu_init" 2>/dev/null)" -gt 0 ]; then
         # idempotent re-entry on an ALREADY-spliced image: refresh only the
         # crypttab when the caller supplies one and the archive lacks it
@@ -458,13 +463,17 @@ initramfs_splice_unseal() {
         lz4) _isu_c="lz4" ;;
         none) _isu_c="cat" ;;
     esac
+    # boot-lane finding #24: restore the executable mode BEFORE the repack —
+    # the awk rewrite recreated the init with umask perms (EACCES at boot).
+    chmod "$_isu_mode" "$_isu_init"
+
     (cd "$_isu_work" && find . | sort | cpio --quiet --renumber-inodes -o -H newc) |
         $_isu_c >"$_isu_img" ||
         {
             rm -rf "$_isu_work"
             die "initramfs splice: repack failed"
         }
-    rm -rf "$_isu_work"
+
 
     # self-verify: markers + hook invocation + parseability of the SHIPPED image
     initramfs_splice_verify "$_isu_img" ||

@@ -50,6 +50,7 @@ build_initrd() {
     # the REAL archive path: stock mkinitfs installs the init at /init
     # (initfs_base: install -m755 "$init" "$tmpdir/init")
     cp "$STOCK_INIT" "$w/init"
+    chmod 755 "$w/init"   # stock mkinitfs installs the init 0755
     cp "$HOOK" "$w/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
     : >"$w/usr/bin/cryptsetup"
     : >"$w/usr/bin/openssl"
@@ -96,6 +97,11 @@ if [ -z "$INIT" ]; then
 fi
 assert_eq "splice marker appears exactly twice (open+close) after ONE splice" "2" \
     "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$INIT")"
+# boot-lane finding #24 (s23 attempt 27): the splice REWRITES the init via awk
+# and must restore the executable bit — boot B died "Failed to execute /init
+# (error -13)" (EACCES) when the packed /init lost +x.
+assert_eq "spliced /init keeps the EXECUTABLE bit (the kernel execs it)" "1" \
+    "$([ -x "$INIT" ] && echo 1 || echo 0)"
 assert_eq "flip marker appears exactly twice (open+close)" "2" \
     "$(grep -cF "$INITRAMFS_SPLICE_FLIP_MARKER" "$INIT")"
 assert_eq "the unseal hook invocation is present (canonical custom_files path)" "1" \
