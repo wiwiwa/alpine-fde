@@ -390,8 +390,12 @@ initramfs_splice_unseal() {
         lz4) _isu_dc="lz4 -dc" ;;
         none) _isu_dc="cat" ;;
     esac
+    # REAL-SERVER BLOCKER #24: the Alpine target's cpio is BUSYBOX (mkinitfs
+    # depends on busybox; no GNU cpio apk exists in the closure) and busybox
+    # rejects GNU's -D/--quiet — the portable form is cd + `cpio -idm` on
+    # stdin (verified against the spool busybox 1.37 applet).
     $_isu_dc "$_isu_img" 2>/dev/null |
-        cpio --quiet -idm -D "$_isu_work" 2>/dev/null ||
+        (cd "$_isu_work" && cpio -idm 2>/dev/null) ||
         {
             rm -rf "$_isu_work"
             die "initramfs splice: cpio extraction failed on $_isu_img ($_isu_comp)"
@@ -477,8 +481,10 @@ initramfs_splice_init_content() {
     [ -f "$_msc_img" ] || die "initramfs splice: initrd not found: $_msc_img"
     require_cmds gzip cpio
     mkdir -p "$_msc_out"
+    # busybox-safe (blocker #24): cd instead of -D, no --quiet, extract ALL
+    # (busybox -i [EXTR] pattern support varies) — the file check below gates
     gzip -dc "$_msc_img" 2>/dev/null |
-        cpio --quiet -idm -D "$_msc_out" "$INITRAMFS_INIT_PATH" >/dev/null 2>&1 ||
+        (cd "$_msc_out" && cpio -idm 2>/dev/null) ||
         true
     _msc_f="$_msc_out/$INITRAMFS_INIT_PATH"
     [ -f "$_msc_f" ] ||

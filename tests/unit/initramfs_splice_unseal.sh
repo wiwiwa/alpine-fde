@@ -144,6 +144,70 @@ assert_contains "audit verdict names the PACKED BUT NEVER CALLED class" \
 INI_ROOT_FS=btrfs initrd_audit "$IMG" >/dev/null 2>&1
 assert_rc "audit PASSES the spliced initrd (full artifact set)" 0 $?
 
+# --- (c2) BUSYBOX ROUND-TRIP (real-server blocker #24): the Alpine target
+# ships ONLY busybox cpio (mkinitfs depends on busybox; no GNU cpio apk) and
+# busybox cpio REJECTS GNU's -D flag ("unrecognized option: D") — the splice
+# died on the live run as "cpio extraction failed (gzip)". Pin: run BOTH new
+# cpio pipelines (extraction `gzip -dc | cpio -idm`, repack
+# `find . | sort | cpio -o -H newc | gzip`) against the GUEST'S OWN busybox
+# applets (spool busybox via the spool musl loader, argv-dispatched), then
+# byte-compare the round-trip: unpack->repack->unpack must preserve the
+# spliced initramfs-init (markers + hook call) and /etc/crypttab. Flag-level
+# compatibility beyond these two pipelines is out of scope here; this
+# round-trip covers the splice path exactly. The leg runs in a SUBSHELL (the
+# applet shims are function-local) and prints one line per check.
+SPOOL=${ALPINE_FDE_SPOOL:-/tmp/mirror-work/spool}
+BB_APK=$(ls "$SPOOL"/busybox-[0-9]*.apk 2>/dev/null | head -n 1)
+MUSL_APK=$(ls "$SPOOL"/musl-[0-9]*.apk 2>/dev/null | head -n 1)
+if [ -n "$BB_APK" ] && [ -n "$MUSL_APK" ]; then
+    BB_RESULT=$(
+        set -e
+        mkdir -p "$TMP/bb/bin" "$TMP/bb/lib"
+        tar -xzf "$BB_APK" -C "$TMP/bb" bin/busybox 2>/dev/null
+        tar -xzf "$MUSL_APK" -C "$TMP/bb" lib/ld-musl-x86_64.so.1 2>/dev/null
+        BB="$TMP/bb/bin/busybox"
+        LD="$TMP/bb/lib/ld-musl-x86_64.so.1"
+        [ -x "$BB" ] || { echo "no busybox"; exit 97; }
+        for app in cpio gzip gunzip find sort mkdir; do ln -sf busybox "$TMP/bb/bin/$app"; done
+        BBIMG=$TMP/initrd-bb.img
+        cp "$IMG" "$BBIMG"
+        rm -rf "$TMP/bbw"
+        mkdir -p "$TMP/bbw"
+        # extraction under the guest applet (busybox cpio -idm; NO -D)
+        gzip -dc "$BBIMG" | (cd "$TMP/bbw" && cpio -idm 2>/dev/null)
+        [ -f "$TMP/bbw/$INITRAMFS_INIT_PATH" ] || { echo "no-init"; exit 65; }
+        [ -f "$TMP/bbw/etc/crypttab" ] || { echo "no-crypttab"; exit 66; }
+        echo "extract-markers=$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$TMP/bbw/$INITRAMFS_INIT_PATH")"
+        # repack under the guest applets
+        (cd "$TMP/bbw" && find . | sort | cpio -o -H newc 2>/dev/null) |
+            gzip -9 >"$TMP/bb-roundtrip.img"
+        echo "repack-bytes=$(wc -c <"$TMP/bb-roundtrip.img")"
+        rm -rf "$TMP/bbx"
+        mkdir -p "$TMP/bbx"
+        gzip -dc "$TMP/bb-roundtrip.img" | (cd "$TMP/bbx" && cpio -idm 2>/dev/null)
+        echo "reinit-lines=$(wc -l <"$TMP/bbx/$INITRAMFS_INIT_PATH")"
+        echo "reinit-markers=$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$TMP/bbx/$INITRAMFS_INIT_PATH")"
+        echo "crypttab=$(grep -c 'luks,tpm2-device' "$TMP/bbx/etc/crypttab" 2>/dev/null)"
+        cmp -s "$INIT2" "$TMP/bbx/$INITRAMFS_INIT_PATH" && echo "init-identical=yes" || echo "init-identical=no"
+        echo OK
+    ) 2>/dev/null
+    BB_RC=$?
+    assert_rc "blocker #24: extract+repack pipelines run under the guest's own busybox cpio" 0 "$BB_RC"
+    if [ "$BB_RC" -eq 0 ]; then
+        assert_contains "busybox extraction: splice markers preserved" "$BB_RESULT" "extract-markers=2"
+        assert_contains "round-trip: repacked image carries the spliced init" "$BB_RESULT" \
+            "reinit-lines=$(wc -l <"$INIT2")"
+        assert_contains "round-trip: splice markers preserved after repack" "$BB_RESULT" "reinit-markers=2"
+        assert_contains "round-trip: /etc/crypttab preserved" "$BB_RESULT" "crypttab=1"
+        assert_contains "round-trip: busybox-repacked initramfs-init is byte-identical" "$BB_RESULT" "init-identical=yes"
+    else
+        printf '%s\n' "$BB_RESULT" >&2
+        _fail "blocker #24 busybox round-trip failed (rc=$BB_RC): $BB_RESULT"
+    fi
+else
+    _pass "busybox round-trip skipped (no spool)"
+fi
+
 # --- (d) no interactive shell in either splice block -------------------------------
 if sed -n "/$INITRAMFS_SPLICE_MARKER/,/$INITRAMFS_SPLICE_MARKER/p" "$INIT2" |
     grep -qE '(^|[[:space:]])(sh|recovery_shell)([[:space:]]|$)'; then
