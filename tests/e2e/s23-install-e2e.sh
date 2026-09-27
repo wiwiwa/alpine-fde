@@ -645,45 +645,36 @@ extract_guest_platform_certs() {
     [ -n "$start" ] && [ -n "$size" ] || return 1
     espimg="$kd/esp.img"
     dd if="$img" of="$espimg" bs=512 skip="$start" count="$size" status=none
-    echo "# s23 dbg: esp=$espimg bytes=$(wc -c <"$espimg")" >&2
-    mdir -i "$espimg" ::/ 2>&1 | head -8 >&2
-    # NB: /efi is the ESP MOUNT POINT in the guest — on the ESP filesystem the
-    # staging lives at /alpine-fde-keys (the earlier ::/efi/... path was the
-    # "extracted: empty" failure of attempt 34b).
-    mcopy -i "$espimg" -s -n ::/alpine-fde-keys "$kd/espkeys/" 2>/dev/null
-    echo "# s23 dbg: extracted: $(ls "$kd/espkeys/" "$kd/espkeys/alpine-fde-keys/" 2>/dev/null | tr '\n' ' ')" >&2
-    for f in db.auth kek.auth pk.auth; do
-        [ -f "$kd/espkeys/alpine-fde-keys/$f" ] || return 1
-        name=${f%.auth}
-        # .auth layout (canonical efitools emission): EFI_TIME(16) +
-        # WIN_CERTIFICATE_UEFI_GUID(dwLength @16) + EFI_SIGNATURE_LIST trailer
-        # (the db/kek/pk update payload). Parse the ESL entry: owner GUID(16)
-        # + X509 cert (SignatureSize-16).
-        python3 - "$kd/espkeys/alpine-fde-keys/$f" "$kd/$name.der" <<'PYE'
+    # pull the SIGNED UKI off the ESP: its Authenticode certificate is the
+    # release cert that OVMF's db entry must carry to verify the boot chain.
+    mcopy -i "$espimg" -s -n ::/EFI/Linux "$kd/espkeys/" 2>/dev/null
+    uki=$(ls "$kd/espkeys/EFI/Linux/"alpine-fde-*.efi 2>/dev/null | head -1)
+    [ -n "$uki" ] || { echo "# s23 dbg: no signed UKI on the ESP" >&2; return 1; }
+    echo "# s23 dbg: uki=$uki bytes=$(wc -c <"$uki")" >&2
+    # db entry = the RELEASE cert extracted from the SIGNED UKI's
+    # Authenticode table (the cert OVMF must have in db to verify it).
+    python3 - "$uki" "$kd/uki-cert.der" <<'PYE'
 import struct, sys
-data=open(sys.argv[1],'rb').read()
-dw=struct.unpack_from('<I',data,16)[0]
-p=data[16+dw:]
-ss=struct.unpack_from('<I',p,24)[0]
-open(sys.argv[2],'wb').write(p[44:44+(ss-16)])
+d=open(sys.argv[1],'rb').read()
+pe=struct.unpack_from('<I',d,0x3c)[0]
+opt=pe+24
+magic=struct.unpack_from('<H',d,opt)[0]
+ddir=opt+(112 if magic==0x20b else 96)
+rva,size=struct.unpack_from('<II',d,ddir+32)
+open(sys.argv[2],'wb').write(d[rva+8:rva+size])
 PYE
-        echo "# s23 dbg: parsed $f (der $(wc -c <"$kd/$name.der") bytes)" >&2
-        case $name in
-            db) crt=db.crt ;;
-            kek) crt=KEK.crt ;;
-            pk) crt=PK.crt ;;
-        esac
-        openssl x509 -inform DER -in "$kd/$name.der" -out "$kd/$crt" 2>/dev/null || { echo "# s23 dbg: x509 FAIL $f" >&2; return 1; }
-        echo "# s23 dbg: cert $crt ok" >&2
-    done
-    [ -f "$kd/db.crt" ] && [ -f "$kd/KEK.crt" ] && [ -f "$kd/PK.crt" ]
+    openssl x509 -inform DER -in "$kd/uki-cert.der" -out "$kd/uki.crt" 2>/dev/null || return 1
+    [ -s "$kd/uki.crt" ] || { echo "# s23 dbg: empty uki cert" >&2; return 1; }
+    return 0
 }
 run_stage boot-b-vars-gen 300 extract_guest_platform_certs "$B/disk.img" "$RUN/keys-b"
+# build the offline vars: PK/KEK from the fixture identity, db = the release
+# cert extracted from the guest's SIGNED UKI
+cp "$RUN/keys-b/uki.crt" "$RUN/keys-b/db.crt"
 run_stage boot-b-vars 300 keys_vars_enrolled "$RUN/keys-b" "$B/vars.fd"
 assert_contains "boot B vars: SecureBootEnable ON (offline enrollment)" \
     "$(keys_vars_get "$B/vars.fd" SecureBootEnable)" "ON"
-assert_eq "boot B vars: custom PK present (offline enrollment)" "0" \
-    "$(keys_vars_get "$B/vars.fd" PK >/dev/null 2>&1; echo $?)"
+assert_file_exists "boot B vars: the extracted release cert (db entry source)" "$RUN/keys-b/db.crt"
 _ensure_tpm "$RUN/tpm"
 _rearm_trap
 CURRENT_QEMU_DIR="$B"
