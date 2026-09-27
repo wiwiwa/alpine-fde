@@ -356,7 +356,7 @@ swtpm_da_state() {
 #   Print the s00b boot-B register-drift verdict: "none" | "amend" | "vote".
 #
 # WHY THIS EXISTS (regression 2026-09-24, registry red): the enroll flow is
-# DIGEST-ANCHORED (Option A — lib/cmd/enroll-tpm.sh compares the pcrsig
+# DIGEST-ANCHORED (Option A — lib/cmd/reseal.sh compares the pcrsig
 # entry's recorded d7 against baseline.expected_pcr7, NO live TPM read, unit-
 # pinned rc-0-despite-live-drift in tests/unit/enroll_precondition_matrix.sh).
 # When a scenario re-anchors the machine's SB varstore AFTER the baseline was

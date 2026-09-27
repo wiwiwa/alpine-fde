@@ -103,7 +103,7 @@ COVERAGE_TABLE=(
     "s15	host: combined .pcrsig pol == policy_digest(enrolled d7, d11) (G-B6)	policy_digest"
     "s15	host: standing token is systemd-tpm2 pinning {PCR 7, PCR 11}	tpm2-pcrs"
     "s15	host: standing token on a fresh keyslot (recovery slot 0 untouched)	keyslot"
-    "s15	host: production CLI enroll-tpm host-side (digest-anchored)	uki_host_enroll_finalized"
+    "s15	host: production CLI reseal host-side (digest-anchored)	uki_host_enroll_finalized"
     "s15	§9.4: live PCR 7 drift synthesized host-side (pcrextend)	swtpm_pcrextend"
     "s15	§9.4: audit detects the drift (exit 1, pcr7 DRIFT line)	DRIFT"
     "s15	§9.4: audit --accept --yes re-baselines (real CLI)	--accept --yes"

@@ -206,7 +206,7 @@ else
     uki_host_enroll_finalized "$EFIVARS" "$RUN_ENROLLED/uki-pcrsig-combined.json" \
         "$RUN_ENROLLED/disk.img" "$RUN_ENROLLED/keys" "$RUN_ENROLLED/kf-slot0" \
         "$RUN_ENROLLED/cli-state" || {
-        echo "s06: production enroll-tpm FAILED"; exit 1; }
+        echo "s06: production reseal FAILED"; exit 1; }
     TOK=$(disk_token_json "$RUN_ENROLLED/disk.img")
     assert_contains "standing token is systemd-tpm2 (Mechanism B)" "$TOK" '"type":"systemd-tpm2"'
     assert_contains "standing token pins {PCR 7, PCR 11}" "$TOK" '"tpm2-pcrs":[7,11]'

@@ -296,7 +296,7 @@ cmd_doctor_main() {
         esac
     else
         printf '[warn]    Secure Boot not confirmed on: %s\n' "$_dd_sb"
-        printf '          (enroll-tpm refuses to run until SB is on and SetupMode=0)\n'
+        printf '          (reseal refuses to run until SB is on and SetupMode=0)\n'
     fi
 
     printf '\napt:\n'

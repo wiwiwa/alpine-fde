@@ -21,7 +21,7 @@
 #     the cache dev
 #   * G-ST3: repeatable --disk without --bcache = Btrfs RAID1
 #   * G-C24/ADR-20 step 6: provisional TPM enrollment guest line after the
-#     in-chroot ukictl build (Mechanism B, PCR 11 only, keyslot 1)
+#     in-chroot kernel build (Mechanism B, PCR 11 only, keyslot 1)
 #   * G-C25 (ADR-20 amendment #4): NO unfinalized MOTD/issue banner — no
 #     plan-write record touches /etc/motd or /etc/issue; `installed` is the
 #     last state write (G-C28 amended)
@@ -247,7 +247,7 @@ assert_contains "plan: the guarded copy probes the loader binary in-chroot, fail
 assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no bootctl binary)" "0" \
     "$(grep -Ec 'bootctl( |$)' <<<"$INS_OUT")"
 # real-server blocker #8: the build record configures the release-key dir
-# (ukictl build resolves keys_dir() with NO default) and consumes the
+# (kernel build resolves keys_dir() with NO default) and consumes the
 # ceremony-staged 0600 passphrase seam file — dry-run carries the literal
 # placeholder (nothing staged, no secret in plan text)
 assert_contains "plan: build record exports the in-chroot release-key dir (blocker #8)" "$INS_OUT" \
@@ -255,12 +255,12 @@ assert_contains "plan: build record exports the in-chroot release-key dir (block
 assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder (in-target path, blocker #9)" "$INS_OUT" \
     '[ -s <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>) && rm -f <release-passfile>'
 # real-server blocker #11: the record derives the TARGET's installed kernel
-# in-guest and passes it to ukictl build (the no-arg form fell back to
+# in-guest and passes it to kernel build (the no-arg form fell back to
 # uname -r — the LIVE ISO kernel, absent from the target)
 assert_contains "plan: build record derives the target kver in-guest (blocker #11)" "$INS_OUT" \
     'kv=$(cd /lib/modules'
-assert_contains "plan: build record passes the derived kver to ukictl build (blocker #11)" "$INS_OUT" \
-    'ukictl build "$kv"'
+assert_contains "plan: build record passes the derived kver to kernel build (blocker #11)" "$INS_OUT" \
+    'kernel build "$kv"'
 assert_contains "plan: build record fails closed when the target has NO module tree (blocker #11)" "$INS_OUT" \
     'no kernel module tree under /lib/modules'
 # blocker #12 follow-up: the record exports ALPINE_FDE_ROOT=/ — in-chroot the
@@ -304,8 +304,8 @@ assert_not_contains "plan: defer-custody — NO plaintext-custody promise before
     "$DEFER_LINE" "keys_encrypt_release"
 assert_contains "plan: §9.1 step 4 — NVRAM enrollment db->KEK->PK via fw_auth_enroll" \
     "$INS_OUT" "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
-assert_contains "plan: §9.1 step 5 — in-chroot ukictl build (boot manager + UKI)" \
-    "$INS_OUT" "/opt/alpine-fde/bin/alpine-fde ukictl build"
+assert_contains "plan: §9.1 step 5 — in-chroot kernel build (boot manager + UKI)" \
+    "$INS_OUT" "/opt/alpine-fde/bin/alpine-fde kernel build"
 # G-C24/§9.1 step 6: provisional TPM enrollment guest line (Mechanism B, PCR 11)
 # item 27 extended (class-killer lint): the seal/token choreography consumes
 # the LUKS2 HEADER (token_free_slot luksDump, luksAddKey, token import) — it
@@ -392,7 +392,7 @@ I_CERK=$(line_no "$INS_OUT" "inst_ceremony_release_key")
 I_ENROLL=$(line_no "$INS_OUT" "fw_auth_enroll")
 I_COPY=$(line_no "$INS_OUT" "BOOTX64.EFI")
 I_HOOKS=$(line_no "$INS_OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
-I_BUILD=$(line_no "$INS_OUT" "ukictl build")
+I_BUILD=$(line_no "$INS_OUT" "kernel build")
 # blocker #12 ORDER GUARD: the features.d module-append staging precedes the
 # build record in the plan (mkinitfs must see the resolved module paths)
 I_APPEND=$(line_no "$INS_OUT" '>> /mnt/etc/mkinitfs/features.d/alpine-fde.modules')
@@ -426,7 +426,7 @@ assert_eq "order (user flow directive): hooks staging BEFORE the credential cere
     "$(( I_HOOKS > 0 && I_HOOKS < I_CERR ? 1 : 0 ))"
 assert_eq "order (user flow directive): state write BEFORE the credential ceremony (mechanical)" "1" \
     "$(( I_STATE > 0 && I_STATE < I_CERR ? 1 : 0 ))"
-assert_eq "order: enrollment before ukictl build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
+assert_eq "order: enrollment before kernel build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
     "$(( I_BUILD < I_SEAL ? 1 : 0 ))"
 assert_eq "order: state write BEFORE the provisional seal (mechanical first — the seal is secret-dependent, it follows the ceremony)" "1" \
@@ -965,8 +965,12 @@ assert_contains "help: ephemeral install key documented" "$HELP_OUT" "ephemeral"
 assert_contains "help: direct reboot documented (no firmware trip)" "$HELP_OUT" "direct reboot"
 assert_contains "help: finalize handoff documented" "$HELP_OUT" "finalize"
 
-# --- 13. pre-upgrade stub (ext4 root -> graceful skip rc 0 per ADR-13) ---------
-PRE_OUT=$("$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+# --- 13. pre-upgrade library entry (ext4 root -> graceful skip rc 0 per ADR-13) ---
+# the CLI verb is retired (§8.1 machine/lib entrance rule): drive the sourced
+# module directly the way internal callers do
+# shellcheck source=../../lib/cmd/pre-upgrade.sh
+source "$REPO/lib/cmd/pre-upgrade.sh"
+PRE_OUT=$(cmd_pre_upgrade_main 2>&1)
 PRE_RC=$?
 assert_eq "pre-upgrade skips ext4 root gracefully (rc 0)" "0" "$PRE_RC"
 assert_contains "pre-upgrade explains ext4 stance" "$PRE_OUT" "btrfs"

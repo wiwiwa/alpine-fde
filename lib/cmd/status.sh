@@ -202,7 +202,7 @@ cmd_status_main() {
         printf '    bootctl not found\n'
     fi
 
-    printf '\n== Digest manifest (ukictl build)\n'
+    printf '\n== Digest manifest (kernel build)\n'
     _st_mf=$(sp_manifest_file)
     if [ -f "$_st_mf" ]; then
         printf '    %s\n' "$_st_mf"
@@ -245,7 +245,7 @@ cmd_status_main() {
     if [ -f "$_st_bf" ]; then
         printf '    FAILED BUILD MARKER PRESENT (%s):\n' "$_st_bf"
         sed 's/^/      /' "$_st_bf"
-        printf '    attach the signing medium and re-run: alpine-fde ukictl build (§9.2)\n'
+        printf '    attach the signing medium and re-run: alpine-fde kernel build (§9.2)\n'
     else
         printf '    ok (no failure marker)\n'
     fi

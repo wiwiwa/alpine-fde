@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmd/ukictl-remove.sh — `alpine-fde ukictl remove <kver>` (gap B-G6 wire):
+# cmd/kernel-remove.sh — `alpine-fde kernel remove <kver>` (gap B-G6 wire):
 # remove one kernel's UKI from the ESP and its entry from the digest manifest.
 # Wire: hooks/kernel-hooks.d/alpine-fde-remove.hook (invoked by the Alpine
 # kernel hook on remove; the APK trigger at hooks/apk/triggers/alpine-fde.trigger
@@ -11,12 +11,12 @@
 # concern (one enrollment per retained UKI, §7.2): it keys off the manifest
 # diff, which this command updates — see docs/Architecture.md §8.3.
 
-cmd_ukictl_remove_main() {
+cmd_kernel_remove_main() {
     strict_mode
 
     _ukrm_kver=${1:-}
     if [ -z "$_ukrm_kver" ] || [ $# -gt 1 ]; then
-        err "ukictl remove: usage: alpine-fde ukictl remove <kver>"
+        err "kernel remove: usage: alpine-fde kernel remove <kver>"
         exit "$ALPINE_FDE_USAGE"
     fi
 
@@ -33,7 +33,7 @@ cmd_ukictl_remove_main() {
     # keep-set — validate at the boundary (usage error; `../traversal`, spaces,
     # shell/JSON metacharacters never reach path composition)
     if ! esp_validate_kver "$_ukrm_kver"; then
-        err "ukictl remove: invalid kernel version: '$_ukrm_kver' (alphanumerics, '.', '_', '-' only)"
+        err "kernel remove: invalid kernel version: '$_ukrm_kver' (alphanumerics, '.', '_', '-' only)"
         exit "$ALPINE_FDE_USAGE"
     fi
 
@@ -43,9 +43,9 @@ cmd_ukictl_remove_main() {
     _ukrm_path=$(esp_uki_path "$_ukrm_kver")
     if [ -f "$_ukrm_path" ]; then
         rm -f "$_ukrm_path"
-        info "ukictl remove: deleted $_ukrm_path"
+        info "kernel remove: deleted $_ukrm_path"
     else
-        info "ukictl remove: no UKI on the ESP for $_ukrm_kver ($_ukrm_path)"
+        info "kernel remove: no UKI on the ESP for $_ukrm_kver ($_ukrm_path)"
     fi
 
     if [ -f "$_ukrm_manifest" ]; then
@@ -53,9 +53,9 @@ cmd_ukictl_remove_main() {
             _ukrm_keep=$(manifest_kvers "$_ukrm_manifest" | grep -Fxv -- "$_ukrm_kver")
             # shellcheck disable=SC2086  # word split intended: one kver per line
             manifest_prune_to "$_ukrm_manifest" $_ukrm_keep
-            info "ukictl remove: manifest entry for $_ukrm_kver removed"
+            info "kernel remove: manifest entry for $_ukrm_kver removed"
         else
-            info "ukictl remove: no manifest entry for $_ukrm_kver"
+            info "kernel remove: no manifest entry for $_ukrm_kver"
         fi
     fi
     exit 0

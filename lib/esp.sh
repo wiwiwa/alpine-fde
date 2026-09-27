@@ -185,7 +185,7 @@ esp_prune_ukis() {
         if [ "$_esp_keep" -eq 0 ]; then
             # LO-04: a failed rm means ESP and manifest would silently diverge
             # (§9.2 "pruned together" becomes unverifiable) — propagate loudly;
-            # the caller (`ukictl build`) treats this as a marked failure.
+            # the caller (`kernel build`) treats this as a marked failure.
             if ! rm -f "$_esp_f"; then
                 err "esp: prune failed: $_esp_f"
                 return 1

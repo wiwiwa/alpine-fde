@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmd/ukictl-build.sh — `alpine-fde ukictl build` (docs/Architecture.md §8.1, §9.2;
+# cmd/kernel-build.sh — `alpine-fde kernel build` (docs/Architecture.md §8.1, §9.2;
 # gap report B-G1/G3/G4/G5/G10/G11/G12; mechanism ladder resolved by ADR-19/
 # ADR-20: Mechanism B (rung b) is the normative Alpine seal path — a2 remains
 # an accepted alias; documented-absent rungs fail closed at the
@@ -36,11 +36,11 @@
 # stored pcr11_digest + the CURRENT baseline PCR 7 and re-sign — no UKI rebuild.
 # This is the §9.4/§9.6 bookkeeping layer ONLY: it performs neither the ESP UKI
 # re-install nor the re-enrollment that §9.6 step 6 names. Full runbook after a
-# key rotation: `ukictl build <kver>` per retained kernel + `enroll-tpm`.
+# key rotation: `kernel build <kver>` per retained kernel + `reseal`.
 
-cmd_ukictl_build_usage() {
+cmd_kernel_build_usage() {
     cat >&2 <<EOF
-Usage: $PROG ukictl build [--re-sign-all] [kver]
+Usage: $PROG kernel build [--re-sign-all] [kver]
 
   kver            kernel release to build (default: the running kernel)
   --re-sign-all   re-sign every retained manifest entry against the current
@@ -48,26 +48,26 @@ Usage: $PROG ukictl build [--re-sign-all] [kver]
 EOF
 }
 
-# _ukictl_lib NAME — source a sibling library next to this command file
-_ukictl_lib() {
+# _kernel_lib NAME — source a sibling library next to this command file
+_kernel_lib() {
     # shellcheck disable=SC1090  # resolved next to this file
     . "${ALPINE_FDE_CMD_DIR:?}/../$1"
 }
 
-# _ukictl_marker_write <marker> <etc-dir> <kver> <reason> — persist the loud
+# _kernel_marker_write <marker> <etc-dir> <kver> <reason> — persist the loud
 # failure marker (consumed by `alpine-fde status`), best effort
-_ukictl_marker_write() {
+_kernel_marker_write() {
     _mk_file=$1
     _mk_etc=$2
     _mk_kver=$3
     _mk_reason=$4
     mkdir -p "$_mk_etc" 2>/dev/null || true
     {
-        printf 'ukictl build failed for kernel %s\n' "$_mk_kver"
+        printf 'kernel build failed for kernel %s\n' "$_mk_kver"
         printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'reason: %s\n' "$_mk_reason"
     } >"$_mk_file" 2>/dev/null \
-        || warn "ukictl build: cannot persist failure marker at $_mk_file"
+        || warn "kernel build: cannot persist failure marker at $_mk_file"
 }
 
 # _uk_kernel_resolve ROOT KVER — real-server blocker #9b: resolve the kernel
@@ -124,7 +124,7 @@ $1" ;;
     return 1
 }
 
-cmd_ukictl_build_main() {
+cmd_kernel_build_main() {
     strict_mode
 
     _uk_sign_all=0
@@ -134,12 +134,12 @@ cmd_ukictl_build_main() {
                 _uk_sign_all=1
                 ;;
             -h | --help)
-                cmd_ukictl_build_usage
+                cmd_kernel_build_usage
                 exit 0
                 ;;
             -*)
-                err "ukictl build: unknown option: $1"
-                cmd_ukictl_build_usage
+                err "kernel build: unknown option: $1"
+                cmd_kernel_build_usage
                 exit "$ALPINE_FDE_USAGE"
                 ;;
             *)
@@ -183,31 +183,31 @@ cmd_ukictl_build_main() {
             # ADR-8: this exit happens BEFORE the cleanup trap (and its marker
             # write) is installed, so persist the marker here explicitly —
             # `status` must see the failed build context
-            _ukictl_marker_write "${ALPINE_FDE_ROOT:-}/etc/alpine-fde/build-failed" \
+            _kernel_marker_write "${ALPINE_FDE_ROOT:-}/etc/alpine-fde/build-failed" \
                 "${ALPINE_FDE_ROOT:-}/etc/alpine-fde" "${_uk_kver:-}" \
                 "no kver given and no resolvable kernel module tree under $_uk_mods (real-server blocker #11)"
-            err "ukictl build: no kver given and no resolvable kernel module tree under $_uk_mods (found:${_uk_cands:- none}; the running kernel '${_uk_run:-unknown}' is not installed there) — pass the target kernel version explicitly (real-server blocker #11)"
+            err "kernel build: no kver given and no resolvable kernel module tree under $_uk_mods (found:${_uk_cands:- none}; the running kernel '${_uk_run:-unknown}' is not installed there) — pass the target kernel version explicitly (real-server blocker #11)"
             exit 64
         fi
         unset _uk_mods _uk_cands _uk_d _uk_b _uk_n _uk_run
     fi
     [ $# -le 1 ] || {
-        err "ukictl build: too many arguments"
-        cmd_ukictl_build_usage
+        err "kernel build: too many arguments"
+        cmd_kernel_build_usage
         exit "$ALPINE_FDE_USAGE"
     }
 
-    _ukictl_lib common.sh
-    _ukictl_lib measure.sh
-    _ukictl_lib policy.sh
-    _ukictl_lib manifest.sh
-    _ukictl_lib keys.sh
-    _ukictl_lib esp.sh
-    _ukictl_lib initramfs.sh
-    # G-R3: the build's ensure-once enroll step IS enroll-tpm's enrollment
-    # (enrl_run/enrl_ensure_once shared core); sourced next to this command.
+    _kernel_lib common.sh
+    _kernel_lib measure.sh
+    _kernel_lib policy.sh
+    _kernel_lib manifest.sh
+    _kernel_lib keys.sh
+    _kernel_lib esp.sh
+    _kernel_lib initramfs.sh
+    # G-R3: the build's ensure-once enroll step IS reseal's enrollment
+    # (reseal_run/reseal_ensure_once shared core); sourced next to this command.
     # shellcheck disable=SC1091  # sibling in the same command directory
-    . "${ALPINE_FDE_CMD_DIR:?}/enroll-tpm.sh"
+    . "${ALPINE_FDE_CMD_DIR:?}/reseal.sh"
     load_config
 
     # --- paths / config ---------------------------------------------------------
@@ -235,8 +235,8 @@ cmd_ukictl_build_main() {
     # blocker #11: --re-sign-all carries NO kver (nothing to validate) — it
     # exits at the re-sign-all branch below before any kver consumption
     if [ "$_uk_sign_all" -eq 0 ] && ! esp_validate_kver "$_uk_kver"; then
-        err "ukictl build: invalid kernel version: '$_uk_kver' (alphanumerics, '.', '_', '-' only)"
-        cmd_ukictl_build_usage
+        err "kernel build: invalid kernel version: '$_uk_kver' (alphanumerics, '.', '_', '-' only)"
+        cmd_kernel_build_usage
         exit "$ALPINE_FDE_USAGE"
     fi
     # G-B3/ADR-19/ADR-20: the ladder is resolved — Mechanism B (rung b) is the
@@ -248,17 +248,17 @@ cmd_ukictl_build_main() {
     _uk_policy_mode=$(policy_mode_normalize "${POLICY_MODE:-${policy_mode:-a2}}") || _uk_pm_rc=$?
     if [ "$_uk_pm_rc" -ne 0 ]; then
         if [ "$_uk_pm_rc" -eq "$ALPINE_FDE_FAIL_CLOSED" ]; then
-            _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
+            _kernel_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
                 "POLICY_MODE documented-absent (ADR-19/ADR-20): Mechanism B (rung b) is the normative seal path; refusing to build"
-            err "ukictl build: refusing to build — see the POLICY_MODE error above (ADR-19/ADR-20)"
+            err "kernel build: refusing to build — see the POLICY_MODE error above (ADR-19/ADR-20)"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
-        die "ukictl build: invalid policy_mode (expected: b — a2 / a-prime-prime / native accepted as aliases; ADR-19/ADR-20)"
+        die "kernel build: invalid policy_mode (expected: b — a2 / a-prime-prime / native accepted as aliases; ADR-19/ADR-20)"
     fi
     _uk_retention=${RETENTION:-2}
     case $_uk_retention in
         '' | *[!0-9]*)
-            die "ukictl build: invalid retention '$_uk_retention' (expected a non-negative integer)"
+            die "kernel build: invalid retention '$_uk_retention' (expected a non-negative integer)"
             ;;
     esac
 
@@ -266,9 +266,9 @@ cmd_ukictl_build_main() {
 
     # --- 0. loud-fail preconditions BEFORE any ESP mutation (ADR-8) --------------
     if ! _uk_key_reason=$(keys_check); then
-        _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" "$_uk_key_reason"
-        err "ukictl build: $_uk_key_reason"
-        err "ukictl build: refusing to touch the ESP — restore the scp backup or attach the signing medium and re-run (ADR-8/ADR-18)"
+        _kernel_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" "$_uk_key_reason"
+        err "kernel build: $_uk_key_reason"
+        err "kernel build: refusing to touch the ESP — restore the scp backup or attach the signing medium and re-run (ADR-8/ADR-18)"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
@@ -313,7 +313,7 @@ cmd_ukictl_build_main() {
             keys_scrub "${_uk_unlock_tmp}" 2>/dev/null || :
         fi
         if [ "$_uk_rc" -ne 0 ]; then
-            _ukictl_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
+            _kernel_marker_write "$_uk_marker" "$_uk_etc" "$_uk_kver" \
                 "${_uk_fail_reason:-build failed (rc=$_uk_rc); full output above}"
         fi
         exit "$_uk_rc"
@@ -339,18 +339,18 @@ cmd_ukictl_build_main() {
             else
                 _uk_fail_reason="release.pem is encrypted: passphrase required; provide ALPINE_FDE_KEY_PASSPHRASE or run interactively (ADR-18)"
             fi
-            err "ukictl build: $_uk_fail_reason"
-            err "ukictl build: refusing to touch the ESP (ADR-8/ADR-18)"
+            err "kernel build: $_uk_fail_reason"
+            err "kernel build: refusing to touch the ESP (ADR-8/ADR-18)"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         }
         chmod 600 "$_uk_unlock_tmp" 2>/dev/null || :
         _uk_keyfile=$_uk_unlock_tmp
-        info "ukictl build: unlocked encrypted release.pem -> $_uk_keyfile (scrubbed at exit)"
+        info "kernel build: unlocked encrypted release.pem -> $_uk_keyfile (scrubbed at exit)"
     fi
 
     # --- re-sign-all path (B-G12; no UKI rebuild, no ESP writes) ------------------
     if [ "$_uk_sign_all" -eq 1 ]; then
-        _ukictl_re_sign_all "$_uk_manifest" "$_uk_d7" "$_uk_marker"
+        _kernel_re_sign_all "$_uk_manifest" "$_uk_d7" "$_uk_marker"
         exit 0 # re-sign-all returns; this exit fires the cleanup trap with rc 0
     fi
 
@@ -360,16 +360,16 @@ cmd_ukictl_build_main() {
     # "<root>/boot/vmlinuz-<kver>" that only fixture sandboxes can satisfy).
     if ! _uk_kernel_resolve "$_uk_root" "$_uk_kver"; then
         _uk_fail_reason="required build input missing: kernel image for $_uk_kver"
-        err "ukictl build: required build input missing: kernel image for $_uk_kver"
-        err "ukictl build: probed (first regular non-empty file wins): $(printf '%s' "$_uk_kernel_cands" | tr '\n' ' ')"
-        err "ukictl build: remedy: install the matching kernel package (e.g. apk add linux-lts) and check: ls ${_uk_root:-}/boot"
+        err "kernel build: required build input missing: kernel image for $_uk_kver"
+        err "kernel build: probed (first regular non-empty file wins): $(printf '%s' "$_uk_kernel_cands" | tr '\n' ' ')"
+        err "kernel build: remedy: install the matching kernel package (e.g. apk add linux-lts) and check: ls ${_uk_root:-}/boot"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     for _uk_f in "$_uk_kernel" "$_uk_cmdline" "$_uk_osrelease"; do
         if [ ! -f "$_uk_f" ]; then
             _uk_fail_reason="required build input missing: $_uk_f"
-            err "ukictl build: $_uk_fail_reason"
+            err "kernel build: $_uk_fail_reason"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
     done
@@ -377,8 +377,8 @@ cmd_ukictl_build_main() {
     # --- cmdline pins guard (G-U6; §8.2 H-G1) — the pins are build inputs ---------
     if ! _uk_pins_reason=$(cmdline_pins_check "$_uk_cmdline"); then
         _uk_fail_reason=$_uk_pins_reason
-        err "ukictl build: $_uk_pins_reason"
-        err "ukictl build: refusing to embed an unpinned cmdline (emergency-shell escape) — restore rd.shell=0 rd.emergency=poweroff"
+        err "kernel build: $_uk_pins_reason"
+        err "kernel build: refusing to embed an unpinned cmdline (emergency-shell escape) — restore rd.shell=0 rd.emergency=poweroff"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
@@ -388,15 +388,15 @@ cmd_ukictl_build_main() {
     # that can never TPM-unlock (ADR-8: loud failure instead).
     if ! _uk_ct_reason=$(crypttab_tpm2_check "${_uk_root}/etc/crypttab"); then
         _uk_fail_reason=$_uk_ct_reason
-        err "ukictl build: $_uk_ct_reason"
-        err "ukictl build: refusing to build the initramfs — fix /etc/crypttab first (§8.2)"
+        err "kernel build: $_uk_ct_reason"
+        err "kernel build: refusing to build the initramfs — fix /etc/crypttab first (§8.2)"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
     # --- workdir + guarded build body ----------------------------------------------
     _uk_work=$(mktemp -d "${TMPDIR:-/tmp}/alpine-fde-build.XXXXXX") || {
         _uk_fail_reason="mktemp for the build workdir failed"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     _uk_uki="$_uk_work/uki.efi"
@@ -414,8 +414,8 @@ cmd_ukictl_build_main() {
     _uk_body || _uk_rc=$?
     if [ "$_uk_rc" -ne 0 ]; then
         _uk_fail_reason="${_uk_fail_reason:-build step failed (rc=$_uk_rc); full output above}"
-        err "ukictl build: failed — $_uk_fail_reason"
-        err "ukictl build: previous UKI left untouched; marker: $_uk_marker"
+        err "kernel build: failed — $_uk_fail_reason"
+        err "kernel build: previous UKI left untouched; marker: $_uk_marker"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
 
@@ -423,7 +423,7 @@ cmd_ukictl_build_main() {
 }
 
 # _uk_body — the build pipeline proper (run in the guarded context of
-# cmd_ukictl_build_main; all _uk_* variables are process globals of this cmd)
+# cmd_kernel_build_main; all _uk_* variables are process globals of this cmd)
 _uk_body() {
     _uk_keydir=$(keys_dir)
 
@@ -439,14 +439,14 @@ _uk_body() {
     initramfs_splice_unseal "$_uk_work/initrd.img" "${_uk_root}/etc/crypttab" ||
         {
             _uk_fail_reason="initramfs splice failed (see above)"
-            err "ukictl build: $_uk_fail_reason"
+            err "kernel build: $_uk_fail_reason"
             return 1
         }
 
     # --- 1b. initrd inventory audit (§8.2/§12/I6; loud ADR-8 failure) --------------
     if ! initrd_audit "$_uk_work/initrd.img" "$_uk_kver" "$_uk_root"; then
         _uk_fail_reason="initrd audit failed: ${_initrd_audit_reason:-<no reason>}"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
 
@@ -470,10 +470,10 @@ _uk_body() {
     # runs (never the bare python FileNotFoundError again).
     if ! _uk_measure_impl=$(measure_resolve); then
         _uk_fail_reason="no PCR-signing implementation available"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
-    info "ukictl build: measure implementation: $_uk_measure_impl"
+    info "kernel build: measure implementation: $_uk_measure_impl"
     _uk_measure_tools=$(measure_tools_arg "$_uk_measure_impl")
     set -- \
         "--linux=$_uk_kernel" \
@@ -496,13 +496,13 @@ _uk_body() {
     fi
     if ! ukify build "$@" >"$_uk_measure"; then
         _uk_fail_reason="ukify build failed (kernel $_uk_kver)"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
     _uk_pcr11=$(jq -r '.sha256[] | select(.phase == "enter-initrd") | .hash' "$_uk_measure")
     if [ "${#_uk_pcr11}" -ne 64 ] || ! policy_check_digest "$_uk_pcr11"; then
         _uk_fail_reason="ukify did not predict an enter-initrd PCR 11 digest"
-        err "ukictl build: ukify did not predict an enter-initrd PCR 11 digest (got '${_uk_pcr11:-<none>}')"
+        err "kernel build: ukify did not predict an enter-initrd PCR 11 digest (got '${_uk_pcr11:-<none>}')"
         return 1
     fi
 
@@ -512,7 +512,7 @@ _uk_body() {
     if policy_check_digest "$_uk_d7"; then
         _uk_policy_digest=$(policy_digest "$_uk_d7" "$_uk_pcr11")
     else
-        warn "ukictl build: baseline PCR 7 pending — policy_digest/signature recorded as empty (run 'alpine-fde audit --init')"
+        warn "kernel build: baseline PCR 7 pending — policy_digest/signature recorded as empty (run 'alpine-fde audit --init')"
     fi
 
     # --- 4. Secure Boot signing + verification --------------------------------------
@@ -521,12 +521,12 @@ _uk_body() {
     if ! sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
         --output "$_uk_uki_signed" "$_uk_uki" >/dev/null; then
         _uk_fail_reason="sbsign failed (key/cert: $_uk_keydir)"
-        err "ukictl build: sbsign failed — check the signing key (key: $_uk_keyfile)"
+        err "kernel build: sbsign failed — check the signing key (key: $_uk_keyfile)"
         return 1
     fi
     sbverify --cert "$_uk_keydir/release.crt" "$_uk_uki_signed" >/dev/null || {
         _uk_fail_reason="sbverify rejected the signed UKI"
-        err "ukictl build: sbverify rejected the signed UKI"
+        err "kernel build: sbverify rejected the signed UKI"
         return 1
     }
 
@@ -544,21 +544,21 @@ _uk_body() {
         if [ -f "$_uk_bm" ]; then
             sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
                 --output "$_uk_bm" "$_uk_bm" || {
-                err "ukictl build: sbsign failed for boot manager $_uk_bm"
+                err "kernel build: sbsign failed for boot manager $_uk_bm"
                 return 1
             }
             _uk_bm_signed=$((_uk_bm_signed + 1))
         fi
     done
     [ "$_uk_bm_signed" -gt 0 ] &&
-        info "ukictl build: signed $_uk_bm_signed boot manager image(s) (Secure Boot)"
+        info "kernel build: signed $_uk_bm_signed boot manager image(s) (Secure Boot)"
 
     # --- 6. manifest upsert + meta ----------------------------------------------------
     # MD-01: the signing-bucket contract for policy_pubkey_fp is "empty stdout +
     # rc 1 on failure" — consume defensively, never record a silent empty fp.
     if ! _uk_pubkey_fp=$(policy_pubkey_fp "$_uk_keydir/release.pub") || [ -z "$_uk_pubkey_fp" ]; then
         _uk_fail_reason="cannot fingerprint the release public key ($_uk_keydir/release.pub)"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
     manifest_upsert "$_uk_manifest" "$_uk_kver" "$_uk_pcr11" "$_uk_policy_digest" "$_uk_signature"
@@ -578,27 +578,27 @@ _uk_body() {
     # bookkeeping). Prune (6c/7) runs only after this succeeded — an enroll
     # failure lands on the ADR-8 marker path with the pre-enroll ESP/manifest
     # state (UKI install may stand).
-    _uk_luks_uuid=$(enrl_crypttab_uuid "${_uk_root}/etc/crypttab" || true)
+    _uk_luks_uuid=$(reseal_crypttab_uuid "${_uk_root}/etc/crypttab" || true)
     _uk_luks_dev=''
     if [ -n "$_uk_luks_uuid" ]; then
-        _uk_luks_dev="$(enrl_by_uuid_dir)/$_uk_luks_uuid"
+        _uk_luks_dev="$(reseal_by_uuid_dir)/$_uk_luks_uuid"
     fi
-    ENRL_ENROLLED=0
-    if ! enrl_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub"; then
-        _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: ${_uk_luks_dev:-<none>})${ENRL_FAIL_REASON:+: $ENRL_FAIL_REASON}"
-        err "ukictl build: $_uk_fail_reason"
+    RESEAL_ENROLLED=0
+    if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub"; then
+        _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: ${_uk_luks_dev:-<none>})${RESEAL_FAIL_REASON:+: $RESEAL_FAIL_REASON}"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
-    if [ "$ENRL_ENROLLED" -eq 1 ]; then
+    if [ "$RESEAL_ENROLLED" -eq 1 ]; then
         # LO-02/MD-01: the enrolled.json write is guarded — a silent empty-write
         # would leave the §8.4 record missing while the build reports success
-        if ! enrl_record "$_uk_luks_uuid" "$_uk_policy_mode" "$ENRL_WIPE" "$ENRL_SLOT" \
+        if ! reseal_record "$_uk_luks_uuid" "$_uk_policy_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" \
             "$_uk_keydir/release.pub"; then
             _uk_fail_reason="writing enrolled.json failed after enrollment"
-            err "ukictl build: $_uk_fail_reason"
+            err "kernel build: $_uk_fail_reason"
             return 1
         fi
-        manifest_set_enrollment "$_uk_manifest" "$ENRL_SLOT" "$ENRL_TOKEN_ID"
+        manifest_set_enrollment "$_uk_manifest" "$RESEAL_SLOT" "$RESEAL_TOKEN_ID"
     elif [ -n "$_uk_luks_dev" ] && [ -e "$_uk_luks_dev" ]; then
         # Token standing (the s14 zero-TPM-op path): §8.4 stamps the standing
         # enrollment's keyslot/token_id onto EVERY manifest entry — incl. the
@@ -606,23 +606,23 @@ _uk_body() {
         # only). Source: the token introspection ensure-once already read —
         # a luksDump metadata read only, still ZERO TPM operations.
         _uk_standing=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-standing.XXXXXX") ||
-            die "ukictl build: mktemp failed"
-        if enrl_cryptsetup luksDump --dump-json-metadata "$_uk_luks_dev" \
+            die "kernel build: mktemp failed"
+        if reseal_cryptsetup luksDump --dump-json-metadata "$_uk_luks_dev" \
             >"$_uk_standing" 2>/dev/null; then
             _uk_slot=$(luks_json_token_keyslot "$_uk_standing" systemd-tpm2 || true)
-            _uk_tok=$(enrl_json_token_id "$_uk_standing" systemd-tpm2)
+            _uk_tok=$(reseal_json_token_id "$_uk_standing" systemd-tpm2)
             if [ -n "$_uk_slot" ] && [ -n "$_uk_tok" ]; then
                 manifest_set_enrollment "$_uk_manifest" "$_uk_slot" "$_uk_tok"
             else
-                warn "ukictl build: cannot parse the standing token's keyslot/token_id on $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
+                warn "kernel build: cannot parse the standing token's keyslot/token_id on $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
             fi
         else
-            warn "ukictl build: cannot re-read LUKS2 metadata of $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
+            warn "kernel build: cannot re-read LUKS2 metadata of $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
         fi
         rm -f "$_uk_standing"
     fi
     # Volume unreachable (dev empty or unresolvable) is the documented
-    # precondition escape: enrl_ensure_once warned; the entries keep empty
+    # precondition escape: reseal_ensure_once warned; the entries keep empty
     # keyslot/token_id bookkeeping until a build that can reach the volume.
 
     # --- 6c. manifest prune to the keep set --------------------------------------------
@@ -636,14 +636,14 @@ _uk_body() {
     # shellcheck disable=SC2086  # word split intended: one kver per line
     if ! esp_prune_ukis $_uk_keep; then
         _uk_fail_reason="ESP prune failed — ESP and manifest would diverge (§9.2); marker set, UKI install stands"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
 
     # --- 8. predictions.json (B-G11/B-G15) -------------------------------------------
     if ! _uk_sections=$(ukify inspect "$_uk_uki_signed" --json=short); then
         _uk_fail_reason="ukify inspect failed on the installed UKI"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         return 1
     fi
     _uk_uki_size=$(wc -c <"$_uk_uki_signed" | tr -d '[:space:]')
@@ -672,24 +672,24 @@ _uk_body() {
           sections: ($sections | with_entries(.value |= {size: .size, sha256: .sha256})),
           tools: {ukify: $ukify_ver, sbsign: $sbsign_ver, openssl: $openssl_ver},
           updated_at: $now}' >"$_uk_predictions_tmp"; then
-        err "ukictl build: assembling predictions.json failed"
+        err "kernel build: assembling predictions.json failed"
         return 1
     fi
     manifest_atomic_write "$_uk_predictions" <"$_uk_predictions_tmp"
 
     # --- 9. success: clear the failure marker -----------------------------------------
     rm -f "$_uk_marker"
-    info "ukictl build: kernel $_uk_kver installed and recorded (pcr11=$_uk_pcr11 policy=${_uk_policy_digest:-<pending>})"
+    info "kernel build: kernel $_uk_kver installed and recorded (pcr11=$_uk_pcr11 policy=${_uk_policy_digest:-<pending>})"
     return 0
 }
 
-# _ukictl_re_sign_all <manifest> <d7hex> <marker> — B-G12: recompute every
+# _kernel_re_sign_all <manifest> <d7hex> <marker> — B-G12: recompute every
 # retained entry's policy_digest from its stored pcr11_digest + current d7,
 # re-sign with the current key, atomically rewrite the manifest, print a diff.
 #
 # §9.4/§9.6 bookkeeping layer ONLY (review MD-03 header fix): no ESP UKI
 # re-install and no re-enrollment happen here — for the full §9.6 step-6
-# runbook run `ukictl build <kver>` per retained kernel + `enroll-tpm`.
+# runbook run `kernel build <kver>` per retained kernel + `reseal`.
 #
 # Failure contract (review MD-03 + HW-1):
 #   * a pending baseline d7 is refused by a PRECHECK before the loop (the old
@@ -700,28 +700,28 @@ _uk_body() {
 #     same pass, so the harness prediction checks (§12) never see divergence
 #   * any failure exits non-zero → the cmd's EXIT trap wipes temps and
 #     persists the ADR-8 marker
-_ukictl_re_sign_all() {
+_kernel_re_sign_all() {
     _uk_manifest=$1
     _uk_d7=$2
     _uk_marker=$3
     manifest_load "$_uk_manifest" >/dev/null 2>&1 \
-        || die "ukictl build --re-sign-all: no manifest at $_uk_manifest (nothing to re-sign)"
+        || die "kernel build --re-sign-all: no manifest at $_uk_manifest (nothing to re-sign)"
     # precheck: a pending baseline PCR 7 makes every policy_digest computation
     # impossible — refuse BEFORE any transformation (torn-manifest prevention)
     if ! policy_check_digest "$_uk_d7"; then
         _uk_fail_reason="re-sign-all: baseline PCR 7 pending — run 'alpine-fde audit --init' first; nothing re-signed"
-        err "ukictl build --re-sign-all: $_uk_fail_reason"
+        err "kernel build --re-sign-all: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
     _uk_keydir=$(keys_dir)
     _uk_rs_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
         _uk_fail_reason="mktemp failed (re-sign-all manifest copy)"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     _uk_rs_sig_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
         _uk_fail_reason="mktemp failed (re-sign-all signature)"
-        err "ukictl build: $_uk_fail_reason"
+        err "kernel build: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     # transactional: all re-signs land in the COPY; the live manifest is
@@ -730,7 +730,7 @@ _ukictl_re_sign_all() {
     # a misattributed schema error)
     cp "$_uk_manifest" "$_uk_rs_tmp" || {
         _uk_fail_reason="cannot copy the manifest for re-signing ($_uk_manifest -> $_uk_rs_tmp)"
-        err "ukictl build --re-sign-all: $_uk_fail_reason"
+        err "kernel build --re-sign-all: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     }
     for _uk_kver in $(manifest_kvers "$_uk_manifest"); do
@@ -738,22 +738,22 @@ _ukictl_re_sign_all() {
             '.digests[] | select(.kernel_version == $kver) | .pcr11_digest' "$_uk_manifest")
         if ! policy_check_digest "$_uk_pcr11"; then
             _uk_fail_reason="re-sign-all: entry $_uk_kver has no/invalid stored pcr11_digest"
-            err "ukictl build --re-sign-all: entry $_uk_kver has no stored pcr11_digest"
+            err "kernel build --re-sign-all: entry $_uk_kver has no stored pcr11_digest"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! _uk_pd=$(policy_digest "$_uk_d7" "$_uk_pcr11"); then
             _uk_fail_reason="re-sign-all: policy digest computation failed for $_uk_kver"
-            err "ukictl build --re-sign-all: $_uk_fail_reason"
+            err "kernel build --re-sign-all: $_uk_fail_reason"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! policy_sign "$_uk_d7" "$_uk_pcr11" "$_uk_keyfile" "$_uk_rs_sig_tmp"; then
             _uk_fail_reason="re-sign-all: signing the policy digest failed for $_uk_kver (key: $_uk_keyfile)"
-            err "ukictl build --re-sign-all: $_uk_fail_reason"
+            err "kernel build --re-sign-all: $_uk_fail_reason"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         if ! _uk_sig=$(openssl base64 -A -in "$_uk_rs_sig_tmp"); then
             _uk_fail_reason="re-sign-all: base64 encoding the signature failed for $_uk_kver"
-            err "ukictl build --re-sign-all: $_uk_fail_reason"
+            err "kernel build --re-sign-all: $_uk_fail_reason"
             exit "$ALPINE_FDE_FAIL_CLOSED"
         fi
         manifest_upsert "$_uk_rs_tmp" "$_uk_kver" "$_uk_pcr11" "$_uk_pd" "$_uk_sig"
@@ -767,7 +767,7 @@ _ukictl_re_sign_all() {
     done
     if ! _uk_fp=$(policy_pubkey_fp "$_uk_keydir/release.pub") || [ -z "$_uk_fp" ]; then
         _uk_fail_reason="re-sign-all: cannot fingerprint the release public key ($_uk_keydir/release.pub)"
-        err "ukictl build --re-sign-all: $_uk_fail_reason"
+        err "kernel build --re-sign-all: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
     manifest_set_meta "$_uk_rs_tmp" "$(jq -r '.current_kernel // empty' "$_uk_rs_tmp")" "$_uk_fp"
@@ -783,7 +783,7 @@ _ukictl_re_sign_all() {
         if [ -n "$_uk_cur_pd" ]; then
             _uk_rs_pred_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-resign.XXXXXX") || {
                 _uk_fail_reason="mktemp failed (re-sign-all predictions)"
-                err "ukictl build: $_uk_fail_reason"
+                err "kernel build: $_uk_fail_reason"
                 exit "$ALPINE_FDE_FAIL_CLOSED"
             }
             if ! jq --arg pd "$_uk_cur_pd" --arg sig "$_uk_cur_sig" \
@@ -791,7 +791,7 @@ _ukictl_re_sign_all() {
                 '.policy_digest = $pd | .signature = $sig | .updated_at = $now' \
                 "$_uk_pred" >"$_uk_rs_pred_tmp"; then
                 _uk_fail_reason="re-sign-all: refreshing predictions.json failed"
-                err "ukictl build --re-sign-all: $_uk_fail_reason"
+                err "kernel build --re-sign-all: $_uk_fail_reason"
                 exit "$ALPINE_FDE_FAIL_CLOSED"
             fi
             manifest_atomic_write "$_uk_pred" <"$_uk_rs_pred_tmp"
@@ -806,5 +806,5 @@ _ukictl_re_sign_all() {
     rm -f "$_uk_rs_sig_tmp"
     _uk_rs_sig_tmp=''
     rm -f "$_uk_marker"
-    info "ukictl build --re-sign-all: $_uk_manifest re-signed over baseline d7 ($_uk_d7)"
+    info "kernel build --re-sign-all: $_uk_manifest re-signed over baseline d7 ($_uk_d7)"
 }

@@ -10,7 +10,7 @@
 #
 #   File "/usr/sbin/ukify", line 839, in call_systemd_measure
 #   FileNotFoundError: [Errno 21] ... '/usr/lib/systemd/systemd-measure'
-#   alpine-fde: error: ukictl build: ukify build failed (kernel 6.18.53-0-lts)
+#   alpine-fde: error: kernel build: ukify build failed (kernel 6.18.53-0-lts)
 #
 # This module reproduces the REAL binary's contract (systemd 261.3 oracle,
 # byte-for-byte differential-pinned by tests/integration/measure_shim_oracle.sh)
@@ -53,7 +53,7 @@
 # private key is NOT rejected (the oracle signs with the private key and
 # fingerprints the given public key verbatim — pinned behavior).
 #
-# Wiring (lib/cmd/ukictl-build.sh): a REAL systemd-measure (e2e-host/CI shape)
+# Wiring (lib/cmd/kernel-build.sh): a REAL systemd-measure (e2e-host/CI shape)
 # always wins; only when absent does measure_probe stage an executable
 # `systemd-measure` shim next to this module's libs and hand it to ukify via
 # --tools=<dir>; neither available → loud fail-closed 64 naming both.
@@ -353,7 +353,7 @@ fde_measure_main() {
 
 # fde_measure_calculate ARGV... — `systemd-measure calculate` for the ukify
 # surface: expected PCR 11 value per phase. --json -> short JSON (the only
-# spelling ukictl-build's jq parse accepts); no --json -> the human format
+# spelling kernel-build's jq parse accepts); no --json -> the human format
 # ("11:sha256=<hex>" lines; lib/cmd/pcrsign.sh's awk fallback parses this).
 fde_measure_calculate() {
     _measure_parse calculate "$@" || exit "$ALPINE_FDE_FAIL_CLOSED"
@@ -472,7 +472,7 @@ measure_stage_shim() {
         die "measure: cannot resolve the measure.sh directory"
     cat >"$_mss_dir/systemd-measure" <<EOF
 #!/bin/sh
-# systemd-measure shim staged by alpine-fde ukictl build (real-server blocker
+# systemd-measure shim staged by alpine-fde kernel build (real-server blocker
 # #16: Alpine ships no systemd-measure package). Dispatches to the bundled
 # POSIX sh + openssl implementation; differential-pinned byte-for-byte against
 # the real systemd-measure by tests/integration/measure_shim_oracle.sh.
@@ -495,22 +495,22 @@ EOF
 measure_probe() {
     _mpr_dir=$1
     if [ -n "$(measure_system_bin)" ]; then
-        info "ukictl build: PCR signing via system systemd-measure ($(measure_system_bin))"
+        info "kernel build: PCR signing via system systemd-measure ($(measure_system_bin))"
         return 0
     fi
     for _mpr_sh in $(measure_lib_candidates); do
         [ -f "$_mpr_sh" ] || continue
         measure_stage_shim "$_mpr_dir" "$_mpr_sh"
-        info "ukictl build: no system systemd-measure — PCR signing via the bundled shim ($_mpr_sh, --tools=$_mpr_dir)"
+        info "kernel build: no system systemd-measure — PCR signing via the bundled shim ($_mpr_sh, --tools=$_mpr_dir)"
         printf '%s\n' "--tools=$_mpr_dir"
         return 0
     done
-    die "ukictl build: no PCR-signing implementation available: probed the system systemd-measure (command -v, ALPINE_FDE_MEASURE_BIN, /usr/lib/systemd/systemd-measure) AND the bundled lib/measure.sh (ALPINE_FDE_CMD_DIR, /opt/alpine-fde/lib) — Alpine ships no systemd-measure package (real-server blocker #16), so the bundled shim is the only guest-side implementation; repair the alpine-fde install tree"
+    die "kernel build: no PCR-signing implementation available: probed the system systemd-measure (command -v, ALPINE_FDE_MEASURE_BIN, /usr/lib/systemd/systemd-measure) AND the bundled lib/measure.sh (ALPINE_FDE_CMD_DIR, /opt/alpine-fde/lib) — Alpine ships no systemd-measure package (real-server blocker #16), so the bundled shim is the only guest-side implementation; repair the alpine-fde install tree"
 }
 
 # --- product-wide resolution (real-server blocker #17) ------------------------------
 
-# measure_stage_root — the STABLE staged-shim location. The ukictl workdir
+# measure_stage_root — the STABLE staged-shim location. The kernel workdir
 # tools dir dies with the workdir; every other consumer (seal.sh's G-B6
 # recomputation) must resolve the SAME implementation from a stable path.
 # ALPINE_FDE_MEASURE_STAGE wins when set (test seam).

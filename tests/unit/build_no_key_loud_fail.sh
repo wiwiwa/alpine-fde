@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/unit/build_no_key_loud_fail.sh — ADR-8/I4 loud failure: with the release
-# key material absent, `ukictl build` exits fail-closed (64), persists the
+# key material absent, `kernel build` exits fail-closed (64), persists the
 # build-failed marker, and does NOT mutate the ESP or the manifest — the previous
 # default UKI stays bootable and unlockable (§10 failure-matrix row).
 set -u
@@ -65,13 +65,13 @@ alpine-fde() {
 }
 
 # --- case 1: keydir not configured at all --------------------------------------------
-out=$(alpine-fde "" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "" kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "unconfigured keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error names the missing configuration" "$out" "release key directory not configured"
 
 # --- case 2: keydir exists but is empty (USB not attached / backup not restored) ------
-out=$(alpine-fde "$TMP/empty-keydir" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$TMP/empty-keydir" kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "empty keydir -> fail-closed exit 64" 64 $rc
 assert_contains "error explains what is missing" "$out" "release.pem is missing"
@@ -84,7 +84,7 @@ assert_contains "recovery copy offers the scp backup + medium paths (ADR-18)" "$
 # --- case 3: keydir has the public key but the private key is offline ------------------
 mkdir -p "$TMP/pubonly"
 cp "$REPO/fixtures/keys/release.pub" "$TMP/pubonly/"
-out=$(alpine-fde "$TMP/pubonly" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$TMP/pubonly" kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "public-key-only keydir -> fail-closed exit 64 (I4)" 64 $rc
 assert_contains "error names the absent private key" "$out" "release.pem is missing"
@@ -105,7 +105,7 @@ assert_contains "marker records the reason" "$(cat "$marker")" "reason:"
 
 # recovery: attach the key (fixture stands in for the signing medium) -> build
 # succeeds and the marker is cleared (§8.3 operator recovery)
-out=$(alpine-fde "$REPO/fixtures/keys" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$REPO/fixtures/keys" kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "recovery build with the key attached succeeds" 0 $rc
 [ ! -e "$marker" ]

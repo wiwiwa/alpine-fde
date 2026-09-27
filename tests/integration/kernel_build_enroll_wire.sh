@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/integration/ukictl_build_enroll_wire.sh — G-U1/G-U2/G-R3/G-D12: `ukictl build`
+# tests/integration/kernel_build_enroll_wire.sh — G-U1/G-U2/G-R3/G-D12: `kernel build`
 # carries the ENSURE-ONCE Mechanism B enrollment step (ADR-19/ADR-20; after the
 # manifest update, BEFORE prune; wired to the ADR-8 marker path). Exercised
 # END-TO-END: REAL swtpm (the seal ops are the production lib/seal.sh path),
@@ -87,7 +87,7 @@ mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux" "$FAKEBIN" "$BYUUI
 
 # --- hermetic release keys (shared fixtures tree is mutated by parallel suites)
 # ADR-16: the release key must be RSA >= 3072 — the enroll path fail-closes rc 2
-# otherwise (keys_rsa3072_guard, lib/cmd/enroll-tpm.sh), so the fixture mints a
+# otherwise (keys_rsa3072_guard, lib/cmd/reseal.sh), so the fixture mints a
 # 3072-bit key.
 openssl genrsa -out "$KEYDIR/release.pem" 3072 2>/dev/null
 openssl pkey -in "$KEYDIR/release.pem" -pubout -out "$KEYDIR/release.pub" 2>/dev/null
@@ -193,7 +193,7 @@ tok_meta() { # jq FILTER over the REAL metadata (-c: compact — arrays compare 
 reset_volume
 reset_wire
 : >"$MARKER" # stale marker must be cleared by the successful build
-out=$(alpine-fde ukictl build "$KVER" 2>&1)
+out=$(alpine-fde kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "T1: build with no token succeeds (enroll once)" 0 $rc
 assert_eq "T1: exactly one luksAddKey (the fresh keyslot)" "1" "$(cs_count 'CALL luksAddKey')"
@@ -228,7 +228,7 @@ assert_eq "T3: token_id repeated on a retained entry (bookkeeping)" "0" \
 
 # --- T2: token standing → metadata read ONLY, zero mutating calls ----------------
 reset_wire
-out=$(alpine-fde ukictl build "$KVER" 2>&1)
+out=$(alpine-fde kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "T2: build with token standing succeeds" 0 $rc
 assert_contains "T2: info line says the enrollment stands" "$out" "already present"
@@ -246,7 +246,7 @@ printf 'not a LUKS container' >"$LUKS" # the volume cannot even be read
 reset_wire
 printf 'old-4.9.0' >"$ESP/EFI/Linux/alpine-fde-4.9.0-1-amd64.efi" # prune bait beyond retention
 manifest_upsert "$M" "4.9.0-1-amd64" "p11-old" "pd-old" "sig-old"
-out=$(alpine-fde ukictl build "$KVER" 2>&1)
+out=$(alpine-fde kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "T4: enroll failure fails the build closed (64)" 64 $rc
 assert_contains "T4: failure names the ensure-once enroll step" "$out" "TPM enrollment failed"
@@ -260,7 +260,7 @@ assert_eq "T4: prune did NOT run (manifest entry still present)" "present" \
 # --- T5: recovery — the enrollment works again, marker cleared, prune runs --------
 reset_volume
 reset_wire
-out=$(alpine-fde ukictl build "$KVER" 2>&1)
+out=$(alpine-fde kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "T5: recovery build succeeds" 0 $rc
 assert_file_absent "T5: success cleared the failure marker" "$MARKER"
@@ -275,7 +275,7 @@ assert_eq "T5: prune ran after recovery" "absent" \
 KVER_B=6.13.0-1-amd64
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_B"
 reset_wire
-out=$(alpine-fde ukictl build "$KVER_B" 2>&1)
+out=$(alpine-fde kernel build "$KVER_B" 2>&1)
 rc=$?
 assert_rc "T6: new-kver build with token standing succeeds" 0 $rc
 assert_contains "T6: info line says the enrollment stands" "$out" "already present"
@@ -295,7 +295,7 @@ KVER_C=6.14.0-1-amd64
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_C"
 rm -f "$BYUUID/$UUID" # the volume is not resolvable in this build context
 reset_wire
-out=$(alpine-fde ukictl build "$KVER_C" 2>&1)
+out=$(alpine-fde kernel build "$KVER_C" 2>&1)
 rc=$?
 assert_rc "T7: build succeeds with the volume unreachable (escape, rc 0)" 0 $rc
 assert_contains "T7: warning names the unreachable volume" "$out" "not reachable"
@@ -323,7 +323,7 @@ jq -n '{type: "systemd-tpm2", keyslots: ["2"], "tpm2-blob": "AAEAC0RhdGE=", "tpm
 cryptsetup token import "$LUKS" --token-id 1 --json-file "$TMP/tok2.json" \
     --disable-external-tokens
 reset_wire
-out=$(alpine-fde ukictl build "$KVER" 2>&1)
+out=$(alpine-fde kernel build "$KVER" 2>&1)
 rc=$?
 assert_rc "T8: >1 standing tokens fails the build closed (64)" 64 $rc
 assert_contains "T8: message cites manual intervention" "$out" "manual intervention"
@@ -338,7 +338,7 @@ assert_eq "T8: ZERO mutating calls (refusal, not re-enroll)" "0" \
 reset_volume
 reset_wire
 rm -f "$MARKER" "$ENROLLED"
-alpine-fde ukictl build "$KVER" >/dev/null 2>&1
+alpine-fde kernel build "$KVER" >/dev/null 2>&1
 rc=$?
 assert_rc "T9: build with the lock wire succeeds" 0 $rc
 assert_eq "T9: luksAddKey ran exactly once" "1" "$(cs_count 'CALL luksAddKey')"
@@ -349,7 +349,7 @@ assert_eq "T9: the lock was HELD at luksAddKey time (probe lost)" "0" \
 # After T9's build the REAL metadata carries the token; the second build must
 # observe it (standing path) rather than enroll again. The CS log is NOT reset:
 # it spans both builds, so the count pins the one-enrollment invariant.
-out2=$(alpine-fde ukictl build "$KVER" 2>&1)
+out2=$(alpine-fde kernel build "$KVER" 2>&1)
 rc2=$?
 assert_rc "T10: second build sees the standing token (rc 0)" 0 "$rc2"
 assert_contains "T10: second build took the standing path" "$out2" "already present"
@@ -368,7 +368,7 @@ printf '{\n  "schema_version": "1",\n  "state": "installed"\n}\n' >"$ISTATE"
 reset_volume
 rm -f "$ENROLLED" "$MARKER"
 reset_wire
-out=$(alpine-fde ukictl build "$KVER_D" 2>&1)
+out=$(alpine-fde kernel build "$KVER_D" 2>&1)
 rc=$?
 assert_rc "T11: stage-1 build (state=installed, reachable volume, 0 tokens) rc 0" 0 $rc
 assert_eq "T11: ZERO mutating calls (gate fired before token inspection)" "0" \
@@ -392,7 +392,7 @@ jq -n '{expected_pcr7: "pending", status: "pending"}' >"$ROOT/etc/alpine-fde/bas
 reset_volume
 rm -f "$ENROLLED" "$MARKER"
 reset_wire
-out=$(alpine-fde ukictl build "$KVER_E" 2>&1)
+out=$(alpine-fde kernel build "$KVER_E" 2>&1)
 rc=$?
 assert_rc "T12: pending-baseline build rc 0 (gate skip)" 0 $rc
 assert_eq "T12: ZERO mutating calls" "0" \
@@ -411,7 +411,7 @@ jq -n '{expected_pcr7: "a5f90c8c5a73ade2323ba70d2c1a8a4a5a1e6e46e08c8ad3f3c5d7c9
 reset_volume
 rm -f "$ENROLLED" "$MARKER"
 reset_wire
-alpine-fde ukictl build "$KVER" >/dev/null 2>&1
+alpine-fde kernel build "$KVER" >/dev/null 2>&1
 rc=$?
 assert_rc "T13: finalized install state build enrolls (rc 0)" 0 $rc
 assert_eq "T13: exactly ONE enrollment under a finalized install state" "1" \
@@ -422,7 +422,7 @@ assert_file_exists "T13: enrolled.json recorded" "$ENROLLED"
 rm -f "$ISTATE" "$ENROLLED" "$MARKER"
 reset_volume
 reset_wire
-alpine-fde ukictl build "$KVER" >/dev/null 2>&1
+alpine-fde kernel build "$KVER" >/dev/null 2>&1
 rc=$?
 assert_rc "T14: absent install-state file ⇒ legacy gate passes (enrolls)" 0 $rc
 assert_eq "T14: exactly ONE enrollment without any install-state file" "1" \

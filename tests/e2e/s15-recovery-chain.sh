@@ -489,7 +489,7 @@ _host_wipe_enrollment() {
     done
 }
 # _enroll_finalized <pcrsig.json> <logfile> — the REAL production CLI
-# enroll-tpm host-side (digest-anchored: the entry's recorded d7/d11 are
+# reseal host-side (digest-anchored: the entry's recorded d7/d11 are
 # compared against the baseline as pure data; no live TPM PCR read; the TPM
 # must be serving for the SRK seal). rc asserted by the caller.
 _enroll_finalized() {
@@ -819,9 +819,9 @@ assert_eq "re-sealed combined entry pol == policy_digest(drifted d7, same d11)" 
 uki_pcrsig_disk "$RUN/pcrsig-drift.img" "$RUN/combined-drift.json" || exit 1
 RESEAL1_LOG="$RUN/enroll-drift.log"
 if _enroll_finalized "$RUN/combined-drift.json" "$RESEAL1_LOG"; then
-    _assert_result ok "re-seal 1: enroll-tpm rc 0 (stale retired + fresh seal stood, one run)" ""
+    _assert_result ok "re-seal 1: reseal rc 0 (stale retired + fresh seal stood, one run)" ""
 else
-    _assert_result not-ok "re-seal 1: enroll-tpm rc 0 (stale retired + fresh seal stood, one run)" \
+    _assert_result not-ok "re-seal 1: reseal rc 0 (stale retired + fresh seal stood, one run)" \
         "output: $(tail -3 "$RESEAL1_LOG" 2>/dev/null | tr '\n' ' ')"
 fi
 NTOK=$(disk_token_json "$CANON_DISK" | jq '[.[] | select(.type == "systemd-tpm2")] | length')
@@ -892,9 +892,9 @@ assert_eq "re-sealed combined entry pol == policy_digest(fresh d7, same d11)" \
 uki_pcrsig_disk "$RUN/pcrsig-fresh.img" "$RUN/combined-fresh.json" || exit 1
 RESEAL2_LOG="$RUN/enroll-fresh.log"
 if _enroll_finalized "$RUN/combined-fresh.json" "$RESEAL2_LOG"; then
-    _assert_result ok "re-seal 2: enroll-tpm rc 0 (fresh-SRK seal stood)" ""
+    _assert_result ok "re-seal 2: reseal rc 0 (fresh-SRK seal stood)" ""
 else
-    _assert_result not-ok "re-seal 2: enroll-tpm rc 0 (fresh-SRK seal stood)" \
+    _assert_result not-ok "re-seal 2: reseal rc 0 (fresh-SRK seal stood)" \
         "output: $(tail -3 "$RESEAL2_LOG" 2>/dev/null | tr '\n' ' ')"
 fi
 NTOK=$(disk_token_json "$CANON_DISK" | jq '[.[] | select(.type == "systemd-tpm2")] | length')

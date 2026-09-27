@@ -12,7 +12,7 @@
 #
 # What is checked:
 #   1. TOOL EXTRACTION (mechanical, command-position approximated) over
-#      - lib/cmd/ukictl-build.sh (the guest UKI build script, wholesale) and
+#      - lib/cmd/kernel-build.sh (the guest UKI build script, wholesale) and
 #      - every GUEST RECORD emitted by lib/cmd/install.sh
 #        (inst_plan_run guest '...' / printf '%s\n' "..." lines).
 #   2. PROVISION: each extracted command word must come from
@@ -24,7 +24,7 @@
 #      EXCEPT the documented known-gap list below.
 #   4. RED CONTROL (the founding fact): NO apk in the spool provides
 #      systemd-measure — the product must keep providing it (lib/measure.sh
-#      + the ukictl-build --tools=<dir> shim staging), or this pin fails.
+#      + the kernel-build --tools=<dir> shim staging), or this pin fails.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -108,7 +108,7 @@ extract_commands() {
     awk '
         BEGIN { q = sprintf("%c", 39); d = sprintf("%c", 34); insq = 0; indq = 0 }
         # NOTE: insq/indq (quote state) are PERSISTENT across lines on purpose:
-        # multi-line quoted strings (jq programs in ukictl-build.sh) must not
+        # multi-line quoted strings (jq programs in kernel-build.sh) must not
         # leak their bodies as fake command words.
         {
             line = $0
@@ -178,7 +178,7 @@ extract_commands() {
 }
 
 # UKI build script: wholesale (it IS the guest build program)
-extract_commands <"$REPO/lib/cmd/ukictl-build.sh" >"$TMP/tools-build.txt"
+extract_commands <"$REPO/lib/cmd/kernel-build.sh" >"$TMP/tools-build.txt"
 # install.sh: only the GUEST RECORD strings (the in-chroot steps)
 {
     grep -h "inst_plan_run guest " "$REPO/lib/cmd/install.sh" | sed -E 's/^[^"'"'"']*["'"'"']//; s/["'"'"'].*$//'
@@ -249,19 +249,19 @@ done <"$TMP/require.txt"
 
 # --- 6. RED CONTROL: systemd-measure is the founding member -------------------------
 if [ -n "$(provided_by systemd-measure)" ]; then
-    _fail "RED CONTROL inverted: an apk now provides systemd-measure ($(provided_by systemd-measure)) — switch the ukictl-build probe to prefer the package and retire the shim"
+    _fail "RED CONTROL inverted: an apk now provides systemd-measure ($(provided_by systemd-measure)) — switch the kernel-build probe to prefer the package and retire the shim"
 else
     _pass "RED CONTROL: NO apk in the spool provides systemd-measure (blocker #16 founding fact holds)"
 fi
 grep -q "fde_measure_main" "$REPO/lib/measure.sh" &&
-    grep -q -- "--tools=" "$REPO/lib/cmd/ukictl-build.sh" &&
-    grep -q "measure_resolve" "$REPO/lib/cmd/ukictl-build.sh"
+    grep -q -- "--tools=" "$REPO/lib/cmd/kernel-build.sh" &&
+    grep -q "measure_resolve" "$REPO/lib/cmd/kernel-build.sh"
 assert_rc "product provides the measure implementation (lib/measure.sh shim + measure_resolve/--tools wiring, blocker #17 centralization)" 0 $?
 
 # coverage guard: the extraction actually saw the guest build surface (a silent
 # extractor regression must not vacuate the pin)
 grep -q '^ukify$' "$TMP/tools-build.txt"
-assert_rc "extractor saw ukify in ukictl-build.sh (extraction not vacuous)" 0 $?
+assert_rc "extractor saw ukify in kernel-build.sh (extraction not vacuous)" 0 $?
 grep -q '^apk$' "$TMP/tools-records.txt" || grep -q '^echo$' "$TMP/tools-records.txt"
 assert_rc "extractor saw guest-record command words (extraction not vacuous)" 0 $?
 

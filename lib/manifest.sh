@@ -1,7 +1,7 @@
 #!/bin/sh
 # manifest.sh — /etc/alpine-fde/digests.json (docs/Architecture.md §8.4, gap B-G4):
 # the signed combined-policy digest set for all retained UKIs. Written by
-# `ukictl build`, consumed by enroll-tpm / audit / the test harness; bridges the
+# `kernel build`, consumed by reseal / audit / the test harness; bridges the
 # build→enroll hand-off including on first install.
 #
 # Schema v1 (normative for this library):

@@ -415,19 +415,19 @@ registry rows gone (see "Retirement of the absorbed scenarios" below).
   unlock, pinned-artifact rootfs populate, §9.1 btrfs subvolumes, §3.3 size
   budget, G-T11b scans); host-side `audit --init` finalizes the baseline
   (real CLI, G-R1-guarded efivars fixture); the production CLI
-  (`enroll-tpm`) seals the single finalized `{PCR 7, PCR 11}` Mechanism B
+  (`reseal`) seals the single finalized `{PCR 7, PCR 11}` Mechanism B
   token (keyslot 1, recovery slot 0 untouched); then the release UKI boots
   with stage=login on the payload drive and reaches `login:` with ZERO
   console keystrokes.
 * **Boot 2 — kernel update (s14)** — UKI 6.4.0 built (the §8.3
   apk-trigger/kernel-hook stand-in), combined `{7,11}` entry re-signed over
-  (same d7, new d11), `enroll-tpm` RETIRES the stale enrollment and stands
+  (same d7, new d11), `reseal` RETIRES the stale enrollment and stands
   the fresh seal in one run, and the new UKI boots + unseals PASSWORDLESSLY
   under the updated `{7,11}`. Plus the §10 "kernel update build failed" row:
   a keyless rebuild fails loudly and ships nothing.
 * **Boot 3 — rollback (s02)** — an OLDER retained UKI (6.1.0, K1-signed,
   never enrolled) is selected (mtools default swap = the harness stand-in
-  for bootnext) and boots + unseals passwordlessly via its OWN
+  for `kernel next`) and boots + unseals passwordlessly via its OWN
   release-signed combined `.pcrsig` with zero enrollment and zero prompts;
   LUKS2 metadata is byte-identical across the boot. (The rollback target is
   a scenario-built older variant rather than the enrolled release UKI
@@ -508,7 +508,7 @@ structure pins); the runner-side phase pins live in
   volume: the §8.2 hook's bounded recovery loop is the only way in, the
   CORRECT slot-0 passphrase is fed prompt-synchronized -> UNSEALED
   (s15/s17's boot 1); host-side the finalized baseline is stamped and the
-  production CLI (`enroll-tpm`) seals the combined `{PCR 7, PCR 11}` token
+  production CLI (`reseal`) seals the combined `{PCR 7, PCR 11}` token
   (keyslot 1, recovery slot 0 untouched).
 * **host: §9.4 detection drill** — live PCR 7 drift synthesized host-side
   (`swtpm_pcrextend`); the real CLI `audit` exits 1 with a `pcr7 DRIFT`
@@ -550,7 +550,7 @@ structure pins); the runner-side phase pins live in
 
 **Recovery-drill shape (deliberate deviation from the 3-boot sketch):** the
 sketch collapsed the two refusal legs into one in-guest recovery unlock
-("enter recovery passphrase, run `audit --accept` + `enroll-tpm` in-guest").
+("enter recovery passphrase, run `audit --accept` + `reseal` in-guest").
 The absorbed scenarios' recovery drill is FAIL-CLOSED in-guest (3 WRONG
 answers -> 3-strike `poweroff -f`) with the recovery as a HOST-side operator
 step, and collapsing the refusal legs would drop the 3-strike / fail-closed

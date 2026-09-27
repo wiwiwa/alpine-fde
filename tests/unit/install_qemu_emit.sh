@@ -11,7 +11,7 @@
 #     metadata, state, ephemeral-key scrub)
 #   * the §9.1 in-chroot provisioning sequence appears as EXECUTABLE guest
 #     lines (apk additions txn, user account, platform-key ceremony, NVRAM
-#     enrollment, bootctl, ukictl build, G-C24 provisional seal)
+#     enrollment, bootctl, kernel build, G-C24 provisional seal)
 #   * G-C25 (ADR-20 amendment #4): NO MOTD/issue banner — no guest printf
 #     drop to /etc/motd or /etc/issue and none of the banner vocabulary
 #   * G-C26: NO OsIndications record in either lane; the direct reboot is
@@ -299,7 +299,7 @@ assert_contains "guest: the guarded copy record dies fail-closed when no loader 
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" "0" \
     "$(grep -Ec 'bootctl( |$)' "$SCRIPT")"
 # real-server blocker #8: the build line must configure the release-key dir
-# (ukictl build resolves keys_dir() with NO default) and feed the passphrase
+# (kernel build resolves keys_dir() with NO default) and feed the passphrase
 # from the ceremony-staged 0600 seam file — never argv.
 assert_contains "blocker #8: the emitted build line exports the in-chroot release-key dir" "$(cat "$SCRIPT")" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
@@ -313,10 +313,10 @@ assert_eq "blocker #9: the emitted build line reads the IN-CHROOT seam path and 
 assert_eq "blocker #9: the emitted build line NEVER references the host-tmpfs seam" "0" \
     "$(grep -c '/dev/shm/alpine-fde-release-pass' "$SCRIPT")"
 # real-server blocker #11: the emitted record derives the TARGET kver in-guest
-# and passes it to ukictl build (the no-arg form fell back to uname -r, the
+# and passes it to kernel build (the no-arg form fell back to uname -r, the
 # LIVE ISO kernel)
-assert_eq "guest: ukictl build (§9.1 step 5) — with the blocker #8/#9/#11 keydir export + in-target passphrase seam + derived target kver" "1" \
-    "$(grep -c 'ukictl build "\$kv"' "$SCRIPT")"
+assert_eq "guest: kernel build (§9.1 step 5) — with the blocker #8/#9/#11 keydir export + in-target passphrase seam + derived target kver" "1" \
+    "$(grep -c 'kernel build "\$kv"' "$SCRIPT")"
 # blocker #12 follow-up: the emitted record exports ALPINE_FDE_ROOT=/ —
 # in-chroot the TARGET IS / (kernel-reality context for the initrd audit)
 assert_eq "blocker #12: the emitted build record exports ALPINE_FDE_ROOT=/" "1" \
@@ -362,7 +362,7 @@ assert_eq "item 27 lint (extended): the emitted seal/token choreography NEVER re
     "$(grep -m1 'seal_provisional' "$SCRIPT" | grep -c '/dev/mapper/')"
 S_KEYGEN=$(grep -n 'provision stage1 --mode in-chroot' "$SCRIPT" | cut -d: -f1)
 S_ENROLL=$(grep -n 'fw_auth_enroll' "$SCRIPT" | cut -d: -f1)
-S_BUILD=$(grep -n 'ukictl build' "$SCRIPT" | cut -d: -f1)
+S_BUILD=$(grep -n 'kernel build' "$SCRIPT" | cut -d: -f1)
 # blocker #12 ORDER GUARD: the features.d module-append staging precedes the
 # build record in the emitted script (mkinitfs must see the resolved paths)
 S_APPEND=$(grep -n '>> .*etc/mkinitfs/features.d/alpine-fde.modules' "$SCRIPT" | head -1 | cut -d: -f1) # blocker #14: the module pack rides features.d .modules (the .files append is gone)

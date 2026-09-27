@@ -67,9 +67,9 @@ if [ -z "${ALPINE_FDE_AUDIT_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/audit.sh"
 fi
-if [ -z "${ALPINE_FDE_ENROLL_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_RESEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/enroll-tpm.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/reseal.sh"
 fi
 if [ -z "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
@@ -80,10 +80,10 @@ if [ -z "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../keys.sh"
 fi
 if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
-    # the §13 entropy floor (§9.1) lives in lib/cmd/rotate.sh (shared with
-    # `rotate` and keys_encrypt_release)
+    # the §13 entropy floor (§9.1) lives in lib/cmd/passwd.sh (shared with
+    # `passwd` and keys_encrypt_release)
     # shellcheck disable=SC1090
-    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/rotate.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/passwd.sh"
 fi
 
 finalize_usage() {
@@ -123,8 +123,8 @@ fin_crypttab_file() {
 }
 
 # fin_crypttab_uuids FILE — every LUKS member UUID, one per line, first-seen
-# order, duplicates collapsed. Same line grammar as enroll-tpm.sh's
-# enrl_crypttab_uuid (that helper exits after the FIRST match — the single-
+# order, duplicates collapsed. Same line grammar as reseal.sh's
+# reseal_crypttab_uuid (that helper exits after the FIRST match — the single-
 # disk volume; finalize must reach every RAID1 member).
 fin_crypttab_uuids() {
     [ -f "$1" ] || return 0
@@ -140,7 +140,7 @@ fin_crypttab_uuids() {
     ' "$1"
 }
 
-# fin_cryptsetup — the cryptsetup seam (same override enroll-tpm/token.sh use)
+# fin_cryptsetup — the cryptsetup seam (same override reseal/token.sh use)
 fin_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
 
 # fin_member_devs — every crypttab LUKS member as a resolvable
@@ -152,7 +152,7 @@ fin_member_devs() {
     [ -n "$_fmd_uuids" ] ||
         die "finalize: no LUKS member UUIDs found in $_fmd_ct — cannot finalize"
     for _fmd_u in $_fmd_uuids; do
-        _fmd_d="$(enrl_by_uuid_dir)/$_fmd_u"
+        _fmd_d="$(reseal_by_uuid_dir)/$_fmd_u"
         [ -e "$_fmd_d" ] ||
             die "finalize: member device not resolvable: $_fmd_d — refusing to finalize a partial array"
         printf '%s\n' "$_fmd_d"
@@ -208,7 +208,7 @@ fin_token_pcrs() {
 # fin_read_recovery_passphrase VAR — the keyslot-0 recovery passphrase into
 # VAR: ALPINE_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo
 # prompt. Enforces the §13 entropy floor (passphrase_floor_ok) BEFORE anything
-# else can happen (fail-closed 64; the floor is the same one `rotate`
+# else can happen (fail-closed 64; the floor is the same one `passwd`
 # enforces).
 fin_read_recovery_passphrase() {
     _frr_var=$1
@@ -254,7 +254,7 @@ fin_read_recovery_passphrase() {
 }
 
 # fin_uki_pcrsig STAGE OUT — extract the .pcrsig from the ESP UKI (the Stage-1
-# `ukictl build` output; the same extraction the provisional enrollment used)
+# `kernel build` output; the same extraction the provisional enrollment used)
 # for the Stage 2 userspace re-unseal of the provisional token.
 fin_uki_pcrsig() {
     _fup_stage=$1
@@ -368,7 +368,7 @@ fin_completion_steps() {
         # Stage-1 ceremony, so without ALPINE_FDE_KEY_PASSPHRASE (or a
         # provided ALPINE_FDE_PCRSIG) this fails CLOSED (the service maps the
         # failure to advisory + retry next boot)
-        _fcs_pcrsig=$(enrl_sign_pcrsig "$_fcs_stage" "$_fcs_keydir") ||
+        _fcs_pcrsig=$(reseal_sign_pcrsig "$_fcs_stage" "$_fcs_keydir") ||
             die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — ALPINE_FDE_PCRSIG or an unlockable release.pem is required (§9.1)"
     fi
     # --- per-member keyslot mutations (§9.1 Stage 2 steps 3-4) -----------------

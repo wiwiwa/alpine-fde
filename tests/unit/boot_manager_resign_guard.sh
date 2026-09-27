@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # tests/unit/boot_manager_resign_guard.sh — boot-manager re-sign guard
-# (docs/Architecture.md §8.3, §11, ADR-8): after a successful ukictl build the
+# (docs/Architecture.md §8.3, §11, ADR-8): after a successful kernel build the
 # kernel hook hooks/kernel-hooks.d/alpine-fde-build.hook re-signs the boot
 # manager binaries a systemd-boot refresh may have re-flashed
 # (ESP:/EFI/systemd/systemd-bootx64.efi and /EFI/BOOT/BOOTX64.EFI). The test
 # drives the REAL hook through its kernel-hooks.d convention
-# (`alpine-fde-build.hook add <kver>`) with a recording `alpine-fde` stub on
-# the ALPINE_FDE_BIN seam (the ukictl build step succeeds) plus PATH-stubbed
-# sbsign/sbverify, and asserts OBSERVED effects: exact argv, ESP paths,
+# (`alpine-fde-build.hook add <kver>`) with a STUB LIB TREE on the
+# ALPINE_FDE_LIB_DIR seam (the lib/cmd/kernel-build.sh entry the hook sources
+# succeeds — §8.1 machine/lib entrance: the hook never execs the CLI) plus
+# PATH-stubbed sbsign/sbverify, and asserts OBSERVED effects: exact argv, ESP paths,
 # verify-FIRST idempotence (review LO-05: sbsign appends signatures —
 # re-signing an already-signed binary stacks a dual signature, the
 # §9.6/s16 revocation failure mode), sbverify-gated install, fail-closed 64 +
 # build-failed marker under $ROOT/etc/alpine-fde when the key is missing or a
 # binary fails verification.
 #
-#   * the ukictl-build contract itself (verbatim argv, child rc propagation,
+#   * the kernel-build contract itself (verbatim argv, child rc propagation,
 #     marker wording, broken-invocation fail-closed) is asserted by
 #     tests/unit/kernel_hooks_wire.sh
 #   * install-side wiring (hook installed + enabled executable) is asserted
@@ -43,10 +44,9 @@ assert_eq "hook is executable (enabled by the kernel hook runner convention)" "1
 export ALPINE_FDE_ESP=$T/esp
 export ALPINE_FDE_ROOT=$T/root
 export ALPINE_FDE_KEYDIR=$T/keys
-export ALPINE_FDE_LIB_DIR=$REPO/lib
 export ALPINE_FDE_TEST_LOG=$T/cmd.log
 export ALPINE_FDE_TEST_SBV_STATE=$T/sbv-state
-mkdir -p "$T/bin" "$ALPINE_FDE_ESP/EFI/systemd" "$ALPINE_FDE_ESP/EFI/BOOT" \
+mkdir -p "$T/fakelib/cmd" "$ALPINE_FDE_ESP/EFI/systemd" "$ALPINE_FDE_ESP/EFI/BOOT" \
     "$ALPINE_FDE_KEYDIR" "$ALPINE_FDE_ROOT/etc/alpine-fde" "$T/stub"
 printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi"
 printf 'unsigned-fallback' >"$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI"
@@ -54,18 +54,19 @@ printf 'key-material' >"$ALPINE_FDE_KEYDIR/release.pem"
 printf 'key-material' >"$ALPINE_FDE_KEYDIR/release.crt"
 MARKER=$ALPINE_FDE_ROOT/etc/alpine-fde/build-failed
 
-# recording alpine-fde stub on the ALPINE_FDE_BIN seam: the ukictl build step
-# succeeds (its own contract lives in kernel_hooks_wire.sh); argv goes to a
-# SEPARATE log so the sbsign/sbverify log below stays the "signing tools ran"
-# record the guard legs assert on
-export ALPINE_FDE_BIN=$T/bin/alpine-fde
-cat >"$ALPINE_FDE_BIN" <<EOF
+# stub lib tree on the ALPINE_FDE_LIB_DIR seam: the kernel build step succeeds
+# (its own contract lives in kernel_hooks_wire.sh); common.sh/keys.sh are the
+# REAL libs (the hook's unlock plumbing runs for real) and the lib/cmd build
+# module is a no-op success — the sbsign/sbverify log below stays the
+# "signing tools ran" record the guard legs assert on
+ln -sf "$REPO/lib/common.sh" "$T/fakelib/common.sh"
+ln -sf "$REPO/lib/keys.sh" "$T/fakelib/keys.sh"
+export ALPINE_FDE_LIB_DIR=$T/fakelib
+cat >"$T/fakelib/cmd/kernel-build.sh" <<'EOF'
 #!/bin/sh
-printf 'alpine-fde %s\n' "\$*" >>"$T/calls.log"
-exit \${ALPINE_FDE_FAKE_RC:-0}
+# stub module: the build step succeeds (rc 0)
+cmd_kernel_build_main() { return 0; }
 EOF
-chmod +x "$ALPINE_FDE_BIN"
-export ALPINE_FDE_FAKE_RC=0
 
 # stubs: sbsign "signs" by copying input to --output; sbverify behaves per
 # ALPINE_FDE_TEST_SBV_MODE — "pass" (always accept), "fail" (always reject),

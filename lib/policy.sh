@@ -161,7 +161,7 @@ policy_verify() {
 # recorded in the manifest and predictions.json).
 # CONTRACT (S-M4): on ANY failure (absent/unparseable key) return rc 1 with
 # EMPTY stdout — never a fingerprint of the empty string. Consumers guard on
-# this (policy_sign_json here; `ukictl build` in lib/cmd/ukictl-build.sh).
+# this (policy_sign_json here; `kernel build` in lib/cmd/kernel-build.sh).
 policy_pubkey_fp() {
     _ppf_tmp=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-pkfp.XXXXXX") || return 1
     if ! openssl pkey -pubin -in "$1" -outform DER 2>/dev/null >"$_ppf_tmp"; then

@@ -421,7 +421,7 @@ assert_eq "order (user flow directive): NVRAM enrollment BEFORE the credential c
     "$(( O_ENROLL > 0 && O_ENROLL < O_CERR ? 1 : 0 ))"
 assert_eq "order (user flow directive): boot-manager guarded file copy BEFORE the credential ceremony" "1" \
     "$(( O_COPY > 0 && O_COPY < O_CERR ? 1 : 0 ))"
-assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a ukictl-build input)" "1" \
+assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a kernel-build input)" "1" \
     "$(( O_HOOKS > 0 && O_HOOKS < O_CERR ? 1 : 0 ))"
 assert_eq "order (user flow directive): install-state write BEFORE the credential ceremony (mechanical)" "1" \
     "$(( O_STATE > 0 && O_STATE < O_CERR ? 1 : 0 ))"
@@ -603,13 +603,13 @@ assert_contains "blocker #7: the copy record dies fail-closed when no loader bin
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the run" "0" \
     "$(grep -Ec 'bootctl( |$)' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
 
-# real-server blocker #8: the ukictl build record must configure the
-# release-key dir (ukictl build resolves keys_dir() = ALPINE_FDE_KEYDIR/
+# real-server blocker #8: the kernel build record must configure the
+# release-key dir (kernel build resolves keys_dir() = ALPINE_FDE_KEYDIR/
 # KEY_PATH — NO default; the bare record died "release key directory not
 # configured") and consume the ceremony-staged 0600 tmpfs passphrase seam
 # file — the passphrase itself NEVER in argv or the log (RESOLVED-4 env
 # mechanism, fed from the file inside the guest shell).
-BLD_LINE=$(grep -m1 'ukictl build' "$ALPINE_FDE_TEST_LOG")
+BLD_LINE=$(grep -m1 'kernel build' "$ALPINE_FDE_TEST_LOG")
 assert_contains "blocker #8: the build record exports the in-chroot release-key dir" "$BLD_LINE" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
 assert_contains "blocker #8: the build record feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file" "$BLD_LINE" \
@@ -619,13 +619,13 @@ assert_contains "blocker #8/9: the ceremony (3/3) record stages the seam IN THE 
 assert_contains "blocker #9: the build record reads the IN-CHROOT seam path and consumes it (rm after read)" "$BLD_LINE" \
     '[ -s /run/alpine-fde-release-pass ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass'
 # real-server blocker #11: the record derives the TARGET's installed kernel
-# IN-GUEST (newest dir under /lib/modules) and passes it to ukictl build — the
+# IN-GUEST (newest dir under /lib/modules) and passes it to kernel build — the
 # retired no-arg form fell back to uname -r, the LIVE ISO kernel (whose
 # /lib/modules tree does not exist in the target)
 assert_contains "blocker #11: the build record derives the target kver in-guest" "$BLD_LINE" \
     'kv=$(cd /lib/modules'
-assert_contains "blocker #11: the build record PASSES the derived kver to ukictl build" "$BLD_LINE" \
-    'ukictl build "$kv"'
+assert_contains "blocker #11: the build record PASSES the derived kver to kernel build" "$BLD_LINE" \
+    'kernel build "$kv"'
 assert_contains "blocker #11: the build record fails closed with an actionable message when the target has NO modules" "$BLD_LINE" \
     'no kernel module tree under /lib/modules'
 # blocker #12 follow-up: the record exports ALPINE_FDE_ROOT=/ — in-chroot the
@@ -644,7 +644,7 @@ assert_eq "blocker #9: the build record NEVER references the host-tmpfs seam (in
     "$(grep -c '/dev/shm/alpine-fde-release-pass' <<<"$BLD_LINE")"
 # blocker #9 EXECUTION-LEVEL: the ceremony really stages the seam file into
 # the target root. Run a scenario that dies exactly AT the build record (the
-# chroot stub gains a fail arm for the ukictl-build guest step, keeping the
+# chroot stub gains a fail arm for the kernel-build guest step, keeping the
 # provision-stage1/chpasswd simulations): the plan's teardown record never
 # runs, so the ceremony-written target file must be there — 0600, holding the
 # confirmed passphrase.
@@ -673,10 +673,10 @@ case "\$*" in
     *"/usr/sbin/chpasswd"*)
         cat >"\$CHPASSWD_CAPTURE"
         ;;
-    *"ukictl build"*)
+    *"kernel build"*)
         # w2-blocker9 die-arm: snapshot the ceremony-staged target seam (it
         # exists RIGHT NOW — the die-path trap scrubs it at process exit),
-        # then fail exactly the ukictl-build guest step
+        # then fail exactly the kernel-build guest step
         [ -n "\$SEAM_SNAP_SRC" ] && [ -f "\$SEAM_SNAP_SRC" ] &&
             cp "\$SEAM_SNAP_SRC" "\$SEAM_SNAP" && chmod 600 "\$SEAM_SNAP"
         echo "simulated guest build failure" >&2
@@ -736,13 +736,13 @@ assert_contains "blocker #12: the build sees ALPINE_FDE_ROOT=/ via the environme
 assert_contains "blocker #8: the build decrypts via the passphrase from the environment (staged seam file)" "$(cat "$FAKE_OUT")" \
     "pass=Fin4l-Rec0very-X9k2-!qmwjpz"
 assert_contains "blocker #11: the derived TARGET kver reaches the build's argv (newest /lib/modules dir)" "$(cat "$FAKE_OUT")" \
-    "argv=ukictl build 6.18.35-0-lts"
+    "argv=kernel build 6.18.35-0-lts"
 assert_contains "blocker #8/#11: the passphrase does NOT appear in the build's argv" "$(cat "$FAKE_OUT")" \
-    "argv=ukictl build 6.18.35-0-lts"
+    "argv=kernel build 6.18.35-0-lts"
 assert_eq "blocker #8: NO passphrase literal anywhere in the run's output or command log" "0" \
     "$(grep -c 'Fin4l-Rec0very-X9k2-!qmwjpz' <<<"$OUT $(cat "$ALPINE_FDE_TEST_LOG")")"
-assert_contains "§9.1 step 5: ukictl build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
-    "/opt/alpine-fde/bin/alpine-fde ukictl build"
+assert_contains "§9.1 step 5: kernel build in-chroot (boot manager + UKI, G-C7 CLI path)" "$LOG" \
+    "/opt/alpine-fde/bin/alpine-fde kernel build"
 # G-C24: provisional seal guest line after the build
 # item 27 extended: the seal/token choreography consumes the LUKS2 HEADER —
 # it must address the CONTAINER dev (${DISK}2), never the mapper
@@ -776,7 +776,7 @@ L_POLICY=$(first_line_no "$OUT" "etc/apk/repositories")
 L_APKUPD=0
 L_KEYGEN=$(first_line_no "$LOG" "provision stage1 --mode in-chroot")
 L_ENROLL=$(first_line_no "$LOG" "fw_auth_enroll")
-L_BUILD=$(first_line_no "$LOG" "ukictl build")
+L_BUILD=$(first_line_no "$LOG" "kernel build")
 L_SEAL=$(first_line_no "$LOG" "seal_provisional")
 L_UMNTR=$(first_line_no "$LOG" "umount -R")
 L_SCRUB=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: rm -f $EPHKEY" | cut -d: -f1)
@@ -784,7 +784,7 @@ assert_eq "order: sfdisk before apk populate" "1" "$(( L_SFDISK < L_APKPOP ? 1 :
 assert_eq "order: populate before repositories drop" "1" \
     "$(( L_APKPOP > 0 && L_POLICY > 0 && L_APKPOP < L_POLICY ? 1 : 0 ))"
 assert_eq "order: keygen before enrollment" "1" "$(( L_KEYGEN < L_ENROLL ? 1 : 0 ))"
-assert_eq "order: enrollment before ukictl build" "1" "$(( L_ENROLL < L_BUILD ? 1 : 0 ))"
+assert_eq "order: enrollment before kernel build" "1" "$(( L_ENROLL < L_BUILD ? 1 : 0 ))"
 assert_eq "order: build before the provisional seal (.pcrsig source)" "1" \
     "$(( L_BUILD < L_SEAL ? 1 : 0 ))"
 assert_eq "order: teardown before the ephemeral-key scrub (G-C26/I1)" "1" \
@@ -1423,7 +1423,7 @@ assert_eq "tpm driver: the host-side load precedes the seal guest line" "1" \
 # run_install invocations cannot pollute the per-run records ($LUKS_UUID,
 # $EPHKEY, $OUT) the earlier sections pin against.
 # The systemd-stub measures the cmdline into PCR 11, so extra words (e.g.
-# console=ttyS0,115200) MUST be present in cmdline.txt BEFORE the ukictl build
+# console=ttyS0,115200) MUST be present in cmdline.txt BEFORE the kernel build
 # + provisional seal: a post-hoc append would break the seal. The seam is the
 # PLAN write, fail-closed against §8.2 H-G1 pin overrides.
 # =============================================================================
@@ -1462,14 +1462,14 @@ assert_contains "hosts-based mirror: the probe names the hosts mechanism" "$OUT"
 # --- boot-lane finding #8: the /dev/shm seam must be VISIBLE in-chroot -------
 # the ceremony's 0600 release-key passphrase seam lives in the LIVE /dev/shm
 # (tmpfs submount); a plain `mount --bind /dev` does not carry submounts, so
-# the in-chroot ukictl build fell back to its interactive prompt and hung the
+# the in-chroot kernel build fell back to its interactive prompt and hung the
 # unattended install (attempt 8). The plan must bind /dev/shm explicitly,
 # BEFORE the secret-consuming guest line.
 SHM_BIND=$(grep -c 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG")
-BUILD_LINE=$(grep -nF 'ukictl build' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
+BUILD_LINE=$(grep -nF 'kernel build' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
 SHM_LINE=$(grep -nF 'mount --bind /dev/shm' "$ALPINE_FDE_TEST_LOG" | head -1 | cut -d: -f1)
 assert_eq "seam visibility: the plan binds /dev/shm into the target" "1" "$SHM_BIND"
-assert_eq "seam visibility: the bind precedes the secret-consuming ukictl build" "1" \
+assert_eq "seam visibility: the bind precedes the secret-consuming kernel build" "1" \
     "$(( SHM_LINE > 0 && BUILD_LINE > 0 && SHM_LINE < BUILD_LINE ? 1 : 0 ))"
 assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_ETC/hosts"
 assert_contains "item 26b: the seeded hosts table carries the live entries" \

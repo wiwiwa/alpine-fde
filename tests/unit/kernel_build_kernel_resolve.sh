@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/unit/ukictl_build_kernel_resolve.sh — real-server blocker #9b: robust
-# kernel-image resolution in `ukictl build`. The verbatim
+# tests/unit/kernel_build_kernel_resolve.sh — real-server blocker #9b: robust
+# kernel-image resolution in `kernel build`. The verbatim
 # `<root>/boot/vmlinuz-<kver>` path only exists in fixture sandboxes; real
 # Alpine kernel packages ship the UNVERSIONED FLAVOR image
 # (/boot/vmlinuz-lts for linux-lts — the live run died with
@@ -100,8 +100,8 @@ EOF
 fixture_root flavor
 printf 'flavor-image-payload' >"$ROOT/boot/vmlinuz-lts" # real Alpine linux-lts layout
 wrap_signers flavor
-out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" ukictl build "$KVER" 2>&1)
-assert_rc "flavor-only root: ukictl build succeeds (blocker 9b headline)" 0 $?
+out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" kernel build "$KVER" 2>&1)
+assert_rc "flavor-only root: kernel build succeeds (blocker 9b headline)" 0 $?
 assert_contains "flavor-only: ukify consumed the FLAVOR image (--linux)" "$(cat "$ARGVLOG")" \
     "--linux=$ROOT/boot/vmlinuz-lts"
 assert_file_exists "flavor-only: UKI installed for the full kver" "$ESP/EFI/Linux/alpine-fde-$KVER.efi"
@@ -117,7 +117,7 @@ fixture_root both
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER" # versioned (fixture/e2e shape)
 printf 'flavor-image-payload' >"$ROOT/boot/vmlinuz-lts"
 wrap_signers both
-out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" ukictl build "$KVER" 2>&1)
+out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" kernel build "$KVER" 2>&1)
 assert_rc "versioned+flavor root: build succeeds" 0 $?
 assert_contains "versioned+flavor: the VERSIONED image is consumed (priority 1 unchanged)" \
     "$(cat "$ARGVLOG")" "--linux=$ROOT/boot/vmlinuz-$KVER"
@@ -131,7 +131,7 @@ assert_ne "versioned+flavor: the flavor image was NOT consumed" \
 fixture_root glob
 printf 'glob-image-payload' >"$ROOT/boot/vmlinuz-virt"
 wrap_signers glob
-out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" ukictl build "$KVER" 2>&1)
+out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" kernel build "$KVER" 2>&1)
 assert_rc "glob-only root: build resolves via the /boot/vmlinuz-* glob" 0 $?
 assert_contains "glob-only: ukify consumed the globbed image" "$(cat "$ARGVLOG")" \
     "--linux=$ROOT/boot/vmlinuz-virt"
@@ -142,7 +142,7 @@ assert_contains "glob-only: ukify consumed the globbed image" "$(cat "$ARGVLOG")
 fixture_root none
 wrap_signers none
 ESP_BEFORE=$(find "$ESP" -type f -exec sha256sum {} \; | sort)
-out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" ukictl build "$KVER" 2>&1)
+out=$(PATH="$WRAPBIN:$PATH" alpine-fde "$ROOT" "$ESP" kernel build "$KVER" 2>&1)
 assert_rc "bare root: no kernel image anywhere -> exit 64" 64 $?
 assert_contains "bare root: the failure names the required input" "$out" "required build input missing"
 assert_contains "bare root: failure names the kver" "$out" "$KVER"
@@ -164,7 +164,7 @@ assert_eq "bare root: no signer ever ran" "0" "$(wc -l <"$ARGVLOG")"
 # =============================================================================
 fixture_root zerobyte
 : >"$ROOT/boot/vmlinuz-lts" # exists but empty (broken install)
-out=$(alpine-fde "$ROOT" "$ESP" ukictl build "$KVER" 2>&1)
+out=$(alpine-fde "$ROOT" "$ESP" kernel build "$KVER" 2>&1)
 assert_rc "zero-byte flavor image: NOT resolved -> exit 64" 64 $?
 assert_contains "zero-byte: failure lists the rejected candidate" "$out" "$ROOT/boot/vmlinuz-lts"
 assert_file_exists "zero-byte: ADR-8 marker persisted" "$ROOT/etc/alpine-fde/build-failed"

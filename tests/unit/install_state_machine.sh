@@ -127,7 +127,7 @@ assert_eq "override: read-back" "finalized" "$(istate_state)"
 unset ALPINE_FDE_INSTALL_STATE
 assert_eq "override removed: back to the root-scoped path" "installed" "$(istate_state)"
 
-# --- 8. optional FILE argument (consumed by enroll-tpm.sh's G-IL7 reader):
+# --- 8. optional FILE argument (consumed by reseal.sh's G-IL7 reader):
 # an explicit path is read as-is, the env/root-scoped default stays untouched
 ARGA=$T/state-a.json
 ARGB=$T/state-b.json

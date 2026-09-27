@@ -98,17 +98,17 @@ sdboot_load_error	Error loading EFI binary
 # ===========================================================================
 # Section 3 — enroll-from-guest CLI markers (§12 S-00b: enrollment runs from
 # the guest via the production CLI). Byte-extracted from the shipped lib:
-#   lib/cmd/ukictl-build.sh:534  info "enroll: no TPM token on … — enrolling
+#   lib/cmd/kernel-build.sh:534  info "enroll: no TPM token on … — enrolling
 #     once (Mechanism B)"           -> cli_enroll_once (suffix literal)
-#   lib/cmd/ukictl-build.sh:526  info "enroll: systemd-tpm2 token already
+#   lib/cmd/kernel-build.sh:526  info "enroll: systemd-tpm2 token already
 #     present … enrollment stands, no TPM operations (s14)" -> cli_enroll_stands
-#   lib/cmd/ukictl-build.sh:505  info "ukictl build: kernel … installed and
+#   lib/cmd/kernel-build.sh:505  info "kernel build: kernel … installed and
 #     recorded (pcr11=…"            -> cli_build_recorded (suffix literal)
 #   lib/seal.sh:367  info "seal: sealed the random volume passphrase (… into
 #     keyslot …)"                   -> cli_seal_slot
-#   lib/cmd/enroll-tpm.sh:193  die "enroll-tpm: PCR 7 drift: live …"
+#   lib/cmd/reseal.sh:193  die "reseal: PCR 7 drift: live …"
 #     -> cli_pcr7_drift
-#   lib/cmd/enroll-tpm.sh:331  info "existing TPM enrollment found — retiring
+#   lib/cmd/reseal.sh:331  info "existing TPM enrollment found — retiring
 #     it in the same run the fresh seal stands" -> cli_enroll_retire
 # (info lines render as "<prog>: info: <text>"; the stored values are the
 # prog-independent suffix literals.)
@@ -117,7 +117,7 @@ cli_enroll_once	enrolling once (Mechanism B)
 cli_enroll_stands	enrollment stands, no TPM operations
 cli_build_recorded	 installed and recorded (pcr11=
 cli_seal_slot	sealed the random volume passphrase (
-cli_pcr7_drift	enroll-tpm: PCR 7 drift: live
+cli_pcr7_drift	reseal: PCR 7 drift: live
 cli_enroll_retire	existing TPM enrollment found — retiring it
 #
 # ===========================================================================

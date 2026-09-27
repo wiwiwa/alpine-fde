@@ -137,7 +137,7 @@
 #                        the installer with ALPINE_FDE_CMDLINE_EXTRA=
 #                        'console=ttyS0,115200' (lib/cmd/install.sh
 #                        inst_cmdline_extra_check / inst_cmdline_extra) —
-#                        the words land in cmdline.txt BEFORE the ukictl
+#                        the words land in cmdline.txt BEFORE the kernel
 #                        build + provisional seal, so the PCR-11 measurement
 #                        and the seal agree (a post-hoc append would break
 #                        the seal). Alpine's mkinitfs setup_inittab_console

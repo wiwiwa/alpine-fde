@@ -170,20 +170,19 @@ Alpine FDE implements a **Zero-Exfiltration** security posture:
 
 ### Command Reference
 
-Everything runs through a single tool: `./bin/alpine-fde <command>` (examples earlier in this guide show the full path; on an installed system the commands are on `PATH` as `alpine-fde <command>`). Lifecycle steps such as TPM enrollment and first-boot finalization run **automatically** — you never invoke them (see [§3](#3-installation--first-boot-experience)).
+Everything runs through a single tool with **7 verbs**: `./bin/alpine-fde <command>` (examples earlier in this guide show the full path; on an installed system the commands are on `PATH` as `alpine-fde <command>`). Lifecycle steps such as TPM enrollment, snapshotting, and first-boot finalization run **automatically** — you never invoke them (see [§3](#3-installation--first-boot-experience)).
 
 | Command | What it does | When you use it |
 |---|---|---|
 | `install` | The guided installation ceremony: partitions and encrypts disk(s) (supports single-disk, `--bcache` hybrid, multi-disk RAID1, and optional ephemeral encrypted swap via `--swap [size]`), installs Alpine base, enrolls Secure Boot keys, and seals the disk key to the TPM (see [§2](#2-installation-ceremonies) and [§3](#3-installation--first-boot-experience)). | Setting up a new machine — run once, from live media. |
-| `ukictl` | Builds or removes the signed boot image for a kernel. Runs automatically on kernel upgrades; you run it manually when rebuilding boot images during recovery ([Runbook 1](#runbook-1-broken-cache-ssd--esp-rebuild-hybrid-bcache-setup), [Runbook 2](#runbook-2-failed-drive-replacement-in-btrfs-raid1)) or for custom kernels. | Only in recovery or custom-kernel scenarios. |
-| `rotate` | Changes the recovery passphrase — no re-encryption, no TPM re-enrollment. | When the passphrase was shared or may be compromised ([Runbook 4](#runbook-4-recovery-passphrase-rotation)). |
 | `audit` | Verifies the running machine against its trusted baseline (firmware state and boot measurements). `--init` records the first baseline; `--accept` accepts a verified new one after a legitimate change. | After firmware/BIOS updates that prompt for the recovery passphrase ([Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)). |
+| `reseal` | Seals or re-enrolls the LUKS2 container to the TPM 2.0 policy. Runs automatically during installation and UKI builds. | During disaster recovery ([Runbook 2](#runbook-2-multi-disk-raid1-member-replacement--re-sync), [Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)) after drive replacement or PCR 7 drift re-baselining, or after a TPM clear. |
+| `passwd` | Changes the recovery passphrase — no re-encryption, no TPM re-enrollment. | When the passphrase was shared or may be compromised ([Runbook 4](#runbook-4-recovery-passphrase-rotation)). |
 | `status` | Shows the current trust state at a glance: Secure Boot state, TPM seal, keyslots, and boot images. | Any time you want to confirm the machine is sealed, signed, and finalized. |
-| `bootnext` | Boots a retained kernel once, on the next reboot only. | Testing a rollback to a previous kernel — see [Booting Alternative or Retained Kernels](#booting-alternative-or-retained-kernels). |
-| `pre-upgrade` | Snapshots the root filesystem so a failed upgrade can be rolled back. | Before upgrades or risky experiments — see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback). |
 | `doctor` | Checks the environment before an install (missing packages, TPM presence, Secure Boot state), and the trust chain afterwards. | Before installing on a new machine, and as the first sanity check when something looks wrong. |
-| `enroll-tpm` | Seals or re-enrolls the LUKS2 container to the TPM 2.0 policy. Runs automatically during installation and UKI builds. | During disaster recovery ([Runbook 2](#runbook-2-multi-disk-raid1-member-replacement--re-sync), [Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)) after drive replacement or PCR 7 drift re-baselining. |
-| `finalize` | Completes trust finalization: baseline capture, {PCR 7, PCR 11} token upgrade, and temporary keyslot purge. Runs automatically on first boot via `alpine-fde-finalize`. | Emergency manual completion if first-boot finalization was interrupted. |
+| `kernel` | Manages the signed boot images per kernel: `kernel build` / `kernel remove` / `kernel prune`, plus `kernel next` to boot a retained kernel once, on the next reboot only. Build/remove run automatically on kernel upgrades; you run them manually when rebuilding boot images during recovery ([Runbook 1](#runbook-1-broken-cache-ssd--esp-rebuild-hybrid-bcache-setup), [Runbook 2](#runbook-2-failed-drive-replacement-in-btrfs-raid1)) or for custom kernels. `kernel next` — see [Booting Alternative or Retained Kernels](#booting-alternative-or-retained-kernels). | Only in recovery, rollback-testing, or custom-kernel scenarios. |
+
+**Internal (machine tier):** `provision`, `pcrsign`, and `finalize` remain callable for human recovery but are NOT part of the daily operator surface — scripts, daemons, and hooks must source the lib modules directly instead of exec'ing `alpine-fde` ([Architecture §8.1](Architecture.md#81-alpine-fde-cli--the-user-facing-tool)). There is no `pre-upgrade` verb: snapshots are taken automatically before upgrades (see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback)).
 
 > [!NOTE]
 > **Flags and exit codes:** Global flags (`--disk`, `--bcache`, `--swap`, `--yes`, `--root`, `--esp`, `--fs`) must come **before** the subcommand — e.g. `alpine-fde --root /mnt audit --accept`, as used in the runbooks below. `--version` and `--help` are always available. Exit codes are stable and safe to rely on in scripts: `0` success, `1` drift or check failed, `2` usage error, `3` not implemented, `64` fail-closed error.
@@ -212,11 +211,7 @@ Alpine package upgrades (`apk upgrade`) that install or update a kernel are hand
 3. Next boot: boots into the new kernel **100% passwordless**. No TPM re-enrollment is required.
 
 ### Btrfs Snapshots & Userspace Rollback
-Before major system changes or upgrades, take an atomic snapshot:
-
-```sh
-alpine-fde pre-upgrade
-```
+Before major system changes or upgrades, a read-only snapshot of the root is taken **automatically** (there is no snapshot command to run — the snapshot flow of `lib/cmd/pre-upgrade.sh` writes it for you before upgrades):
 
 This creates a read-only snapshot of `@` under `/.snapshots/<timestamp>` (subvolume `@snapshots`). If an upgrade breaks userspace, restore the snapshot:
 ```sh
@@ -241,7 +236,7 @@ Up to 3 kernels are retained on the ESP. To boot a previous kernel one time:
 bootctl list
 
 # Select kernel for next boot only
-alpine-fde bootnext alpine-fde-6.6.x-lts.efi
+alpine-fde kernel next alpine-fde-6.6.x-lts.efi
 ```
 
 The system reboots into the previous kernel **without requiring a password**, because each retained boot image carries its own signature that the TPM accepts.
@@ -355,7 +350,7 @@ Platform measurements have drifted from the trusted baseline:
   - TCG Event Log:       DRIFT
 
 If you recently updated firmware or BIOS settings, verify and accept via:
-  alpine-fde audit --accept && alpine-fde enroll-tpm
+  alpine-fde audit --accept && alpine-fde reseal
 Otherwise, investigate potential unauthorized firmware modification!
 ================================================================================
 ```
@@ -470,7 +465,7 @@ mv /efi/EFI/BOOT/BOOTX64.EFI.signed /efi/EFI/BOOT/BOOTX64.EFI
 
 # 4. Rebuild signed UKIs on the new ESP for the target kernel
 TARGET_KVER=$(ls -1 /lib/modules | sort -V | tail -n1)
-alpine-fde ukictl build "$TARGET_KVER"
+alpine-fde kernel build "$TARGET_KVER"
 
 # Exit chroot and unmount
 exit
@@ -509,14 +504,14 @@ btrfs replace start 2 /dev/mapper/root-repl /mnt
 #### Step 4: Seal Replacement Container to TPM 2.0
 ```sh
 LUKS_UUID=$(cryptsetup luksUUID /dev/nvme1n1p1)
-alpine-fde --root /mnt enroll-tpm --uuid "$LUKS_UUID"
+alpine-fde --root /mnt reseal --uuid "$LUKS_UUID"
 ```
 
 #### Step 5: Update crypttab and Rebuild UKI
 Update `/mnt/etc/crypttab` with the new container UUID and rebuild the UKI:
 ```sh
 TARGET_KVER=$(ls -1 /mnt/lib/modules | sort -V | tail -n1)
-alpine-fde --root /mnt ukictl build "$TARGET_KVER"
+alpine-fde --root /mnt kernel build "$TARGET_KVER"
 ```
 
 #### Variation: Failed Backing Drive in Accelerated Multi-Disk Hybrid Setup (`--bcache /dev/nvme0n1 --disk /dev/sda --disk /dev/sdb`)
@@ -558,7 +553,7 @@ If a backing HDD (e.g. `/dev/sdb`) fails in an accelerated hybrid RAID1 setup:
    ```sh
    btrfs replace start <missing-devid> /dev/mapper/root-repl /mnt
    LUKS_UUID=$(cryptsetup luksUUID /dev/bcache1)
-   alpine-fde --root /mnt enroll-tpm --uuid "$LUKS_UUID"
+   alpine-fde --root /mnt reseal --uuid "$LUKS_UUID"
    ```
 
 ---
@@ -578,7 +573,7 @@ If a backing HDD (e.g. `/dev/sdb`) fails in an accelerated hybrid RAID1 setup:
    ```
 4. Re-enroll keyslot 1 to the new PCR 7 value:
    ```sh
-   alpine-fde enroll-tpm
+   alpine-fde reseal
    ```
 5. Subsequent boots resume passwordless automatic unlock.
 
@@ -590,7 +585,7 @@ If a backing HDD (e.g. `/dev/sdb`) fails in an accelerated hybrid RAID1 setup:
 
 Run the passphrase rotation command:
 ```sh
-alpine-fde rotate
+alpine-fde passwd
 ```
 * Prompts for the existing passphrase, verifies the entropy floor on the new passphrase, and updates LUKS2 keyslot 0.
 * Volume encryption keys and TPM 2.0 seals remain untouched (no re-encryption or TPM re-enrollment required).
@@ -610,10 +605,10 @@ If the encrypted root container is intact:
    mount /dev/nvme0n1p1 /mnt/efi
    ```
 2. **Rebuild bootloader and UKIs:**
-   The keys reside inside the unlocked root volume at `/mnt/etc/alpine-fde/keys/`. Run `ukictl build`:
+   The keys reside inside the unlocked root volume at `/mnt/etc/alpine-fde/keys/`. Run `kernel build`:
    ```sh
    TARGET_KVER=$(ls -1 /mnt/lib/modules | sort -V | tail -n1)
-   alpine-fde --root /mnt ukictl build "$TARGET_KVER"
+   alpine-fde --root /mnt kernel build "$TARGET_KVER"
    ```
    *(Prompts for your release signing key passphrase to decrypt `/mnt/etc/alpine-fde/keys/release.pem`)*
 3. **Unmount and reboot:**

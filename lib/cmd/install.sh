@@ -129,7 +129,7 @@ inst_esp_mnt() { printf '%s\n' "${INST_ESP_MNT:-/efi}"; }
 # (the plan-time extra-cmdline seam: extra kernel words appended to the target
 # cmdline.txt, e.g. console=ttyS0,115200 for a headless/serial console). The
 # systemd-stub measures the cmdline into PCR 11, so the words MUST be present
-# BEFORE the ukictl build + provisional seal — a post-hoc append would break
+# BEFORE the kernel build + provisional seal — a post-hoc append would break
 # the seal; that is why this is an install-time seam and not a boot-time knob.
 # A §8.2 H-G1 pin override (any rd.shell=/rd.emergency= word other than the
 # exact pins) dies HERE, before any disk mutation: the seam must not become a
@@ -303,7 +303,7 @@ inst_loader_binary() {
 #   <esp>/EFI/BOOT/BOOTX64.EFI — removable-media fallback path: boots on any
 #       firmware with NO NVRAM dependency (the harness fixtures already model
 #       BOOTX64 as the default entry)
-# The in-chroot build (ukictl build, §8.3) signs the binaries; the
+# The in-chroot build (kernel build, §8.3) signs the binaries; the
 # systemd-boot-update.service mask (§6) stays consistent with the retired
 # bootctl flow. Run BEFORE the credential ceremony (no secret involved).
 inst_bootmgr_copy_line() {
@@ -419,9 +419,9 @@ inst_bootentry_ensure() {
   _ibe_lbl=$(inst_bootentry_label)
   _ibe_ldr=$(inst_bootentry_loader)
   # fail-closed: the loader the entry points at must already be staged (§8.3
-  # boot-manager copy + the ukictl build's re-sign run BEFORE this record)
+  # boot-manager copy + the kernel build's re-sign run BEFORE this record)
   [ -f "$_ibe_espdir/EFI/BOOT/BOOTX64.EFI" ] ||
-    die "install: $_ibe_espdir/EFI/BOOT/BOOTX64.EFI is missing — refusing to create the '$_ibe_lbl' boot entry before the ESP is staged (the §8.3 boot-manager copy and the ukictl build must run first)"
+    die "install: $_ibe_espdir/EFI/BOOT/BOOTX64.EFI is missing — refusing to create the '$_ibe_lbl' boot entry before the ESP is staged (the §8.3 boot-manager copy and the kernel build must run first)"
   _ibe_bl=$(sp_baseline_file)
   [ -f "$_ibe_bl" ] ||
     die "install: no baseline at $_ibe_bl — cannot resolve the ESP partition the '$_ibe_lbl' boot entry must point at"
@@ -545,7 +545,7 @@ guarded file copy of the systemd-boot loader EFI binary to
 <esp>/EFI/BOOT/BOOTX64.EFI — Alpine ships no bootctl binary —, hooks, target
 metadata, install-state=installed) so the
 credential ceremony sits LAST; only the secret-dependent steps follow it
-(signed UKI + boot manager via `ukictl build`, PROVISIONAL TPM token sealed
+(signed UKI + boot manager via `kernel build`, PROVISIONAL TPM token sealed
 into keyslot 1, Mechanism B, PCR 11 only, from the UKI's .pcrsig), then
 teardown (unmount + ephemeral-key scrub) and: a direct reboot to disk when
 NVRAM enrollment succeeded — or, when the firmware refused it (key material
@@ -947,7 +947,7 @@ inst_preflight() {
   # §13 host tool set — topology-conditional. apk populates the rootfs;
   # openssl generates the ephemeral install key; sbsign/ukify are NOT
   # host-required (the boot manager + UKI are built + signed IN-CHROOT by
-  # ukictl build, §9.1 step 5).
+  # kernel build, §9.1 step 5).
   # shellcheck disable=SC2046  # deliberate word split: the bin:pkg pairs never contain spaces
   require_pkgs $(inst_live_tool_pairs)
   # real-server blocker #7 (bootctl): Alpine ships NO bootctl binary — the
@@ -1071,7 +1071,7 @@ inst_stage_ephemeral_key() {
 # the prompts live ONLY in these functions, reached through the executed plan
 # (chroot runner). The ONE outbound handoff is the release-key passphrase to
 # the in-chroot build: the ceremony writes it to the 0600 tmpfs seam file
-# staged at generate time (real-server blocker #8) so `ukictl build`'s
+# staged at generate time (real-server blocker #8) so `kernel build`'s
 # keys_unlock can decrypt release.pem — never argv, never the log, scrubbed
 # with the ephemeral key (I1). Dry-run/qemu emit the records as inert text —
 # secrets never appear in plan text, argv, the environment, or on disk/ESP
@@ -1115,12 +1115,12 @@ inst_prompt_secret() {
 }
 
 # inst_ceremony_floor PASSPHRASE — §13 entropy floor, shared implementation
-# (passphrase_floor_ok from lib/cmd/rotate.sh, lazily sourced): >=12 chars
+# (passphrase_floor_ok from lib/cmd/passwd.sh, lazily sourced): >=12 chars
 # across >=3 character classes, or >=16 chars.
 inst_ceremony_floor() {
   # shellcheck disable=SC1090
   command -v passphrase_floor_ok >/dev/null 2>&1 ||
-    . "${ALPINE_FDE_CMD_DIR:-$(sp_cmd_dir)}/rotate.sh"
+    . "${ALPINE_FDE_CMD_DIR:-$(sp_cmd_dir)}/passwd.sh"
   passphrase_floor_ok "$1"
 }
 
@@ -1232,7 +1232,7 @@ inst_ceremony_recovery() {
 # passphrase is ALSO written to the 0600 seam file IN THE TARGET ROOT
 # (<mnt>/run/alpine-fde-release-pass — the H-02 /dev bind is PLAIN, so a host
 # tmpfs seam is invisible guest-side), handing it to the in-chroot
-# `ukictl build`: its shell reads it into ALPINE_FDE_KEY_PASSPHRASE
+# `kernel build`: its shell reads it into ALPINE_FDE_KEY_PASSPHRASE
 # (RESOLVED-4, keys_unlock priority 1) — never argv, never the log, consumed
 # (rm) by the build record itself and scrubbed by teardown + the die-path
 # traps (I1). Crash resume: an already-encrypted release.pem
@@ -1307,7 +1307,7 @@ inst_ceremony_release_key() {
 # luksAddKey; token_next_id/token_import -> header token ops) and would fail
 # "not a valid LUKS device" against the decrypted /dev/mapper/* views.
 # Mechanics:
-#   1. extract the .pcrsig from the just-built UKI (stage-1 `ukictl build`
+#   1. extract the .pcrsig from the just-built UKI (stage-1 `kernel build`
 #      output on the ESP; objcopy section extraction, pcrsign contract)
 #   2. per container: seal_provisional (Mechanism B, PCR 11 only) -> token
 #      JSON; luksAddKey the sealed random passphrase into the token keyslot
@@ -1878,7 +1878,7 @@ cmd_install_main() {
   # bcache.ko + 69-bcache.rules) and ROOT_FS/BCACHE ride the conf below.
   # The rd.shell=0/rd.emergency=poweroff cmdline pins below stay: they are the
   # H-G1 fail-closed contract enforced by the cmdline-pins guard (§8.2) on
-  # every ukictl build — not a dracut module knob.
+  # every kernel build — not a dracut module knob.
   _im_cmdline_extra=$(inst_cmdline_extra)
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     inst_plan_write /etc/alpine-fde/cmdline.txt \
@@ -1911,7 +1911,7 @@ cmd_install_main() {
   # boot-lane finding #8 (s23 attempt 8): the ceremony's 0600 release-key
   # passphrase seam file lives in the LIVE env's /dev/shm (a tmpfs SUBMOUNT)
   # — a plain `mount --bind /dev` does NOT carry submounts, so the in-chroot
-  # ukictl build could not read the seam and fell back to its interactive
+  # kernel build could not read the seam and fell back to its interactive
   # prompt (hung the unattended install). Bind the shm tree explicitly; the
   # blocker #8 contract (never argv, never on disk) then actually holds.
   inst_plan_run host "mkdir -p $_im_mnt/dev/shm && mount --bind /dev/shm $_im_mnt/dev/shm"
@@ -2004,7 +2004,7 @@ cmd_install_main() {
   # §6 systemd-boot-update.service mask stays consistent.
   inst_plan_run guest "$(inst_bootmgr_copy_line $_im_esp_mnt)"
   # step 7 (MOVED BEFORE the credential ceremony — no ceremony secret; the
-  # staging is also a ukictl-build INPUT — the kernel hook fires on every
+  # staging is also a kernel-build INPUT — the kernel hook fires on every
   # build): hooks + trigger + first-boot AUTO-FINALIZER (§9.1 step 7;
   # ADR-13/ADR-19/ADR-20, G-C16 Alpine layout — flat templates copied to
   # their run-parts destinations; the auto-finalizer oneshot ships to
@@ -2068,7 +2068,7 @@ cmd_install_main() {
   # state-gated OFF — the PROVISIONAL seal below is the only enrollment of
   # Stage 1)
   # REAL-SERVER BLOCKER #8 + #9: the build record must (a) configure the
-  # release-key directory — ukictl build resolves keys_dir() =
+  # release-key directory — kernel build resolves keys_dir() =
   # ALPINE_FDE_KEYDIR/KEY_PATH with NO default; the bare record died
   # "release key directory not configured (set --keydir / KEY_PATH /
   # ALPINE_FDE_KEYDIR)" — and (b) consume the release-key PASSPHRASE the
@@ -2084,10 +2084,10 @@ cmd_install_main() {
   # REAL-SERVER BLOCKER #11: the record derives the TARGET's installed
   # kernel IN-GUEST (basename of the newest version-sorted directory under
   # /lib/modules — top-level dirs only, fail-closed when absent, which means
-  # the linux-lts package did not install) and PASSES it to ukictl build:
+  # the linux-lts package did not install) and PASSES it to kernel build:
   # the retired no-arg form fell back to `uname -r` — the LIVE ISO's kernel
   # — whose module tree does not exist in the target.
-  inst_plan_run guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde ukictl build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
+  inst_plan_run guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde kernel build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
   # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:

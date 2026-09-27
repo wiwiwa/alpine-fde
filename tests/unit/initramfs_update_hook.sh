@@ -2,12 +2,14 @@
 # tests/unit/initramfs_update_hook.sh — G-C16 (§8.3 + ADR-19, resolution R7):
 # the APK trigger replaces the retired Debian /etc/initramfs/post-update.d
 # template. hooks/apk/triggers/alpine-fde.trigger watches /lib/modules and
-# rebuilds the signed UKI for every installed kernel version through
-# `alpine-fde ukictl build <kver>` (ALPINE_FDE_BIN seam);
-# the child's exit code propagates (ADR-8 loud failure + persisted marker
-# under /etc/alpine-fde, recovery = `apk fix`).
+# rebuilds the signed UKI for every installed kernel version through the
+# lib/cmd build entry (§8.1 machine/lib entrance: the trigger sources
+# $ALPINE_FDE_LIB_DIR/cmd/kernel-build.sh and calls cmd_kernel_build_main in a
+# subshell per kernel — it NEVER execs the `alpine-fde` CLI); the exit code
+# propagates (ADR-8 loud failure + persisted marker under /etc/alpine-fde,
+# recovery = `apk fix`).
 #
-# The test drives the REAL trigger with a recording `alpine-fde` stub.
+# The test drives the REAL trigger with a recording stub lib tree.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -24,16 +26,17 @@ assert_eq "trigger template is executable" "1" "$([ -x "$TRIGGER" ] && echo 1 ||
 sh -n "$TRIGGER" >/dev/null 2>&1
 assert_eq "trigger parses under POSIX sh (busybox ash)" "0" "$?"
 
-mkdir -p "$T/bin" "$T/root/etc/alpine-fde" "$T/lib/modules/6.6.63-0-lts" "$T/lib/modules/6.6.62-0-lts"
-FAKE=$T/bin/alpine-fde
-cat >"$FAKE" <<EOF
+mkdir -p "$T/fakelib/cmd" "$T/root/etc/alpine-fde" "$T/lib/modules/6.6.63-0-lts" "$T/lib/modules/6.6.62-0-lts"
+cat >"$T/fakelib/cmd/kernel-build.sh" <<EOF
 #!/bin/sh
-printf '%s\n' "\$*" >>"$T/calls.log"
-exit \$ALPINE_FDE_FAKE_RC
+# stub module: records the build argv, exits with the scripted rc
+cmd_kernel_build_main() {
+    printf '%s\n' "build \$*" >>"$T/calls.log"
+    exit \$ALPINE_FDE_FAKE_RC
+}
 EOF
-chmod +x "$FAKE"
 : >"$T/calls.log"
-export ALPINE_FDE_BIN=$FAKE
+export ALPINE_FDE_LIB_DIR=$T/fakelib
 export ALPINE_FDE_ROOT=$T/root
 export ALPINE_FDE_FAKE_RC=0
 MARKER=$T/root/etc/alpine-fde/build-failed
@@ -48,19 +51,19 @@ run_trigger() { # <args...>
 # describe pass: informational, never builds (apk contract)
 # =============================================================================
 assert_eq "trigger: describe rc 0" "0" "$(run_trigger describe)"
-assert_eq "trigger: describe never invokes the binary" "0" "$(wc -l <"$T/calls.log" | tr -d ' ')"
+assert_eq "trigger: describe never invokes the lib entry" "0" "$(wc -l <"$T/calls.log" | tr -d ' ')"
 assert_ne "trigger: describe prints a description" "" "$(cat "$T/out.log")"
 
 # =============================================================================
 # trigger run: builds the UKI for EVERY kernel version under the watched dir
 # =============================================================================
 assert_eq "trigger: run rc 0" "0" "$(run_trigger "$T/lib/modules")"
-assert_eq "trigger: one ukictl build per installed kernel" "2" \
+assert_eq "trigger: one kernel build per installed kernel" "2" \
     "$(wc -l <"$T/calls.log" | tr -d ' ')"
 assert_contains "trigger: builds the current kernel verbatim" \
-    "$(cat "$T/calls.log")" "ukictl build 6.6.63-0-lts"
+    "$(cat "$T/calls.log")" "build 6.6.63-0-lts"
 assert_contains "trigger: builds the retained kernel verbatim" \
-    "$(cat "$T/calls.log")" "ukictl build 6.6.62-0-lts"
+    "$(cat "$T/calls.log")" "build 6.6.62-0-lts"
 assert_eq "trigger: no marker on success" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
 
 # =============================================================================
@@ -70,10 +73,10 @@ assert_eq "trigger: no marker on success" "0" "$([ -e "$MARKER" ] && echo 1 || e
 # =============================================================================
 export ALPINE_FDE_FAKE_RC=64
 assert_eq "trigger: child rc 64 propagates" "64" "$(run_trigger "$T/lib/modules")"
-assert_eq "trigger: failure invoked ukictl build once, then stopped" "1" \
+assert_eq "trigger: failure invoked kernel build once, then stopped" "1" \
     "$(wc -l <"$T/calls.log" | tr -d ' ')"
 assert_contains "trigger: failure was for the first-sorted kernel" \
-    "$(cat "$T/calls.log")" "ukictl build 6.6.62-0-lts"
+    "$(cat "$T/calls.log")" "build 6.6.62-0-lts"
 assert_eq "trigger: failure marker persisted" "1" "$([ -f "$MARKER" ] && echo 1 || echo 0)"
 assert_contains "trigger: marker names the failed kernel" "$(cat "$MARKER")" "6.6.62-0-lts"
 assert_contains "trigger: marker recovery names apk fix" "$(cat "$MARKER")" "apk fix"

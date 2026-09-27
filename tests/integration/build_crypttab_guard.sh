@@ -2,7 +2,7 @@
 # tests/integration/build_crypttab_guard.sh — G-U4 (§8.2): verified coupling guard.
 # systemd-cryptsetup adds tpm2-tss to the initrd only when /etc/crypttab carries
 # a tpm2-device= option AT BUILD TIME; omitting it silently disables all TPM
-# unlock. `ukictl build` therefore refuses (rc 64 + ADR-8 marker) before the
+# unlock. `kernel build` therefore refuses (rc 64 + ADR-8 marker) before the
 # initramfs builder ever runs, unless root's crypttab line carries tpm2-device=.
 # The INITRAMFS_CMD stub records invocations: on a guard failure dracut-equivalent
 # must run ZERO times; on success at least once.
@@ -82,7 +82,7 @@ build() {
         ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REC {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" kernel build "$KVER" >/dev/null 2>&1
 }
 
 # --- 1. crypttab missing entirely --------------------------------------------------
@@ -263,7 +263,7 @@ IV_OUT=$(env ALPINE_FDE_BIN_TEST=1 ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_ESP="$ESP"
     ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
     INITRAMFS_CMD="$REC {out} {kver}" \
     RETENTION=1 \
-    "$REPO/bin/alpine-fde" ukictl build "$KVER" 2>&1 >/dev/null)
+    "$REPO/bin/alpine-fde" kernel build "$KVER" 2>&1 >/dev/null)
 assert_rc "crypttab 14: invalid TOPOLOGY defaults to single (1-entry crypttab passes)" 0 $?
 assert_contains "crypttab 14: invalid TOPOLOGY warns and names the default" "$IV_OUT" \
     "invalid TOPOLOGY"

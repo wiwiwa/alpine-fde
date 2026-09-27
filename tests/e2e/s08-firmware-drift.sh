@@ -128,7 +128,7 @@ ESP_MIB=$(( UKI_MIB * 2 + 8 ))
 esp_make "$ENROLL/esp.img" "$ESP_MIB" "$ENROLL/harness.efi" || exit 1
 disk_make_luks "$ENROLL/disk.img" 128 || exit 1
 
-# efivars seam for the enroll-tpm I5 guard (mkvar pattern from
+# efivars seam for the reseal I5 guard (mkvar pattern from
 # tests/unit/baseline_finalize_guard.sh): attrs u32le 0x7 + payload byte.
 EFIVARS="$RUN/efivars-sb-on"
 mkdir -p "$EFIVARS"
@@ -184,16 +184,16 @@ assert_eq "combined .pcrsig entry pol == policy_digest(booted d7, enter-initrd d
 # the payload drive of boot 2 must carry the combined entry (a ladder-only
 # pcrsig is refused by the hook's I3 gate)
 uki_pcrsig_disk "$ENROLL/pcrsig.img" "$ENROLL/uki-pcrsig-combined.json" || exit 1
-# enroll precondition (CLI, enrl_preconditions #2): a FINALIZED baseline at
+# enroll precondition (CLI, reseal_preconditions #2): a FINALIZED baseline at
 # $ALPINE_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
 # scenario-local cli-state root — the same seam s06/s09/s12/s13 use; without
-# it enroll-tpm dies "no baseline at /etc/alpine-fde/baseline.json".
+# it reseal dies "no baseline at /etc/alpine-fde/baseline.json".
 uki_baseline_stamp "$ENROLL/cli-state" "$PCR7_ENROLLED"
 printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0 (no newline)
 chmod 600 "$RUN/kf-slot0"
 uki_host_enroll_finalized "$EFIVARS" "$ENROLL/uki-pcrsig-combined.json" \
     "$ENROLL/disk.img" "$RUN/keys" "$RUN/kf-slot0" "$ENROLL/cli-state" || {
-    echo "s08: production enroll-tpm FAILED"; exit 1; }
+    echo "s08: production reseal FAILED"; exit 1; }
 TOK=$(disk_token_json "$ENROLL/disk.img")
 assert_contains "standing token is systemd-tpm2 (Mechanism B)" "$TOK" '"type":"systemd-tpm2"'
 assert_contains "standing token pins {PCR 7, PCR 11}" "$TOK" '"tpm2-pcrs":[7,11]'

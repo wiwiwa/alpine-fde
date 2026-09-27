@@ -1,5 +1,5 @@
 #!/bin/sh
-# bootnext.sh — `alpine-fde bootnext <entry>`: one-shot boot entry for rollback
+# kernel-next.sh — `alpine-fde kernel next <entry>`: one-shot boot entry for rollback
 # (§8.1, §9.3; C-G11). Writes the EFI variable LoaderEntryOneShot under the
 # systemd loader GUID directly to efivarfs (no bootctl/systemd round-trip):
 #   file: <efivars>/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
@@ -8,10 +8,10 @@
 # prints the current value. The firmware hands the entry to the boot manager
 # for the NEXT boot only, then clears the variable.
 
-if [ -n "${ALPINE_FDE_BOOTNEXT_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_KERNEL_NEXT_LOADED:-}" ]; then
     return 0
 fi
-ALPINE_FDE_BOOTNEXT_LOADED=1
+ALPINE_FDE_KERNEL_NEXT_LOADED=1
 
 if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
@@ -21,9 +21,9 @@ fi
 BN_VAR_NAME='LoaderEntryOneShot'
 BN_VAR_GUID='4a67b082-0a4c-41cf-b6c7-440b29bb8c4f'
 
-bootnext_usage() {
+kernel_next_usage() {
     cat >&2 <<'EOF'
-Usage: alpine-fde bootnext [<entry-id>]
+Usage: alpine-fde kernel next [<entry-id>]
 
 Set the one-shot boot entry (UEFI LoaderEntryOneShot; consumed by
 systemd-boot on the NEXT boot only, then cleared by the firmware). <entry-id>
@@ -32,14 +32,14 @@ alpine-fde-6.6.0-0-lts.conf. Without argument: print the current value.
 EOF
 }
 
-# bn_var_path — full efivarfs path of the LoaderEntryOneShot variable
-bn_var_path() {
+# kn_var_path — full efivarfs path of the LoaderEntryOneShot variable
+kn_var_path() {
     _bp_dir=$(fw_efivars_dir)
     printf '%s/%s-%s\n' "$_bp_dir" "$BN_VAR_NAME" "$BN_VAR_GUID"
 }
 
-# bn_validate_entry ENTRY — rc 0 iff usable as an entry id
-bn_validate_entry() {
+# kn_validate_entry ENTRY — rc 0 iff usable as an entry id
+kn_validate_entry() {
     _bv_e=$1
     [ -n "$_bv_e" ] || return 1
     case $_bv_e in
@@ -49,9 +49,9 @@ bn_validate_entry() {
     return 0
 }
 
-# bn_encode ENTRY — var file body on stdout (u32le attrs 0x7 + UTF-16LE id);
+# kn_encode ENTRY — var file body on stdout (u32le attrs 0x7 + UTF-16LE id);
 # self-contained (no provision.sh helpers): awk emits char + NUL pairs
-bn_encode() {
+kn_encode() {
     {
         printf '\007\000\000\000'
         printf '%s\n' "$1" | awk '{
@@ -61,7 +61,7 @@ bn_encode() {
     }
 }
 
-cmd_bootnext_main() {
+cmd_kernel_next_main() {
     strict_mode
 
     _bm_entry=''
@@ -69,16 +69,16 @@ cmd_bootnext_main() {
     while [ $# -gt 0 ]; do
         case $1 in
             -h | --help)
-                bootnext_usage
+                kernel_next_usage
                 return 0
                 ;;
             --)
                 shift
                 break
                 ;;
-            -*) die -r "$ALPINE_FDE_USAGE" "bootnext: unknown option: $1" ;;
+            -*) die -r "$ALPINE_FDE_USAGE" "kernel next: unknown option: $1" ;;
             *)
-                [ "$_bm_given" -eq 0 ] || die -r "$ALPINE_FDE_USAGE" "bootnext: unexpected arguments: $*"
+                [ "$_bm_given" -eq 0 ] || die -r "$ALPINE_FDE_USAGE" "kernel next: unexpected arguments: $*"
                 _bm_entry=$1
                 _bm_given=1
                 ;;
@@ -86,7 +86,7 @@ cmd_bootnext_main() {
         shift
     done
 
-    _bm_path=$(bn_var_path)
+    _bm_path=$(kn_var_path)
     _bm_dir=${_bm_path%/*}
     if [ "$_bm_given" -eq 0 ]; then
         # display current value
@@ -104,14 +104,14 @@ cmd_bootnext_main() {
     fi
 
     _bm_entry_set=$_bm_entry
-    if ! bn_validate_entry "$_bm_entry"; then
-        die -r "$ALPINE_FDE_USAGE" "bootnext: invalid entry id: '$_bm_entry' (alphanumerics, '.', '_', '-' only, <= 200 chars)"
+    if ! kn_validate_entry "$_bm_entry"; then
+        die -r "$ALPINE_FDE_USAGE" "kernel next: invalid entry id: '$_bm_entry' (alphanumerics, '.', '_', '-' only, <= 200 chars)"
     fi
-    [ -d "$_bm_dir" ] || die "bootnext: efivarfs directory not found: $_bm_dir (booted without UEFI?)"
-    [ -w "$_bm_dir" ] || die "bootnext: efivarfs not writable (need root?) — try sudo"
+    [ -d "$_bm_dir" ] || die "kernel next: efivarfs directory not found: $_bm_dir (booted without UEFI?)"
+    [ -w "$_bm_dir" ] || die "kernel next: efivarfs not writable (need root?) — try sudo"
     # delete-then-write: a stale variable may hold a longer payload
     rm -f "$_bm_path"
-    bn_encode "$_bm_entry" >"$_bm_path" || die "bootnext: writing $_bm_path failed"
+    kn_encode "$_bm_entry" >"$_bm_path" || die "kernel next: writing $_bm_path failed"
     printf 'alpine-fde: one-shot boot entry set: %s (next boot only)\n' "$_bm_entry" >&2
     return 0
 }

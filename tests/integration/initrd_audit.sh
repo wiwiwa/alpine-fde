@@ -282,7 +282,7 @@ assert_rc "audit 5c: no lister + INITRAMFS_CMD override = loud skip (override ow
 assert_eq "audit 5c: no failure reason on the skipped audit" "" "$_initrd_audit_reason"
 
 # =============================================================================
-# 6. full real `ukictl build` over the fake inventory (audit is wired)
+# 6. full real `kernel build` over the fake inventory (audit is wired)
 # =============================================================================
 KVER=6.6.63-0-lts
 ROOT="$TMP/root"
@@ -301,7 +301,7 @@ build() { # <variant>
         ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" kernel build "$KVER" >/dev/null 2>&1
 }
 
 # 6a: non-compliant inventory (missing hook) -> rc 64 + marker, ESP untouched

@@ -25,17 +25,21 @@ cmd_status_main() {
 }
 EOF
 
-cat >"$CMD/rotate.sh" <<'EOF'
-cmd_rotate_main() { return 5; }
+cat >"$CMD/passwd.sh" <<'EOF'
+cmd_passwd_main() { return 5; }
 EOF
 
-cat >"$CMD/bootnext.sh" <<'EOF'
-cmd_bootnext_main() { printf 'ENTRY=%s\n' "${1:-}"; }
+cat >"$CMD/kernel-next.sh" <<'EOF'
+cmd_kernel_next_main() { printf 'ENTRY=%s\n' "${1:-}"; }
 EOF
 
-cat >"$CMD/enroll-tpm.sh" <<'EOF'
-# hyphenated subcommand: entry point must be cmd_enroll_tpm_main
-cmd_enroll_tpm_main() { printf 'ENROLL-STUB\n'; }
+cat >"$CMD/reseal.sh" <<'EOF'
+# hyphenated subcommand: entry point must be cmd_reseal_main
+cmd_reseal_main() { printf 'ENROLL-STUB\n'; }
+EOF
+
+cat >"$CMD/kernel.sh" <<'EOF'
+cmd_kernel_main() { printf 'KERNEL=%s\n' "$*"; }
 EOF
 
 : >"$CMD/provision.sh" # empty: no cmd_provision_main -> dispatcher must exit 3
@@ -116,16 +120,24 @@ assert_eq "global flags forwarded, extra args passed through" \
 
 # --- subcommand exit status propagates ---
 rc=0
-out=$(sp rotate 2>/dev/null) || rc=$?
-assert_rc "cmd exit status propagates (rotate -> 5)" "5" "$rc"
+out=$(sp passwd 2>/dev/null) || rc=$?
+assert_rc "cmd exit status propagates (passwd -> 5)" "5" "$rc"
 
 # --- positional arguments reach the command ---
-out=$(sp bootnext Linux-rollback)
-assert_eq "positional arg passthrough (bootnext)" "ENTRY=Linux-rollback" "$out"
+out=$(sp kernel next Linux-rollback)
+assert_eq "positional arg passthrough (kernel next)" "KERNEL=next Linux-rollback" "$out"
 
 # --- hyphenated subcommand maps to underscore function ---
-out=$(sp enroll-tpm)
-assert_eq "enroll-tpm routes to cmd_enroll_tpm_main" "ENROLL-STUB" "$out"
+out=$(sp reseal)
+assert_eq "reseal routes to cmd_reseal_main" "ENROLL-STUB" "$out"
+
+# --- the renamed-away verbs are GONE from the table (§8.1 7-verb surface) ---
+for retired in rotate bootnext enroll-tpm pre-upgrade ukictl; do
+    rc=0
+    out=$(sp "$retired" 2>&1 >/dev/null) || rc=$?
+    assert_rc "retired verb '$retired' -> usage rc 2" "2" "$rc"
+    assert_contains "retired verb '$retired' named as unknown subcommand" "$out" "unknown subcommand: $retired"
+done
 
 # --- not-implemented contract: exit 3, clean message ---
 rc=0
@@ -134,7 +146,7 @@ assert_rc "cmd file without entry function -> exit 3" "3" "$rc"
 assert_contains "missing entry function says not implemented" "$out" "not implemented"
 
 rc=0
-out=$(sp ukictl 2>&1 >/dev/null) || rc=$?
+out=$(sp install 2>&1 >/dev/null) || rc=$?
 assert_rc "missing cmd file -> exit 3" "3" "$rc"
 assert_contains "missing cmd file says not implemented" "$out" "not implemented"
 

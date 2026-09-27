@@ -117,7 +117,7 @@ token_doc() { # DUMPFILE OUT — extract the first systemd-tpm2 token document
 
 # --- K1 .pcrsig + K1-sealed enrollment --------------------------------------------
 policy_sign_json "$D7" "$D11" "$K1/release.pem" "$K1/release.pub" "$TMP/pcrsig-k1.json"
-fde "$K1" enroll-tpm --uuid "$UUID" --pcrsig "$TMP/pcrsig-k1.json" 2>"$TMP/enroll-k1.err"
+fde "$K1" reseal --uuid "$UUID" --pcrsig "$TMP/pcrsig-k1.json" 2>"$TMP/enroll-k1.err"
 ENROLL_K1_RC=$?
 assert_rc "K1 enrollment (explicit pcrsig) rc 0" 0 $ENROLL_K1_RC
 
@@ -137,7 +137,7 @@ cryptsetup open --test-passphrase --key-slot "$K1_SLOT" --key-file "$TMP/pass-k1
 assert_rc "K1 passphrase unlocks its keyslot (pre-rotation sanity)" 0 $?
 
 # --- rotation: swap the KEYDIR to K2 (baseline still pins K1!) and re-enroll ------
-fde "$K2" enroll-tpm --uuid "$UUID" 2>"$TMP/enroll-k2.err"
+fde "$K2" reseal --uuid "$UUID" 2>"$TMP/enroll-k2.err"
 ENROLL_K2_RC=$?
 assert_rc "K2 re-enrollment rc 0 (standing K1 token retired in the same run)" 0 $ENROLL_K2_RC
 # the pcrsig for K2 did not exist — the in-process re-sign fallback from the

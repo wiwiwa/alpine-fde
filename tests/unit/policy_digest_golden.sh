@@ -160,7 +160,7 @@ cmp -s "$TMP/sig.bin" "$TMP/sig-from-json.bin"
 assert_rc "pcrsig JSON: sig decodes to the identical signature bytes" 0 $?
 
 # --- S-M4: policy_pubkey_fp contract — unparseable key: rc 1, EMPTY stdout ------------
-# (consumed by policy_sign_json here AND by `ukictl build`, which guards on this
+# (consumed by policy_sign_json here AND by `kernel build`, which guards on this
 # exact contract: failure must never yield the well-known SHA256("") fingerprint)
 printf 'deliberately not a key' >"$TMP/corrupt.pub"
 rc=0; out=$(policy_pubkey_fp "$TMP/corrupt.pub") || rc=$?

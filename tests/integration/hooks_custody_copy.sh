@@ -12,7 +12,7 @@
 #     path is signed with; plaintext keys keep the old behavior;
 #     missing/wrong passphrase = loud 64 + build-failed marker (ADR-8)
 #   * §9.2/ADR-18 single-unlock: ONE hook run unlocks EXACTLY ONCE — the
-#     hook unlocks BEFORE `ukictl build` and hands the ALREADY-UNLOCKED
+#     hook unlocks BEFORE `kernel build` and hands the ALREADY-UNLOCKED
 #     staged path to the child (staged keydir seam), so the build child and
 #     the boot-manager re-sign leg never unlock/prompt again
 #   * ADR-8 loud failure stays SINGLE: no env + no tty -> one rc 64, one
@@ -69,22 +69,11 @@ printf 'unsigned-systemd-boot' >"$ALPINE_FDE_ESP/EFI/systemd/systemd-bootx64.efi
 printf 'unsigned-fallback' >"$ALPINE_FDE_ESP/EFI/BOOT/BOOTX64.EFI"
 MARKER=$ALPINE_FDE_ROOT/etc/alpine-fde/build-failed
 
-# recording alpine-fde stub (the ukictl build child — "succeeds" unless
-# ALPINE_FDE_TEST_FAIL is set; records the ALPINE_FDE_KEYDIR seam it was
-# handed so the single-unlock handoff is assertable)
-FAKE=$T/stub/alpine-fde
-cat >"$FAKE" <<'EOF'
-#!/bin/sh
-printf 'alpine-fde %s ALPINE_FDE_KEYDIR=%s\n' "$*" "${ALPINE_FDE_KEYDIR:-}" >>"$ALPINE_FDE_TEST_LOG"
-# record WHAT the child saw at its keydir seam (mid-run: the hook scrubs the
-# staging on exit, so this is the only vantage point)
-if [ -n "${ALPINE_FDE_KEYDIR:-}" ] && [ -f "$ALPINE_FDE_KEYDIR/release.pem" ]; then
-    printf 'child-release.pem=%s\n' "$(cat "$ALPINE_FDE_KEYDIR/release.pem")" \
-        >>"$ALPINE_FDE_TEST_LOG"
-fi
-[ -n "${ALPINE_FDE_TEST_FAIL:-}" ] && exit "${ALPINE_FDE_TEST_FAIL}"
-exit 0
-EOF
+# recording build-child STUB MODULE (§8.1 machine/lib entrance: the hook
+# sources lib/cmd/kernel-build.sh instead of execing a binary) — written into
+# the stub lib below; it "succeeds" unless ALPINE_FDE_TEST_FAIL is set and
+# records the ALPINE_FDE_KEYDIR seam it was handed so the single-unlock
+# handoff is assertable
 # sbsign/sbverify stubs: sbsign records argv and writes signed(output);
 # sbverify accepts only signed content
 cat >"$T/stub/sbsign" <<'EOF'
@@ -109,8 +98,7 @@ f=''
 for a in "$@"; do f=$a; done
 [ "$(tail -c 6 "$f")" = "signed" ]
 EOF
-chmod +x "$FAKE" "$T/stub/sbsign" "$T/stub/sbverify"
-export ALPINE_FDE_BIN=$FAKE
+chmod +x "$T/stub/sbsign" "$T/stub/sbverify"
 export PATH="$T/stub:$PATH"
 
 # the hook-run passphrase (fixtures + stub tty prompt seam below)
@@ -124,8 +112,23 @@ HOOK_PASS='ci-hook-passphrase-600000'
 # for `[ -t 0 ]` because run_hook feeds the hook </dev/null.
 # =============================================================================
 STUBLIB=$T/stub-lib
-mkdir -p "$STUBLIB"
+mkdir -p "$STUBLIB/cmd"
 : >"$STUBLIB/common.sh"
+cat >"$STUBLIB/cmd/kernel-build.sh" <<'EOF'
+# stub build module — the recording kernel build child
+cmd_kernel_build_main() {
+    printf 'kernel build %s ALPINE_FDE_KEYDIR=%s\n' "$*" "${ALPINE_FDE_KEYDIR:-}" \
+        >>"$ALPINE_FDE_TEST_LOG"
+    # record WHAT the child saw at its keydir seam (mid-run: the hook scrubs
+    # the staging on exit, so this is the only vantage point)
+    if [ -n "${ALPINE_FDE_KEYDIR:-}" ] && [ -f "$ALPINE_FDE_KEYDIR/release.pem" ]; then
+        printf 'child-release.pem=%s\n' "$(cat "$ALPINE_FDE_KEYDIR/release.pem")" \
+            >>"$ALPINE_FDE_TEST_LOG"
+    fi
+    [ -n "${ALPINE_FDE_TEST_FAIL:-}" ] && exit "${ALPINE_FDE_TEST_FAIL}"
+    exit 0
+}
+EOF
 cat >"$STUBLIB/keys.sh" <<'EOF'
 # stub keys.sh — unit-test double for lib/keys.sh (ADR-18 custody surface only)
 keys_is_encrypted() {
@@ -281,7 +284,7 @@ refit_encrypted() {
 }
 
 # leg 7: encrypted key + NO env + STUB TTY prompt -> the prompt is hit EXACTLY
-# ONCE per hook run and BOTH stages (ukictl build + boot-manager re-sign)
+# ONCE per hook run and BOTH stages (kernel build + boot-manager re-sign)
 # succeed on the single unlocked copy
 refit_encrypted
 reset_stubs
@@ -307,7 +310,7 @@ export ALPINE_FDE_TEST_TTY=1
 export ALPINE_FDE_TEST_FAIL=7
 assert_eq "hook: failing build child -> rc propagates" "7" "$(run_hook)"
 assert_contains "hook: build failure marker appended" \
-    "$(cat "$MARKER")" "kernel hook: ukictl build failed"
+    "$(cat "$MARKER")" "kernel hook: kernel build failed"
 assert_eq "hook: child-failure path unlocked ONCE" "1" "$(unlock_count; true)"
 assert_eq "hook: child-failure path scrubbed the staged copy on the exit path" "" \
     "$(staged_left)"

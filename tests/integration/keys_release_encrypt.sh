@@ -188,13 +188,13 @@ assert_eq "is_encrypted: iter=1000 -> 1 (600000 floor pinned)" "1" "$(call_rc ke
 _clean_shell_rc() { # <keydir> — env-clean subshell mirroring install.sh's
     # guest one-liner: the line exports the cmd dir, then sources common.sh +
     # keys.sh (a fresh chroot shell preloads nothing — die/info and the §13
-    # floor's rotate.sh must all resolve from the payload tree)
+    # floor's passwd.sh must all resolve from the payload tree)
     (
         unset ALPINE_FDE_KEYS_LOADED ALPINE_FDE_COMMON_LOADED
         unset ALPINE_FDE_KEY_PASSPHRASE ALPINE_FDE_CMD_DIR
         mkdir -p "$T/opt/alpine-fde/lib/cmd"
         cp "$REPO/lib/common.sh" "$REPO/lib/keys.sh" "$T/opt/alpine-fde/lib/"
-        cp "$REPO/lib/cmd/rotate.sh" "$T/opt/alpine-fde/lib/cmd/"
+        cp "$REPO/lib/cmd/passwd.sh" "$T/opt/alpine-fde/lib/cmd/"
         export ALPINE_FDE_CMD_DIR="$T/opt/alpine-fde/lib/cmd"
         . "$T/opt/alpine-fde/lib/common.sh"
         . "$T/opt/alpine-fde/lib/keys.sh"

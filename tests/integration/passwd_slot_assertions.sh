@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tests/integration/rotate_slot_assertions.sh — `alpine-fde rotate`:
+# tests/integration/rotate_slot_assertions.sh — `alpine-fde passwd`:
 #   * §13 entropy floor enforced (weak passphrase -> fail-closed, no cryptsetup)
 #   * device resolution via baseline target.luks_uuid -> by-uuid dir
 #   * luksChangeKey argv: --key-slot 0 + Argon2id KDF pins
 #   * post-assertions: token count unchanged, keyslots != 0 byte-identical,
 #     keyslot 0 changed (stubbed luksDump pre/post)
-#   * --reseat-tpm delegates to enroll-tpm: the Mechanism B seal (fresh
+#   * --reseat-tpm delegates to reseal: the Mechanism B seal (fresh
 #     keyslot + token, standing enrollment retired in the same run; ADR-19 —
 #     no systemd-cryptenroll anywhere)
 #   * passphrase temp files live on tmpfs (/dev/shm, §11 I1 — never plaintext
@@ -23,10 +23,10 @@ source "$REPO/lib/common.sh"
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/cmd/rotate.sh
-source "$REPO/lib/cmd/rotate.sh"
+# shellcheck source=../../lib/cmd/passwd.sh
+source "$REPO/lib/cmd/passwd.sh"
 
-T=$(mktemp -d /tmp/alpine-fde-rotate.XXXXXX)
+T=$(mktemp -d /tmp/alpine-fde-passwd.XXXXXX)
 FAKEBIN=$T/bin
 UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 export ALPINE_FDE_ROOT=$T/root
@@ -57,7 +57,7 @@ case "$1" in
         echo "DUMP$n" >>"$CS_LOG"
         if [ -e "$POSTFAIL" ] && [ "$n" = "2" ]; then exit 1; fi
         if [ "$n" = "1" ]; then
-            cat "$PRE_JSON"                       # rotate pre-view (slot0 OLD)
+            cat "$PRE_JSON"                       # passwd pre-view (slot0 OLD)
         elif [ -e "$PRE_AT3" ] && [ "$n" = "3" ]; then
             cat "$PRE3_JSON"                      # enroll pre-view: standing old token, slot0 NEW
         else
@@ -158,7 +158,7 @@ make_baseline() { # luks_uuid-value
 }
 
 run_rotate() { # args...
-    ROT_OUT=$("$REPO/bin/alpine-fde" rotate "$@" 2>&1)
+    ROT_OUT=$("$REPO/bin/alpine-fde" passwd "$@" 2>&1)
     ROT_RC=$?
 }
 
@@ -203,8 +203,8 @@ assert_eq "blocklisted passphrase -> fail-closed" "64" "$ROT_RC"
 export ALPINE_FDE_NEW_PASSPHRASE='new-pass-V4l1d!here'
 
 # --- 5b. §11 I1 fail-closed chain: unwritable ALPINE_FDE_TMPDIR -> 64, no leak ----
-# rotate must fail closed (64) when the passphrase temp files cannot be created
-# (rotate.sh mktemp chain) — and no passphrase file may be left behind anywhere
+# passwd must fail closed (64) when the passphrase temp files cannot be created
+# (passwd.sh mktemp chain) — and no passphrase file may be left behind anywhere
 # under the requested tmpdir.
 reset_state
 ROT_TMPDIR=$T/rot-tmp
@@ -214,7 +214,7 @@ ALPINE_FDE_TMPDIR="$ROT_TMPDIR" run_rotate
 assert_eq "unwritable ALPINE_FDE_TMPDIR -> fail-closed 64" "64" "$ROT_RC"
 assert_contains "fail-closed message names the temp-file failure" "$ROT_OUT" "cannot create temp file"
 assert_eq "no passphrase/temp file leaked under the unwritable tmpdir" "" \
-    "$(find "$ROT_TMPDIR" -type f -name 'alpine-fde-rot-*' -print -quit)"
+    "$(find "$ROT_TMPDIR" -type f -name 'alpine-fde-passwd-*' -print -quit)"
 assert_eq "cryptsetup never invoked (mktemp chain precedes it)" "0" "$(wc -l <"$CS_LOG")"
 chmod 700 "$ROT_TMPDIR"   # restore so the EXIT cleanup can remove it
 
@@ -228,7 +228,7 @@ assert_eq "cryptsetup never invoked for newline passphrase" "0" "$(wc -l <"$CS_L
 # --- 6. happy path ---------------------------------------------------------------------------
 reset_state
 run_rotate
-assert_eq "happy rotate rc 0" "0" "$ROT_RC"
+assert_eq "happy passwd rc 0" "0" "$ROT_RC"
 CALLS=$(grep -v '^CALL:' -d skip "$CS_LOG" 2>/dev/null || sed -n 's/^CALL: //p' "$CS_LOG")
 CALLS=$(sed -n 's/^CALL: //p' "$CS_LOG")
 assert_contains "luksChangeKey argv: --key-slot 0" "$CALLS" "--key-slot 0"
@@ -241,8 +241,8 @@ assert_eq "exactly one luksChangeKey invocation" "1" "$(grep -c luksChangeKey "$
 TMP_PATHS=$(sed -n 's/^MODE [0-9]* //p' "$CS_STAT")
 OLD_TMP=$(printf '%s\n' "$TMP_PATHS" | head -n1)
 NEW_TMP=$(printf '%s\n' "$TMP_PATHS" | sed -n '2p')
-assert_contains "old passphrase temp under /dev/shm (tmpfs, I1)" "$OLD_TMP" "/dev/shm/alpine-fde-rot-old."
-assert_contains "new passphrase temp under /dev/shm (tmpfs, I1)" "$NEW_TMP" "/dev/shm/alpine-fde-rot-new."
+assert_contains "old passphrase temp under /dev/shm (tmpfs, I1)" "$OLD_TMP" "/dev/shm/alpine-fde-passwd-old."
+assert_contains "new passphrase temp under /dev/shm (tmpfs, I1)" "$NEW_TMP" "/dev/shm/alpine-fde-passwd-new."
 assert_eq "passphrase temp files mode 0600 at call time" "600
 600" "$(sed -n 's/^MODE \([0-9]*\) .*/\1/p' "$CS_STAT")"
 if [ -e "$OLD_TMP" ] || [ -e "$NEW_TMP" ]; then
@@ -326,10 +326,10 @@ assert_contains "H-1: re-keyed warning on re-read failure" "$ROT_OUT" "WAS re-ke
 # --- 10. removed: user-facing --dry-run (task 8 — the flag is gone; rc 2 usage) ---------------------
 reset_state
 run_rotate --dry-run
-assert_eq "--dry-run is no longer a rotate option -> usage rc 2" "2" "$ROT_RC"
+assert_eq "--dry-run is no longer a passwd option -> usage rc 2" "2" "$ROT_RC"
 assert_eq "--dry-run: cryptsetup not invoked" "0" "$(wc -l <"$CS_LOG")"
 
-# --- 11. --reseat-tpm delegates to enroll-tpm (swtpm + stub cryptsetup: the
+# --- 11. --reseat-tpm delegates to reseal (swtpm + stub cryptsetup: the
 # Mechanism B seal path, ADR-19/ADR-20 — no systemd-cryptenroll anywhere) ------
 assert_rc "swtpm fixture starts" 0 swtpm_start "$T/swtpm"
 export ALPINE_FDE_TCTI=$SWTPM_TCTI
@@ -339,13 +339,13 @@ mkvar SecureBoot 1
 mkvar SetupMode 0
 # the enrollment anchors the release key from the KEYDIR (G-B7) — a REAL key so
 # the token pubkey post-assert can DER-encode it. ADR-16: --reseat-tpm delegates
-# to enroll-tpm, which fails closed on any release key < RSA-3072, so the KEYDIR
+# to reseal, which fails closed on any release key < RSA-3072, so the KEYDIR
 # is a hermetic suite-generated RSA-3072 keydir (same release.pem/.pub/.crt
 # shaping as keys_rsa3072_chain.sh), not the shared RSA-2048 fixtures/keys dir
 openssl genrsa -out "$T/keys/release.pem" 3072 2>/dev/null
 openssl pkey -in "$T/keys/release.pem" -pubout -out "$T/keys/release.pub" 2>/dev/null
 openssl req -new -x509 -key "$T/keys/release.pem" -out "$T/keys/release.crt" \
-    -subj /CN=alpine-fde-rotate-reseat 2>/dev/null
+    -subj /CN=alpine-fde-passwd-reseat 2>/dev/null
 [ -s "$T/keys/release.pub" ] && [ -s "$T/keys/release.crt" ] || {
     echo "FAIL: cannot generate the RSA-3072 reseat keydir" >&2
     exit 1
@@ -361,9 +361,9 @@ BL_PCR0="$LIVE" BL_PCR1="$LIVE" BL_PCR2="$LIVE" BL_PCR3="$LIVE" BL_PCR7="$LIVE" 
 # produces — token on the free slot 2, pubkey = the keydir release key
 DER_B64=$(openssl pkey -pubin -in "$T/keys/release.pub" -outform DER 2>/dev/null | openssl base64 -A)
 reset_state
-# PRE (rotate's own pre-view, n=1): slot-0 with the OLD salt - rotate asserts
+# PRE (passwd's own pre-view, n=1): slot-0 with the OLD salt - passwd asserts
 #   the change took effect (slot0 differs pre/post)
-# PRE3 (the enroll's pre-view, n=3): slot-0 ALREADY the new salt (rotate ran
+# PRE3 (the enroll's pre-view, n=3): slot-0 ALREADY the new salt (passwd ran
 #   first) + the STANDING old-keyslot-1 token the reseat must retire
 # POST (n>=2): the fresh enrollment - token on the FREE slot over {0,1,2} = 3,
 #   slot-0 identical to the enroll's pre-view (the enroll must not touch it)
@@ -382,7 +382,7 @@ POST11
 touch "$PRE_AT3"
 run_rotate --reseat-tpm
 rm -f "$PRE_AT3"
-assert_eq "rotate --reseat-tpm rc 0" "0" "$ROT_RC"
+assert_eq "passwd --reseat-tpm rc 0" "0" "$ROT_RC"
 assert_eq "luksChangeKey ran" "1" "$(grep -c luksChangeKey "$CS_LOG")"
 assert_contains "reseat: the Mechanism B enrollment added a fresh keyslot" "$(cat "$CS_LOG")" "luksAddKey"
 assert_contains "reseat: the fresh token was imported" "$(cat "$CS_LOG")" "token import"
@@ -395,10 +395,10 @@ assert_eq "reseat: enrolled.json policy_mode is b" "b" "$(baseline_get "$(sp_enr
 assert_eq "reseat: enrolled.json token keyslot (free slot)" "3" "$(baseline_get "$(sp_enrolled_file)" token_keyslot)"
 
 # --- 12. M-2: SIGINT mid-luksChangeKey -> zeroized + removed, rotation aborted ------
-# The stubbed luksChangeKey lingers (CS_SLOW); the driver backgrounds rotate under
+# The stubbed luksChangeKey lingers (CS_SLOW); the driver backgrounds passwd under
 # job control (set -m keeps SIGINT trappable for async children), signals INT once
 # the passphrase files exist, and requires: rotation NOT completed, and no
-# alpine-fde-rot-* file left anywhere under the requested tmpdir.
+# alpine-fde-passwd-* file left anywhere under the requested tmpdir.
 reset_state
 mkdir -p "$T/rottmp"
 touch "$CS_SLOW"
@@ -406,7 +406,7 @@ touch "$CS_SLOW"
 INT_RC_FILE=$T/int-rc
 (
     set -m
-    ALPINE_FDE_TMPDIR="$T/rottmp" "$REPO/bin/alpine-fde" rotate >"$T/int-out" 2>&1 &
+    ALPINE_FDE_TMPDIR="$T/rottmp" "$REPO/bin/alpine-fde" passwd >"$T/int-out" 2>&1 &
     ROT_PID=$!
     for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         [ -s "$CS_LOG" ] && break
@@ -419,14 +419,14 @@ INT_RC_FILE=$T/int-rc
 rm -f "$CS_SLOW"
 ROT_INT_RC=$(cat "$INT_RC_FILE")
 ROT_OUT=$(cat "$T/int-out")
-assert_eq "SIGINT: rotate interrupted (rc 130), not run to completion" "130" "$ROT_INT_RC"
+assert_eq "SIGINT: passwd interrupted (rc 130), not run to completion" "130" "$ROT_INT_RC"
 assert_not_contains "SIGINT: rotation must not complete" "$ROT_OUT" "keyslot-0 passphrase changed"
 assert_eq "SIGINT: no passphrase/temp file left under the tmpdir (M-2)" "" \
-    "$(find "$T/rottmp" -type f -name 'alpine-fde-rot-*' -print -quit)"
+    "$(find "$T/rottmp" -type f -name 'alpine-fde-passwd-*' -print -quit)"
 
 # --- 13. L-4: jq missing -> ADR-15 loud refusal before any cryptsetup call -----------
 # Every post-assertion parser is jq-based with fail-vacuous fallbacks; without jq
-# the assertions degrade and rotate dies claiming "keyslot 0 vanished". ADR-15:
+# the assertions degrade and passwd dies claiming "keyslot 0 vanished". ADR-15:
 # the command must declare the dependency and refuse loudly instead.
 NOJQ=$T/bin-nojq
 mkdir -p "$NOJQ"

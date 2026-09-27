@@ -191,7 +191,7 @@ aud_next_steps() {
 PCR 7 drift recovery (§9.4): confirm the drift is benign (firmware/dbx update?
 or tampering?), then:
   alpine-fde audit --accept      # re-baseline (operator confirmation)
-  alpine-fde enroll-tpm          # re-enroll — ONE cryptenroll covers all retained UKIs;
+  alpine-fde reseal          # re-enroll — ONE cryptenroll covers all retained UKIs;
                                  # cryptenroll re-captures the new CURRENT PCR 7 into
                                  # the static policy (A″: no signing medium needed, the
                                  # UKIs' signatures stay untouched; §9.4)
@@ -199,7 +199,7 @@ EOF
 }
 
 # aud_write_last_audit FILE BASELINE RESULT ACCEPTED — last-audit.json.
-# M-3 (the baseline_finalize_from_live / enrl_record pattern): the document is
+# M-3 (the baseline_finalize_from_live / reseal_record pattern): the document is
 # staged in a temp file NEXT TO the target, chmod 600 BEFORE the rename, then
 # moved into place ATOMICALLY — no default-umask window and no torn
 # last-audit.json (a failed stage leaves the previous document untouched

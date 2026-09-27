@@ -9,7 +9,7 @@
 #   release.pub — public key (PEM)       — .pcrpkey section, keyName computation
 #
 # Absent key material is a LOUD failure (exit 64) before any ESP mutation
-# (ADR-8); `ukictl build` also persists a failure marker (its own concern).
+# (ADR-8); `kernel build` also persists a failure marker (its own concern).
 #
 # Also provides the TPMT_PUBLIC/TPM2B_PUBLIC builder for the release public key
 # — the byte-exact public area whose TPM Name pins the release key inside the
@@ -46,7 +46,7 @@
 # Depends on: lib/common.sh, lib/policy.sh (policy_hex_to_bin), openssl,
 # tpm2-tools via the tpm() TCTI wrapper (keys_keyname, keys_keyname_verifying).
 # ADR-18 custody (keys_is_encrypted / keys_encrypt_release / keys_unlock):
-# openssl only; the §13 passphrase floor is reused from lib/cmd/rotate.sh
+# openssl only; the §13 passphrase floor is reused from lib/cmd/passwd.sh
 # (sourced lazily via $ALPINE_FDE_CMD_DIR when keys_encrypt_release needs it).
 
 if [ -n "${ALPINE_FDE_KEYS_LOADED:-}" ]; then
@@ -71,7 +71,7 @@ keys_dir() {
 }
 
 # keys_check [dir] — rc 0 iff the directory exists and holds all three files;
-# on failure prints a one-line reason (used by ukictl build for the loud-fail
+# on failure prints a one-line reason (used by kernel build for the loud-fail
 # marker BEFORE any ESP mutation). ADR-18 semantics: release.pem is the
 # ENCRYPTED on-target key — the messages point at the scp backup / signing
 # medium restore paths (G-KC8).
@@ -265,7 +265,7 @@ keys_is_encrypted() {
 # keys_encrypt_release KEYDIR — encrypt $KEYDIR/release.pem in place to the
 # ADR-18 form (see keys_is_encrypted) and scrub ALL plaintext copies
 # (release.priv.pem duplicate + tmp staging — zeroize + rm). The §13 entropy
-# floor (passphrase_floor_ok from lib/cmd/rotate.sh) is enforced BEFORE any
+# floor (passphrase_floor_ok from lib/cmd/passwd.sh) is enforced BEFORE any
 # ciphertext exists; floor violations are usage-class rc 2.
 # Passphrase credential mechanism (RESOLVED-4): ALPINE_FDE_KEY_PASSPHRASE env
 # -> interactive double no-echo TTY prompt -> loud die 64. The variable is
@@ -295,7 +295,7 @@ keys_encrypt_release() {
     fi
     unset _ker_p1 _ker_p2 2>/dev/null || :
     if ! command -v passphrase_floor_ok >/dev/null 2>&1; then
-        # resolution order (first readable rotate.sh wins):
+        # resolution order (first readable passwd.sh wins):
         #   1. the cmd-dir seam (CLI context: ALPINE_FDE_CMD_DIR always set)
         #   2. the cmd/ sibling of THIS file (any self-contained tree)
         #   3. the documented tooling-copy destination (§8.1/§9.1: the guest
@@ -310,16 +310,16 @@ keys_encrypt_release() {
         fi
         _ker_cands="$_ker_cands /opt/alpine-fde/lib/cmd /usr/share/alpine-fde/lib/cmd"
         for _ker_cmd_dir in $_ker_cands; do
-            if [ -f "$_ker_cmd_dir/rotate.sh" ]; then
+            if [ -f "$_ker_cmd_dir/passwd.sh" ]; then
                 # shellcheck disable=SC1090  # resolved via the cmd dir seam
-                . "$_ker_cmd_dir/rotate.sh"
+                . "$_ker_cmd_dir/passwd.sh"
                 break
             fi
         done
         unset _ker_self _ker_cmd_dir _ker_cands 2>/dev/null || :
     fi
     command -v passphrase_floor_ok >/dev/null 2>&1 \
-        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/rotate.sh not found via ALPINE_FDE_CMD_DIR, the lib sibling, /opt/alpine-fde, or the installed tree)"
+        || die "keys_encrypt_release: passphrase_floor_ok unavailable (lib/cmd/passwd.sh not found via ALPINE_FDE_CMD_DIR, the lib sibling, /opt/alpine-fde, or the installed tree)"
     if ! passphrase_floor_ok "$ALPINE_FDE_KEY_PASSPHRASE"; then
         die -r "$ALPINE_FDE_USAGE" "keys_encrypt_release: release-key passphrase below entropy floor (§13: ≥12 chars/3 classes or ≥16; not a common pattern) — refusing before any ciphertext is written (ADR-18)"
     fi
@@ -366,7 +366,7 @@ keys_encrypt_release() {
 # credential mechanism (RESOLVED-4 + real-server blocker #9a), in ORDER:
 #   1. ALPINE_FDE_KEY_PASSPHRASE env
 #   2. the CEREMONY-STAGED CACHE — the install's credential ceremony (3/3)
-#      hands the confirmed passphrase to a subsequent `ukictl build` through a
+#      hands the confirmed passphrase to a subsequent `kernel build` through a
 #      0600 tmpfs seam file (${ALPINE_FDE_TMPDIR:-/dev/shm}/
 #      alpine-fde-release-pass.*, blocker #8); when the env seam is empty
 #      (its transport is the CALLER's record, outside this function's

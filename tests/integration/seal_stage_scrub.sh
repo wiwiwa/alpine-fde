@@ -5,7 +5,7 @@
 #     NEVER /tmp, because the staging may hold the random volume passphrase
 #   * seal_scrub is the seal-owned scrub helper: zeroize + unlink the staged
 #     passphrase, remove the seal work dir
-#   * after the REAL enroll flow (enrl_run with real seal ops vs swtpm,
+#   * after the REAL enroll flow (reseal_run with real seal ops vs swtpm,
 #     file-backed LUKS2) the whole test tree holds ZERO leftover staging
 #     artifacts (alpine-fde-seal-pass.* / alpine-fde-seal* / alpine-fde-enroll.*)
 #   * seal_upgrade_token scrubs its OWN staging (passphrase + blob halves +
@@ -27,8 +27,8 @@ source "$REPO/lib/policy.sh"
 source "$REPO/lib/keys.sh"
 # shellcheck source=../../lib/seal.sh
 source "$REPO/lib/seal.sh"
-# shellcheck source=../../lib/cmd/enroll-tpm.sh
-source "$REPO/lib/cmd/enroll-tpm.sh"
+# shellcheck source=../../lib/cmd/reseal.sh
+source "$REPO/lib/cmd/reseal.sh"
 
 command -v swtpm >/dev/null 2>&1 || {
     echo "FAIL: swtpm not available — this test is normative and must run where swtpm exists" >&2
@@ -111,15 +111,15 @@ assert_eq "staging root honors ALPINE_FDE_TMPDIR" "$TMP/tmp" "$(seal_stage_dir)"
 # the /tmp default is BANNED from the seal/enroll staging sites (I1: the
 # staging may hold the random volume passphrase) — no "${TMPDIR:-/tmp}"
 # default may remain in the seal/enroll staging code
-assert_eq "no /tmp-defaulted staging left in seal.sh / enroll-tpm.sh" "0" \
-    "$(grep -c 'TMPDIR:-/tmp' "$REPO/lib/seal.sh" "$REPO/lib/cmd/enroll-tpm.sh" | awk -F: '{ s += $NF } END { print s+0 }')"
+assert_eq "no /tmp-defaulted staging left in seal.sh / reseal.sh" "0" \
+    "$(grep -c 'TMPDIR:-/tmp' "$REPO/lib/seal.sh" "$REPO/lib/cmd/reseal.sh" | awk -F: '{ s += $NF } END { print s+0 }')"
 
-# --- 2. the REAL enroll flow (enrl_run, real seal ops) scrubs on success ---------------
+# --- 2. the REAL enroll flow (reseal_run, real seal ops) scrubs on success ---------------
 LUKS1=$TMP/luks-enroll.img
 mk_luks "$LUKS1"
-ENRL_RC=0
-ENRL_OUT=$(enrl_run b "$KEYDIR/release.pub" "$LUKS1" 0 "$TMP/pcrsig711.json" 2>&1) || ENRL_RC=$?
-assert_eq "real enroll flow rc 0" "0" "$ENRL_RC"
+RESEAL_RC=0
+RESEAL_OUT=$(reseal_run b "$KEYDIR/release.pub" "$LUKS1" 0 "$TMP/pcrsig711.json" 2>&1) || RESEAL_RC=$?
+assert_eq "real enroll flow rc 0" "0" "$RESEAL_RC"
 assert_no_leftovers "enroll flow success"
 
 # --- 3. enroll flow with an INJECTED FAILURE (luksAddKey refuses) ----------------------
@@ -134,7 +134,7 @@ LUKS2=$TMP/luks-enroll-fail.img
 mk_luks "$LUKS2"
 ALPINE_FDE_CRYPTSETUP=$TMP/cs-no-addkey
 ENRL2_RC=0
-ENRL2_OUT=$(enrl_run b "$KEYDIR/release.pub" "$LUKS2" 0 "$TMP/pcrsig711.json" 2>&1) || ENRL2_RC=$?
+ENRL2_OUT=$(reseal_run b "$KEYDIR/release.pub" "$LUKS2" 0 "$TMP/pcrsig711.json" 2>&1) || ENRL2_RC=$?
 assert_eq "injected luksAddKey failure -> enroll flow rc 1" "1" "$ENRL2_RC"
 unset ALPINE_FDE_CRYPTSETUP
 assert_no_leftovers "enroll flow failure"

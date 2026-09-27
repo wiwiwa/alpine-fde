@@ -18,7 +18,7 @@
 #      anywhere on the LUKS payload; ESP scanned host-side
 #   6. `audit --init` finalizes the baseline via the REAL CLI (against a
 #      G-R1-compliant efivars fixture: SecureBoot=1 SetupMode=0) BEFORE any UKI
-#      chain work — S-00b (ukictl build + enroll) only runs after this scenario
+#      chain work — S-00b (kernel build + enroll) only runs after this scenario
 #   7. G-T13 prediction check: ukify's predicted PCR 11 (enter-initrd entry ==
 #      the {11}-selection PolicyPCR digest over the guest's PRE-UNLOCK reading,
 #      i.e. the post-phase-word line — never the final register)

@@ -124,7 +124,7 @@ seal_digest_11() {
 }
 
 # seal_stage_dir — the I1 staging root. ALWAYS tmpfs: ${ALPINE_FDE_TMPDIR:-/dev/shm}
-# (the repo-wide tmpfs seam convention; rotate.sh/keys.sh/finalize.sh agree).
+# (the repo-wide tmpfs seam convention; passwd.sh/keys.sh/finalize.sh agree).
 # NEVER default to /tmp: every staging site below may hold the RANDOM VOLUME
 # PASSPHRASE or key material in flight (§11 I1 — no plaintext secret on a
 # persistent filesystem), and /tmp is not guaranteed to be a tmpfs. ALPINE_FDE_TMPDIR
@@ -233,7 +233,7 @@ seal_verify_pcrsig() {
 # RAW bytes go into the TPM sealed object only (seal_create decodes).
 # BYTE-EXACT: no trailing newline — every consumer (luksAddKey --key-file,
 # the mkinitfs hook's stdin feed) must see identical bytes.
-# ALPINE_FDE_SEAL_STAGE (enroll-tpm's choreography staging dir) wins when set
+# ALPINE_FDE_SEAL_STAGE (reseal's choreography staging dir) wins when set
 # so the whole staging tree is scrubbed with one rm by the caller; the default
 # is the seal_stage_dir tmpfs root — NEVER /tmp (I1).
 seal_gen_passphrase() {
@@ -533,7 +533,7 @@ seal_enroll() {
     SEAL_MODE=$_se_mode
     # NOTE: SEAL_PASS_FILE and the blob halves under $_se_w remain staged for
     # the caller (token.sh choreography / post-asserts) — the caller scrubs
-    # them with seal_scrub (seal_upgrade_token does so itself; enrl_run's
+    # them with seal_scrub (seal_upgrade_token does so itself; reseal_run's
     # choreography stage holds them and scrubs on every exit path).
     info "seal: sealed the random volume passphrase ($_se_mode, PCR $_se_sel) into keyslot $SEAL_SLOT of $_se_dev"
     return 0

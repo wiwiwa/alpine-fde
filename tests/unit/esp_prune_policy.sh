@@ -2,7 +2,7 @@
 # tests/unit/esp_prune_policy.sh — ESP install/prune contract (§9.2/§9.3, B-G5):
 # keep current + 2 newest by Debian version sort; prune files+manifest from ONE
 # keep-set decision; pruning only ever runs after a successful install (the
-# end-to-end ordering lives in ukictl_build_stub / build_no_key_loud_fail).
+# end-to-end ordering lives in kernel_build_stub / build_no_key_loud_fail).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)

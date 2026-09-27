@@ -1,21 +1,21 @@
 #!/bin/sh
-# rotate.sh — `alpine-fde rotate`: change the keyslot-0 (recovery) passphrase via
+# passwd.sh — `alpine-fde passwd`: change the keyslot-0 (recovery) passphrase via
 # `cryptsetup luksChangeKey` (§8.1, §9.4). The volume key is untouched — no
 # re-encryption; TPM seals are untouched — no re-seal needed.
 #
 # Optional --reseat-tpm additionally wipes + re-creates the TPM enrollment in
 # ONE Mechanism B sealing run (never a bare wipe — delegated to
-# enroll-tpm.sh's precondition-checked flow; ADR-19: no systemd-cryptenroll
+# reseal.sh's precondition-checked flow; ADR-19: no systemd-cryptenroll
 # anywhere — the seal is tpm2-tools + the LUKS2 token choreography).
 #
 # Passphrase floor (§13 / C-G12, enforced fail-closed):
 #   >= 12 chars with >= 3 character classes, or >= 16 chars (any classes);
 #   small common-password blocklist (case-insensitive substring match).
 
-if [ -n "${ALPINE_FDE_ROTATE_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_PASSWD_LOADED:-}" ]; then
     return 0
 fi
-ALPINE_FDE_ROTATE_LOADED=1
+ALPINE_FDE_PASSWD_LOADED=1
 
 if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
@@ -69,36 +69,36 @@ passphrase_floor_ok() {
     return 1
 }
 
-rotate_usage() {
+passwd_usage() {
     cat >&2 <<'EOF'
-Usage: alpine-fde rotate [--reseat-tpm]
+Usage: alpine-fde passwd [--reseat-tpm]
 
 Change the keyslot-0 (recovery) passphrase: cryptsetup luksChangeKey on the
 baseline's LUKS device, Argon2id KDF pins preserved. The volume key and all
 TPM seals are untouched (no re-encryption, no re-seal, §9.4).
   --reseat-tpm   additionally wipe+re-enroll the TPM seal in ONE Mechanism B
-                 sealing run (enroll-tpm preconditions apply; ADR-19)
+                 sealing run (reseal preconditions apply; ADR-19)
 Passphrases: ALPINE_FDE_OLD_PASSPHRASE / ALPINE_FDE_NEW_PASSPHRASE env or
 interactive prompt. New passphrase must meet the §13 floor (>=12 chars/3
 classes or >=16 chars, no common-password blocklist hits).
 EOF
 }
 
-# rot_device — resolve the LUKS device from the baseline target
-rot_device() {
+# passwd_device — resolve the LUKS device from the baseline target
+passwd_device() {
     _rd_bl=$(sp_baseline_file)
-    [ -f "$_rd_bl" ] || die "rotate: no baseline at $_rd_bl"
-    baseline_validate "$_rd_bl" || die "rotate: baseline invalid"
+    [ -f "$_rd_bl" ] || die "passwd: no baseline at $_rd_bl"
+    baseline_validate "$_rd_bl" || die "passwd: baseline invalid"
     _rd_uuid=$(baseline_get_in "$_rd_bl" target luks_uuid)
-    [ -n "$_rd_uuid" ] || die "rotate: baseline target.luks_uuid empty (set by install)"
+    [ -n "$_rd_uuid" ] || die "passwd: baseline target.luks_uuid empty (set by install)"
     _rd_dev="${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_rd_uuid"
-    [ -e "$_rd_dev" ] || die "rotate: LUKS device not resolvable: $_rd_dev"
+    [ -e "$_rd_dev" ] || die "passwd: LUKS device not resolvable: $_rd_dev"
     printf '%s\n' "$_rd_dev"
 }
 
-# rot_prompt PASSPHRASE-VARNAME PROMPT — read twice-matched passphrase into
+# passwd_prompt PASSPHRASE-VARNAME PROMPT — read twice-matched passphrase into
 # the named variable (interactive only)
-rot_prompt() {
+passwd_prompt() {
     _rp_var=$1 _rp_prompt=$2
     printf '%s: ' "$_rp_prompt" >&2
     stty -echo 2>/dev/null || true
@@ -110,45 +110,45 @@ rot_prompt() {
     fde_strip_trailing_cr _rp_a
     fde_strip_trailing_cr _rp_b
     if [ "$_rp_a" != "$_rp_b" ]; then
-        die "rotate: passphrases do not match"
+        die "passwd: passphrases do not match"
     fi
     eval "$_rp_var=\$_rp_a"
 }
 
-# rot_luksdump DEV OUTFILE — luksDump JSON via the cryptsetup seam
-rot_luksdump() {
+# passwd_luksdump DEV OUTFILE — luksDump JSON via the cryptsetup seam
+passwd_luksdump() {
     _rl_dev=$1 _rl_out=$2
     "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" luksDump --dump-json-metadata "$_rl_dev" >"$_rl_out" 2>/dev/null
 }
 
-cmd_rotate_main() {
+cmd_passwd_main() {
     _rm_reseat=0
     while [ $# -gt 0 ]; do
         case $1 in
             --reseat-tpm) _rm_reseat=1 ;;
             -h | --help)
-                rotate_usage
+                passwd_usage
                 return 0
                 ;;
-            *) die -r "$ALPINE_FDE_USAGE" "rotate: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "passwd: unknown argument: $1" ;;
         esac
         shift
     done
 
     require_pkgs cryptsetup:cryptsetup jq:jq
-    _rm_dev=$(rot_device)
+    _rm_dev=$(passwd_device)
 
     # Passphrase acquisition (env for CI, prompt otherwise)
     _rm_old=${ALPINE_FDE_OLD_PASSPHRASE:-}
     _rm_new=${ALPINE_FDE_NEW_PASSPHRASE:-}
     if [ -z "$_rm_new" ]; then
-        rot_prompt _rm_new "new keyslot-0 passphrase"
+        passwd_prompt _rm_new "new keyslot-0 passphrase"
     fi
     if ! passphrase_floor_ok "$_rm_new"; then
-        die "rotate: new passphrase rejected by the §13 entropy floor (>=12 chars/3 classes or >=16 chars, no blocklist hits, no control characters) — refusing (T2b)"
+        die "passwd: new passphrase rejected by the §13 entropy floor (>=12 chars/3 classes or >=16 chars, no blocklist hits, no control characters) — refusing (T2b)"
     fi
     if [ -z "$_rm_old" ]; then
-        rot_prompt _rm_old "current keyslot-0 passphrase"
+        passwd_prompt _rm_old "current keyslot-0 passphrase"
     fi
 
     # Keyslot-0 change with LUKS2 metadata before/after assertions: every slot
@@ -157,35 +157,35 @@ cmd_rotate_main() {
     # secret is ever plaintext on disk) — default /dev/shm, overridable via
     # ALPINE_FDE_TMPDIR (tests / exotic setups); never ${TMPDIR:-/tmp}.
     _rm_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
-    _rm_pre=$(mktemp "$_rm_tmpdir/alpine-fde-rot-pre.XXXXXX") ||
-        die "rotate: cannot create temp file in $_rm_tmpdir"
-    _rm_post=$(mktemp "$_rm_tmpdir/alpine-fde-rot-post.XXXXXX") || {
+    _rm_pre=$(mktemp "$_rm_tmpdir/alpine-fde-passwd-pre.XXXXXX") ||
+        die "passwd: cannot create temp file in $_rm_tmpdir"
+    _rm_post=$(mktemp "$_rm_tmpdir/alpine-fde-passwd-post.XXXXXX") || {
         rm -f "$_rm_pre"
-        die "rotate: cannot create temp file in $_rm_tmpdir"
+        die "passwd: cannot create temp file in $_rm_tmpdir"
     }
-    _rm_oldf=$(mktemp "$_rm_tmpdir/alpine-fde-rot-old.XXXXXX") || {
+    _rm_oldf=$(mktemp "$_rm_tmpdir/alpine-fde-passwd-old.XXXXXX") || {
         rm -f "$_rm_pre" "$_rm_post"
-        die "rotate: cannot create temp file in $_rm_tmpdir"
+        die "passwd: cannot create temp file in $_rm_tmpdir"
     }
-    _rm_newf=$(mktemp "$_rm_tmpdir/alpine-fde-rot-new.XXXXXX") || {
+    _rm_newf=$(mktemp "$_rm_tmpdir/alpine-fde-passwd-new.XXXXXX") || {
         rm -f "$_rm_pre" "$_rm_post" "$_rm_oldf"
-        die "rotate: cannot create temp file in $_rm_tmpdir"
+        die "passwd: cannot create temp file in $_rm_tmpdir"
     }
-    rot_luksdump "$_rm_dev" "$_rm_pre" || die "rotate: cannot read LUKS2 metadata of $_rm_dev"
+    passwd_luksdump "$_rm_dev" "$_rm_pre" || die "passwd: cannot read LUKS2 metadata of $_rm_dev"
     # M-2 (§11 I1 hygiene): every exit path — normal, SIGINT, SIGTERM — must
     # zeroize the passphrase files before unlinking them and remove all four
     # temp files. A multi-second 1-GiB-Argon2id luksChangeKey is a wide window;
     # an interrupted run must not leave plaintext passphrases on tmpfs.
-    _rot_cleanup() {
-        for _rot_f in "${_rm_oldf:-}" "${_rm_newf:-}"; do
-            [ -n "$_rot_f" ] && : >"$_rot_f" 2>/dev/null
+    _passwd_cleanup() {
+        for _passwd_f in "${_rm_oldf:-}" "${_rm_newf:-}"; do
+            [ -n "$_passwd_f" ] && : >"$_passwd_f" 2>/dev/null
         done
         rm -f "${_rm_oldf:-}" "${_rm_newf:-}" "${_rm_pre:-}" "${_rm_post:-}" 2>/dev/null
         return 0
     }
-    trap _rot_cleanup EXIT
-    trap 'trap - INT; _rot_cleanup; exit 130' INT
-    trap 'trap - TERM; _rot_cleanup; exit 143' TERM
+    trap _passwd_cleanup EXIT
+    trap 'trap - INT; _passwd_cleanup; exit 130' INT
+    trap 'trap - TERM; _passwd_cleanup; exit 143' TERM
     printf '%s' "$_rm_old" >"$_rm_oldf"
     printf '%s' "$_rm_new" >"$_rm_newf"
     chmod 600 "$_rm_oldf" "$_rm_newf"
@@ -193,28 +193,28 @@ cmd_rotate_main() {
     if ! "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" luksChangeKey \
         --key-slot 0 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 \
         --key-file "$_rm_oldf" "$_rm_dev" "$_rm_newf"; then
-        err "rotate: luksChangeKey failed (wrong current passphrase?)"
+        err "passwd: luksChangeKey failed (wrong current passphrase?)"
         _rm_rc=1
     fi
-    [ "$_rm_rc" -eq 0 ] || die "rotate: keyslot 0 not changed"
+    [ "$_rm_rc" -eq 0 ] || die "passwd: keyslot 0 not changed"
 
     # H-1: luksChangeKey returned 0 — keyslot 0 WAS re-keyed, the OLD passphrase
     # no longer unlocks. Every failure from here on must say so before dying
     # (§10 "passphrase forgotten + TPM refuses = data loss"): an operator who
-    # concludes "rotate failed" keeps the old passphrase record. Suppressed only
+    # concludes "passwd failed" keeps the old passphrase record. Suppressed only
     # where the slot-0 assertions prove the change did NOT take effect.
-    _rot_rekey_warn() {
-        err "rotate: keyslot 0 WAS re-keyed to the NEW passphrase before this failure — the OLD passphrase no longer unlocks. Investigate with: cryptsetup luksDump --dump-json-metadata <dev>"
+    _passwd_rekey_warn() {
+        err "passwd: keyslot 0 WAS re-keyed to the NEW passphrase before this failure — the OLD passphrase no longer unlocks. Investigate with: cryptsetup luksDump --dump-json-metadata <dev>"
     }
-    if ! rot_luksdump "$_rm_dev" "$_rm_post"; then
-        _rot_rekey_warn
-        die "rotate: cannot re-read LUKS2 metadata"
+    if ! passwd_luksdump "$_rm_dev" "$_rm_post"; then
+        _passwd_rekey_warn
+        die "passwd: cannot re-read LUKS2 metadata"
     fi
     # tokens unchanged
     _rm_tok_pre=$(luks_json_count_type "$_rm_pre" systemd-tpm2)
     _rm_tok_post=$(luks_json_count_type "$_rm_post" systemd-tpm2)
     if [ "$_rm_tok_pre" != "$_rm_tok_post" ]; then
-        err "rotate: assertion failed: token count changed ($_rm_tok_pre -> $_rm_tok_post) — TPM seals must be untouched"
+        err "passwd: assertion failed: token count changed ($_rm_tok_pre -> $_rm_tok_post) — TPM seals must be untouched"
         _rm_rc=1
     fi
     # every keyslot except 0 byte-identical
@@ -222,7 +222,7 @@ cmd_rotate_main() {
         _rm_b=$(luks_json_slot_blob "$_rm_pre" "$_rm_slot")
         [ -n "$_rm_b" ] || continue
         if [ "$_rm_b" != "$(luks_json_slot_blob "$_rm_post" "$_rm_slot")" ]; then
-            err "rotate: assertion failed: keyslot $_rm_slot changed — only keyslot 0 may change"
+            err "passwd: assertion failed: keyslot $_rm_slot changed — only keyslot 0 may change"
             _rm_rc=1
         fi
     done
@@ -231,29 +231,29 @@ cmd_rotate_main() {
     _rm_s0post=$(luks_json_slot_blob "$_rm_post" 0)
     _rm_was_rekeyed=1
     if [ -z "$_rm_s0post" ]; then
-        err "rotate: assertion failed: keyslot 0 vanished"
+        err "passwd: assertion failed: keyslot 0 vanished"
         _rm_rc=1
         _rm_was_rekeyed=0
     elif [ "$_rm_s0pre" = "$_rm_s0post" ]; then
-        err "rotate: assertion failed: keyslot 0 unchanged — change did not take effect"
+        err "passwd: assertion failed: keyslot 0 unchanged — change did not take effect"
         _rm_rc=1
         _rm_was_rekeyed=0
     fi
     if [ "$_rm_rc" -ne 0 ] && [ "$_rm_was_rekeyed" -eq 1 ]; then
-        _rot_rekey_warn
+        _passwd_rekey_warn
     fi
-    [ "$_rm_rc" -eq 0 ] || die "rotate: post-assertions failed"
+    [ "$_rm_rc" -eq 0 ] || die "passwd: post-assertions failed"
 
     printf 'alpine-fde: keyslot-0 passphrase changed (volume key and TPM seals untouched)\n' >&2
 
     if [ "$_rm_reseat" -eq 1 ]; then
         info "re-seating the TPM seal (single wipe+enroll Mechanism B run, ADR-19)"
-        if [ ! -f "$(sp_cmd_dir)/enroll-tpm.sh" ]; then
-            die "rotate: enroll-tpm.sh not found next to rotate.sh — cannot --reseat-tpm"
+        if [ ! -f "$(sp_cmd_dir)/reseal.sh" ]; then
+            die "passwd: reseal.sh not found next to passwd.sh — cannot --reseat-tpm"
         fi
         # shellcheck disable=SC1090
-        . "$(sp_cmd_dir)/enroll-tpm.sh"
-        cmd_enroll_tpm_main --reseat
+        . "$(sp_cmd_dir)/reseal.sh"
+        cmd_reseal_main --reseat
     fi
     return 0
 }

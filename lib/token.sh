@@ -26,7 +26,7 @@
 # verbatim.
 #
 # Choreography primitives (all cryptsetup calls go through the
-# ALPINE_FDE_CRYPTSETUP seam — the same env override enroll-tpm/ukictl-build
+# ALPINE_FDE_CRYPTSETUP seam — the same env override reseal/kernel-build
 # and their tests use):
 #   token_free_slot <dev>       smallest free keyslot >= 1 (slot 0 is recovery)
 #   token_next_id   <dev>       smallest free LUKS2 token id
@@ -195,7 +195,7 @@ token_kill_slot() {
 }
 
 # token_post_assert <pre_json> <post_json> <pub_b64> <pcrs_json> <slot> —
-# the enroll post-assert skeleton (reused from lib/cmd/enroll-tpm.sh's
+# the enroll post-assert skeleton (reused from lib/cmd/reseal.sh's
 # assertions, generalized over the mode):
 #   * exactly one systemd-tpm2 token
 #   * its tpm2-pubkey == <pub_b64> (the pinned release key)

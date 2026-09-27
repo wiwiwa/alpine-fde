@@ -1,13 +1,13 @@
 #!/bin/sh
-# enroll-tpm.sh — `alpine-fde enroll-tpm`: Mechanism B TPM-seal enrollment
+# reseal.sh — `alpine-fde reseal`: Mechanism B TPM-seal enrollment
 # (§6.1/§7.1/§9.1/§9.4; ADR-19/ADR-20; gaps G-B3/G-B5/G-B6/G-B7). Alpine has
 # NO systemd-cryptenroll (ADR-19): the seal is lib/seal.sh (tpm2-tools) and the
 # LUKS2 choreography is lib/token.sh — cryptsetup stays the only LUKS2 seam.
 # A guest/installed-system tool (needs the TPM via the configured TCTI); unit
 # tests exercise the logic via stubs + the swtpm fixture. Also the shared
-# enrollment core of `ukictl build`: enrl_run / enrl_ensure_once are the
-# callable seam the build's ensure-once step reuses (`enroll`/`enroll-tpm` are
-# the alias surface of that step, §8.1).
+# enrollment core of `kernel build`: reseal_run / reseal_ensure_once are the
+# callable seam the build's ensure-once step reuses (§8.1: the enrollment is
+# internal to the build; `reseal` is the operator-facing spelling).
 #
 # Preconditions (fail-closed, in order):
 #   1. policy_mode gate (ADR-19: b canonical; a2/native aliases; a / ap exit 64)
@@ -26,7 +26,7 @@
 #      3072 bits (ADR-16 fail-closed rc 2, keys_rsa3072_guard)
 #   6. LUKS device resolvable via /dev/disk/by-uuid/<baseline target.luks_uuid>
 #   7. a usable TPM via TCTI (tpm2 getcap probe; seal_require_env)
-# Then enrl_run: the Mechanism B enrollment (seal under the finalized {7,11}
+# Then reseal_run: the Mechanism B enrollment (seal under the finalized {7,11}
 # policy + keyslot + token + retire-on-reseat), post-asserted via
 # `cryptsetup luksDump --dump-json-metadata` (exactly one systemd-tpm2 token,
 # pubkey == the keydir release key, pcrs [7,11], keyslot != 0, recovery
@@ -36,7 +36,7 @@
 # supplies the release-key-signed .pcrsig JSON the seal embeds; its entry is
 # verified openssl-level against the policy digest recomputed from the entry's
 # own anchored d7/d11 components BEFORE anything is embedded (G-B6, digest-
-# anchored — no live PCR read). Without one, enroll-tpm re-signs in-process
+# anchored — no live PCR read). Without one, reseal re-signs in-process
 # from the keydir's release.pem (keys_unlock; ADR-18) over the CURRENT PCR 7/11
 # — the §9.4 re-enroll path (re-captures the new current PCR 7; live-read
 # precondition kept).
@@ -45,10 +45,10 @@
 # run as the fresh one is standing (add new keyslot + token FIRST, then remove
 # the old token + kill the old slot) — never a bare wipe (brick risk).
 
-if [ -n "${ALPINE_FDE_ENROLL_LOADED:-}" ]; then
+if [ -n "${ALPINE_FDE_RESEAL_LOADED:-}" ]; then
     return 0
 fi
-ALPINE_FDE_ENROLL_LOADED=1
+ALPINE_FDE_RESEAL_LOADED=1
 
 if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
@@ -65,15 +65,15 @@ fi
 #   ALPINE_FDE_ENROLL_LOCK   ensure-once lockfile override (tests; default below)
 #   ALPINE_FDE_PCRSIG        .pcrsig JSON source for the ensure-once path
 #   ALPINE_FDE_LUKS_KEYFILE  existing-passphrase key file authorizing luksAddKey
-enrl_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
-enrl_by_uuid_dir() { printf '%s\n' "${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}"; }
+reseal_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
+reseal_by_uuid_dir() { printf '%s\n' "${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}"; }
 
 # --- ensure-once serialization (§8.3 one-enrollment invariant; review HW-3) -----
-# The inspect+enroll decision must be atomic: two concurrent `ukictl build`s
+# The inspect+enroll decision must be atomic: two concurrent `kernel build`s
 # (operator + kernel hook, two racing postinst passes) must never both see
 # "zero tokens" and both enroll. flock (util-linux, base dep) on a lockfile in
 # /run (tmpfs), /var/lock fallback, overridable for tests.
-enrl_lockfile() {
+reseal_lockfile() {
     if [ -n "${ALPINE_FDE_ENROLL_LOCK:-}" ]; then
         printf '%s\n' "$ALPINE_FDE_ENROLL_LOCK"
         return 0
@@ -85,16 +85,16 @@ enrl_lockfile() {
     printf '%s\n' /var/lock/alpine-fde-enroll.lock
 }
 
-# enrl_lock_acquire — take the exclusive enrollment lock on fd 9 (bounded wait).
+# reseal_lock_acquire — take the exclusive enrollment lock on fd 9 (bounded wait).
 # rc 0 = held; rc 1 = cannot serialize (caller decides fatality). Release with
-# enrl_lock_release. ENRL_LOCKED is 1 while held (diagnostics).
-enrl_lock_acquire() {
-    ENRL_LOCKED=0
+# reseal_lock_release. RESEAL_LOCKED is 1 while held (diagnostics).
+reseal_lock_acquire() {
+    RESEAL_LOCKED=0
     if ! command -v flock >/dev/null 2>&1; then
         err "enroll: flock not available (util-linux) — cannot serialize the enrollment (§8.3)"
         return 1
     fi
-    _ela_f=$(enrl_lockfile)
+    _ela_f=$(reseal_lockfile)
     _ela_dir=${_ela_f%/*}
     if [ ! -d "$_ela_dir" ] && ! mkdir -p "$_ela_dir" 2>/dev/null; then
         err "enroll: cannot create lock directory $_ela_dir"
@@ -112,35 +112,35 @@ enrl_lock_acquire() {
         exec 9>&-
         return 1
     fi
-    ENRL_LOCKED=1
+    RESEAL_LOCKED=1
     return 0
 }
 
-# enrl_lock_release — drop the enrollment lock (idempotent). NOTE: plain
+# reseal_lock_release — drop the enrollment lock (idempotent). NOTE: plain
 # `exec 9>&-` only — an extra `2>/dev/null` on the exec would be applied
 # PERSISTENTLY (POSIX exec-without-command semantics) and silence the rest of
 # the process's stderr.
-enrl_lock_release() {
-    if [ "${ENRL_LOCKED:-0}" -eq 1 ]; then
+reseal_lock_release() {
+    if [ "${RESEAL_LOCKED:-0}" -eq 1 ]; then
         exec 9>&-
-        ENRL_LOCKED=0
+        RESEAL_LOCKED=0
     fi
     return 0
 }
 
-# enrl_policy_mode — config key `policy_mode` (env wins). ADR-19/ADR-20: the
+# reseal_policy_mode — config key `policy_mode` (env wins). ADR-19/ADR-20: the
 # ladder is resolved — Mechanism B (rung b) is the normative Alpine pipeline;
 # a2 / a-prime-prime / native are accepted aliases of the same construction;
 # rungs a / ap fail closed at the policy_mode_normalize boundary (64, cites
 # ADR-19).
-enrl_policy_mode() {
+reseal_policy_mode() {
     policy_mode_normalize "${policy_mode:-${POLICY_MODE:-b}}" ||
-        die "enroll-tpm: invalid policy_mode '${policy_mode:-${POLICY_MODE:-}}' (ADR-19: Mechanism B (rung b) is the normative path; want b — a2 accepted as an alias)"
+        die "reseal: invalid policy_mode '${policy_mode:-${POLICY_MODE:-}}' (ADR-19: Mechanism B (rung b) is the normative path; want b — a2 accepted as an alias)"
 }
 
 enroll_usage() {
     cat >&2 <<'EOF'
-Usage: alpine-fde enroll-tpm [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
+Usage: alpine-fde reseal [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
                              [--reseat]
 
 Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 token;
@@ -171,29 +171,29 @@ documented-absent (fail closed, 64, ADR-19).
 EOF
 }
 
-# enrl_preconditions UUID-OVERRIDE [PCRSIG] — on success rc 0 with the resolved
-# triple in the ENRL_PRE_UUID / ENRL_PRE_PUB / ENRL_PRE_DEV globals (review
+# reseal_preconditions UUID-OVERRIDE [PCRSIG] — on success rc 0 with the resolved
+# triple in the RESEAL_PRE_UUID / RESEAL_PRE_PUB / RESEAL_PRE_DEV globals (review
 # MD-02: a flat space-joined stdout cannot round-trip paths containing spaces);
 # dies fail-closed otherwise. KEYDIR-explicit (G-B7): the release key comes from
 # keys_dir — the baseline's keys.release_pub_path is never consulted.
-enrl_preconditions() {
-    ENRL_PRE_UUID=''
-    ENRL_PRE_PUB=''
-    ENRL_PRE_DEV=''
+reseal_preconditions() {
+    RESEAL_PRE_UUID=''
+    RESEAL_PRE_PUB=''
+    RESEAL_PRE_DEV=''
     _ep_override=${1:-}
     _ep_pcrsig=${2:-${ALPINE_FDE_PCRSIG:-}}
     _ep_bl=$(sp_baseline_file)
-    [ -f "$_ep_bl" ] || die "enroll-tpm: no baseline at $_ep_bl (run 'alpine-fde provision stage1')"
-    baseline_validate "$_ep_bl" || die "enroll-tpm: baseline invalid: $_ep_bl"
+    [ -f "$_ep_bl" ] || die "reseal: no baseline at $_ep_bl (run 'alpine-fde provision stage1')"
+    baseline_validate "$_ep_bl" || die "reseal: baseline invalid: $_ep_bl"
     if ! baseline_is_final "$_ep_bl"; then
-        die "enroll-tpm: baseline expected_pcr7 is pending — finalize after first boot: alpine-fde audit --init"
+        die "reseal: baseline expected_pcr7 is pending — finalize after first boot: alpine-fde audit --init"
     fi
 
     _ep_sb=$(fw_sb_state) || true
     case $_ep_sb in
         secureboot=1\ setup_mode=0\ *) : ;;
         *)
-            die "enroll-tpm: precondition failed: Secure Boot must be on with SetupMode=0, got: $_ep_sb (I5)"
+            die "reseal: precondition failed: Secure Boot must be on with SetupMode=0, got: $_ep_sb (I5)"
             ;;
     esac
 
@@ -212,28 +212,28 @@ enrl_preconditions() {
     fi
     if [ -n "$_ep_anchor" ]; then
         if [ "$_ep_anchor" != "$_ep_expected" ]; then
-            die "enroll-tpm: PCR 7 digest-anchor drift: pcrsig entry d7 $_ep_anchor != baseline expected_pcr7 $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
+            die "reseal: PCR 7 digest-anchor drift: pcrsig entry d7 $_ep_anchor != baseline expected_pcr7 $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
         fi
     else
         if ! _ep_live=$(tpm_pcr_read 7) || [ -z "$_ep_live" ]; then
-            die "enroll-tpm: cannot read live PCR 7 (TCTI: ${ALPINE_FDE_TCTI:-<default>})"
+            die "reseal: cannot read live PCR 7 (TCTI: ${ALPINE_FDE_TCTI:-<default>})"
         fi
         if [ "$_ep_live" != "$_ep_expected" ]; then
-            die "enroll-tpm: PCR 7 drift: live $_ep_live != baseline $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
+            die "reseal: PCR 7 drift: live $_ep_live != baseline $_ep_expected — audit, then audit --accept + re-enroll (§9.4)"
         fi
     fi
 
     _ep_keydir=$(keys_dir)
-    [ -n "$_ep_keydir" ] || die "enroll-tpm: no release key directory configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
-    [ -d "$_ep_keydir" ] || die "enroll-tpm: release key directory not found: $_ep_keydir"
+    [ -n "$_ep_keydir" ] || die "reseal: no release key directory configured (set --keydir / KEY_PATH / ALPINE_FDE_KEYDIR)"
+    [ -d "$_ep_keydir" ] || die "reseal: release key directory not found: $_ep_keydir"
     _ep_pub="$_ep_keydir/release.pub"
-    [ -f "$_ep_pub" ] || die "enroll-tpm: release public key not found: $_ep_pub"
+    [ -f "$_ep_pub" ] || die "reseal: release public key not found: $_ep_pub"
     # ADR-16: the release key must be RSA >= 3072 — fail-closed rc 2 at the
     # enroll path entry, BEFORE any TPM/LUKS2 state is touched
     keys_rsa3072_guard "$_ep_keydir"
 
     _ep_uuid=${_ep_override:-$(baseline_get_in "$_ep_bl" target luks_uuid)}
-    [ -n "$_ep_uuid" ] || die "enroll-tpm: no LUKS uuid (baseline target.luks_uuid empty; set it in install or pass --uuid)"
+    [ -n "$_ep_uuid" ] || die "reseal: no LUKS uuid (baseline target.luks_uuid empty; set it in install or pass --uuid)"
     case $_ep_uuid in
         /*)
             # G-XC12 (§8.1 "(or target block device)"): an explicit
@@ -242,31 +242,31 @@ enrl_preconditions() {
             _ep_dev=$_ep_uuid
             ;;
         *)
-            _ep_dev="$(enrl_by_uuid_dir)/$_ep_uuid"
+            _ep_dev="$(reseal_by_uuid_dir)/$_ep_uuid"
             ;;
     esac
-    [ -e "$_ep_dev" ] || die "enroll-tpm: LUKS device not resolvable: $_ep_dev"
+    [ -e "$_ep_dev" ] || die "reseal: LUKS device not resolvable: $_ep_dev"
 
     # a usable TPM via the configured TCTI (Mechanism B precondition, §6.1)
     seal_require_env
 
-    ENRL_PRE_UUID=$_ep_uuid
-    ENRL_PRE_PUB=$_ep_pub
-    ENRL_PRE_DEV=$_ep_dev
+    RESEAL_PRE_UUID=$_ep_uuid
+    RESEAL_PRE_PUB=$_ep_pub
+    RESEAL_PRE_DEV=$_ep_dev
     return 0
 }
 
-# enrl_record FILE(UUID) MODE WIPE KEYSLOT PUBKEY — write enrolled.json.
+# reseal_record FILE(UUID) MODE WIPE KEYSLOT PUBKEY — write enrolled.json.
 # Built with jq -n (field values can never mangle the JSON) and installed
 # atomically (temp in the same directory + chmod 600 BEFORE the rename — no
 # default-umask window, no partial document; review LO-02). rc 1 on failure.
-enrl_record() {
+reseal_record() {
     _er_uuid=$1 _er_mode=$2 _er_wipe=$3 _er_slot=$4 _er_pub=$5
     _er_f=$(sp_enrolled_file)
     _er_dir=${_er_f%/*}
     mkdir -p "$_er_dir"
     _er_tmp=$(mktemp "$_er_dir/.alpine-fde-enrolled.XXXXXX") || {
-        err "enroll-tpm: cannot create temp file for enrolled.json in $_er_dir"
+        err "reseal: cannot create temp file for enrolled.json in $_er_dir"
         return 1
     }
     if ! jq -n \
@@ -277,58 +277,58 @@ enrl_record() {
           policy_mode: $mode, wipe_slot: $wipe, token_keyslot: $slot,
           pubkey: $pub, pcr_bank: "sha256"}' >"$_er_tmp"; then
         rm -f "$_er_tmp"
-        err "enroll-tpm: serializing enrolled.json failed"
+        err "reseal: serializing enrolled.json failed"
         return 1
     fi
     chmod 600 "$_er_tmp"
     if ! mv -f "$_er_tmp" "$_er_f"; then
         rm -f "$_er_tmp"
-        err "enroll-tpm: installing enrolled.json failed: $_er_f"
+        err "reseal: installing enrolled.json failed: $_er_f"
         return 1
     fi
     return 0
 }
 
-# enrl_json_token_id FILE TYPE — the JSON key (token id) of the first token of
+# reseal_json_token_id FILE TYPE — the JSON key (token id) of the first token of
 # TYPE in `cryptsetup luksDump --dump-json-metadata` output (numeric "0"… or
 # any string key). jq-parsed like baseline.sh's luks_json_* parsers —
 # cryptsetup's dump layout varies by version (compact single-line on 2.7.x)
 # and must never be text-anchored.
-enrl_json_token_id() {
+reseal_json_token_id() {
     jq -r 'first(.tokens // {} | to_entries[] | select(.value.type? == $t) | .key) // empty' \
         --arg t "$2" "$1" 2>/dev/null || :
 }
 
-# enrl_sign_pcrsig <staging_dir> <keydir> — the in-process re-sign fallback
+# reseal_sign_pcrsig <staging_dir> <keydir> — the in-process re-sign fallback
 # (§9.4): sign the {7,11} policy over the CURRENT live PCR 7/11 with the
 # keydir's release.pem (keys_unlock handles the ADR-18 encrypted form; the
 # decrypted copy is scrubbed HERE, before this function returns).
-enrl_sign_pcrsig() {
+reseal_sign_pcrsig() {
     _esp_stage=$1 _esp_keydir=$2
     seal_require_env
     _esp_d7=$(seal_pcrread 7)
     _esp_d11=$(seal_pcrread 11)
     if command -v keys_unlock >/dev/null 2>&1; then
         _esp_priv=$(keys_unlock "$_esp_keydir") || {
-            die "enroll-tpm: release.pem unlock failed — cannot re-sign the policy (ADR-18)"
+            die "reseal: release.pem unlock failed — cannot re-sign the policy (ADR-18)"
         }
     else
         _esp_priv="$_esp_keydir/release.pem"
-        [ -f "$_esp_priv" ] || die "enroll-tpm: no release.pem in $_esp_keydir — cannot re-sign the policy"
+        [ -f "$_esp_priv" ] || die "reseal: no release.pem in $_esp_keydir — cannot re-sign the policy"
     fi
     # subshell: a die inside policy_sign_json must not strand the decrypted key
     if ! (policy_sign_json "$_esp_d7" "$_esp_d11" "$_esp_priv" \
         "$_esp_keydir/release.pub" "$_esp_stage/pcrsig.json"); then
         [ -n "${_esp_priv}" ] && [ "$_esp_priv" != "$_esp_keydir/release.pem" ] &&
             keys_scrub "$_esp_priv"
-        die "enroll-tpm: in-process policy re-sign failed (keydir: $_esp_keydir)"
+        die "reseal: in-process policy re-sign failed (keydir: $_esp_keydir)"
     fi
     [ "$_esp_priv" != "$_esp_keydir/release.pem" ] && keys_scrub "$_esp_priv"
     printf '%s\n' "$_esp_stage/pcrsig.json"
 }
 
-# enrl_run MODE PUBKEY DEVSPEC FORCE-WIPE(0|1) [PCRSIG] — the single-enrollment
-# core shared by `enroll-tpm` and the `ukictl build` ensure-once step (G-R3):
+# reseal_run MODE PUBKEY DEVSPEC FORCE-WIPE(0|1) [PCRSIG] — the single-enrollment
+# core shared by `reseal` and the `kernel build` ensure-once step (G-R3):
 #   * pre-dump LUKS2 metadata; >1 existing systemd-tpm2 tokens → loud refusal
 #   * a standing enrollment is retired in the SAME run the fresh one stands
 #     (add new keyslot + token, import token, THEN remove old token + kill old
@@ -340,43 +340,43 @@ enrl_sign_pcrsig() {
 #     fail-closed; this function translates that to rc 1 — the CALLER owns
 #     fatal handling) with ALL staging under one directory scrubbed on every
 #     exit path (I1: the random volume passphrase never survives on disk)
-# On success: rc 0 with ENRL_SLOT / ENRL_TOKEN_ID / ENRL_WIPE set. Any failure:
+# On success: rc 0 with RESEAL_SLOT / RESEAL_TOKEN_ID / RESEAL_WIPE set. Any failure:
 # rc 1 with the reason on stderr.
-enrl_run() {
+reseal_run() {
     _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4 _er_sig_arg=${5:-${ALPINE_FDE_PCRSIG:-}}
-    # ADR-16: same release-key floor as enrl_preconditions — this shared core
-    # is also the `ukictl build` ensure-once entry, which never passes through
+    # ADR-16: same release-key floor as reseal_preconditions — this shared core
+    # is also the `kernel build` ensure-once entry, which never passes through
     # the CLI precondition gate
     keys_rsa3072_guard "${_er_pub%/*}"
-    ENRL_SLOT=''
-    ENRL_TOKEN_ID=''
-    ENRL_WIPE=no
+    RESEAL_SLOT=''
+    RESEAL_TOKEN_ID=''
+    RESEAL_WIPE=no
     # I1: every enroll-owned scratch/staging root is TMPFS — the enrollment
     # stage holds the RANDOM VOLUME PASSPHRASE, so the default is /dev/shm
     # (the repo tmpfs seam; cf. seal_stage_dir), never /tmp. The same root
     # pins the LUKS2 metadata dumps (not secret, scrubbed anyway).
     _er_pre=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspre.XXXXXX") || return 1
-    if ! enrl_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_pre" 2>/dev/null; then
+    if ! reseal_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_pre" 2>/dev/null; then
         rm -f "$_er_pre"
-        err "enroll-tpm: cannot read LUKS2 metadata of $_er_dev"
+        err "reseal: cannot read LUKS2 metadata of $_er_dev"
         return 1
     fi
     _er_tok_pre=$(luks_json_count_type "$_er_pre" systemd-tpm2)
     if [ "$_er_tok_pre" -gt 1 ]; then
         rm -f "$_er_pre"
-        err "enroll-tpm: $_er_tok_pre systemd-tpm2 tokens found (expected <= 1) — manual intervention required"
+        err "reseal: $_er_tok_pre systemd-tpm2 tokens found (expected <= 1) — manual intervention required"
         return 1
     fi
     if [ "$_er_tok_pre" -gt 0 ]; then
         if [ "$_er_force" != "1" ]; then
             info "existing TPM enrollment found — retiring it in the same run the fresh seal stands"
         fi
-        ENRL_WIPE=yes
+        RESEAL_WIPE=yes
     fi
     if [ "$_er_force" = "1" ]; then
-        ENRL_WIPE=yes # explicit --reseat forces retire+re-enroll in ONE run
+        RESEAL_WIPE=yes # explicit --reseat forces retire+re-enroll in ONE run
     fi
-    _er_old_tok=$(enrl_json_token_id "$_er_pre" systemd-tpm2)
+    _er_old_tok=$(reseal_json_token_id "$_er_pre" systemd-tpm2)
     _er_old_slot=$(luks_json_token_keyslot "$_er_pre" systemd-tpm2 2>/dev/null || true)
     _er_slot0_pre=$(luks_json_slot_blob "$_er_pre" 0)
 
@@ -392,7 +392,7 @@ enrl_run() {
     if [ -n "$_er_sig_arg" ]; then
         if ! cp "$_er_sig_arg" "$_er_stage/pcrsig.json" 2>/dev/null; then
             rm -rf "$_er_stage" "$_er_pre"
-            err "enroll-tpm: cannot read the .pcrsig source: $_er_sig_arg"
+            err "reseal: cannot read the .pcrsig source: $_er_sig_arg"
             return 1
         fi
     fi
@@ -405,7 +405,7 @@ enrl_run() {
     (
         export ALPINE_FDE_SEAL_STAGE="$_er_stage"
         if [ ! -f "$_er_stage/pcrsig.json" ]; then
-            enrl_sign_pcrsig "$_er_stage" "$_er_keydir" || exit 1
+            reseal_sign_pcrsig "$_er_stage" "$_er_keydir" || exit 1
         fi
         seal_finalized "$_er_keydir" "$_er_dev" "$_er_stage/pcrsig.json" \
             "$_er_stage/token.json" || exit 1
@@ -413,12 +413,12 @@ enrl_run() {
             "${ALPINE_FDE_LUKS_KEYFILE:-}" || exit 1
         _er_tid=$(token_next_id "$_er_dev") || exit 1
         token_import "$_er_dev" "$_er_stage/token.json" "$_er_tid" || exit 1
-        if [ "$ENRL_WIPE" = "yes" ] && [ -n "$_er_old_tok" ]; then
+        if [ "$RESEAL_WIPE" = "yes" ] && [ -n "$_er_old_tok" ]; then
             token_remove "$_er_dev" "$_er_old_tok" || exit 1
             token_kill_slot "$_er_dev" "$_er_old_slot" "$SEAL_PASS_FILE" || exit 1
         fi
-        printf '%s\n' "ENRL_SLOT=$SEAL_SLOT" "ENRL_TOKEN_ID=$_er_tid" \
-            "ENRL_PASS=$SEAL_PASS_FILE" >"$_er_stage/env"
+        printf '%s\n' "RESEAL_SLOT=$SEAL_SLOT" "RESEAL_TOKEN_ID=$_er_tid" \
+            "RESEAL_PASS=$SEAL_PASS_FILE" >"$_er_stage/env"
     ) 2>>"$_er_stage/sub.err" || _er_rc=1
     if [ -s "$_er_stage/sub.err" ]; then
         cat "$_er_stage/sub.err" >&2
@@ -426,7 +426,7 @@ enrl_run() {
     if [ "$_er_rc" -eq 0 ] && [ -f "$_er_stage/env" ]; then
         # shellcheck disable=SC1090
         . "$_er_stage/env"
-        keys_scrub "$ENRL_PASS"
+        keys_scrub "$RESEAL_PASS"
     fi
     if [ "$_er_rc" -ne 0 ]; then
         # I1 invariant (c): the staged passphrase is ZEROIZED, not merely
@@ -436,7 +436,7 @@ enrl_run() {
         done
         rm -rf "$_er_stage"
         rm -f "$_er_pre"
-        err "enroll-tpm: the Mechanism B enrollment failed — LUKS2 state may hold a fresh keyslot without its token (re-run enrollment; §8.3)"
+        err "reseal: the Mechanism B enrollment failed — LUKS2 state may hold a fresh keyslot without its token (re-run enrollment; §8.3)"
         return 1
     fi
 
@@ -445,27 +445,27 @@ enrl_run() {
         rm -rf "$_er_stage" "$_er_pre"
         return 1
     }
-    if ! enrl_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_post" 2>/dev/null; then
+    if ! reseal_cryptsetup luksDump --dump-json-metadata "$_er_dev" >"$_er_post" 2>/dev/null; then
         rm -rf "$_er_stage"
         rm -f "$_er_pre" "$_er_post"
-        err "enroll-tpm: cannot re-read LUKS2 metadata after enrollment"
+        err "reseal: cannot re-read LUKS2 metadata after enrollment"
         return 1
     fi
     _er_pub_b64=$(openssl pkey -pubin -in "$_er_pub" -outform DER 2>/dev/null | openssl base64 -A)
-    if ! token_post_assert "$_er_pre" "$_er_post" "$_er_pub_b64" '[7,11]' "$ENRL_SLOT"; then
+    if ! token_post_assert "$_er_pre" "$_er_post" "$_er_pub_b64" '[7,11]' "$RESEAL_SLOT"; then
         rm -rf "$_er_stage"
         rm -f "$_er_pre" "$_er_post"
-        err "enroll-tpm: post-assertions failed — enrollment NOT recorded"
+        err "reseal: post-assertions failed — enrollment NOT recorded"
         return 1
     fi
     # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
-    ENRL_TOKEN_ID=$(enrl_json_token_id "$_er_post" systemd-tpm2)
+    RESEAL_TOKEN_ID=$(reseal_json_token_id "$_er_post" systemd-tpm2)
     rm -rf "$_er_stage"
     rm -f "$_er_pre" "$_er_post"
     return 0
 }
 
-# enrl_install_state — the persisted installation state (state sibling's API:
+# reseal_install_state — the persisted installation state (state sibling's API:
 # lib/install-state.sh; the state file is resolved by istate_file() —
 # $ALPINE_FDE_INSTALL_STATE test override, else $(sp_etc_dir)/install-state.json).
 # Empty output ⇒ no state file (legacy / not-installed build context — the
@@ -474,7 +474,7 @@ enrl_run() {
 # the sibling owns the file contract and decides warn semantics). The lib is
 # sourced when present; until it lands, a local jq fallback reads .state
 # (same schema contract: {"state": "installed"|"finalized", ...}).
-enrl_install_state() {
+reseal_install_state() {
     if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
         _eis_lib="$(sp_cmd_dir)/../install-state.sh"
         if [ -r "$_eis_lib" ]; then
@@ -495,15 +495,15 @@ enrl_install_state() {
     fi
 }
 
-# enrl_ensure_gate_skip — G-IL7 (§8.1 ukictl-build row): the build's ensure-once
+# reseal_ensure_gate_skip — G-IL7 (§8.1 kernel-build row): the build's ensure-once
 # enrollment must NEVER fire while the installation is unfinalized — Stage-1
 # in-chroot provisioning presents the exact trap (reachable volume, zero
 # tokens, SB off). SKIP (warn; caller returns rc 0, bookkeeping stays empty)
 # when the persisted install state exists and is not `finalized`, or when the
 # baseline expected_pcr7 is still pending. Absent install-state file ⇒ legacy
 # context ⇒ proceed. rc 0 ⇒ SKIP, rc 1 ⇒ run the enrollment path.
-enrl_ensure_gate_skip() {
-    _eg_state=$(enrl_install_state)
+reseal_ensure_gate_skip() {
+    _eg_state=$(reseal_install_state)
     if [ -n "$_eg_state" ] && [ "$_eg_state" != "finalized" ]; then
         warn "enroll: install state is '$_eg_state' (not finalized) — skipping the ensure-once enrollment; finalize after first boot ('alpine-fde audit --init') and rebuild (§8.1)"
         return 0
@@ -516,55 +516,55 @@ enrl_ensure_gate_skip() {
     return 1
 }
 
-# enrl_ensure_once DEVSPEC PUBKEY — the `ukictl build` ensure-once step (G-U1):
+# reseal_ensure_once DEVSPEC PUBKEY — the `kernel build` ensure-once step (G-U1):
 #   * volume unreachable → warn + rc 0 (a build context may not have the target
 #     volume attached; under the pinned pubkey+signed-policy construction
 #     kernel updates are TPM-free either way, s14)
 #   * G-IL7: install state not finalized / baseline pending → warn + rc 0
-#     (Stage-1 builds must never enroll; ENRL_SKIPPED=1 signals the skip)
+#     (Stage-1 builds must never enroll; RESEAL_SKIPPED=1 signals the skip)
 #   * inspect + enroll run UNDER the enrollment lock (§8.3: concurrent builds /
 #     postinst passes must serialize on the one-enrollment decision, HW-3)
 #   * exactly 1 systemd-tpm2 token → info line, ZERO TPM operations (s14)
-#   * 0 tokens → exactly ONE enrollment via enrl_run (ENRL_ENROLLED=1)
+#   * 0 tokens → exactly ONE enrollment via reseal_run (RESEAL_ENROLLED=1)
 #   * >1 tokens → LOUD refusal rc 1 citing manual intervention (never silently
 #     "stands" — the dead-slot accumulation the invariant exists to prevent)
-# Globals on return: ENRL_ENROLLED (1 = enrolled here), ENRL_SKIPPED (1 = a
+# Globals on return: RESEAL_ENROLLED (1 = enrolled here), RESEAL_SKIPPED (1 = a
 # documented precondition escape fired: unreachable volume or unfinalized
-# install), ENRL_FAIL_REASON. rc 1 only on enrollment failure (caller: marker
+# install), RESEAL_FAIL_REASON. rc 1 only on enrollment failure (caller: marker
 # + fail-closed pipeline).
-enrl_ensure_once() {
+reseal_ensure_once() {
     _ee_dev=$1 _ee_pub=$2
-    ENRL_ENROLLED=0
-    # shellcheck disable=SC2034  # consumed by the caller (ukictl build, §8.4)
-    ENRL_SKIPPED=0
-    ENRL_FAIL_REASON=''
+    RESEAL_ENROLLED=0
+    # shellcheck disable=SC2034  # consumed by the caller (kernel build, §8.4)
+    RESEAL_SKIPPED=0
+    RESEAL_FAIL_REASON=''
     if [ -z "$_ee_dev" ] || [ ! -e "$_ee_dev" ]; then
-        # shellcheck disable=SC2034  # consumed by the caller (ukictl build)
-        ENRL_SKIPPED=1
+        # shellcheck disable=SC2034  # consumed by the caller (kernel build)
+        RESEAL_SKIPPED=1
         warn "enroll: LUKS2 volume not reachable (${_ee_dev:-<none>}) — skipping the ensure-once enrollment check (kernel updates are TPM-free under the pinned-token construction, s14)"
         return 0
     fi
-    if enrl_ensure_gate_skip; then
-        # shellcheck disable=SC2034  # consumed by the caller (ukictl build)
-        ENRL_SKIPPED=1
+    if reseal_ensure_gate_skip; then
+        # shellcheck disable=SC2034  # consumed by the caller (kernel build)
+        RESEAL_SKIPPED=1
         return 0
     fi
-    if ! enrl_lock_acquire; then
+    if ! reseal_lock_acquire; then
         err "enroll: refusing an unserialized ensure-once check on $_ee_dev (§8.3)"
         return 1
     fi
     _ee_rc=0
-    enrl_ensure_once_locked "$_ee_dev" "$_ee_pub" || _ee_rc=1
-    enrl_lock_release
+    reseal_ensure_once_locked "$_ee_dev" "$_ee_pub" || _ee_rc=1
+    reseal_lock_release
     return "$_ee_rc"
 }
 
-# enrl_ensure_once_locked DEVSPEC PUBKEY — the inspect+enroll body; caller holds
+# reseal_ensure_once_locked DEVSPEC PUBKEY — the inspect+enroll body; caller holds
 # the enrollment lock
-enrl_ensure_once_locked() {
+reseal_ensure_once_locked() {
     _ee_dev=$1 _ee_pub=$2
     _ee_pre=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enroll-ensure.XXXXXX") || return 1
-    if ! enrl_cryptsetup luksDump --dump-json-metadata "$_ee_dev" >"$_ee_pre" 2>/dev/null; then
+    if ! reseal_cryptsetup luksDump --dump-json-metadata "$_ee_dev" >"$_ee_pre" 2>/dev/null; then
         rm -f "$_ee_pre"
         err "enroll: cannot read LUKS2 metadata of $_ee_dev"
         return 1
@@ -578,23 +578,23 @@ enrl_ensure_once_locked() {
     if [ "$_ee_tok" -gt 1 ]; then
         # §7.2 fact check: LUKS2 provides 32 keyslots (0..31); this tool's
         # enrollment allocates from 1..31 (token_free_slot; slot 0 is recovery)
-        ENRL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 1) — manual intervention required (§8.3 one-enrollment invariant; LUKS2 provides 32 keyslots, this tool enrolls into 1..31)"
-        err "enroll: $ENRL_FAIL_REASON — clean up the surplus tokens/slots before any further enrollment"
+        RESEAL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 1) — manual intervention required (§8.3 one-enrollment invariant; LUKS2 provides 32 keyslots, this tool enrolls into 1..31)"
+        err "enroll: $RESEAL_FAIL_REASON — clean up the surplus tokens/slots before any further enrollment"
         return 1
     fi
     info "enroll: no TPM token on $_ee_dev — enrolling once (Mechanism B)"
-    if ! enrl_run b "$_ee_pub" "$_ee_dev" 0; then
+    if ! reseal_run b "$_ee_pub" "$_ee_dev" 0; then
         return 1
     fi
     # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
-    ENRL_ENROLLED=1
+    RESEAL_ENROLLED=1
     return 0
 }
 
-# enrl_crypttab_uuid FILE — the LUKS2 target UUID of the first crypttab line
+# reseal_crypttab_uuid FILE — the LUKS2 target UUID of the first crypttab line
 # with luks options (the volume the build's enroll step addresses, §8.2
 # verified coupling); empty output when absent
-enrl_crypttab_uuid() {
+reseal_crypttab_uuid() {
     [ -f "$1" ] || return 0
     awk '
         /^[[:space:]]*#/ { next }
@@ -607,19 +607,19 @@ enrl_crypttab_uuid() {
     ' "$1"
 }
 
-cmd_enroll_tpm_main() {
+cmd_reseal_main() {
     strict_mode
 
     _em_uuid='' _em_reseat=0 _em_pcrsig=${ALPINE_FDE_PCRSIG:-}
     while [ $# -gt 0 ]; do
         case $1 in
             --uuid)
-                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "enroll-tpm: --uuid requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "reseal: --uuid requires an argument"
                 _em_uuid=$2
                 shift
                 ;;
             --pcrsig)
-                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "enroll-tpm: --pcrsig requires an argument"
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "reseal: --pcrsig requires an argument"
                 _em_pcrsig=$2
                 shift
                 ;;
@@ -628,38 +628,38 @@ cmd_enroll_tpm_main() {
                 enroll_usage
                 return 0
                 ;;
-            *) die -r "$ALPINE_FDE_USAGE" "enroll-tpm: unknown argument: $1" ;;
+            *) die -r "$ALPINE_FDE_USAGE" "reseal: unknown argument: $1" ;;
         esac
         shift
     done
 
     # G-B4/ADR-19: the ladder gate fires BEFORE any package or precondition
     # work — a documented-absent mode fails closed regardless of environment.
-    _em_mode=$(enrl_policy_mode)
+    _em_mode=$(reseal_policy_mode)
 
     require_pkgs cryptsetup:cryptsetup tpm2:tpm2-tools jq:jq openssl:openssl flock:util-linux
 
-    enrl_preconditions "$_em_uuid" "$_em_pcrsig"
-    _em_uuid=$ENRL_PRE_UUID
-    _em_pub=$ENRL_PRE_PUB
-    _em_dev=$ENRL_PRE_DEV
+    reseal_preconditions "$_em_uuid" "$_em_pcrsig"
+    _em_uuid=$RESEAL_PRE_UUID
+    _em_pub=$RESEAL_PRE_PUB
+    _em_dev=$RESEAL_PRE_DEV
 
     # The single Mechanism B enrollment (shared core, G-R3) under the
     # enrollment lock (§8.3 serialization, HW-3); failures die fail-closed 64
-    if ! enrl_lock_acquire; then
-        die "enroll-tpm: cannot take the enrollment lock — refusing an unserialized enrollment"
+    if ! reseal_lock_acquire; then
+        die "reseal: cannot take the enrollment lock — refusing an unserialized enrollment"
     fi
     _em_rc=0
-    enrl_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" || _em_rc=1
-    enrl_lock_release
+    reseal_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" || _em_rc=1
+    reseal_lock_release
     if [ "$_em_rc" -ne 0 ]; then
-        die "enroll-tpm: enrollment failed — enrolled.json NOT written"
+        die "reseal: enrollment failed — enrolled.json NOT written"
     fi
 
-    if ! enrl_record "$_em_uuid" "$_em_mode" "$ENRL_WIPE" "$ENRL_SLOT" "$_em_pub"; then
-        die "enroll-tpm: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
+    if ! reseal_record "$_em_uuid" "$_em_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" "$_em_pub"; then
+        die "reseal: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
     fi
     printf 'alpine-fde: enrolled (policy_mode=%s, token keyslot %s, wipe=%s); record: %s\n' \
-        "$_em_mode" "$ENRL_SLOT" "$ENRL_WIPE" "$(sp_enrolled_file)" >&2
+        "$_em_mode" "$RESEAL_SLOT" "$RESEAL_WIPE" "$(sp_enrolled_file)" >&2
     return 0
 }

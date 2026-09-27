@@ -1341,7 +1341,7 @@ PYEOF
 # policy_digest over (d7, d11) release-signed exactly the way `pcrsign`
 # (lib/cmd/pcrsign.sh) signs a finalized enrollment — policy_digest_bin |
 # openssl dgst -sha256 -sign. This is the entry a finalized Mechanism B token
-# (enrl_run -> seal_finalized, G-B6) requires in ALPINE_FDE_PCRSIG, and the
+# (reseal_run -> seal_finalized, G-B6) requires in ALPINE_FDE_PCRSIG, and the
 # entry the §8.2 hook extracts for a {7,11}-selection token. NOT a fantasy
 # shape: identical fields (pcrs/pkfp/pol/sig — plus the digest-anchor fields
 # d7/d11 the shipped CLI's policy_sign_json also records) and signing recipe
@@ -1429,7 +1429,7 @@ uki_wait_hook_prompt() {
 
 # uki_host_enroll_finalized <efivars-dir> <pcrsig.json> <luks-dev-or-uuid>
 #                           <keydir> <slot0-keyfile> [state-root] — run the
-# REAL production CLI enroll-tpm host-side against the fixture swtpm
+# REAL production CLI reseal host-side against the fixture swtpm
 # (ALPINE_FDE_TCTI=SWTPM_TCTI, exported by swtpm_start), producing the
 # finalized {7,11} Mechanism B token the §8.2 hook consumes. The caller must
 # have: a finalized baseline expected_pcr7 (uki_baseline_stamp — the booted
@@ -1447,13 +1447,13 @@ uki_host_enroll_finalized() {
         ALPINE_FDE_KEYDIR="$keydir" \
         ALPINE_FDE_LUKS_KEYFILE="$keyfile" \
         ALPINE_FDE_NO_INSTALL=1 \
-        "$_UKI_REPO_ROOT/bin/alpine-fde" enroll-tpm --uuid "$dev" --pcrsig "$pcrsig"
+        "$_UKI_REPO_ROOT/bin/alpine-fde" reseal --uuid "$dev" --pcrsig "$pcrsig"
 }
 
 # uki_baseline_stamp <root> <pcr7hex> — write the finalized baseline.json
 # (schema v1, s00 shape) with expected_pcr7 stamped from the booted console —
 # the OPERATOR-meaningful value is the BOOTED machine's PCR 7, never the
-# restarted fixture's. enrl_preconditions compares live-vs-this at enroll.
+# restarted fixture's. reseal_preconditions compares live-vs-this at enroll.
 uki_baseline_stamp() {
     local root=$1 pcr7=$2 dir
     dir="$root/etc/alpine-fde"

@@ -4,7 +4,7 @@
 # the shared helper) refuses fail-closed (64) unless Secure Boot is ON with
 # SetupMode=0. An SB-off finalized baseline would become the trust root that
 # `audit` reports "clean" against. No override: an SB-off machine must fix
-# Secure Boot first (enroll-tpm refuses likewise).
+# Secure Boot first (reseal refuses likewise).
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)

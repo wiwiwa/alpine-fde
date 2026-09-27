@@ -5,7 +5,7 @@
 # REWORKED 2026-09-18 per the amended §12 S-00b contract; flipped to the
 # ALPINE contract (G-E3, 2026-09-21): the first-install enrollment happens
 # via the PRODUCTION CLI in the guest — `/opt/alpine-fde/bin/alpine-fde
-# enroll-tpm` (Mechanism B backing: tpm2-tools seal + LUKS2 token import,
+# reseal` (Mechanism B backing: tpm2-tools seal + LUKS2 token import,
 # ADR-19/§7; exactly ONE enrollment; the pcrsig source rides the documented
 # ALPINE_FDE_PCRSIG seam so no release.pem is needed in-guest) — REPLACING
 # the harness stand-in (the initrd's hand-run cryptenroll), which is proven
@@ -17,7 +17,7 @@
 #           (§3.3) -> poweroff. Host-side: `audit --init` finalizes the
 #           baseline via the REAL CLI (G-R1-guarded efivars fixture) BEFORE
 #           any UKI-chain work (§12 S-00b precondition, on every path).
-#   boot B  the `ukictl build` PRODUCT analog (release-key PCR-signed +
+#   boot B  the `kernel build` PRODUCT analog (release-key PCR-signed +
 #           sbsigned UKI) boots the populated disk and the enrollment runs
 #           FROM THE GUEST via the production CLI (it has TPM access + the
 #           finalized baseline, §9.1 first-install path):
@@ -36,7 +36,7 @@
 #               multitool closure), removes the dead token (fixture
 #               teardown), and runs the production CLI: its real
 #               preconditions fire (finalized baseline, SB on + SetupMode=0,
-#               live PCR 7 == baseline, LUKS uuid resolvable) and enrl_run
+#               live PCR 7 == baseline, LUKS uuid resolvable) and reseal_run
 #               performs the single A'' enrollment. Console asserts the
 #               CLI's own markers: the argv line, the cryptenroll_enrolled
 #               sentinel and `alpine-fde: enrolled (...)` + rc 0. NO
@@ -487,7 +487,7 @@ else
     # ADR-16 floor (the s18 pattern): keys_create may mint an RSA-2048 release
     # key, and the production CLI's keys_rsa3072_guard refuses to enroll below
     # RSA-3072 (observed live 2026-09-22, run s00b-enroll-1790071919:
-    # enroll-tpm rc 2 "release key is RSA-2048" — after the KEYDIR fix let it
+    # reseal rc 2 "release key is RSA-2048" — after the KEYDIR fix let it
     # reach the guard). Reissue at the floor BEFORE the varstore embeds db.
     run_stage release-key-floor 300 uki_release_key_floor "$STATE/keys"
     run_stage keys_vars_enrolled 120 keys_vars_enrolled "$STATE/keys" "$STATE/vars-enrolled.fd"
@@ -703,7 +703,7 @@ if (( FROM_CACHE == 0 )); then
 # self-bootstrap branch floors its own keys BEFORE keys_vars_enrolled, but a
 # ALPINE_FDE_S00_STATE chain (the registry path: s00 -> s00b) hands this
 # scenario a below-floor key — observed in the registry run: boot B's fed
-# enroll-tpm died P6-RC=2 ("release key is RSA-2048") while the standalone
+# reseal died P6-RC=2 ("release key is RSA-2048") while the standalone
 # self-bootstrap run passed. Reissue at the floor on the RUN-DIR key copy
 # (never the shared STATE dir); the db identity changes, so if the key was
 # reissued also rebuild the SB varstore from the new certs — the db cert is
@@ -739,8 +739,8 @@ else
     _assert_result ok "S-00b: guest-bound baseline is FINAL (no pending PCR 7)" ""
 fi
 
-# --- the ukictl build PRODUCT: release-key PCR-signed + sbsigned UKI -------------
-echo "# S-00b: building the release UKI (ukictl build product: ukify pcr-signing + sbsign)"
+# --- the kernel build PRODUCT: release-key PCR-signed + sbsigned UKI -------------
+echo "# S-00b: building the release UKI (kernel build product: ukify pcr-signing + sbsign)"
 # boot B's UKI carries the DEBUG SHELL seam for the fed session. Explicit
 # empty pins keep any leaked env from shaping later builds.
 # Built BEFORE the tooling payload: the payload carries the release UKI's
@@ -827,7 +827,7 @@ for _jl in $(ldd "$(command -v jq)" | awk '$3 ~ /^\// {print $3}'); do
 done
 printf '#!/bin/sh\nexec /opt/jqbin/ld-linux --library-path /opt/jqbin/lib /opt/jqbin/jq "$@"\n' \
     >"$TOOLING/usr/bin/jq"
-# flock (util-linux): the production CLI's enroll-tpm preconditions demand
+# flock (util-linux): the production CLI's reseal preconditions demand
 # flock:util-linux (B.5 HW-3 ensure-once serialization) — under
 # ALPINE_FDE_NO_INSTALL=1 in the initrd a missing binary is the CLI's hard
 # exit 64, so the payload ships it. Same host-closure isolation as jq (own
@@ -853,7 +853,7 @@ for _fl in $(ldd "$(command -v flock)" | awk '$3 ~ /^\// {print $3}'); do
 done
 printf '#!/bin/sh\nexec /opt/flockbin/ld-linux --library-path /opt/flockbin/lib /opt/flockbin/flock "$@"\n' \
     >"$TOOLING/usr/bin/flock"
-# openssl: Mechanism B's require_pkgs demands the binary and enrl_run/
+# openssl: Mechanism B's require_pkgs demands the binary and reseal_run/
 # seal_finalized call it directly (token post-assert pubkey fingerprint,
 # base64 blob halves). Own loader + closure (the /opt/tpm pattern); its
 # interp must equal the payload interp, its libs may superset the jq set
@@ -881,7 +881,7 @@ printf '#!/bin/sh\nexec /opt/sslbin/ld-linux --library-path /opt/sslbin/lib /opt
 # -1789709163: "New TPM2 token enrolled as key slot 1." followed by
 # "post-assert failed"). Normalize the dump to the documented shape
 # (verified host-side against the real dump: count_type/token_keyslot/
-# slot_blob/enrl_json_token_id all correct); non-dump invocations pass
+# slot_blob/reseal_json_token_id all correct); non-dump invocations pass
 # through untouched. OUT-OF-BUCKET FIX REQUIRED in lib/ (reported).
 { printf '#!/bin/sh\n_dump=0\nfor _a in "$@"; do\n    [ "$_a" = "--dump-json-metadata" ] && _dump=1\ndone\nif [ "$_dump" = 1 ]; then\n    /usr/sbin/cryptsetup "$@" | /usr/bin/jq -c . | sed '"'"'s/":"/": "/g; s/":{/": {/g; s/":\\[/": [/g'"'"'\nelse\n    exec /usr/sbin/cryptsetup "$@"\nfi\n'; } \
     >"$TOOLING/usr/bin/cryptsetup-pretty"
@@ -1005,21 +1005,21 @@ wait_console "$RUN" "T9-52-GONE" 120
 #    UKI's own signed prediction from the payload (no release.pem in-guest);
 #    everything else (preconditions, seal, post-asserts, enrolled.json) is
 #    the production CLI's own Mechanism B path.
-# ALPINE_FDE_KEYDIR is REQUIRED here (G-B7): enrl_preconditions resolves the
+# ALPINE_FDE_KEYDIR is REQUIRED here (G-B7): reseal_preconditions resolves the
 # release key from keys_dir ONLY (--keydir / KEY_PATH / ALPINE_FDE_KEYDIR) and
-# never consults the baseline's keys.release_pub_path — without it enroll-tpm
+# never consults the baseline's keys.release_pub_path — without it reseal
 # dies rc 64 ("no release key directory configured") BEFORE sealing, the disk
 # keeps ZERO systemd-tpm2 tokens, and boot C's zero-input unlock is impossible
 # (observed live 2026-09-22, run s00b-enroll-1790068029: P6-RC=64 -> boot C
 # "no systemd-tpm2 token found" -> recovery-passphrase prompt).
 # ALPINE_FDE_TMPDIR=/tmp is REQUIRED here: the CLI's scratch mktemps default
-# to /dev/shm, which the busybox initrd does not mount — enrl_run fails
+# to /dev/shm, which the busybox initrd does not mount — reseal_run fails
 # ("mktemp: : No such file or directory" -> "enrolled.json NOT written",
 # observed live 2026-09-22, run s00b-enroll-1790077927: P6-RC=64).
 feed_line "$RUN/serial.sock" "mkdir -p /run/bu && ln -sf /dev/vdb /run/bu/$DISK_UUID && export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_LUKS_KEYFILE=/kf0 ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/etc/alpine-fde/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
 wait_console "$RUN" "P5-43-OK" 120
 # 5) THE PRODUCTION CLI: the §9.1 first-install enrollment (single Mechanism B seal)
-feed_line "$RUN/serial.sock" 'timeout 180 /opt/alpine-fde/bin/alpine-fde enroll-tpm; echo P6-RC=$?'
+feed_line "$RUN/serial.sock" 'timeout 180 /opt/alpine-fde/bin/alpine-fde reseal; echo P6-RC=$?'
 i=0
 until grep -qE 'P6-RC=[0-9]+' "$RUN/console.log" 2>/dev/null; do
     _budget_check "console-wait:P6-RC"

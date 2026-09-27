@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# tests/unit/pre_upgrade_ext4_skip.sh — `alpine-fde pre-upgrade` (§8.1, ADR-13):
+# tests/unit/pre_upgrade_ext4_skip.sh — the pre-upgrade LIBRARY entry
+# (lib/cmd/pre-upgrade.sh, cmd_pre_upgrade_main; §8.1, ADR-13). NOTE: the CLI
+# verb is RETIRED (§8.1 machine/lib entrance rule — the snapshot role moved to
+# the automatic snapshot flow), so this suite drives the sourced module the
+# way internal callers do:
 # Btrfs is the DEFAULT root (ADR-13, §4), so a btrfs root must produce a real
 # READ-ONLY snapshot — `btrfs subvolume snapshot -r <src> /.snapshots/<UTC-ts>`
 # (source = the root's MOUNT POINT per the queue-30 finding — the subvolume is
@@ -18,9 +22,16 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=../lib/assert.sh
 source "$HERE/../lib/assert.sh"
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+# shellcheck source=../../lib/common.sh
+. "$REPO/lib/common.sh"
+# shellcheck source=../../lib/cmd/pre-upgrade.sh
+. "$REPO/lib/cmd/pre-upgrade.sh"
 
+# drive the REAL handler in a SUBSHELL (die/exit inside are contained, the rc
+# propagates) — the same contract the dispatcher used to provide
 run_pu() { # FSTYPE — drive the real handler with the fstype seam
-    PU_OUT=$(ALPINE_FDE_ROOT_FSTYPE="$1" "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+    PU_OUT=$(ALPINE_FDE_ROOT_FSTYPE="$1" cmd_pre_upgrade_main 2>&1)
     PU_RC=$?
 }
 
@@ -53,7 +64,7 @@ EOF
 chmod +x "$FAKEBIN/btrfs"
 
 PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs.argv" ALPINE_FDE_ROOT="$ROOT" \
-    ALPINE_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+    ALPINE_FDE_ROOT_FSTYPE=btrfs cmd_pre_upgrade_main 2>&1)
 PU_RC=$?
 assert_eq "btrfs root -> rc 0 (snapshot created)" "0" "$PU_RC"
 assert_eq "btrfs invoked exactly once" "1" "$(wc -l <"$TMP/btrfs.argv")"
@@ -81,7 +92,7 @@ assert_file_exists "snapshot materialized under /.snapshots/<ts>" "$ROOT/.snapsh
 MI=$TMP/mountinfo.btrfs
 printf '42 41 0:42 / %s rw,relatime - btrfs /dev/sda1 rw,ssd,subvol=/@\n' "$ROOT" >"$MI"
 PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs-mi.argv" ALPINE_FDE_ROOT="$ROOT" \
-    ALPINE_FDE_MOUNTINFO="$MI" "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+    ALPINE_FDE_MOUNTINFO="$MI" cmd_pre_upgrade_main 2>&1)
 PU_RC=$?
 assert_eq "mountinfo btrfs -> rc 0 (snapshot, no stat needed)" "0" "$PU_RC"
 assert_contains "info line cites the mountinfo source" "$PU_OUT" "(mountinfo)"
@@ -92,7 +103,7 @@ assert_eq "btrfs invoked exactly once (mountinfo leg)" "1" "$(wc -l <"$TMP/btrfs
 MI2=$TMP/mountinfo.ext4
 printf '43 41 0:43 / %s rw,relatime - ext4 /dev/sdb2 rw\n' "$ROOT" >"$MI2"
 PU_OUT=$(ALPINE_FDE_ROOT="$ROOT" ALPINE_FDE_MOUNTINFO="$MI2" \
-    "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+    cmd_pre_upgrade_main 2>&1)
 PU_RC=$?
 assert_eq "mountinfo ext4 -> rc 0 (skip)" "0" "$PU_RC"
 assert_contains "skip message names the mountinfo-detected fstype" "$PU_OUT" \
@@ -105,14 +116,14 @@ unset ALPINE_FDE_MOUNTINFO
 ROOT2="$TMP/root2"
 mkdir -p "$ROOT2"
 PU_OUT=$(PATH="$FAKEBIN:$PATH" BTRFS_LOG="$TMP/btrfs2.argv" ALPINE_FDE_ROOT="$ROOT2" \
-    ALPINE_FDE_ROOT_FSTYPE=btrfs "$REPO/bin/alpine-fde" pre-upgrade 2>&1)
+    ALPINE_FDE_ROOT_FSTYPE=btrfs cmd_pre_upgrade_main 2>&1)
 PU_RC=$?
 assert_eq "missing /.snapshots -> loud 64 (not rc 3)" "64" "$PU_RC"
 assert_contains "64 message cites the §9.1 layout (@snapshots at /.snapshots)" "$PU_OUT" "@snapshots"
 assert_eq "missing /.snapshots: btrfs never invoked" "" "$(cat "$TMP/btrfs2.argv" 2>/dev/null)"
 
 # --- 5. help text: purpose, snapshot path, retention note ----------------------------
-PU_OUT=$("$REPO/bin/alpine-fde" pre-upgrade --help 2>&1)
+PU_OUT=$(cmd_pre_upgrade_main --help 2>&1)
 PU_RC=$?
 assert_eq "--help -> rc 0" "0" "$PU_RC"
 assert_contains "help names the snapshot path" "$PU_OUT" "/.snapshots/<"

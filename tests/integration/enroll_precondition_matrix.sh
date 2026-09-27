@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/integration/enroll_precondition_matrix.sh — `alpine-fde enroll-tpm` after the
+# tests/integration/enroll_precondition_matrix.sh — `alpine-fde reseal` after the
 # Mechanism B rewire (ADR-19/ADR-20: systemd-cryptenroll is GONE — lib/seal.sh
 # + lib/token.sh do the sealing; cryptsetup stays the LUKS2 seam):
 #   * precondition matrix: SB off / SetupMode=1 / PCR7 drift / pending
@@ -16,9 +16,9 @@
 #     (ALPINE_FDE_PCRSIG unset — release.pem from the keydir via keys_unlock);
 #     tampered .pcrsig -> 64, no keyslot, no token, no record (G-B6)
 #   * compact LUKS2 wire shape (real cryptsetup dumps): parsers + reseat work
-#   * `ukictl enroll` alias: same surface (the retired --dry-run now rejects
-#     identically on both spellings)
-#   * function-level (enrl_run, seal ops stubbed): choreography order, retire
+#   * the retired `kernel enroll` sub-verb: unknown verb rc 2 (reseal is the
+#     operator spelling; --dry-run still rejects identically on it)
+#   * function-level (reseal_run, seal ops stubbed): choreography order, retire
 #     on reseat, >1 standing tokens refuse loudly, post-assert failures record
 #     nothing, passphrase scrubbed, G-IL7/HW-3 ensure-once contract intact
 
@@ -218,7 +218,7 @@ assert_absent() { # DESC PATH
 
 run_enroll() { # args...
     restore_state
-    ENROLL_OUT=$("$REPO/bin/alpine-fde" enroll-tpm "$@" 2>&1)
+    ENROLL_OUT=$("$REPO/bin/alpine-fde" reseal "$@" 2>&1)
     ENROLL_RC=$?
 }
 
@@ -287,7 +287,7 @@ make_baseline final
 run_enroll_mode() { # MODE
     reset_state
     sb_vars 1 0
-    MODE_OUT=$(policy_mode="$1" "$REPO/bin/alpine-fde" enroll-tpm 2>&1)
+    MODE_OUT=$(policy_mode="$1" "$REPO/bin/alpine-fde" reseal 2>&1)
     MODE_RC=$?
 }
 for m in a ap a-prime combined; do
@@ -379,7 +379,7 @@ make_baseline final
 reset_state
 write_compact_pre_token
 write_compact_post_reseat
-ENROLL_OUT=$("$REPO/bin/alpine-fde" enroll-tpm --reseat --pcrsig "$PSIG_ANCH" 2>&1)
+ENROLL_OUT=$("$REPO/bin/alpine-fde" reseal --reseat --pcrsig "$PSIG_ANCH" 2>&1)
 ENROLL_RC=$?
 assert_eq "compact standing token: reseat rc 0" "0" "$ENROLL_RC"
 assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luksKillSlot "$CS_LOG")"
@@ -388,26 +388,30 @@ assert_eq "compact reseat: old slot retired via luksKillSlot" "1" "$(grep -c luk
 make_baseline final
 sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
-assert_eq "--dry-run is no longer an enroll-tpm option -> usage rc 2" "2" "$ENROLL_RC"
+assert_eq "--dry-run is no longer an reseal option -> usage rc 2" "2" "$ENROLL_RC"
 assert_contains "rejection names the offending argument" "$ENROLL_OUT" "unknown argument: --dry-run"
 assert_eq "--dry-run: no keyslot mutation" "0" "$(grep -c luksAddKey "$CS_LOG")"
 assert_absent "--dry-run writes no enrolled.json" "$(sp_enrolled_file)"
 
-# --- 13. `ukictl enroll` alias: identical surface ------------------------------------------------------
+# --- 13. the retired `kernel enroll` sub-verb is GONE (rc 2 unknown verb) -----------------------------
+# The enrollment alias surface was folded away with the verb renames (§8.1):
+# the operator spelling for a standalone re-enrollment is `alpine-fde reseal`;
+# `kernel` only carries build/remove/prune/next.
 sb_vars 1 0
 run_enroll --dry-run --pcrsig "$PSIG_ANCH"
 PLAN=$(printf '%s\n' "$ENROLL_OUT" | grep 'unknown argument')
 reset_state # fresh metadata counter — the alias must see the SAME pre-state
-ALIAS_OUT=$("$REPO/bin/alpine-fde" ukictl enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
+ALIAS_OUT=$("$REPO/bin/alpine-fde" kernel enroll --dry-run --pcrsig "$PSIG_ANCH" 2>&1)
 ALIAS_RC=$?
-assert_eq "ukictl enroll alias: same rc" "2" "$ALIAS_RC"
-assert_contains "ukictl enroll alias: same rejection" "$ALIAS_OUT" "$PLAN"
+assert_eq "retired kernel enroll sub-verb: unknown verb rc 2" "2" "$ALIAS_RC"
+assert_contains "retired kernel enroll sub-verb: names the unknown verb" "$ALIAS_OUT" "unknown verb: enroll"
+assert_contains "retired kernel enroll sub-verb: --dry-run still rejected on the reseal surface" "$PLAN" "unknown argument: --dry-run"
 
-# --- 14. function level: enrl_run with STUBBED seal ops -------------------------------------------------
+# --- 14. function level: reseal_run with STUBBED seal ops -------------------------------------------------
 # shellcheck source=../../lib/token.sh
 . "$REPO/lib/token.sh"
-# shellcheck source=../../lib/cmd/enroll-tpm.sh
-. "$REPO/lib/cmd/enroll-tpm.sh"
+# shellcheck source=../../lib/cmd/reseal.sh
+. "$REPO/lib/cmd/reseal.sh"
 
 FNLOG=$T/fn.log
 # snapshot the REAL token_post_assert before the stubs replace it (rename the
@@ -429,28 +433,28 @@ wire_stubs() {
     token_import() { echo "CALL token_import $*" >>"$FNLOG"; return 0; }
     token_remove() { echo "CALL token_remove $*" >>"$FNLOG"; return 0; }
     token_kill_slot() { echo "CALL token_kill_slot $*" >>"$FNLOG"; return 0; }
-    token_dump() { enrl_cryptsetup luksDump --dump-json-metadata "$1" >"$2" 2>/dev/null; }
+    token_dump() { reseal_cryptsetup luksDump --dump-json-metadata "$1" >"$2" 2>/dev/null; }
     token_post_assert() { return 0; }
 }
 wire_real_post_assert() {
     token_post_assert() { token_post_assert_real "$@"; }
 }
 
-# happy: choreography order, ENRL_* globals, passphrase scrubbed
+# happy: choreography order, RESEAL_* globals, passphrase scrubbed
 restore_state
 : >"$FNLOG"
 rm -f "$T/staged-pass"
-ENRL_RC=0
+RESEAL_RC=0
 wire_stubs
-enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
-assert_eq "fn: enrl_run(b) rc 0" "0" "$ENRL_RC"
+reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || RESEAL_RC=1
+assert_eq "fn: reseal_run(b) rc 0" "0" "$RESEAL_RC"
 assert_eq "fn: seal op invoked once" "1" "$(grep -c seal_finalized "$FNLOG")"
 assert_eq "fn: keyslot added" "1" "$(grep -c token_add_keyslot "$FNLOG")"
 assert_eq "fn: token imported" "1" "$(grep -c token_import "$FNLOG")"
 assert_eq "fn: NO retire on a fresh volume" "0" "$(grep -c -e token_remove -e token_kill_slot "$FNLOG")"
-assert_eq "fn: ENRL_SLOT" "2" "$ENRL_SLOT"
-assert_eq "fn: ENRL_TOKEN_ID" "0" "$ENRL_TOKEN_ID"
-assert_eq "fn: ENRL_WIPE" "no" "$ENRL_WIPE"
+assert_eq "fn: RESEAL_SLOT" "2" "$RESEAL_SLOT"
+assert_eq "fn: RESEAL_TOKEN_ID" "0" "$RESEAL_TOKEN_ID"
+assert_eq "fn: RESEAL_WIPE" "no" "$RESEAL_WIPE"
 assert_eq "fn: staged passphrase SCRUBBED after the run" "absent" \
     "$([ -e "$T/staged-pass" ] && echo present || echo absent)"
 
@@ -459,10 +463,10 @@ reset_state
 write_pre_token
 write_post_ok
 : >"$FNLOG"
-ENRL_RC=0
-enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || ENRL_RC=1
-assert_eq "fn reseat: rc 0" "0" "$ENRL_RC"
-assert_eq "fn reseat: ENRL_WIPE=yes" "yes" "$ENRL_WIPE"
+RESEAL_RC=0
+reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || RESEAL_RC=1
+assert_eq "fn reseat: rc 0" "0" "$RESEAL_RC"
+assert_eq "fn reseat: RESEAL_WIPE=yes" "yes" "$RESEAL_WIPE"
 assert_eq "fn reseat: old token removed" "1" "$(grep -c token_remove "$FNLOG")"
 assert_eq "fn reseat: old slot killed" "1" "$(grep -c token_kill_slot "$FNLOG")"
 
@@ -473,9 +477,9 @@ cat >"$T/luks-pre.json" <<'EOF'
  "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]},"1":{"type":"systemd-tpm2","keyslots":["2"]}}}
 EOF
 : >"$FNLOG"
-ENRL_RC=0
-EE_REASON=$(enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
-assert_eq "fn >1 tokens: rc 1" "1" "$ENRL_RC"
+RESEAL_RC=0
+EE_REASON=$(reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || RESEAL_RC=1
+assert_eq "fn >1 tokens: rc 1" "1" "$RESEAL_RC"
 assert_contains "fn >1 tokens: message names the count" "$EE_REASON" "2 systemd-tpm2 tokens"
 assert_eq "fn >1 tokens: NO seal op" "0" "$(grep -c seal_finalized "$FNLOG")"
 
@@ -484,9 +488,9 @@ wire_real_post_assert
 reset_state
 write_pre_notoken
 write_post_two
-ENRL_RC=0
-PA_REASON=$(enrl_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || ENRL_RC=1
-assert_eq "fn post-assert failure: rc 1" "1" "$ENRL_RC"
+RESEAL_RC=0
+PA_REASON=$(reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || RESEAL_RC=1
+assert_eq "fn post-assert failure: rc 1" "1" "$RESEAL_RC"
 assert_contains "fn post-assert failure: names the assert" "$PA_REASON" "exactly 1 systemd-tpm2 token"
 assert_absent "fn post-assert failure: no enrolled.json (caller records only on rc 0)" "$(sp_enrolled_file)"
 
@@ -494,12 +498,12 @@ assert_absent "fn post-assert failure: no enrolled.json (caller records only on 
 reset_state
 write_pre_token
 : >"$FNLOG"
-ENRL_SKIPPED=0
+RESEAL_SKIPPED=0
 EO_RC=0
-enrl_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" || EO_RC=1
+reseal_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" || EO_RC=1
 assert_eq "ensure-once: standing token stands (rc 0)" "0" "$EO_RC"
 assert_eq "ensure-once: NO seal op (zero TPM ops, s14)" "0" "$(grep -c seal_finalized "$FNLOG")"
-assert_eq "ensure-once: ENRL_ENROLLED stays 0" "0" "$ENRL_ENROLLED"
+assert_eq "ensure-once: RESEAL_ENROLLED stays 0" "0" "$RESEAL_ENROLLED"
 
 # >1 standing tokens on the ensure-once path: loud refusal citing the REAL
 # LUKS2 slot budget (§7.2: LUKS2 provides 32 keyslots; the enrollment's free
@@ -513,7 +517,7 @@ EOF
 write_post_ok
 : >"$FNLOG"
 EO2_RC=0
-EO2_OUT=$(enrl_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
+EO2_OUT=$(reseal_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
 assert_eq "ensure-once >1 tokens: rc 1" "1" "$EO2_RC"
 assert_contains "ensure-once >1 tokens: names the count" "$EO2_OUT" "2 systemd-tpm2 tokens"
 assert_contains "ensure-once >1 tokens: cites manual intervention" "$EO2_OUT" "manual intervention"

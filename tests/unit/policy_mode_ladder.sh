@@ -7,11 +7,11 @@
 # spelling a-prime/combined) stay documented-absent and fail closed (64) at
 # every entry point:
 #   * policy_mode_normalize — the common.sh boundary (unit level)
-#   * `ukictl build` — rc 64 + ADR-8 build-failed marker + ESP byte-identical
-#   * `enroll-tpm` — rc 64
+#   * `kernel build` — rc 64 + ADR-8 build-failed marker + ESP byte-identical
+#   * `reseal` — rc 64
 # Every rejection cites ADR-19 ("Mechanism B (rung b) is the normative path").
 # b's ACCEPTANCE at the entry points is asserted as the gate-passing observed
-# effect (enroll-tpm proceeds past the mode gate into its baseline precondition).
+# effect (reseal proceeds past the mode gate into its baseline precondition).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -54,7 +54,7 @@ done
 policy_mode_normalize definitely-not-a-mode >/dev/null 2>&1
 assert_rc "normalize: unknown mode stays a plain reject (rc 1)" 1 $?
 
-# --- entry points: ukictl build + enroll-tpm ---------------------------------------
+# --- entry points: kernel build + reseal ---------------------------------------
 KVER=6.12.8-1-amd64
 KEYDIR="$REPO/fixtures/keys"
 TMP=$(mktemp -d)
@@ -86,7 +86,7 @@ alpine-fde() {
 
 ESP_BEFORE=$(find "$ESP" -type f -exec sha256sum {} + | sort)
 for m in a ap; do
-    out=$(POLICY_MODE=$m alpine-fde ukictl build "$KVER" 2>&1)
+    out=$(POLICY_MODE=$m alpine-fde kernel build "$KVER" 2>&1)
     rc=$?
     assert_rc "build: POLICY_MODE=$m exits 64" 64 $rc
     assert_contains "build: $m message cites ADR-19 (normalize boundary)" "$out" "ADR-19"
@@ -97,21 +97,21 @@ for m in a ap; do
 done
 
 for m in a ap; do
-    out=$(POLICY_MODE=$m alpine-fde enroll-tpm 2>&1)
+    out=$(POLICY_MODE=$m alpine-fde reseal 2>&1)
     rc=$?
-    assert_rc "enroll-tpm: POLICY_MODE=$m exits 64" 64 $rc
-    assert_contains "enroll-tpm: $m message cites ADR-19" "$out" "ADR-19"
-    assert_contains "enroll-tpm: $m message names the normative Mechanism B path" "$out" "Mechanism B"
+    assert_rc "reseal: POLICY_MODE=$m exits 64" 64 $rc
+    assert_contains "reseal: $m message cites ADR-19" "$out" "ADR-19"
+    assert_contains "reseal: $m message names the normative Mechanism B path" "$out" "Mechanism B"
 done
 
 # b is ACCEPTED at the entry points: the mode gate passes and the command moves
 # on to its next precondition (absent baseline -> the "no baseline" failure, NOT
 # a policy_mode rejection).
 rm -f "$ROOT/etc/alpine-fde/baseline.json"
-out=$(POLICY_MODE=b alpine-fde enroll-tpm 2>&1)
+out=$(POLICY_MODE=b alpine-fde reseal 2>&1)
 rc=$?
-assert_rc "enroll-tpm: POLICY_MODE=b passes the mode gate (fails later on baseline)" 64 $rc
-assert_not_contains "enroll-tpm: b rejection is not a mode rejection" "$out" "policy_mode"
-assert_contains "enroll-tpm: b reached the baseline precondition" "$out" "no baseline"
+assert_rc "reseal: POLICY_MODE=b passes the mode gate (fails later on baseline)" 64 $rc
+assert_not_contains "reseal: b rejection is not a mode rejection" "$out" "policy_mode"
+assert_contains "reseal: b reached the baseline precondition" "$out" "no baseline"
 
 finish

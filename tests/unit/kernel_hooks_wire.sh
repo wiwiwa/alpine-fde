@@ -3,8 +3,8 @@
 # behavioral contract of the Alpine /etc/kernel-hooks.d/ hooks (the
 # ukify-kernel-hook convention replaces the retired Debian dpkg templates):
 #
-#   hooks/kernel-hooks.d/alpine-fde-build.hook   (add|update -> ukictl build)
-#   hooks/kernel-hooks.d/alpine-fde-remove.hook  (remove     -> ukictl remove)
+#   hooks/kernel-hooks.d/alpine-fde-build.hook   (add|update -> kernel build)
+#   hooks/kernel-hooks.d/alpine-fde-remove.hook  (remove     -> kernel remove)
 #
 # Convention: the kernel hook runner invokes `<hook> <event> <kver>` with
 # event in {add, update, remove}. The build hook acts on add/update, the
@@ -17,8 +17,13 @@
 # names `apk fix`). After a successful build the hook re-signs the boot
 # manager on the ESP (verify-first, from the retired Debian upgrade hook).
 #
-# The test drives the REAL hook scripts with a recording `alpine-fde` stub
-# (ALPINE_FDE_BIN / ALPINE_FDE_BIN seam) plus sbsign/sbverify stubs.
+# The test drives the REAL hook scripts with a RECORDING LIB TREE: the hooks
+# never exec the `alpine-fde` binary (§8.1 machine/lib entrance rule) — they
+# source $ALPINE_FDE_LIB_DIR/cmd/{kernel-build,kernel-remove}.sh and call the
+# cmd entry in a subshell. The seam is therefore a stub lib dir whose cmd
+# modules record their argv and exit $ALPINE_FDE_FAKE_RC; the real common.sh /
+# keys.sh are symlinked in so the hook's unlock plumbing runs for real.
+# sbsign/sbverify stay PATH stubs.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -42,15 +47,26 @@ assert_eq "build hook parses under POSIX sh (busybox ash)" "0" "$?"
 sh -n "$REMOVE" >/dev/null 2>&1
 assert_eq "remove hook parses under POSIX sh (busybox ash)" "0" "$?"
 
-# --- recording alpine-fde stub + boot-manager stubs -----------------------------
-FAKE=$T/bin/alpine-fde
-mkdir -p "$T/bin" "$T/root/etc/alpine-fde" "$T/stub" "$T/esp/EFI/systemd" "$T/esp/EFI/BOOT"
-cat >"$FAKE" <<EOF
+# --- recording lib tree (stub cmd modules) + boot-manager stubs -----------------
+mkdir -p "$T/fakelib/cmd" "$T/root/etc/alpine-fde" "$T/stub" "$T/esp/EFI/systemd" "$T/esp/EFI/BOOT"
+ln -sf "$REPO/lib/common.sh" "$T/fakelib/common.sh"
+ln -sf "$REPO/lib/keys.sh" "$T/fakelib/keys.sh"
+cat >"$T/fakelib/cmd/kernel-build.sh" <<EOF
 #!/bin/sh
-printf '%s\n' "\$*" >>"$T/calls.log"
-exit \$ALPINE_FDE_FAKE_RC
+# stub module: records the build argv, exits with the scripted rc
+cmd_kernel_build_main() {
+    printf '%s\n' "build \$*" >>"$T/calls.log"
+    exit \$ALPINE_FDE_FAKE_RC
+}
 EOF
-chmod +x "$FAKE"
+cat >"$T/fakelib/cmd/kernel-remove.sh" <<EOF
+#!/bin/sh
+# stub module: records the remove argv, exits with the scripted rc
+cmd_kernel_remove_main() {
+    printf '%s\n' "remove \$*" >>"$T/calls.log"
+    exit \$ALPINE_FDE_FAKE_RC
+}
+EOF
 cat >"$T/stub/sbsign" <<'EOF'
 #!/bin/sh
 out=''
@@ -75,12 +91,10 @@ printf 'unsigned-boot-manager' >"$T/esp/EFI/systemd/systemd-bootx64.efi"
 printf 'unsigned-fallback' >"$T/esp/EFI/BOOT/BOOTX64.EFI"
 
 : >"$T/calls.log"
-export ALPINE_FDE_BIN=$FAKE
-export ALPINE_FDE_BIN=$FAKE
+export ALPINE_FDE_LIB_DIR=$T/fakelib
 export ALPINE_FDE_ROOT=$T/root
 export ALPINE_FDE_ESP=$T/esp
 export ALPINE_FDE_KEYDIR=$REPO/fixtures/keys
-export ALPINE_FDE_LIB_DIR=$REPO/lib
 export PATH="$T/stub:$PATH"
 export ALPINE_FDE_FAKE_RC=0
 MARKER=$T/root/etc/alpine-fde/build-failed
@@ -95,31 +109,32 @@ run_hook() { # <hook> <args...>
 no_calls() { assert_eq "$1" "0" "$(wc -l <"$T/calls.log" | tr -d ' ')"; }
 
 # =============================================================================
-# build hook: add/update -> `ukictl build <kver>` verbatim (§8.3)
+# build hook: add/update -> lib entry `kernel build <kver>` verbatim (§8.3;
+# the §8.1 machine/lib entrance: sourced module + subshell call, NO CLI exec)
 # =============================================================================
 assert_eq "build: add event rc 0" "0" "$(run_hook "$BUILD" add 6.6.63-0-lts)"
-assert_eq "build: add invoked ukictl build with the kver verbatim" \
-    "ukictl build 6.6.63-0-lts" "$(cat "$T/calls.log")"
+assert_eq "build: add invoked kernel build with the kver verbatim" \
+    "build 6.6.63-0-lts" "$(cat "$T/calls.log")"
 assert_eq "build: no marker on success" "0" "$([ -e "$MARKER" ] && echo 1 || echo 0)"
 
 assert_eq "build: update event rc 0" "0" "$(run_hook "$BUILD" update 6.6.63-0-lts)"
-assert_eq "build: update invoked ukictl build verbatim" \
-    "ukictl build 6.6.63-0-lts" "$(cat "$T/calls.log")"
+assert_eq "build: update invoked kernel build verbatim" \
+    "build 6.6.63-0-lts" "$(cat "$T/calls.log")"
 
 # remove events are the remove hook's business
 assert_eq "build: remove event is a no-op rc 0" "0" "$(run_hook "$BUILD" remove 6.6.63-0-lts)"
-no_calls "build: remove event never invokes the binary"
+no_calls "build: remove event never invokes the lib entry"
 
 # =============================================================================
-# remove hook: remove -> `ukictl remove <kver>` (§8.3 prune)
+# remove hook: remove -> lib entry `kernel remove <kver>` (§8.3 prune)
 # =============================================================================
 assert_eq "remove: remove event rc 0" "0" "$(run_hook "$REMOVE" remove 6.6.63-0-lts)"
-assert_eq "remove: invoked ukictl remove with the kver verbatim" \
-    "ukictl remove 6.6.63-0-lts" "$(cat "$T/calls.log")"
+assert_eq "remove: invoked kernel remove with the kver verbatim" \
+    "remove 6.6.63-0-lts" "$(cat "$T/calls.log")"
 assert_eq "remove: add event is a no-op rc 0" "0" "$(run_hook "$REMOVE" add 6.6.63-0-lts)"
-no_calls "remove: add event never invokes the binary"
+no_calls "remove: add event never invokes the lib entry"
 assert_eq "remove: update event is a no-op rc 0" "0" "$(run_hook "$REMOVE" update 6.6.63-0-lts)"
-no_calls "remove: update event never invokes the binary"
+no_calls "remove: update event never invokes the lib entry"
 
 # =============================================================================
 # ADR-8: child failure propagates + marker persisted under /etc/alpine-fde,
@@ -150,10 +165,10 @@ export ALPINE_FDE_FAKE_RC=0
 # broken invocations fail closed, loudly (rc 64 pinned)
 # =============================================================================
 assert_eq "build: missing kver fails closed (64)" "64" "$(run_hook "$BUILD" add)"
-no_calls "build: missing kver never invokes the binary"
+no_calls "build: missing kver never invokes the lib entry"
 assert_ne "build: missing kver prints loud diagnostics" "" "$(cat "$T/out.log")"
 assert_eq "remove: missing kver fails closed (64)" "64" "$(run_hook "$REMOVE" remove)"
-no_calls "remove: missing kver never invokes the binary"
+no_calls "remove: missing kver never invokes the lib entry"
 
 # =============================================================================
 # boot-manager re-sign rides the build hook (reused Debian logic, verify-first)
@@ -168,7 +183,7 @@ assert_eq "build: verify-first re-run rc 0 (idempotent)" "0" \
     "$(run_hook "$BUILD" add 6.6.65-0-lts)"
 
 # =============================================================================
-# apk trigger artifact: present, parses, carries the trigger dir directive,
+# apk trigger artifact: present, parses, carries the trigger dir directive
 # and mentions NO dpkg-era anything
 # =============================================================================
 assert_file_exists "apk trigger exists" "$TRIGGER"

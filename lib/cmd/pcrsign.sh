@@ -7,8 +7,8 @@
 # fields only). All signing math lives in lib/policy.sh (golden-vector pinned +
 # live-TPM cross-checked); key material handling in lib/keys.sh — the keydir
 # release.pem is routed through keys_unlock (ADR-18 encrypted-at-rest form is
-# decrypted to a scrubbed tmpfs copy; §11 I4), the same seam enrl_sign_pcrsig
-# and the ukictl hook use.
+# decrypted to a scrubbed tmpfs copy; §11 I4), the same seam reseal_sign_pcrsig
+# and the kernel hook use.
 #
 # Sequence (§6.1.1 steps 1–5):
 #   1. expected PCR 11 digest: `ukify build --measure`, phase pinned
@@ -40,7 +40,7 @@ _pcrsign_lib() {
 # _pcrsign_marker_write REASON — persist the ADR-8 failure marker for a
 # release-key UNLOCK failure (ADR-18: the keydir release.pem is the
 # encrypted-at-rest form and could not be decrypted), best effort, same shape
-# as ukictl-build's _ukictl_marker_write (consumed next to
+# as kernel-build's _kernel_marker_write (consumed next to
 # <etc>/build-failed). Only the unlock path writes it: this command is a
 # standalone signer with no ESP/build state of its own.
 _pcrsign_marker_write() {
@@ -245,7 +245,7 @@ cmd_pcrsign_main() {
     _ps_tmp=''
     _ps_keydir=$(keys_dir)
     # ADR-18 + §11 I4: route the private key through the SAME unlock seam as
-    # enrl_sign_pcrsig (lib/cmd/enroll-tpm.sh) and the ukictl hook — the keydir
+    # reseal_sign_pcrsig (lib/cmd/reseal.sh) and the kernel hook — the keydir
     # release.pem may be the encrypted-at-rest form, and signing with the raw
     # ciphertext would simply fail (or worse, bypass custody). ALPINE_FDE_KEY_
     # PASSPHRASE is the canonical credential-agent env spelling (§8.1); keys_

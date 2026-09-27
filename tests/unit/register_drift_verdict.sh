@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/unit/register_drift_verdict.sh — fixture_drift_verdict (tests/lib/
 # swtpm-fixture.sh): the s00b boot-B register-drift trigger in the DIGEST-
-# ANCHORED enroll era. Since Option A (lib/cmd/enroll-tpm.sh) the CLI compares
+# ANCHORED enroll era. Since Option A (lib/cmd/reseal.sh) the CLI compares
 # the pcrsig entry's recorded d7 against baseline.expected_pcr7 with NO live
 # TPM read and can enroll rc 0 over a drifted register (fail-at-unseal
 # replaces fail-at-seal, unit-pinned in enroll_precondition_matrix.sh 9b) —

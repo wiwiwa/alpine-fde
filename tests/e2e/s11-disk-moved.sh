@@ -176,14 +176,14 @@ mkdir -p "$EFIVARS"
 _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 _mkvar SecureBoot 1
 _mkvar SetupMode 0
-# enroll precondition (CLI, enrl_preconditions #2): a FINALIZED baseline at
+# enroll precondition (CLI, reseal_preconditions #2): a FINALIZED baseline at
 # $ALPINE_FDE_ROOT/etc/alpine-fde/baseline.json. Stamp the booted d7 into a
 # scenario-local cli-state root — the same seam s06/s09/s12/s13 use; without
-# it enroll-tpm dies "no baseline at /etc/alpine-fde/baseline.json".
+# it reseal dies "no baseline at /etc/alpine-fde/baseline.json".
 uki_baseline_stamp "$ENROLL/cli-state" "$PCR7_ENROLLED"
 uki_host_enroll_finalized "$EFIVARS" "$ENROLL/uki-pcrsig-combined.json" \
     "$ENROLL/disk.img" "$RUN/keys" "$RUN/kf-slot0" "$ENROLL/cli-state" || {
-    echo "s11: production enroll-tpm FAILED"; exit 1; }
+    echo "s11: production reseal FAILED"; exit 1; }
 TOK=$(disk_token_json "$ENROLL/disk.img")
 assert_contains "standing token is systemd-tpm2 (Mechanism B)" "$TOK" '"type":"systemd-tpm2"'
 assert_contains "standing token pins {PCR 7, PCR 11}" "$TOK" '"tpm2-pcrs":[7,11]'

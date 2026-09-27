@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/unit/luks_json_parsers.sh — LUKS2 metadata JSON mini-parsers
-# (lib/baseline.sh luks_json_* + lib/cmd/enroll-tpm.sh enrl_json_token_id)
+# (lib/baseline.sh luks_json_* + lib/cmd/reseal.sh reseal_json_token_id)
 # against EVERY real-world shape, not just the pretty stub shape:
 #   * PRETTY — 4-space indented, ": " separators (hand-written stub shape)
 #   * COMPACT — single line, NO space after colons: what real cryptsetup
@@ -23,8 +23,8 @@ source "$REPO/lib/common.sh"
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/cmd/enroll-tpm.sh
-source "$REPO/lib/cmd/enroll-tpm.sh"
+# shellcheck source=../../lib/cmd/reseal.sh
+source "$REPO/lib/cmd/reseal.sh"
 
 T=$(mktemp -d /tmp/alpine-fde-luks-json-parsers.XXXXXX)
 cleanup() { rm -rf "$T"; }
@@ -245,13 +245,13 @@ assert_ne "slot_blob compact: tampered slot 0 differs" "$BLOB_COMPACT" \
 assert_eq "slot_blob pretty: absent slot -> empty" "" "$(luks_json_slot_blob "$PRETTY" 7)"
 assert_eq "slot_blob compact: absent slot -> empty" "" "$(luks_json_slot_blob "$COMPACT" 7)"
 
-# --- enrl_json_token_id ----------------------------------------------------------------
-assert_eq "token_id pretty: numeric key" "0" "$(enrl_json_token_id "$PRETTY" systemd-tpm2)"
-assert_eq "token_id compact: numeric key" "0" "$(enrl_json_token_id "$COMPACT" systemd-tpm2)"
-assert_eq "token_id indented-nospace: numeric key" "0" "$(enrl_json_token_id "$REAL" systemd-tpm2)"
-assert_eq "token_id compact: string key (tpm2)" "tpm2" "$(enrl_json_token_id "$COMPACTSTR" systemd-tpm2)"
-assert_eq "token_id pretty: absent -> empty" "" "$(enrl_json_token_id "$PRETTYN" systemd-tpm2)"
-assert_eq "token_id compact: absent -> empty" "" "$(enrl_json_token_id "$COMPACTN" systemd-tpm2)"
+# --- reseal_json_token_id ----------------------------------------------------------------
+assert_eq "token_id pretty: numeric key" "0" "$(reseal_json_token_id "$PRETTY" systemd-tpm2)"
+assert_eq "token_id compact: numeric key" "0" "$(reseal_json_token_id "$COMPACT" systemd-tpm2)"
+assert_eq "token_id indented-nospace: numeric key" "0" "$(reseal_json_token_id "$REAL" systemd-tpm2)"
+assert_eq "token_id compact: string key (tpm2)" "tpm2" "$(reseal_json_token_id "$COMPACTSTR" systemd-tpm2)"
+assert_eq "token_id pretty: absent -> empty" "" "$(reseal_json_token_id "$PRETTYN" systemd-tpm2)"
+assert_eq "token_id compact: absent -> empty" "" "$(reseal_json_token_id "$COMPACTN" systemd-tpm2)"
 
 # --- shape-tolerance: pretty and compact of the SAME document agree ----------------------
 assert_eq "shape tolerance: count agrees pretty vs compact" \
@@ -259,6 +259,6 @@ assert_eq "shape tolerance: count agrees pretty vs compact" \
 assert_eq "shape tolerance: keyslot agrees pretty vs compact" \
     "$(luks_json_token_keyslot "$PRETTY" systemd-tpm2)" "$(luks_json_token_keyslot "$COMPACT" systemd-tpm2)"
 assert_eq "shape tolerance: token id agrees pretty vs compact" \
-    "$(enrl_json_token_id "$PRETTY" systemd-tpm2)" "$(enrl_json_token_id "$COMPACT" systemd-tpm2)"
+    "$(reseal_json_token_id "$PRETTY" systemd-tpm2)" "$(reseal_json_token_id "$COMPACT" systemd-tpm2)"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

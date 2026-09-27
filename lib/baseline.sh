@@ -1,7 +1,7 @@
 #!/bin/sh
 # baseline.sh — baseline.json v1 schema + shared helpers for the Alpine FDE
-# ceremony/lifecycle commands (bucket C: provision/install/enroll/rotate/
-# audit/status/bootnext/doctor).
+# ceremony/lifecycle commands (bucket C: provision/install/enroll/passwd/
+# audit/status/doctor; one-shot boot entry via `alpine-fde kernel next`).
 #
 # baseline.json v1 (docs/Architecture.md §8.4, gap C-G5) — emitted layout is
 # fixed (2-space top level, 4-space nested, every value a JSON string):
@@ -235,7 +235,7 @@ baseline_write() {
 EOF
     # I-2: pin the trust-root record's mode explicitly — 0600 regardless of the
     # caller's ambient umask (direct sourcing, tests, future callers), matching
-    # aud_write_last_audit/enrl_record.
+    # aud_write_last_audit/reseal_record.
     chmod 600 "$_bw_f"
 }
 
@@ -427,7 +427,7 @@ baseline_finalize_from_live() {
     # `audit` is measured against, so it may only be captured in the machine's
     # FINAL Secure Boot state. Fail-closed 64 before ANY mutation (the baseline
     # stays pending); no override — an SB-off machine must fix Secure Boot
-    # first ('enroll-tpm' refuses on the same precondition).
+    # first ('reseal' refuses on the same precondition).
     _bff_sb=$(fw_sb_state) || true
     case $_bff_sb in
         secureboot=1\ setup_mode=0\ *) : ;;
@@ -447,7 +447,7 @@ baseline_finalize_from_live() {
         die "baseline_finalize: cannot acquire $_bff_lock (another ceremony running?)"
     fi
     # _bff_fail — staged-document die path: discard the temp doc, drop the lock.
-    # CR-01: plain `exec 9>&-` ONLY (same pattern as enrl_lock_release) — a
+    # CR-01: plain `exec 9>&-` ONLY (same pattern as reseal_lock_release) — a
     # second redirect on the same exec (e.g. 2>/dev/null) is applied
     # PERSISTENTLY (POSIX exec-without-command semantics) and would silence
     # stderr BEFORE die prints, making every fail-closed path invisible.

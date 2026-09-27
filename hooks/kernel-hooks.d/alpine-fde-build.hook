@@ -7,7 +7,7 @@
 #
 #   alpine-fde-build.hook <event> <kver>     event in {add, update, remove}
 #
-# add/update map to `alpine-fde ukictl build <kver>`: initramfs (mkinitfs,
+# add/update map to `alpine-fde kernel build <kver>`: initramfs (mkinitfs,
 # ADR-13) -> ukify build --measure --phases=enter-initrd with the release key
 # -> sbsign + sbverify -> atomic UKI install to the ESP -> manifest upsert ->
 # ensure-once enroll -> prune beyond current + 2 old. remove events are the
@@ -22,7 +22,7 @@
 # ADR-18 custody: release.pem may be the ENCRYPTED on-target form. This hook
 # unlocks it ONCE via keys_unlock (the ALPINE_FDE_KEY_PASSPHRASE env seam or
 # the no-echo TTY prompt) and signs with the UNLOCKED tmpfs path. §9.2 single-unlock: the
-# unlock happens BEFORE the `ukictl build` child, and the staged decrypted
+# unlock happens BEFORE the `kernel build` child, and the staged decrypted
 # path is handed to that child through the staged keydir seam (ALPINE_FDE_KEYDIR,
 # the spelling the runtime libs consume) so the build child and the
 # boot-manager re-sign leg share exactly ONE unlock/passphrase prompt per hook
@@ -34,8 +34,8 @@
 # ADR-8: a failing build is a LOUD failure — the nonzero exit propagates to
 # the kernel hook runner, the failure marker is persisted under
 # /etc/alpine-fde for `alpine-fde status`, and the PREVIOUS default UKI is
-# never touched (ukictl build writes the ESP atomically and prunes only after
-# success). Operator recovery: re-run `alpine-fde ukictl build <kver>` (enter
+# never touched (kernel build writes the ESP atomically and prunes only after
+# success). Operator recovery: re-run `alpine-fde kernel build <kver>` (enter
 # the release-key passphrase when prompted); unattended, provide
 # ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then `apk fix`.
 #
@@ -62,7 +62,10 @@ case $event in
 esac
 
 # --- env seam: the ALPINE_FDE_* namespace (§8.1) ---------------------------------
-ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-alpine-fde}
+# §8.1 machine/lib entrance rule: this hook NEVER execs the `alpine-fde` CLI —
+# it sources the lib/cmd build module directly and calls its entry point in a
+# subshell (the cmd entry `exit`s internally; the subshell contains that and
+# propagates the rc).
 ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-}
 ALPINE_FDE_ESP=${ALPINE_FDE_ESP:-/efi}
 ALPINE_FDE_KEYDIR=${ALPINE_FDE_KEYDIR:-/etc/alpine-fde/keys}
@@ -103,13 +106,27 @@ fi
 # shellcheck source=../lib/keys.sh
 . "$ALPINE_FDE_LIB_DIR/keys.sh"
 
+# hook_kernel_build KVER — the §8.1 machine/lib entrance: the hook sources the
+# lib/cmd build module DIRECTLY (never execs the `alpine-fde` CLI) and runs
+# its entry point inside a SUBSHELL — the cmd entry `exit`s internally (rc 0
+# on success, 64 fail-closed otherwise); the subshell contains those exits so
+# this hook's post-build boot-manager re-sign leg still runs and the rc
+# propagates to the kernel hook runner (ADR-8 loud failure).
+hook_kernel_build() {
+    _hkb_kver=$1
+    ALPINE_FDE_CMD_DIR="$ALPINE_FDE_LIB_DIR/cmd"
+    # shellcheck disable=SC1090  # resolved via the runtime lib dir
+    . "$ALPINE_FDE_CMD_DIR/kernel-build.sh"
+    ( cmd_kernel_build_main "$_hkb_kver" )
+}
+
 [ -n "$ALPINE_FDE_KEYDIR" ] || guard_fail "no key directory configured (ALPINE_FDE_KEYDIR unset)"
 for f in release.pem release.crt; do
     [ -f "$ALPINE_FDE_KEYDIR/$f" ] || guard_fail "missing key material: $ALPINE_FDE_KEYDIR/$f"
 done
 
 # ADR-18/§9.2: unlock the release key EXACTLY ONCE per hook invocation, BEFORE
-# the `ukictl build` child (no-op for a plaintext release.pem). Both signing
+# the `kernel build` child (no-op for a plaintext release.pem). Both signing
 # stages — the child's UKI build and the boot-manager re-sign leg below — then
 # share this single unlocked copy.
 _hook_keyfile="$ALPINE_FDE_KEYDIR/release.pem"
@@ -127,7 +144,7 @@ if keys_is_encrypted "$_hook_keyfile"; then
     chmod 600 "$_hook_unlocked" 2>/dev/null || :
     _hook_keyfile=$_hook_unlocked
     # staged keydir seam (§9.2 single-unlock): a tmpfs view of the keydir whose
-    # release.pem IS the decrypted copy, handed to the `ukictl build` child via
+    # release.pem IS the decrypted copy, handed to the `kernel build` child via
     # ALPINE_FDE_KEYDIR (the spelling lib/keys.sh keys_dir consumes) so the
     # child classifies it plaintext and performs ZERO unlock interaction
     # instead of prompting a second time
@@ -150,9 +167,9 @@ if keys_is_encrypted "$_hook_keyfile"; then
 fi
 
 if [ -n "$_hook_stage_keydir" ]; then
-    ALPINE_FDE_KEYDIR="$_hook_stage_keydir" "$ALPINE_FDE_BIN" ukictl build "$kver"
+    ALPINE_FDE_KEYDIR="$_hook_stage_keydir" hook_kernel_build "$kver"
 else
-    "$ALPINE_FDE_BIN" ukictl build "$kver"
+    hook_kernel_build "$kver"
 fi
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -160,9 +177,9 @@ if [ "$rc" -ne 0 ]; then
     # APPEND, don't overwrite: the build already wrote a marker naming the
     # exact failing step/pin — keep it and add the recovery line beneath it
     {
-        printf 'kernel hook: ukictl build failed for kernel %s\n' "$kver"
+        printf 'kernel hook: kernel build failed for kernel %s\n' "$kver"
         printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'recovery: re-run "alpine-fde ukictl build %s" (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n' "$kver"
+        printf 'recovery: re-run "alpine-fde kernel build %s" (enter the release-key passphrase when prompted); unattended: provide ALPINE_FDE_KEY_PASSPHRASE via your credential agent, then "apk fix"\n' "$kver"
     } >>"$marker" 2>/dev/null || :
     exit "$rc"
 fi

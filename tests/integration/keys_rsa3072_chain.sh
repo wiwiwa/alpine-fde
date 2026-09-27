@@ -8,8 +8,8 @@
 #   * 3072-bit chain: seal_provisional -> seal_unseal round-trip against the
 #     swtpm fixture with a file-backed LUKS2 container returns EXACTLY the
 #     staged random volume passphrase
-#   * keys_check stays size-blind (completeness contract used by ukictl build)
-#   * the ENROLL PATH ENTRY (enrl_preconditions) refuses a 2048-bit release key
+#   * keys_check stays size-blind (completeness contract used by kernel build)
+#   * the ENROLL PATH ENTRY (reseal_preconditions) refuses a 2048-bit release key
 #     fail-closed rc 2 citing ADR-16 (fail-closed at enroll, orchestrator
 #     decision) — red-first: today it would pass
 set -u
@@ -28,8 +28,8 @@ source "$REPO/lib/policy.sh"
 source "$REPO/lib/keys.sh"
 # shellcheck source=../../lib/seal.sh
 source "$REPO/lib/seal.sh"
-# shellcheck source=../../lib/cmd/enroll-tpm.sh
-source "$REPO/lib/cmd/enroll-tpm.sh"
+# shellcheck source=../../lib/cmd/reseal.sh
+source "$REPO/lib/cmd/reseal.sh"
 
 command -v swtpm >/dev/null 2>&1 || {
     echo "FAIL: swtpm not available — this test is normative and must run where swtpm exists" >&2
@@ -102,7 +102,7 @@ assert_eq "keys_rsa_bits reports 3072 for the 3072-bit key" "3072" \
     "$(keys_rsa_bits "$KEY3072/release.pub")"
 keys_check "$KEY3072"
 assert_rc "keys_check passes for the complete 3072-bit keydir" 0 $?
-# keys_check is the COMPLETENESS contract (ukictl build loud-fail marker) and
+# keys_check is the COMPLETENESS contract (kernel build loud-fail marker) and
 # stays size-blind; the SIZE policy is enforced at the enroll path entry (below)
 keys_check "$KEY2048"
 assert_rc "keys_check stays size-blind (2048 keydir passes completeness)" 0 $?
@@ -144,7 +144,7 @@ assert_eq "unsealed bytes == staged random volume passphrase" "$PROV_PASS" \
     "$(cat "$TMP/unsealed.txt")"
 keys_scrub "$SEAL_PASS_FILE"
 
-# --- 3. ADR-16 gate at the ENROLL PATH ENTRY (enrl_preconditions) ------------------------
+# --- 3. ADR-16 gate at the ENROLL PATH ENTRY (reseal_preconditions) ------------------------
 # enroll precondition fixture: final baseline + SB on/SetupMode=0 + live PCR 7
 # match + resolvable LUKS uuid (the guard fires right after the keydir check)
 EFIVARS=$TMP/efivars
@@ -166,14 +166,14 @@ BL_PCR0="$D7" BL_PCR1="$D7" BL_PCR2="$D7" BL_PCR3="$D7" BL_PCR7="$D7" \
 # real TPMs refuse LoadExternal of larger keys, so the amended ADR-16 accepts
 # the 2048-bit release key at the enroll path entry.
 ALPINE_FDE_KEYDIR=$KEY2048
-enrl_preconditions 2>"$TMP/pre2048.err"
+reseal_preconditions 2>"$TMP/pre2048.err"
 assert_rc "enroll path entry: 2048-bit release key PASSES (ADR-11 amendment, blocker #26)" 0 $?
-assert_eq "resolved pubkey is the 2048-bit keydir's release.pub" "$KEY2048/release.pub" "$ENRL_PRE_PUB"
+assert_eq "resolved pubkey is the 2048-bit keydir's release.pub" "$KEY2048/release.pub" "$RESEAL_PRE_PUB"
 
 # the floor still refuses a SUB-2048 key, fail-closed rc 2 citing ADR-16
 mkdir -p "$TMP/keys1024"
 openssl genrsa -out "$TMP/keys1024/release.pub" 1024 2>/dev/null
-PRE1024_OUT=$(ALPINE_FDE_KEYDIR=$TMP/keys1024 enrl_preconditions 2>&1)
+PRE1024_OUT=$(ALPINE_FDE_KEYDIR=$TMP/keys1024 reseal_preconditions 2>&1)
 PRE1024_RC=$?
 assert_rc "enroll path entry: 1024-bit release key -> refuse rc 2 (fail-closed)" 2 "$PRE1024_RC"
 assert_contains "enroll-path refusal cites ADR-16" "$PRE1024_OUT" "ADR-16"
@@ -181,9 +181,9 @@ assert_contains "enroll-path refusal names the offending key size" "$PRE1024_OUT
 assert_contains "enroll-path refusal states the floor" "$PRE1024_OUT" "2048"
 
 ALPINE_FDE_KEYDIR=$KEY3072
-enrl_preconditions 2>"$TMP/pre3072.err"
+reseal_preconditions 2>"$TMP/pre3072.err"
 assert_rc "enroll path entry: 3072-bit release key passes (>= floor)" 0 $?
-assert_eq "resolved pubkey is the 3072-bit keydir's release.pub" "$KEY3072/release.pub" "$ENRL_PRE_PUB"
+assert_eq "resolved pubkey is the 3072-bit keydir's release.pub" "$KEY3072/release.pub" "$RESEAL_PRE_PUB"
 
 swtpm_stop "$TPMDIR" || true
 finish

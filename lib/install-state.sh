@@ -66,10 +66,10 @@ istate_get() {
 
 # istate_state [FILE] — print the state value; empty + warn when the document
 # is absent (pre-state-machine installs) or carries no readable state. An
-# explicit FILE argument is read as-is (consumed by enroll-tpm.sh's G-IL7
+# explicit FILE argument is read as-is (consumed by reseal.sh's G-IL7
 # install-state reader); without one the path resolves via istate_file.
 # Report only: rc 0, the CALLER decides what empty/garbage means.
-# shellcheck disable=SC2120  # the FILE arg is passed by external consumers (enroll-tpm.sh G-IL7 reader, tests)
+# shellcheck disable=SC2120  # the FILE arg is passed by external consumers (reseal.sh G-IL7 reader, tests)
 istate_state() {
     if [ -n "${1:-}" ]; then
         _is_f=$1
@@ -103,7 +103,7 @@ istate_is_provisional_booted() {
 # istate_write STATE — validate (installed|provisional-booted|finalized,
 # fail-closed 64 on anything else) and atomically install the state document
 # (temp next to the target + chmod 600 BEFORE the rename — no partial
-# document, no umask window; same pattern as enrl_record / baseline finalize).
+# document, no umask window; same pattern as reseal_record / baseline finalize).
 istate_write() {
     _is_new=$1
     case $_is_new in

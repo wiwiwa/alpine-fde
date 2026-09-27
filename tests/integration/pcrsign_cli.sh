@@ -218,7 +218,7 @@ assert_contains "missing UKI message names the file" "$out" "does-not-exist.efi"
 # systemd-stub measures .ucode/.dtb/.splash/.pcrpkey into PCR 11; pcrsign extracts
 # only .linux/.initrd/.cmdline/.osrel, so a signature over such a UKI would be
 # silently dead. Fixture: a real ukify build with --pcr-private-key (embeds
-# .pcrpkey — exactly what every A'' `ukictl build` UKI carries); a throwaway
+# .pcrpkey — exactly what every A'' `kernel build` UKI carries); a throwaway
 # systemd-measure stub satisfies ukify's sign step during the fixture build only.
 SMBIN="$TMP/smbin"
 mkdir -p "$SMBIN"

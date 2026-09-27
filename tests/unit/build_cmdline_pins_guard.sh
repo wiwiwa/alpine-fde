@@ -101,7 +101,7 @@ build() {
         ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
         INITRAMFS_CMD="$REC {out} {kver}" \
         RETENTION=1 \
-        "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
+        "$REPO/bin/alpine-fde" kernel build "$KVER" >/dev/null 2>&1
 }
 
 # --- 1. rd.shell=0 stripped ----------------------------------------------------------

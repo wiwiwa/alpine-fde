@@ -319,7 +319,7 @@ require_pkgs() {
 # the A″ spellings (a2 / a-prime-prime / native) remain accepted as aliases —
 # same policy construction (static-PCR7 + release-key-signed PCR11 under
 # PolicyAuthorize). Rungs a / ap / a-prime / combined stay documented-absent
-# and fail closed HERE (rc 64) so every entry point (ukictl build, enroll-tpm,
+# and fail closed HERE (rc 64) so every entry point (kernel build, reseal,
 # ...) inherits the same loud rejection citing ADR-19.
 # Unknown garbage → rc 1 (caller decides usage vs fail-closed).
 policy_mode_normalize() {

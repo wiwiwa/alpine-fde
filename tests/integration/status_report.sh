@@ -132,7 +132,7 @@ cat >"$(sp_last_audit_file)" <<'EOF'
   "accepted": "no"
 }
 EOF
-printf 'ukictl build failed for kernel 6.1.0-3\nreason: signing key absent\n' >"$(sp_etc_dir)/build-failed"
+printf 'kernel build failed for kernel 6.1.0-3\nreason: signing key absent\n' >"$(sp_etc_dir)/build-failed"
 
 run_status() {
     ST_OUT=$("$REPO/bin/alpine-fde" status 2>&1)
@@ -152,7 +152,7 @@ assert_contains "token pubkey fingerprint echoed" "$ST_OUT" "token pubkey fp: sh
 assert_contains "SB state line (on, no setup mode)" "$ST_OUT" "secureboot=1 setup_mode=0"
 assert_contains "build-failed marker shown prominently (ADR-8)" "$ST_OUT" "FAILED BUILD MARKER PRESENT"
 assert_contains "marker reason quoted" "$ST_OUT" "signing key absent"
-assert_contains "marker points at the recovery flow" "$ST_OUT" "ukictl build"
+assert_contains "marker points at the recovery flow" "$ST_OUT" "kernel build"
 assert_contains "last-audit result + accepted echoed" "$ST_OUT" "result: drift accepted: no"
 
 # --- 3. §8.3 sbverify over BOTH boot binaries -------------------------------------

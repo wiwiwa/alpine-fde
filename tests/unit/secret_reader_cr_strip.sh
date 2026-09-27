@@ -13,7 +13,7 @@
 #     value it stores is CR-free
 #   * genuine embedded control characters (TAB) are still refused — the strip
 #     must not become a blanket cntrl bypass
-#   * rotate's rot_prompt strips CR on both reads; the mismatch check still
+#   * passwd's passwd_prompt strips CR on both reads; the mismatch check still
 #     compares the stripped values
 # Driven END-TO-END through the real readers with CRLF/LF stdin (the documented
 # non-tty test seam) — never by re-implementing the reader in the test.
@@ -62,32 +62,32 @@ out=$(inst_prompt_secret 'pass: ' _V3 <"$T/eof.in" 2>&1); rc=$?
 assert_eq "install reader: EOF still fail-closed (blocker-hardened behavior)" "64" "$rc"
 assert_contains "install reader: EOF diagnostic present" "$out" "end of input"
 
-# --- 3. rotate: rot_prompt strips CR on both reads ----------------------------
-# rot_prompt reads </dev/tty verbatim, so allocate a pty via script(1) and
+# --- 3. passwd: passwd_prompt strips CR on both reads ----------------------------
+# passwd_prompt reads </dev/tty verbatim, so allocate a pty via script(1) and
 # feed the CRLF secrets through it (the real interactive shape).
-sed -n '/^rot_prompt()/,/^}/p' "$REPO/lib/cmd/rotate.sh" >"$T/rot_prompt.sh"
-assert_file_exists "rot_prompt extracted from rotate.sh" "$T/rot_prompt.sh"
-cat >"$T/rot_drive.sh" <<'DRIVE'
+sed -n '/^passwd_prompt()/,/^}/p' "$REPO/lib/cmd/passwd.sh" >"$T/passwd_prompt.sh"
+assert_file_exists "passwd_prompt extracted from passwd.sh" "$T/passwd_prompt.sh"
+cat >"$T/passwd_drive.sh" <<'DRIVE'
 source "$_fde_lib/common.sh"
-source "$_fde_dir/rot_prompt.sh"
+source "$_fde_dir/passwd_prompt.sh"
 # the server shape: the console line discipline does NOT translate CR->NL
 # (icrnl off), so the CR Enter sends SURVIVES into the read — the exact
 # condition that fired the blocker on the real server.
 stty -icrnl 2>/dev/null || true
-rot_prompt P "new: " 2>&1
+passwd_prompt P "new: " 2>&1
 printf 'GOT=[%s]' "$P"
 DRIVE
 # script(1) wires its stdin into the driven session's /dev/tty; the feed must
 # be PACED (input only after the drive applied -icrnl), or the pty buffers the
 # bytes under the wrong line discipline.
 out=$(cd "$T" && _fde_lib="$REPO/lib" _fde_dir="$T" bash -c \
-    '(sleep 1; printf "R3ally-good\r\nR3ally-good\r\n"; sleep 2) | script -qec "bash \"$_fde_dir/rot_drive.sh\"" /dev/null' 2>&1 | tr -d '\r')
-assert_contains "rotate reader: CRLF secrets accepted (CR stripped on both reads)" \
+    '(sleep 1; printf "R3ally-good\r\nR3ally-good\r\n"; sleep 2) | script -qec "bash \"$_fde_dir/passwd_drive.sh\"" /dev/null' 2>&1 | tr -d '\r')
+assert_contains "passwd reader: CRLF secrets accepted (CR stripped on both reads)" \
     "$out" 'GOT=[R3ally-good]'
 
 out=$(cd "$T" && _fde_lib="$REPO/lib" _fde_dir="$T" bash -c \
-    '(sleep 1; printf "R3ally-good\r\nOther-secret\n"; sleep 2) | script -qec "bash \"$_fde_dir/rot_drive.sh\"" /dev/null' 2>&1 | tr -d '\r')
-assert_contains "rotate reader: mismatched confirm still refuses" "$out" "do not match"
+    '(sleep 1; printf "R3ally-good\r\nOther-secret\n"; sleep 2) | script -qec "bash \"$_fde_dir/passwd_drive.sh\"" /dev/null' 2>&1 | tr -d '\r')
+assert_contains "passwd reader: mismatched confirm still refuses" "$out" "do not match"
 
 # --- 4. finalize: the recovery re-prompt reads use the shared strip -----------
 assert_contains "finalize re-prompt: reads routed through the shared strip idiom" \

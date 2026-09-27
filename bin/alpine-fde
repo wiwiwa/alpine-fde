@@ -23,7 +23,15 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # Test seam: override where command implementations live (unit tests inject stubs).
 ALPINE_FDE_CMD_DIR="${ALPINE_FDE_CMD_DIR:-$SCRIPT_DIR/../lib/cmd}"
 
-SUBCOMMANDS='provision install ukictl pcrsign enroll-tpm finalize rotate audit status bootnext pre-upgrade doctor'
+# The user-facing surface is 7 verbs (docs/Architecture.md §8.1):
+#   install · audit · reseal · passwd · status · doctor · kernel
+# The machine tier (provision / pcrsign / finalize) stays callable for human
+# recovery but is NOT part of the operator command table (§8.1 "Internal
+# Automation & Background Components"). The retired pre-upgrade CLI verb is
+# library-only now: lib/cmd/pre-upgrade.sh stays sourceable (its functions are
+# callable), but there is no dispatch row — the snapshot role moved to the
+# automatic snapshot flow (UserGuide §4).
+SUBCOMMANDS='provision install kernel pcrsign reseal finalize passwd audit status doctor'
 
 usage() {
     cat >&2 <<EOF
@@ -32,20 +40,23 @@ Usage: $PROG [global flags] <subcommand> [args...]
 $PROG $ALPINE_FDE_VERSION — TPM 2.0-backed verified boot & full-disk-encryption lifecycle
 
 Subcommands:
-  provision      one-time: release keys, firmware key enrollment, pending baseline
   install        guided disk setup, minimal Alpine rootfs (apk), signed boot chain
-  ukictl         build / sign / enroll / prune unified kernel images
-  pcrsign        release-key signature over the combined PCR 7+11 policy digest
-   enroll-tpm     re-enroll the TPM seal for all manifest kernels (TPM-clear recovery)
-   finalize       first-boot trust finalization: Secure Boot guard, baseline capture,
-                  TPM enrollment of every crypttab member (guided; the advisory
-                  alpine-fde-finalize OpenRC service only prints guidance; §9.1)
-  rotate         change the keyslot-0 passphrase (no re-encryption, no re-seal)
   audit          compare live PCRs + Secure Boot state against the baseline
+  reseal         re-enroll the TPM seal for all manifest kernels (TPM-clear recovery)
+  passwd         change the keyslot-0 recovery passphrase (no re-encryption, no re-seal)
   status         Secure Boot state, PCR readings, keyslots, manifest vs ESP
-  bootnext       set a one-shot boot entry (rollback)
-  pre-upgrade    snapshot the root filesystem before upgrades (btrfs only)
   doctor         check/repair prerequisites of the running environment
+  kernel         build / remove / prune the signed UKIs; "kernel next" sets a
+                 one-shot boot entry (rollback)
+
+Machine-tier internals (kept callable for human recovery; not part of the
+daily operator surface — scripts and services must source lib modules
+directly instead of exec'ing this CLI, §8.1):
+  provision      one-time: release keys, firmware key enrollment, pending baseline
+  pcrsign        release-key signature over the combined PCR 7+11 policy digest
+  finalize       first-boot trust finalization: Secure Boot guard, baseline capture,
+                 TPM enrollment of every crypttab member (guided; the advisory
+                 alpine-fde-finalize OpenRC service only prints guidance; §9.1)
 
 Global flags (must precede the subcommand):
   --tcti <conf>   TCTI config for tpm2-tools (env: ALPINE_FDE_TCTI; empty = default discovery)
@@ -87,8 +98,10 @@ is_subcommand() {
 }
 
 # cmd_to_fn NAME — entry-point function name for a subcommand.
-# Hyphens are invalid in shell identifiers: 'enroll-tpm' → 'cmd_enroll_tpm_main'
-# (single hyphen supported, matching the current subcommand table).
+# Hyphens are invalid in shell identifiers: 'kernel-build' →
+# 'cmd_kernel_build_main' (single hyphen supported, matching the subcommand
+# table; the current 7-verb surface has no hyphenated verb, but the kernel
+# sub-verbs build/remove/prune/next are dispatched inside lib/cmd/kernel.sh).
 cmd_to_fn() {
     _head=${1%-*}
     if [ "$_head" = "$1" ]; then

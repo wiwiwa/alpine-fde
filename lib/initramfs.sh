@@ -1,6 +1,6 @@
 #!/bin/sh
 # initramfs.sh — initramfs-builder seam (docs/Architecture.md §8.2/§8.3,
-# ADR-13, G-C10). `ukictl build` consumes the initrd for the kernel being
+# ADR-13, G-C10). `kernel build` consumes the initrd for the kernel being
 # built; who builds it is swappable:
 #
 #   default : mkinitfs -c /etc/mkinitfs/mkinitfs.conf -F <features> -o <out> <kver>
@@ -616,7 +616,7 @@ initrd_audit() {
     }
 
     # REAL-SERVER BLOCKER #12: kernel-reality context. When the caller passes
-    # the target root + kver (ukictl build does), modules are also judged
+    # the target root + kver (kernel build does), modules are also judged
     # against /lib/modules/<kver>/modules.builtin — a module the KERNEL BUILT
     # IN ships no .ko file anywhere, so requiring one in the inventory
     # false-positives forever.

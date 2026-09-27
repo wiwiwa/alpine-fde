@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # tests/integration/build_esp_no_secrets.sh — G-U11 (§11 I2): the ESP contains no
-# secrets, guarded after a REAL `ukictl build` over the stub inputs:
+# secrets, guarded after a REAL `kernel build` over the stub inputs:
 #   * `find ESP -type f` == exactly the retained UKI set (current + retention)
 #   * no "BEGIN ... PRIVATE KEY" material anywhere on the ESP
 #   * no .pem/.pub/.crt/.json artifacts on the ESP
-# The build env mirrors tests/unit/ukictl_build_stub.sh (stub initramfs, real
+# The build env mirrors tests/unit/kernel_build_stub.sh (stub initramfs, real
 # ukify/sbsign, seeded retained UKIs so prune is exercised against real state).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -49,8 +49,8 @@ ALPINE_FDE_BIN_TEST=1 \
     ALPINE_FDE_CONF="$TMP/alpine-fde.conf" \
     INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
     RETENTION=2 \
-    "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
-assert_rc "ukictl build succeeds over the stub inputs" 0 $?
+    "$REPO/bin/alpine-fde" kernel build "$KVER" >/dev/null 2>&1
+assert_rc "kernel build succeeds over the stub inputs" 0 $?
 
 # --- exactly the retained UKI set -----------------------------------------------------
 EXPECTED=$(printf '%s\n' \
@@ -84,7 +84,7 @@ env -u ALPINE_FDE_ESP \
     ALPINE_FDE_NO_INSTALL=1 \
     INITRAMFS_CMD="$REPO/fixtures/initramfs/stub-generate.sh {out} {kver}" \
     RETENTION=2 \
-    "$REPO/bin/alpine-fde" ukictl build "$KVER" >/dev/null 2>&1
+    "$REPO/bin/alpine-fde" kernel build "$KVER" >/dev/null 2>&1
 assert_rc "build with conf-persisted ESP_PATH (no env) succeeds" 0 $?
 test -e "$ESP3/EFI/Linux/alpine-fde-$KVER.efi"
 assert_rc "UKI landed on the conf-recorded ESP" 0 $?

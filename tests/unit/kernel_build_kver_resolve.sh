@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/unit/ukictl_build_kver_resolve.sh — real-server blocker #11: the
-# no-kver-argument fallback of `ukictl build`. The install plan's guest record
-# used to call `ukictl build` with NO kver, so the build fell back to
+# tests/unit/kernel_build_kver_resolve.sh — real-server blocker #11: the
+# no-kver-argument fallback of `kernel build`. The install plan's guest record
+# used to call `kernel build` with NO kver, so the build fell back to
 # `uname -r` — the LIVE ISO's kernel — while the TARGET's installed linux-lts
 # is a different version (/lib/modules/<live-kver> does not exist in the
 # target). Contract for the NO-ARG invocation:
@@ -52,7 +52,7 @@ fixture_root() { # NAME — root+ESP with every build input EXCEPT the kernel
         >"$ROOT/etc/crypttab"
 }
 
-build() { # args... -> ukictl build (no-arg legs pass NO kver)
+build() { # args... -> kernel build (no-arg legs pass NO kver)
     _bk_root=$1
     _bk_esp=$2
     shift 2
@@ -65,7 +65,7 @@ build() { # args... -> ukictl build (no-arg legs pass NO kver)
         INITRAMFS_CMD="$REC {out} {kver}" \
         RETENTION=2 \
         PATH="$UNAMEBIN:$PATH" \
-        "$REPO/bin/alpine-fde" ukictl build "$@"
+        "$REPO/bin/alpine-fde" kernel build "$@"
 }
 
 # recording INITRAMFS_CMD stub (call counter for the fail-closed pin)

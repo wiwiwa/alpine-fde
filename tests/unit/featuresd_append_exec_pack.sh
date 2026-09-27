@@ -8,7 +8,7 @@
 #   (a) execute as a HOST plan record — a guest record would run INSIDE the
 #       chroot where <mnt> does not exist, so the scan would find nothing and
 #       append nothing (the hypothesized defect shape),
-#   (b) execute BEFORE the in-guest `ukictl build` record (mkinitfs reads the
+#   (b) execute BEFORE the in-guest `kernel build` record (mkinitfs reads the
 #       feature files at build time),
 #   (c) append modules.dep-KEY paths (the /lib/modules/<kver>/ prefix
 #       stripped) to features.d/alpine-fde.modules that resolve under the
@@ -26,7 +26,7 @@
 # every non-comment features.d entry is glob-expanded against the TARGET
 # root and the matches are cpio'd at their guest-relative paths (newc +
 # gzip — what initrd_lister's default `gzip -dc | cpio -it` reads back).
-# tests/integration has no ukictl-build fixture on this branch, so this
+# tests/integration has no kernel-build fixture on this branch, so this
 # unit-level real-pack is the mkinitfs packing acceptance leg.
 
 set -u
@@ -250,7 +250,7 @@ esac
 # --- (b) execution order: append BEFORE the in-guest build record -------------
 O_APPEND=$(first_line_no "$OUT" 'features.d/alpine-fde.modules; td=')
 O_BLD=$(first_line_no "$OUT" 'guest: export ALPINE_FDE_ROOT=/')
-assert_eq "the module-append record executes BEFORE the in-guest ukictl build record" "1" \
+assert_eq "the module-append record executes BEFORE the in-guest kernel build record" "1" \
     "$(( O_APPEND > 0 && O_BLD > O_APPEND ? 1 : 0 ))"
 
 # --- (c) appended lines are modules.dep KEYS, target-root-resolvable ----------

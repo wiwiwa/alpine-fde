@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/integration/pcrsign_encrypted_key.sh — §8.4 + §11 invariant I4 + ADR-18:
 # `pcrsign` must route the keydir release.pem through the SAME unlock seam the
-# other signing callers use (keys_unlock, like enrl_sign_pcrsig in
-# lib/cmd/enroll-tpm.sh) instead of signing with the raw (possibly
+# other signing callers use (keys_unlock, like reseal_sign_pcrsig in
+# lib/cmd/reseal.sh) instead of signing with the raw (possibly
 # encrypted-at-rest) file. Asserts OBSERVED effects, driving the REAL
 # cmd_pcrsign dispatcher with a stubbed ukify (canned enter-initrd measure
 # JSON, tests/unit/pcrsign_cli.sh idiom):

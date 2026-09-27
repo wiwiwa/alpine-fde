@@ -53,13 +53,13 @@
 #           -> switch_root -> `login:` — ZERO console keystrokes.
 #   Boot 2  kernel update: UKI 6.4.0 built (the §8.3 apk-trigger/kernel-hook
 #           stand-in), combined {7,11} entry re-signed over (same d7, new
-#           d11), `enroll-tpm` RETIRES the stale enrollment and stands the
+#           d11), `reseal` RETIRES the stale enrollment and stands the
 #           fresh seal in the same run; the new UKI boots and unseals
 #           PASSWORDLESSLY under the updated {7,11}. Plus the §10 row
 #           "kernel update build failed": a keyless rebuild fails loudly,
 #           ships nothing.
 #   Boot 3  rollback: the retained previous UKI (v1) is selected (the mtools
-#           default swap — the harness stand-in for bootnext), its OWN
+#           default swap — the harness stand-in for kernel next), its OWN
 #           release-signed combined {7,11} entry rides the payload drive;
 #           the older UKI boots and unseals passwordlessly with ZERO new
 #           enrollment; LUKS2 metadata is byte-identical across the boot.
@@ -72,7 +72,7 @@
 #           digest-anchored seal must be composed over the register the
 #           machine actually reproduces — s16's 2026-09-24 lesson). Host:
 #           baseline re-anchored (the §9.4 accept analog), K2 combined entry,
-#           `enroll-tpm` under K2 (retire + stand), token pins the K2 public
+#           `reseal` under K2 (retire + stand), token pins the K2 public
 #           key. Final launch: passwordless boot + unseal under K2 on the
 #           rotated register.
 #
@@ -596,7 +596,7 @@ _assert_polluted() {
 }
 
 # _enroll_cli <label> <pcrsig.json> <keydir> <logfile> — the production CLI
-# enroll-tpm host-side (uki_host_enroll_finalized's environment, explicit for
+# reseal host-side (uki_host_enroll_finalized's environment, explicit for
 # the pipeline's canonical disk); rc asserted by the caller.
 _enroll_cli() {
     local label="$1" pcrsig="$2" keydir="$3" logfile="$4"
@@ -606,7 +606,7 @@ _enroll_cli() {
         ALPINE_FDE_KEYDIR="$keydir" \
         ALPINE_FDE_LUKS_KEYFILE="$RUN/kf-slot0" \
         ALPINE_FDE_NO_INSTALL=1 \
-        timeout 600 "$REPO/bin/alpine-fde" enroll-tpm --uuid "$CANON_DISK" --pcrsig "$pcrsig" \
+        timeout 600 "$REPO/bin/alpine-fde" reseal --uuid "$CANON_DISK" --pcrsig "$pcrsig" \
         >"$logfile" 2>&1
 }
 
@@ -930,7 +930,7 @@ else
 fi
 
 # --- in-guest LIVE-OPS suite (user directive: status / audit / doctor /
-# rotate / pre-upgrade executed DURING a live boot, riding boot 1's login
+# passwd / pre-upgrade executed DURING a live boot, riding boot 1's login
 # session — ZERO additional boots) --------------------------------------------
 #
 # The installed Alpine root ships the tooling tree + the glibc-closure stubs
@@ -1151,11 +1151,11 @@ _liveops_session() {
     _liv_feed "$dir" \
         'grep -F "readiness report" /tmp/liv-doc.out && grep -Eq "TPM 2.0 reachable" /tmp/liv-doc.out && echo LIV5B-OK || { cut -c1-72 /tmp/liv-doc.out | head -16; echo LIV5B-DIAG; }' \
         'LIV5B-(OK|DIAG)'
-    # --- rotate: the keyslot-0 passphrase change, there AND BACK (§9.4) --------
+    # --- passwd: the keyslot-0 passphrase change, there AND BACK (§9.4) --------
     # net-zero: the canonical disk keeps the standing slot-0 passphrase for
     # the later legs even though this boot's overlay is committed (R1).
     _liv_feed "$dir" \
-        "ALPINE_FDE_OLD_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE ALPINE_FDE_NEW_PASSPHRASE=w2-Live0ps-Rotate9zkq /opt/alpine-fde/bin/alpine-fde rotate >/tmp/liv-rot1.out 2>&1; echo LIV6-RC=\$?" \
+        "ALPINE_FDE_OLD_PASSPHRASE=$ALPINE_FDE_SLOT0_PASSPHRASE ALPINE_FDE_NEW_PASSPHRASE=w2-Live0ps-Rotate9zkq /opt/alpine-fde/bin/alpine-fde passwd >/tmp/liv-rot1.out 2>&1; echo LIV6-RC=\$?" \
         'LIV6-RC=0'
     _liv_feed "$dir" \
         'grep -F "keyslot-0 passphrase changed" /tmp/liv-rot1.out && echo LIV6B-OK' \
@@ -1169,15 +1169,17 @@ _liveops_session() {
         'printf %s w2-Live0ps-Rotate9zkq | cryptsetup open --test-passphrase --key-slot 0 /dev/vdb >/dev/null 2>&1 && echo LIV7B-OK || echo LIV7B-DIAG' \
         'LIV7B-(OK|DIAG)'
     # --- pre-upgrade: the btrfs snapshot op (§8.1 C-G16), then cleaned up ------
-    # The CLI snapshots the root subvolume at its MOUNT POINT (the live-found
-    # mountinfo fs-root defect — the §9.1 layout mounts subvol=@ as / and
-    # "/@" does not exist inside its own namespace — fixed in
+    # The LIBRARY entry snapshots the root subvolume at its MOUNT POINT (the
+    # live-found mountinfo fs-root defect — the §9.1 layout mounts subvol=@ as
+    # / and "/@" does not exist inside its own namespace — fixed in
     # lib/cmd/pre-upgrade.sh _pu_snapshot_src; unit pin
-    # tests/unit/pre_upgrade_snapshot_src.sh). The CLI prints the snapshot
-    # path on stdout; the leg asserts rc 0 + the read-only snapshot exists,
-    # then deletes it (no residual state rides the committed overlay).
+    # tests/unit/pre_upgrade_snapshot_src.sh). The verb is RETIRED (§8.1
+    # machine/lib entrance rule): the leg sources the module and calls
+    # cmd_pre_upgrade_main directly. It prints the snapshot path on stdout;
+    # the leg asserts rc 0 + the read-only snapshot exists, then deletes it
+    # (no residual state rides the committed overlay).
     _liv_feed "$dir" \
-        'SNAP=$(/opt/alpine-fde/bin/alpine-fde pre-upgrade 2>/tmp/liv-pu.err | tail -n 1); echo LIV8-RC=$?' \
+        'SNAP=$(. /opt/alpine-fde/lib/common.sh && ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd . /opt/alpine-fde/lib/cmd/pre-upgrade.sh && cmd_pre_upgrade_main 2>/tmp/liv-pu.err | tail -n 1); echo LIV8-RC=$?' \
         'LIV8-RC=0'
     _liv_feed "$dir" \
         '[ -n "$SNAP" ] && /usr/local/bin/btrfs subvolume show "$SNAP" 2>/dev/null | grep -F "Read-only" >/dev/null && echo LIV8B-OK || { cat /tmp/liv-pu.err | cut -c1-72 | head -3; echo LIV8B-DIAG; }' \
@@ -1190,7 +1192,7 @@ _liveops_session() {
 
 # =================================================================================
 # Boot 1 (login half) — zero-input token unlock -> login: -> the LIVE-OPS
-# session (status / audit / doctor / rotate / pre-upgrade in-guest)
+# session (status / audit / doctor / passwd / pre-upgrade in-guest)
 # =================================================================================
 _stage_open "boot1-login"
 B1="$RUN/boot1-login"
@@ -1236,7 +1238,7 @@ for _c_attempt in 1 2; do
     ((_c_attempt < 2)) || { echo "s01c: login boot failed after 2 attempts"; exit 1; }
 done
 # the live session rotated keyslot 0 to the in-session passphrase (§9.4
-# rotate) — restore the STANDING slot-0 passphrase host-side now that the
+# passwd) — restore the STANDING slot-0 passphrase host-side now that the
 # boot's overlay is committed (the CLI cannot do this step: the §13 floor
 # rightly refuses the fixture passphrase, which is on the common-password
 # blocklist). Net-zero proof below: the standing credential unlocks slot 0
@@ -1247,13 +1249,13 @@ if printf '%s' "w2-Live0ps-Rotate9zkq" | timeout 60 cryptsetup open --test-passp
     chmod 600 "$RUN/kf-rot.tmp"
     printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-rot2.tmp"
     chmod 600 "$RUN/kf-rot2.tmp"
-    _bounded 600 liveops-rotate-restore cryptsetup luksChangeKey --batch-mode \
+    _bounded 600 liveops-passwd-restore cryptsetup luksChangeKey --batch-mode \
         --key-slot 0 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
         --key-file "$RUN/kf-rot.tmp" "$CANON_DISK" "$RUN/kf-rot2.tmp"
     shred -u "$RUN/kf-rot.tmp" "$RUN/kf-rot2.tmp" 2>/dev/null \
         || rm -f "$RUN/kf-rot.tmp" "$RUN/kf-rot2.tmp"
 else
-    echo "# liveops: slot 0 did not take the in-session passphrase (rotate did not land?)"
+    echo "# liveops: slot 0 did not take the in-session passphrase (passwd did not land?)"
 fi
 
 cp "$RUN/console.log" "$RUN/console-b1-login.log"
@@ -1290,13 +1292,13 @@ assert_contains "[liveops] the session ended in the guest's own poweroff (not a 
 # the disk-level net-zero proof (the session rotated slot 0 to the in-session
 # passphrase; the scenario restored the standing one host-side after the
 # commit): the standing credential unlocks slot 0 AND the rotated one no
-# longer does, and the TPM enrollment survived a no-reseat rotate untouched
-assert_eq "liveops: rotate was NET-ZERO (the standing slot-0 passphrase unlocks slot 0)" "0" \
+# longer does, and the TPM enrollment survived a no-reseat passwd untouched
+assert_eq "liveops: passwd was NET-ZERO (the standing slot-0 passphrase unlocks slot 0)" "0" \
     "$(printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | timeout 300 cryptsetup open --test-passphrase --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; echo $?)"
 assert_ne "liveops: the in-session passphrase no longer unlocks slot 0 (the restore was real)" "0" \
     "$(printf '%s' "w2-Live0ps-Rotate9zkq" | timeout 300 cryptsetup open --test-passphrase --key-slot 0 "$CANON_DISK" >/dev/null 2>&1; echo $?)"
 NTOK_LIV=$(disk_token_json "$CANON_DISK" | jq '[.[] | select(.type == "systemd-tpm2")] | length')
-assert_eq "liveops: the standing TPM enrollment survived the session (rotate without reseat)" "1" "$NTOK_LIV"
+assert_eq "liveops: the standing TPM enrollment survived the session (passwd without reseat)" "1" "$NTOK_LIV"
 # G-T13 prediction for the ENROLLED release UKI on its own console
 CONSOLE="$RUN/console-b1-login.log"
 cp "$RUN/uki-v1.pcrsig.json" "$RUN/uki-pcrsig.json"
@@ -1310,7 +1312,7 @@ _stage_close "boot1-login"
 echo "# ==== boot 2: kernel update (s14's core, progressive) ===="
 # §8.3 Alpine kernel-update delivery contract (the apk trigger + kernel-hooks.d
 # stand-in): the update boots carry the tooling payload on their pcrsig drive
-# tail and the scenario asserts the shipped hooks invoke `alpine-fde ukictl build`.
+# tail and the scenario asserts the shipped hooks invoke `alpine-fde kernel build`.
 _step tooling-payload
 rm -rf "$RUN/tooling" "$RUN/tooling.tar.gz"
 mkdir -p "$RUN/tooling/opt/alpine-fde"
@@ -1328,10 +1330,10 @@ else
     _assert_result not-ok "S-14 payload: kernel hook + apk trigger + mkinitfs hook ship in the tooling payload" \
         "required entries missing from $RUN/tooling.listing"
 fi
-assert_contains "S-14 contract: the kernel hook invokes alpine-fde ukictl build (§8.3 marker)" \
-    "$(cat "$REPO/hooks/kernel-hooks.d/alpine-fde-build.hook")" "ukictl build"
-assert_contains "S-14 contract: the apk trigger invokes alpine-fde ukictl build (§8.3 marker)" \
-    "$(cat "$REPO/hooks/apk/triggers/alpine-fde.trigger")" "ukictl build"
+assert_contains "S-14 contract: the kernel hook invokes alpine-fde kernel build (§8.3 marker)" \
+    "$(cat "$REPO/hooks/kernel-hooks.d/alpine-fde-build.hook")" "kernel build"
+assert_contains "S-14 contract: the apk trigger invokes alpine-fde kernel build (§8.3 marker)" \
+    "$(cat "$REPO/hooks/apk/triggers/alpine-fde.trigger")" "kernel build"
 assert_contains "S-14 contract: the apk trigger watches the kernel module tree" \
     "$(cat "$REPO/hooks/apk/triggers/alpine-fde.trigger")" "/lib/modules"
 # the guest tree for the variant builds (cached via .closure-ok; in skip mode
@@ -1369,7 +1371,7 @@ if [[ -e "$RUN/uki-keyless.efi" ]]; then
 else
     _assert_result ok "failed rebuild ships NO UKI artifact" ""
 fi
-# the kernel update: build 6.4.0 (the §8.3 ukictl-build stand-in), touch NOTHING
+# the kernel update: build 6.4.0 (the §8.3 kernel-build stand-in), touch NOTHING
 # in the TPM world until the re-seal below
 _vuki_build_checked "$RUN/stage-v2" "$RUN/guest-tree" "$RUN/keys" 6.4.0 v640 "$RUN/uki-v2.efi"
 cp "$RUN/uki-v2.efi.pcrsig.json" "$RUN/uki-v2.pcrsig.json"
@@ -1379,7 +1381,7 @@ D11_V2=$(cat "$RUN/uki-v2.efi.pcr11.txt")
 POLS_V1=$(jq -r '.sha256[].pol' "$RUN/uki-v1.pcrsig.json" | sort)
 POLS_V2=$(jq -r '.sha256[].pol' "$RUN/uki-v2.pcrsig.json" | sort)
 assert_ne "new kernel -> new signed pols (distinct PCR 11 prediction)" "$POLS_V1" "$POLS_V2"
-# the re-seal (§8.3 production answer): enroll-tpm RETIRES the stale enrollment
+# the re-seal (§8.3 production answer): reseal RETIRES the stale enrollment
 # and stands the fresh seal in the same run — the {7,11} policy re-composed
 # over the UNCHANGED static d7 and the NEW UKI's signed prediction; the volume
 # key is never re-encrypted. Digest-anchored: no reseeding needed.
@@ -1394,9 +1396,9 @@ cat "$RUN/pcrsig-v2.img" "$RUN/tooling.tar.gz" >"$RUN/pcrsig-v2-tooling.img"
 swtpm_ensure "$RUN/tpm" || { echo "s01c: swtpm restart (re-seal) failed"; exit 1; }
 RETIRE_LOG="$RUN/enroll-v2.log"
 if _enroll_cli "reseal-v2" "$RUN/uki-v2-combined.json" "$RUN/keys" "$RETIRE_LOG"; then
-    _assert_result ok "re-seal: enroll-tpm rc 0 (stale retired + fresh seal stood, one run)" ""
+    _assert_result ok "re-seal: reseal rc 0 (stale retired + fresh seal stood, one run)" ""
 else
-    _assert_result not-ok "re-seal: enroll-tpm rc 0 (stale retired + fresh seal stood, one run)" \
+    _assert_result not-ok "re-seal: reseal rc 0 (stale retired + fresh seal stood, one run)" \
         "output: $(tail -3 "$RETIRE_LOG" 2>/dev/null | tr '\n' ' ')"
 fi
 assert_contains "re-seal: the CLI RETIRED the stale enrollment in the same run" \
@@ -1458,7 +1460,7 @@ assert_eq "rollback combined entry pol == policy_digest(enrolled d7, 6.1.0 enter
     "$(jq -r '.sha256[-1].pol' "$RUN/uki-v0-combined.json")"
 uki_pcrsig_disk "$RUN/pcrsig-v0-rb.img" "$RUN/uki-v0-combined.json" || exit 1
 # the rollback ACTION: retain the older UKI and select it (the mtools default
-# swap — the harness stand-in for bootnext; the retained entries stay in
+# swap — the harness stand-in for kernel next; the retained entries stay in
 # ::/EFI/Linux)
 _esp_add_uki "$CANON_ESP" "$RUN/uki-v0.efi" alpine-fde-v0.efi || exit 1
 _esp_set_default "$CANON_ESP" "$RUN/uki-v0.efi" || exit 1
@@ -1490,7 +1492,7 @@ CONSOLE="$CONSOLE_SAVED"
 #           bounded recovery loop (fed slot-0) -> the boot LANDS the rotated
 #           PCR 7. Overlay discarded (the enrollment is still the K1 world).
 #   host:  baseline re-anchored to the rotated register (the §9.4 accept
-#           analog), K2 combined entry, enroll-tpm under K2 (retire + stand).
+#           analog), K2 combined entry, reseal under K2 (retire + stand).
 #   launch 2: passwordless boot + unseal under K2 on the rotated register.
 # =================================================================================
 echo "# ==== boot 4: release-key rotation (s16's core, progressive) ===="
@@ -1533,33 +1535,33 @@ assert_ne "new .pcrsig is signed by a DIFFERENT key (pkfp K1 != K2)" "$K1PKFP" "
 _esp_add_uki "$CANON_ESP" "$RUN/uki-k2.efi" alpine-fde-k2.efi || exit 1
 _esp_set_default "$CANON_ESP" "$RUN/uki-k2.efi" || exit 1
 
-_pipeline_boot "b4-rotate-recovery" "$CANON_ESP" "$RUN/vars-rotated.fd" "$RUN/pcrsig-v2.img" discard feed
-LOG=$(cat "$RUN/console-b4-rotate-recovery.log")
+_pipeline_boot "b4-passwd-recovery" "$CANON_ESP" "$RUN/vars-rotated.fd" "$RUN/pcrsig-v2.img" discard feed
+LOG=$(cat "$RUN/console-b4-passwd-recovery.log")
 # the firmware ACCEPTED the K2-only UKI under the rotated policy (it carries no
 # K1 signature — dbx += K1 revokes nothing on it); the STANDING K1-signed entry
 # is refused by the I3 gate, and the bounded recovery loop is the way in
-_assert_polluted "$LOG" "b4-rotate-recovery" 1
-assert_contains "[b4-rotate-recovery] the I3 gate refused the STANDING K1-signed entry under the K2 initrd" \
+_assert_polluted "$LOG" "b4-passwd-recovery" 1
+assert_contains "[b4-passwd-recovery] the I3 gate refused the STANDING K1-signed entry under the K2 initrd" \
     "$LOG" "$(sentinel_of unseal_sig_refused)"
-_ref_line=$(grep -nm1 -F "$(sentinel_of unseal_sig_refused)" "$RUN/console-b4-rotate-recovery.log" 2>/dev/null | cut -d: -f1)
-_p1_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$RUN/console-b4-rotate-recovery.log" 2>/dev/null | cut -d: -f1)
+_ref_line=$(grep -nm1 -F "$(sentinel_of unseal_sig_refused)" "$RUN/console-b4-passwd-recovery.log" 2>/dev/null | cut -d: -f1)
+_p1_line=$(grep -nm1 -E "$(sentinel_of unseal_prompt_re)" "$RUN/console-b4-passwd-recovery.log" 2>/dev/null | cut -d: -f1)
 if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line )); then
-    _assert_result ok "[b4-rotate-recovery] refusal FIRST (line $_ref_line < first prompt line $_p1_line)" ""
+    _assert_result ok "[b4-passwd-recovery] refusal FIRST (line $_ref_line < first prompt line $_p1_line)" ""
 else
-    _assert_result not-ok "[b4-rotate-recovery] refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
+    _assert_result not-ok "[b4-passwd-recovery] refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
 fi
 # the recovery boot IS the post-rotation measurement: the rotated vars moved
 # PCR 7 off the pre-rotation value, and the K2 seal must be composed over the
 # register the machine actually reproduces (digest-anchored, the s16 lesson)
-D7_ROT=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-b4-rotate-recovery.log" | head -1 | cut -d= -f2)
+D7_ROT=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-b4-passwd-recovery.log" | head -1 | cut -d= -f2)
 [[ -n "$D7_ROT" ]] || { echo "s01c: recovery console has no PCR 7 print — nothing to compose over"; exit 1; }
 assert_ne "the rotated vars moved PCR 7 off the pre-rotation value" "$D7" "$D7_ROT"
 PCR11_V2=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-b2-kernel-update.log" | head -1 | cut -d= -f2)
-PCR11_K2REC=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-b4-rotate-recovery.log" | head -1 | cut -d= -f2)
+PCR11_K2REC=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$RUN/console-b4-passwd-recovery.log" | head -1 | cut -d= -f2)
 assert_ne "the K2 kernel moved PCR 11 (distinct measured content)" "$PCR11_V2" "$PCR11_K2REC"
-CONSOLE="$RUN/console-b4-rotate-recovery.log"
+CONSOLE="$RUN/console-b4-passwd-recovery.log"
 cp "$RUN/uki-k2.pcrsig.json" "$RUN/uki-pcrsig.json"
-assert_pcr11_prediction "G-T13 [b4-rotate-recovery]"
+assert_pcr11_prediction "G-T13 [b4-passwd-recovery]"
 CONSOLE="$CONSOLE_SAVED"
 
 # §9.4 accept analog: the baseline is re-anchored to the register the machine
@@ -1578,24 +1580,24 @@ assert_eq "K2 combined entry pol == policy_digest(rotated d7, K2 enter-initrd d1
 uki_pcrsig_disk "$RUN/pcrsig-k2.img" "$RUN/uki-k2-combined.json" || exit 1
 swtpm_ensure "$RUN/tpm" || { echo "s01c: swtpm restart (K2 enroll) failed"; exit 1; }
 K2LOG="$RUN/enroll-k2.log"
-if _enroll_cli "rotate-enroll-k2" "$RUN/uki-k2-combined.json" "$RUN/keys2" "$K2LOG"; then
-    _assert_result ok "K2 re-seal: enroll-tpm rc 0 (K1 retired + K2 seal stood, one run)" ""
+if _enroll_cli "passwd-enroll-k2" "$RUN/uki-k2-combined.json" "$RUN/keys2" "$K2LOG"; then
+    _assert_result ok "K2 re-seal: reseal rc 0 (K1 retired + K2 seal stood, one run)" ""
 else
-    _assert_result not-ok "K2 re-seal: enroll-tpm rc 0 (K1 retired + K2 seal stood, one run)" \
+    _assert_result not-ok "K2 re-seal: reseal rc 0 (K1 retired + K2 seal stood, one run)" \
         "output: $(tail -3 "$K2LOG" 2>/dev/null | tr '\n' ' ')"
 fi
 assert_contains "K2 re-seal: the CLI RETIRED the stale enrollment in the same run" \
     "$(cat "$K2LOG")" "$(sentinel_of cli_enroll_retire)"
 _assert_token "$CANON_DISK" "K2 re-seal" "$RUN/keys2/release.pub"
 
-_pipeline_boot "b4-rotate-k2" "$CANON_ESP" "$RUN/vars-rotated.fd" "$RUN/pcrsig-k2.img" commit
-LOG=$(cat "$RUN/console-b4-rotate-k2.log")
-_assert_unsealed "$LOG" "b4-rotate-k2"
+_pipeline_boot "b4-passwd-k2" "$CANON_ESP" "$RUN/vars-rotated.fd" "$RUN/pcrsig-k2.img" commit
+LOG=$(cat "$RUN/console-b4-passwd-k2.log")
+_assert_unsealed "$LOG" "b4-passwd-k2"
 assert_eq "the booted PCR 7 IS the rotated value the K2 seal was composed over (no fixture drift confound)" \
-    "$D7_ROT" "$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-b4-rotate-k2.log" | head -1 | cut -d= -f2)"
-CONSOLE="$RUN/console-b4-rotate-k2.log"
+    "$D7_ROT" "$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/console-b4-passwd-k2.log" | head -1 | cut -d= -f2)"
+CONSOLE="$RUN/console-b4-passwd-k2.log"
 cp "$RUN/uki-k2.pcrsig.json" "$RUN/uki-pcrsig.json"
-assert_pcr11_prediction "G-T13 [b4-rotate-k2]"
+assert_pcr11_prediction "G-T13 [b4-passwd-k2]"
 CONSOLE="$CONSOLE_SAVED"
 
 # --- verdict --------------------------------------------------------------------

@@ -7,7 +7,7 @@
 #
 #   alpine-fde-remove.hook <event> <kver>    event in {add, update, remove}
 #
-# remove maps to `alpine-fde ukictl remove <kver>`: ESP UKI + digest-manifest
+# remove maps to `alpine-fde kernel remove <kver>`: ESP UKI + digest-manifest
 # entry dropped together (§8.3 prune, current + 2 retained). add/update
 # events are the build hook's business and exit 0 here.
 #
@@ -15,12 +15,13 @@
 # the kernel hook runner and the failure marker is persisted under
 # /etc/alpine-fde for `alpine-fde status`. A stale UKI fails closed at boot
 # (boots, prompts). Operator recovery: re-run
-# `alpine-fde ukictl remove <kver>`, or `apk fix` if the package state is
+# `alpine-fde kernel remove <kver>`, or `apk fix` if the package state is
 # inconsistent.
 #
-# Env: ALPINE_FDE_ROOT (target root for the marker, default /); the binary
-# seam is ALPINE_FDE_BIN (default `alpine-fde`). The env namespace is
-# ALPINE_FDE_* only (§8.1).
+# Env: ALPINE_FDE_ROOT (target root for the marker, default /);
+# ALPINE_FDE_LIB_DIR (runtime; derived from this script's location, falling
+# back to /usr/share/alpine-fde/lib). The env namespace is ALPINE_FDE_* only
+# (§8.1).
 
 set -u
 
@@ -38,19 +39,38 @@ case $event in
         ;;
 esac
 
-ALPINE_FDE_BIN=${ALPINE_FDE_BIN:-alpine-fde}
 ALPINE_FDE_ROOT=${ALPINE_FDE_ROOT:-}
 FDE_ETC="$ALPINE_FDE_ROOT/etc/alpine-fde"
 marker="$FDE_ETC/build-failed"
 
-"$ALPINE_FDE_BIN" ukictl remove "$kver"
+# §8.1 machine/lib entrance: resolve the runtime lib dir the same way the
+# build hook does, source the lib/cmd remove module DIRECTLY (never exec the
+# `alpine-fde` CLI) and run its entry point in a SUBSHELL — the cmd entry
+# `exit`s internally; the subshell contains that and propagates the rc.
+ALPINE_FDE_LIB_DIR=${ALPINE_FDE_LIB_DIR:-}
+if [ -z "$ALPINE_FDE_LIB_DIR" ]; then
+    _hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    if [ -f "$_hook_dir/../../lib/manifest.sh" ]; then
+        ALPINE_FDE_LIB_DIR="$_hook_dir/../../lib"
+    else
+        ALPINE_FDE_LIB_DIR=/usr/share/alpine-fde/lib
+    fi
+fi
+if [ ! -f "$ALPINE_FDE_LIB_DIR/common.sh" ] || [ ! -f "$ALPINE_FDE_LIB_DIR/cmd/kernel-remove.sh" ]; then
+    echo "alpine-fde hook: remove: alpine-fde runtime not found at $ALPINE_FDE_LIB_DIR (common.sh / cmd/kernel-remove.sh) — cannot prune (ADR-8)" >&2
+    exit 64
+fi
+ALPINE_FDE_CMD_DIR="$ALPINE_FDE_LIB_DIR/cmd"
+# shellcheck disable=SC1090  # resolved via the runtime lib dir
+. "$ALPINE_FDE_CMD_DIR/kernel-remove.sh"
+( cmd_kernel_remove_main "$kver" )
 rc=$?
 if [ "$rc" -ne 0 ]; then
     mkdir -p "$FDE_ETC" 2>/dev/null || :
     {
-        printf 'kernel remove hook: ukictl remove failed for kernel %s\n' "$kver"
+        printf 'kernel remove hook: kernel remove failed for kernel %s\n' "$kver"
         printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'recovery: re-run "alpine-fde ukictl remove %s" (stale UKIs fail closed at boot); "apk fix" if the package state is inconsistent\n' "$kver"
+        printf 'recovery: re-run "alpine-fde kernel remove %s" (stale UKIs fail closed at boot); "apk fix" if the package state is inconsistent\n' "$kver"
     } >"$marker" 2>/dev/null || :
     exit "$rc"
 fi
