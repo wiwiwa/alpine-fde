@@ -174,61 +174,6 @@ initramfs_build() {
 # the stock usr/share/mkinitfs/initramfs-init). The §8.2 Early-Boot Unseal Hook
 # rides in via mkinitfs.conf custom_files
 # (/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh) but is NEVER invoked:
-# boot B tries to mount the raw encrypted container and lands in the
-# recovery shell. The fix is a pinned POST-PROCESS of the built initrd:
-# unpack the cpio, splice the unseal call into initramfs-init at the exact
-# point where drivers + /dev are up (after nlplug-findfs) and BEFORE the root
-# mount attempt, inject /etc/crypttab (nothing else packs it), and repack.
-#
-# TWO splice points, one idempotent step (marker ALPINE-FDE-SPLICE-v1):
-#   splice A (pre-mount, after the nlplug-findfs invocation): run the hook,
-#             then point KOPT_root at the mapped container — the stock mount
-#             uses "$KOPT_root" and the cmdline names the raw LUKS UUID.
-#   splice B (post-mount, before the mount-move/switch_root tail): flip the
-#             ADR-20 install-state marker on the mounted NEWROOT via the
-#             hook's FDE_STATE_ONLY mode (the hook's own flip is guarded by
-#             the state file existing on NEWROOT, which only exists mounted).
-#
-# Splice ordering contract (ADR-20): the hook is fail-closed by construction
-# (bounded recovery prompt -> poweroff -f, never a shell); the splice adds no
-# interactive path of its own.
-
-INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
-INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
-INITRAMFS_INIT_PATH='init'
-INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
-
-# initramfs_detect_comp FILE — print the compression name (gzip|xz|zstd|lz4|
-# none) from the magic bytes; dies loud on an unknown image (blocker #23).
-initramfs_detect_comp() {
-    _idc_magic=$(od -An -tx1 -N6 "$1" 2>/dev/null | tr -d ' \n')
-    case $_idc_magic in
-        1f8b*) printf '%s\n' gzip ;;
-        fd377a585a00*) printf '%s\n' xz ;;
-        28b52ffd*) printf '%s\n' zstd ;;
-        04224d18*) printf '%s\n' lz4 ;;
-        '') die "initramfs splice: cannot read the initrd image: $1" ;;
-        *) die "initramfs splice: unknown initrd compression (magic $_idc_magic) in $1 — refusing to splice" ;;
-    esac
-}
-
-# _initramfs_splice_block A|B — print the splice block (tab-indented to match
-# the initramfs-init body) for the given point:
-#   A: after the nlplug-findfs invocation, before resume_from_disk/the mount —
-#      run the fail-closed unseal hook, then point KOPT_root at the mapped
-#      container (the stock mount uses "$KOPT_root"; the cmdline names the raw
-#      LUKS UUID).
-#   B: after the root is mounted, before the mount-move/switch_root tail —
-#      flip the ADR-20 install-state marker via the hook's FDE_STATE_ONLY
-#      mode (the hook's own flip needs the state file on a MOUNTED NEWROOT,
-#      which only exists past splice A's mount).
-
-# --- initramfs unseal splice (real-server blocker #23) ---------------------------
-# mkinitfs 3.14.1's initramfs-init has NO user-hook mechanism (no sourced
-# /etc/mkinitfs/* hook, no feature .sh, no crypttab consumer — verified against
-# the stock usr/share/mkinitfs/initramfs-init). The §8.2 Early-Boot Unseal Hook
-# rides in via mkinitfs.conf custom_files
-# (/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh) but is NEVER invoked:
 # boot B tries to mount the raw encrypted container and lands in the recovery
 # shell. The fix is a pinned POST-PROCESS of the built initrd: unpack the cpio,
 # splice the unseal call into initramfs-init at the exact point where drivers +

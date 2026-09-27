@@ -71,6 +71,18 @@ build_initrd() {
 CTAB="$TMP/crypttab"
 printf 'root UUID=22222222-2222-2222-2222-222222222222 none luks,tpm2-device=auto,discard\n' >"$CTAB"
 
+# --- dedupe pin (canary fallout): exactly ONE initramfs_detect_comp, lz4-capable.
+# A duplicate definition once masked the lz4-capable copy (file-order wins).
+assert_eq "exactly one initramfs_detect_comp definition in lib/initramfs.sh" "1" \
+    "$(grep -cF 'initramfs_detect_comp() {' "$REPO/lib/initramfs.sh")"
+grep -qF '04224d18*' "$REPO/lib/initramfs.sh" &&
+    _pass "detect_comp handles the lz4 magic (pinned)" ||
+    _fail "detect_comp lost the lz4 magic"
+printf '\004\042M\030' >"$TMP/lz4-magic.img"
+out=$(initramfs_detect_comp "$TMP/lz4-magic.img" 2>&1); rc=$?
+assert_rc "detect_comp runs on an lz4-magic image" 0 "$rc"
+assert_eq "detect_comp identifies lz4" "lz4" "$out"
+
 # --- (a) splice once: markers, order, crypttab, validity --------------------------
 IMG=$TMP/initrd-a.img
 build_initrd "$IMG"
