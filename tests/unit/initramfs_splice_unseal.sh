@@ -97,6 +97,13 @@ if [ -z "$INIT" ]; then
 fi
 assert_eq "splice marker appears exactly twice (open+close) after ONE splice" "2" \
     "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$INIT")"
+# boot-lane finding #25 (s23 attempt 24): the spliced init mounts efivarfs
+# BEFORE the hook — the hook's SB guard reads the efivars SB state and the
+# stock initramfs never mounts it ('secureboot=unreadable').
+INIT_MNT_IDX=$(grep -n 'mount -t efivarfs' "$INIT" | head -1 | cut -d: -f1)
+INIT_HOOK_IDX=$(grep -n 'alpine-fde-unseal.sh' "$INIT" | head -1 | cut -d: -f1)
+assert_eq "splice: the initramfs mounts efivarfs before the unseal hook" "1" \
+    "$([ -n "$INIT_MNT_IDX" ] && [ -n "$INIT_HOOK_IDX" ] && [ "$INIT_MNT_IDX" -lt "$INIT_HOOK_IDX" ] && echo 1 || echo 0)"
 # boot-lane finding #24 (s23 attempt 27): the splice REWRITES the init via awk
 # and must restore the executable bit — boot B died "Failed to execute /init
 # (error -13)" (EACCES) when the packed /init lost +x.

@@ -222,34 +222,6 @@ initramfs_detect_comp() {
 #      flip the ADR-20 install-state marker via the hook's FDE_STATE_ONLY
 #      mode (the hook's own flip needs the state file on a MOUNTED NEWROOT,
 #      which only exists past splice A's mount).
-_initramfs_splice_block() {
-    case $1 in
-        A)
-            printf '\t# >>> alpine-fde unseal splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_MARKER"
-            printf '\t# §8.2 Early-Boot Unseal Hook: Secure-Boot-guarded TPM 2.0 unseal of the\n'
-            printf '\t# root container. Fail-closed by construction: bounded recovery prompt ->\n'
-            printf '\t# poweroff -f, NEVER a shell (ADR-20). Runs AFTER nlplug-findfs (drivers\n'
-            printf '\t# + /dev up) and BEFORE the root mount attempt.\n'
-            printf '\tif [ -x /%s ]; then\n' "$INITRAMFS_HOOK_PATH"
-            printf '\t\tFDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
-            printf '\t\t# the hook opened the mapped container — mount THAT, not the raw LUKS UUID\n'
-            printf '\t\tif [ -e /dev/mapper/root ]; then\n'
-            printf '\t\t\tKOPT_root=/dev/mapper/root\n'
-            printf '\t\tfi\n'
-            printf '\tfi\n'
-            printf '\t# <<< alpine-fde unseal splice (%s) <<<\n' "$INITRAMFS_SPLICE_MARKER"
-            ;;
-        B)
-            printf '\t# >>> alpine-fde state-flip splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
-            printf '\t# the root is mounted now: flip the ADR-20 install-state marker\n'
-            printf '\t# (installed -> provisional-booted) via the hook%s state-only mode\n' "'s"
-            printf '\tif [ -x /%s ] && [ -f "$sysroot/etc/alpine-fde/install-state.json" ]; then\n' "$INITRAMFS_HOOK_PATH"
-            printf '\t\tFDE_STATE_ONLY=1 FDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
-            printf '\tfi\n'
-            printf '\t# <<< alpine-fde state-flip splice (%s) <<<\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
-            ;;
-    esac
-}
 
 # --- initramfs unseal splice (real-server blocker #23) ---------------------------
 # mkinitfs 3.14.1's initramfs-init has NO user-hook mechanism (no sourced
@@ -305,6 +277,10 @@ _initramfs_splice_block() {
     case $1 in
         A)
             printf '\t# >>> alpine-fde unseal splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_MARKER"
+            printf '\t# boot-lane finding #25 (s23 attempt 24): the SB guard reads the\n'
+            printf '\t# efivars SB state - the stock initramfs never mounts efivarfs.\n'
+            printf '\tmodprobe efivarfs 2>/dev/null\n'
+            printf '\tmount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null\n'
             printf '\t# §8.2 Early-Boot Unseal Hook: Secure-Boot-guarded TPM 2.0 unseal of\n'
             printf '\t# the root container. Fail-closed by construction: bounded recovery\n'
             printf '\t# prompt -> poweroff -f, NEVER a shell (ADR-20). Runs AFTER\n'

@@ -1694,6 +1694,11 @@ cmd_install_main() {
   # prompt (hung the unattended install). Bind the shm tree explicitly; the
   # blocker #8 contract (never argv, never on disk) then actually holds.
   inst_plan_run host "mkdir -p $_im_mnt/dev/shm && mount --bind /dev/shm $_im_mnt/dev/shm"
+  # boot-lane finding #25 (s23 attempt 24): the LIVE env must have efivarfs
+  # MOUNTED or the chroot's efivars bind is an empty sysfs dir — the in-chroot
+  # NVRAM enrollment then fails and the install defers key import to the
+  # operator ("staged kek.auth ... ESP fallback"; PK absent at the verdict).
+  inst_plan_run host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
   inst_plan_run host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
 
   # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/alpine-fde ---
