@@ -76,7 +76,7 @@ export ALPINE_FDE_TMPDIR=$TMP
 export ALPINE_FDE_INSTALL_SCRIPT=$TMP/guest.sh
 export ALPINE_FDE_EFIVARS_DIR=$TMP/efivars
 mkdir -p "$TMP/stub" "$TMP/efivars" "$TMP/hooks"/kernel-hooks.d "$TMP/hooks"/mkinitfs/features.d \
-    "$TMP/hooks/apk/triggers" "$TMP/hooks/openrc" "$TMP/hooks/profile.d"
+    "$TMP/hooks/apk/triggers" "$TMP/hooks/conf.d" "$TMP/hooks/openrc" "$TMP/hooks/profile.d"
 make_stub() {
     printf '#!/bin/sh\nexit 0\n' >"$TMP/stub/$1"
     chmod +x "$TMP/stub/$1"
@@ -93,7 +93,8 @@ export PATH="$TMP/stub:$PATH"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     mkinitfs/features.d/alpine-fde.modules \
-    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    apk/triggers/alpine-fde.trigger apk/triggers/alpine-fde-snapshot.trigger \
+    conf.d/alpine-fde-snapshot openrc/alpine-fde-finalize \
     openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
     printf '#!/bin/sh\nexit 0\n' >"$TMP/hooks/$h"
     chmod +x "$TMP/hooks/$h"

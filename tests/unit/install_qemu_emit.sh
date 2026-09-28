@@ -446,8 +446,8 @@ assert_eq "emitted script chmod 700" "700" "$(stat -c '%a' "$SCRIPT")"
 # =============================================================================
 # BYTE-IDENTITY PIN (item 17d regression guard): the direct-execution refactor
 # (inst_exec at the point of decision) must emit the guest script BYTE-IDENTICAL
-# to the retired two-phase accumulator (SPC_PLAN + inst_execute_plan). The
-# golden below was captured from the PRE-refactor accumulator emission with
+# to the pre-snapshot direct-execution emission, then REGENERATED when the
+# golden below was captured from the POST-refactor direct-execution emission
 # THIS EXACT scenario (single-disk btrfs, NO_REBOOT=1, default --esp /efi, the
 # fixture above); volatile values are normalized on BOTH sides:
 #   $T -> <TMP>, $REPO -> <REPO>, the staged ephemeral-key mktemp suffix,
