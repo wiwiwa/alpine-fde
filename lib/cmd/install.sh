@@ -487,10 +487,27 @@ EOF
   else
     "$_ibe_eb" -c -d "$_ibe_disk" -p "$_ibe_pn" -L "$_ibe_lbl" -l "$_ibe_ldr" >/dev/null ||
       die "install: efibootmgr -c failed — the '$_ibe_lbl' boot entry ($_ibe_disk -p $_ibe_pn -> $_ibe_ldr) could not be created"
-    _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
-    _ibe_mine=$(inst_bootentry_find "$_ibe_fresh" "$_ibe_lcpu")
+    # Real-server evidence (Dell PowerEdge R640, 2026-09-28): the create's
+    # BootOrder update persisted, but the new Boot variable was NOT yet visible
+    # in the immediate post-create listing — some firmware commits the variable
+    # late (NVRAM write latency; it was present and correct minutes later). The
+    # old immediate verify refused fail-closed and killed an
+    # otherwise-complete install. Bounded backoff: re-read the listing up to 5
+    # attempts, 2s apart (~10s; ALPINE_FDE_NVRAM_RETRY_SLEEP is the test seam
+    # for the interval), each re-verifying the SAME label + GUID +
+    # loader match (inst_bootentry_find), before declaring failure.
+    _ibe_try=0
+    while :; do
+      _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
+      _ibe_mine=$(inst_bootentry_find "$_ibe_fresh" "$_ibe_lcpu")
+      [ -n "$_ibe_mine" ] && break
+      _ibe_try=$((_ibe_try + 1))
+      [ "$_ibe_try" -ge 5 ] && break
+      warn "install: the '$_ibe_lbl' entry is not in the efibootmgr listing yet (attempt $_ibe_try/5) — likely firmware NVRAM write latency (Dell); retrying"
+      sleep "${ALPINE_FDE_NVRAM_RETRY_SLEEP:-2}"
+    done
     [ -n "$_ibe_mine" ] ||
-      die "install: the '$_ibe_lbl' boot entry was created but is not in the efibootmgr listing — refusing to guess the entry number"
+      die "install: the '$_ibe_lbl' boot entry was created but is not in the efibootmgr listing after 5 attempts (~10s) — refusing to guess the entry number (likely cause: firmware NVRAM write latency — some firmware, notably Dell, commits the new boot variable late; re-running the install converges idempotently, or create the entry manually)"
     info "install: created boot entry Boot$_ibe_mine '$_ibe_lbl' -> HD(1,GPT,$_ibe_pu) $_ibe_ldr"
   fi
   # FIRST in BootOrder: the previous order preserved behind us (still-existing

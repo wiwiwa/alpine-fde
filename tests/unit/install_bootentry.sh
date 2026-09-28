@@ -123,6 +123,7 @@ chmod +x "$T/stub/efibootmgr"
 reset_nvram() { # [entry lines...] [order CSV]
     : >"$NVRAM/entries"
     rm -f "$NVRAM/order"
+    rm -f "$NVRAM/lag"
     : >"$NVRAM/log"
     if [ -n "${2:-}" ]; then printf '%s\n' "$2" >"$NVRAM/order"; fi
     if [ -n "${1:-}" ]; then printf '%s\n' "$1" >"$NVRAM/entries"; fi
@@ -232,6 +233,84 @@ GUARD_RC=$?
 assert_eq "guard: missing baseline -> die (fail-closed 64)" "64" "$GUARD_RC"
 assert_contains "guard: the die names the baseline" "$OUT" "baseline.json"
 mv "$T/baseline.gone" "$T/root/etc/alpine-fde/baseline.json"
+
+# =============================================================================
+# 6b. NVRAM write-latency retry (real Dell PowerEdge R640, 2026-09-28): the
+# create's BootOrder update persisted but the new Boot variable was NOT yet
+# visible in the immediate post-create listing. Pins:
+#   (a) a fake efibootmgr whose listing LAGS one read behind the create (the
+#       first listing after -c omits our entry, the second includes it) must
+#       PASS via the bounded backoff (5 attempts, ALPINE_FDE_NVRAM_RETRY_SLEEP
+#       apart), re-verifying the SAME label + GUID + loader match;
+#   (b) a fake that NEVER shows the entry still fails fail-closed 64, with the
+#       die naming firmware NVRAM write latency (Dell) as the likely cause.
+# The wrapper delegates to the base fake (state-file NVRAM) and filters its
+# -v output — the approximation is the lag, not the parsed format.
+# =============================================================================
+cat >"$T/stub/efibootmgr-lagging" <<'EOF'
+#!/bin/sh
+# lagging fake: the FIRST -v after each -c omits our entry (stale NVRAM view)
+BASE=${ALPINE_FDE_EFIBOOTMGR_BASE}
+case " $* " in
+    *" -c "*)
+        : >"$NVRAM/lag"
+        exec "$BASE" "$@" ;;
+    *" -v "*)
+        if [ -f "$NVRAM/lag" ]; then
+            rm -f "$NVRAM/lag"
+            "$BASE" -v | grep -v 'Alpine FDE'
+            exit 0
+        fi
+        exec "$BASE" "$@" ;;
+    *)
+        exec "$BASE" "$@" ;;
+esac
+EOF
+chmod +x "$T/stub/efibootmgr-lagging"
+cat >"$T/stub/efibootmgr-never" <<'EOF'
+#!/bin/sh
+# never-shows fake: our entry NEVER appears in the -v listing
+BASE=${ALPINE_FDE_EFIBOOTMGR_BASE}
+case " $* " in
+    *" -v "*)
+        "$BASE" "$@" | grep -v 'Alpine FDE'
+        exit 0 ;;
+    *)
+        exec "$BASE" "$@" ;;
+esac
+EOF
+chmod +x "$T/stub/efibootmgr-never"
+SAVED_EB=$ALPINE_FDE_EFIBOOTMGR
+ALPINE_FDE_EFIBOOTMGR_BASE=$SAVED_EB
+
+# (a) lagging listing: pass via the retry
+export ALPINE_FDE_EFIBOOTMGR_BASE
+ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr-lagging
+ALPINE_FDE_NVRAM_RETRY_SLEEP=0
+reset_nvram '' '0002'
+printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
+assert_rc "lag: rc 0 (the retry recovers the delayed visibility)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
+assert_contains "lag: the entry is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
+assert_contains "lag: the retry warned about NVRAM latency while waiting" "$ASSERT_RC_OUTPUT" "NVRAM write latency"
+assert_eq "lag: the recovered entry pins the CURRENT GUID + is FIRST" "0001,0002" "$(cat "$NVRAM/order")"
+assert_eq "lag: the recovered entry carries the ESP's GUID" "1" "$(grep -c "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]|$GUID|Alpine FDE" "$NVRAM/entries")"
+
+# (b) never-visible listing: fail-closed 64 with the latency clause
+ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr-never
+reset_nvram '' '0002'
+printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
+OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" 2>&1)
+NEVER_RC=$?
+assert_eq "never: rc 64 (still fail-closed, no entry-number guessing)" "64" "$NEVER_RC"
+assert_contains "never: the die keeps the refuse-to-guess clause" "$OUT" "refusing to guess the entry number"
+assert_contains "never: the die names NVRAM write latency (Dell) as the likely cause" "$OUT" "NVRAM write latency"
+assert_contains "never: the die reports the bounded attempts" "$OUT" "after 5 attempts"
+assert_eq "never: the entry WAS created in the fake NVRAM (the write, not the read, succeeded)" "1" \
+    "$(grep -c "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]|$GUID|Alpine FDE" "$NVRAM/entries")"
+assert_eq "never: BootOrder untouched (no guessing)" "0002" "$(cat "$NVRAM/order")"
+
+ALPINE_FDE_EFIBOOTMGR=$SAVED_EB
+ALPINE_FDE_NVRAM_RETRY_SLEEP=
 
 # =============================================================================
 # 7. inst_bootentry_parse: label matching is EXACT (a longer label sharing the
