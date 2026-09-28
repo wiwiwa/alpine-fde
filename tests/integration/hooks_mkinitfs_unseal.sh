@@ -6,7 +6,8 @@
 # The hook's collaborators are PATH stubs that RECORD their full argv:
 #   tpm2_pcrextend/startauthsession/policypcr/policyauthorize/loadexternal/
 #   verifysignature/createprimary/load/unseal/flushcontext, cryptsetup,
-#   poweroff. openssl/sha256sum/awk/sed/dd/od stay REAL (they exist in the
+#   poweroff, nlplug-findfs (the UUID= resolver's uevent waiter). openssl/
+#   sha256sum/awk/sed/dd/od stay REAL (they exist in the
 #   initramfs per hooks/mkinitfs/features.d/alpine-fde.files).
 #
 # Pinned behavior (docs/Architecture.md §8.2, §9.1 Stage 2, ADR-20):
@@ -60,14 +61,21 @@
 #      A partial member-open failure is NOT a refusal class (the blob
 #      verified) and prompts unwarned; the success path prints no preamble.
 #  11. device-attach race (real-server blocker, Dell PowerEdge R640 first
-#      verified boot 2026-09-28): when the token scan finds NO token AND a
-#      crypttab member's by-uuid path was missing at probe time (the LAST
+#      verified boot 2026-09-28): the initramfs /init runs nlplug-findfs +
+#      mdev — NO udevd — so NOTHING creates /dev/disk/by-uuid entries; the
+#      resolver therefore asks nlplug-findfs FIRST (the same uevent waiter
+#      init uses; it waits for the uevent matching the UUID= spec and prints
+#      the /dev node), keeping the by-uuid path as the fallback for
+#      udev-equipped images. When the token scan still finds NO token AND a
+#      crypttab member was not resolvable/attached at probe time (the LAST
 #      kernel line before the old verdict was "[sdb] Attached SCSI disk"),
 #      the hook WAITS — bounded (FDE_ATTACH_WAIT_SECS), `sleep 1` probes of
-#      the SAME by-uuid paths the lookup uses — and re-scans. A member that
+#      the SAME resolution the lookup uses — and re-scans. A member that
 #      appears during the wait continues the NORMAL passwordless flow with
 #      NO token_missing sentinel and NO warn preamble; only an EXHAUSTED
 #      bound takes the genuine token_missing verdict (preamble + prompt).
+#      Without the nlplug-findfs binary the resolver goes straight to the
+#      by-uuid path (FDE_DISK_BY_UUID_DIR stays meaningful).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -325,6 +333,41 @@ exit 0
 EOF
 chmod +x "$BIN/poweroff"
 
+# nlplug-findfs stub — the UUID= resolver's uevent waiter (the binary the real
+# initramfs /init uses; the hook prefers it for UUID=* members when present).
+# Models the real contract — wait for the uevent matching the spec, print the
+# /dev node — with the attach TIMING under test control:
+#   FDE_TEST_NLPLUG_ATTACH_AFTER=N: the "device attach" (the uevent the waiter
+#     accepts) happens on the Nth invocation; before that it stays SILENT and
+#     fails (uevent silence), exactly the R640 not-yet-attached window. On
+#     attach it CREATES the fixture node (the by-uuid path the resolver
+#     resolves against — node creation timing folds into the stub) and prints
+#     it. Default N=1: attached immediately.
+cat >"$BIN/nlplug-findfs" <<EOF
+#!/bin/sh
+printf 'nlplug-findfs %s\n' "\$*" >>'$LOG'
+_n=\$(cat '$TMP/nlplug.count' 2>/dev/null || :)
+_n=\$((\${_n:-0} + 1))
+echo "\$_n" >'$TMP/nlplug.count'
+if [ "\$_n" -ge "\${FDE_TEST_NLPLUG_ATTACH_AFTER:-1}" ]; then
+    _spec=
+    for _a in "\$@"; do
+        case \$_a in
+            UUID=*) _spec=\${_a#UUID=} ;;
+        esac
+    done
+    [ -n "\$_spec" ] || exit 1
+    _dir="\${FDE_DISK_BY_UUID_DIR:-/dev/disk/by-uuid}"
+    mkdir -p "\$_dir" 2>/dev/null || :
+    _node="\$_dir/\$_spec"
+    : >"\$_node" 2>/dev/null || :
+    printf '%s\n' "\$_node"
+    exit 0
+fi
+exit 1
+EOF
+chmod +x "$BIN/nlplug-findfs"
+
 # ADR-20 guard terminal action: `reboot -f` into the firmware setup. The stub
 # RECORDS argv and exits 0 (the hook must `exit 0` after an accepted reboot —
 # on real firmware the machine resets and the hook never returns).
@@ -350,6 +393,7 @@ run_hook() { # <stdin-file> [VAR=VAL ...]
     env PATH="$BIN:$PATH" FDE_NEWROOT="$TMP/newroot" FDE_EXTRA_DIR="$TMP/extra" \
         FDE_CRYPTTAB="$TMP/crypttab" FDE_TMPDIR="$TMP/tmp" \
         FDE_EFIVARS_DIR="$TMP/efivars" \
+        FDE_NLPLUG_FINDFS="$BIN/nlplug-findfs" \
         FDE_TEST_TOKEN_FILE="$TMP/token.json" "$@" \
         sh "$HOOK" <"$stdin" >"$TMP/out.log" 2>&1
     echo $?
@@ -360,7 +404,7 @@ argv_count() { # <pattern>
 }
 reset_leg() {
     : >"$LOG"
-    rm -f "$TMP/out.log"
+    rm -f "$TMP/out.log" "$TMP/nlplug.count"
 }
 
 # assert_precedes <desc> <file> <needle-a> <needle-b-ERE> — line-ordered
@@ -538,9 +582,9 @@ assert_eq "tpm absent: exactly ONE preamble+closing emission (no repetition per 
 # 3b. token_missing class (§8.2 step 2): the token scan exhausts the FULL
 #     LUKS2 range 0..31 with NO systemd-tpm2 token on any member -> the
 #     token_missing warn preamble + closing line, then the bounded prompt.
-#     FDE_ATTACH_WAIT_SECS is pinned small here: the default by-uuid dir has
-#     no member node in the sandbox, so the bounded attach wait runs to its
-#     exhaustion BEFORE the (genuine) token_missing verdict.
+#     FDE_ATTACH_WAIT_SECS is pinned small here: no systemd-tpm2 token exists
+#     on the member (the export floor is 32), so whatever the attach resolver
+#     finds, the (genuine) token_missing verdict is taken after the bound.
 # =============================================================================
 reset_leg
 write_state installed
@@ -559,31 +603,31 @@ assert_contains "token missing: prompt carries the (attempt 1 of 3) counter" \
 assert_eq "token missing: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
 
 # =============================================================================
-# 3c. DEVICE-ATTACH RACE (real-server blocker, Dell PowerEdge R640 first
-#     verified boot 2026-09-28): the member's by-uuid node appears LATE — the
-#     fixture node is created only after 2 probe cycles (a background creator
-#     sleeps past the hook's first two `sleep 1` probes, exactly the shape of
-#     "[sdb] Attached SCSI disk" arriving after the token lookup gave up).
-#     The hook must WAIT (bounded) and RE-SCAN: recovery passphrase path NOT
-#     taken, NO token_missing preamble, normal passwordless unlock.
+# 3c. DEVICE-ATTACH RACE via the nlplug-findfs route (real-server blocker,
+#     Dell PowerEdge R640 first verified boot 2026-09-28): the mdev initramfs
+#     has NO udevd, so no /dev/disk/by-uuid node ever appears — the resolver
+#     asks nlplug-findfs, which waits for the member's uevent. The stub keeps
+#     the uevent SILENT for the first two invocations (the initial token scan
+#     + the first bounded-wait probe — the "[sdb] Attached SCSI disk" window)
+#     and attaches on the third, creating + printing the fixture node. The
+#     hook must WAIT (bounded) and RE-SCAN: recovery passphrase path NOT
+#     taken, NO token_missing preamble, normal passwordless unlock, and the
+#     open goes to the nlplug-printed node.
 # =============================================================================
 reset_leg
 write_state installed
 mkdir -p "$TMP/late-uuid"
-# the fixture "device node": a plain path the -e probe matches (the probe
-# targets the SAME by-uuid path the lookup opens; block-dev-ness is out of
-# scope for the sandbox — cryptsetup is stubbed)
-( sleep 2; : >"$TMP/late-uuid/$UUID1" ) &
-rc=$(run_hook "$TMP/stdin1" FDE_DISK_BY_UUID_DIR="$TMP/late-uuid" FDE_ATTACH_WAIT_SECS=10 FDE_TEST_REQUIRE_NODE=1)
-wait $! 2>/dev/null || :
+rc=$(run_hook "$TMP/stdin1" FDE_DISK_BY_UUID_DIR="$TMP/late-uuid" FDE_ATTACH_WAIT_SECS=10 FDE_TEST_REQUIRE_NODE=1 FDE_TEST_NLPLUG_ATTACH_AFTER=3)
 assert_rc "attach race: hook rc 0 (member appeared during the bounded wait)" 0 "$rc"
+assert_eq "attach race: the resolver asked nlplug-findfs (scan + 2 wait probes + re-scan + the open-loop resolve)" "5" \
+    "$(argv_count '^nlplug-findfs')"
 assert_contains "attach race: the wait notice is printed (console diagnosability)" \
     "$(cat "$TMP/out.log")" "waiting up to 10s"
 assert_contains "attach race: the re-scan notice is printed" \
     "$(cat "$TMP/out.log")" "retrying the token scan"
 assert_eq "attach race: unseal reached after the re-scan" "1" "$(argv_count '^tpm2_unseal')"
 assert_eq "attach race: exactly one open (normal passwordless flow)" "1" "$(argv_count '^cryptsetup open')"
-assert_eq "attach race: open via the late member's by-uuid path" "1" \
+assert_eq "attach race: open via the nlplug-printed member node" "1" \
     "$(grep -c "cryptsetup open --type luks --key-file - $TMP/late-uuid/$UUID1 root$" "$LOG" || true)"
 assert_eq "attach race: NO recovery passphrase prompt (path NOT taken)" "0" \
     "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/out.log" || true)"
@@ -599,14 +643,18 @@ assert_contains "attach race: marker moved to provisional-booted" \
 
 # =============================================================================
 # 3d. EXHAUSTED attach bound -> GENUINE token_missing (§8.2 step 2): the
-#     member never appears, the bounded wait runs out, and only THEN is the
-#     token_missing verdict taken — preamble + closing line + bounded prompt.
+#     member's uevent NEVER arrives (nlplug-findfs stays silent, the by-uuid
+#     fallback never materializes either), the bounded wait runs out, and
+#     only THEN is the token_missing verdict taken — preamble + closing line
+#     + bounded prompt.
 # =============================================================================
 reset_leg
 write_state installed
 mkdir -p "$TMP/never-uuid"
-rc=$(run_hook "$TMP/stdin-rec" FDE_DISK_BY_UUID_DIR="$TMP/never-uuid" FDE_ATTACH_WAIT_SECS=2 FDE_TEST_REQUIRE_NODE=1)
+rc=$(run_hook "$TMP/stdin-rec" FDE_DISK_BY_UUID_DIR="$TMP/never-uuid" FDE_ATTACH_WAIT_SECS=2 FDE_TEST_REQUIRE_NODE=1 FDE_TEST_NLPLUG_ATTACH_AFTER=9999)
 assert_rc "attach bound exhausted: recovery passphrase still unlocks" 0 "$rc"
+assert_eq "attach bound exhausted: nlplug-findfs consulted through the bound (scan + 2 probes + the open-loop resolve), silent" "4" \
+    "$(argv_count '^nlplug-findfs')"
 assert_contains "attach bound exhausted: the wait notice is printed" \
     "$(cat "$TMP/out.log")" "waiting up to 2s"
 assert_eq "attach bound exhausted: NO re-scan notice (the bound expired)" "0" \
@@ -622,6 +670,22 @@ assert_precedes "attach bound exhausted: preamble precedes the passphrase prompt
 assert_contains "attach bound exhausted: open used the prompted passphrase" \
     "$(cat "$LOG")" "cryptsetup-pass recovery-pass"
 assert_eq "attach bound exhausted: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
+
+# =============================================================================
+# 3e. ABSENT nlplug-findfs binary -> the by-uuid fallback DIRECTLY (the
+#     resolver prefers nlplug ONLY when the binary exists; udev-equipped
+#     images keep the FDE_DISK_BY_UUID_DIR seam meaningful).
+# =============================================================================
+reset_leg
+write_state installed
+rc=$(run_hook "$TMP/stdin1" FDE_NLPLUG_FINDFS="$BIN/nlplug-findfs-absent")
+assert_rc "nlplug absent: hook rc 0 (by-uuid fallback resolves the member)" 0 "$rc"
+assert_eq "nlplug absent: the resolver never invoked nlplug-findfs" "0" \
+    "$(argv_count '^nlplug-findfs')"
+assert_eq "nlplug absent: open via the by-uuid path resolved from crypttab" \
+    "cryptsetup open --type luks --key-file - /dev/disk/by-uuid/$UUID1 root" \
+    "$(grep '^cryptsetup open' "$LOG")"
+assert_eq "nlplug absent: no poweroff" "0" "$(argv_count '^poweroff')"
 
 # =============================================================================
 # 4. 3-STRIKE -> poweroff -f exactly once, rc != 0 (§8.2 fail-closed)

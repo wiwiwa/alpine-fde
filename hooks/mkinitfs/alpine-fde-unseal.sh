@@ -46,7 +46,8 @@
 #      write, atomic tmp+mv, only when the state file says `installed`).
 #
 # Test seams (the real boot path uses the defaults): FDE_NEWROOT, FDE_CRYPTTAB,
-# FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS.
+# FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
+# FDE_NLPLUG_FINDFS.
 #
 # Busybox mkinitfs environment only: no bashisms, no GNU tools beyond busybox
 # (sha256sum/od/dd/sed/awk/tr/mktemp/date), openssl + cryptsetup + tpm2-tools
@@ -72,6 +73,12 @@ FDE_PCR_PHASE=enter-initrd
 # the race path itself never prints the warn-before-prompt preamble.
 FDE_DISK_BY_UUID_DIR=${FDE_DISK_BY_UUID_DIR:-/dev/disk/by-uuid}
 FDE_ATTACH_WAIT_SECS=${FDE_ATTACH_WAIT_SECS:-30}
+# The UUID=* resolver's device-attachment source: nlplug-findfs (the uevent
+# waiter the initramfs's own /init uses — this image runs nlplug + mdev, NO
+# udevd, so /dev/disk/by-uuid entries are never created and by-uuid can only
+# ever be the fallback for udev-equipped images). When the binary is absent
+# the resolver goes straight to the by-uuid path.
+FDE_NLPLUG_FINDFS=${FDE_NLPLUG_FINDFS:-nlplug-findfs}
 
 # Warn-before-prompt REASON preambles (user decision queue item 8, §8.2 step
 # 5): ONE canonical sentence per refusal class, printed verbatim by the branch
@@ -280,6 +287,21 @@ _fdh_resolve_dev() {
             case ${1#UUID=} in
                 *[!0-9a-fA-F-]*) return 1 ;;
             esac
+            if command -v "$FDE_NLPLUG_FINDFS" >/dev/null 2>&1; then
+                # REAL-SERVER R640 (verified boot 2026-09-28): this initramfs's
+                # /init runs nlplug-findfs + mdev — NO udevd — so NOTHING ever
+                # creates /dev/disk/by-uuid entries; a bare by-uuid print
+                # starves the whole FDE_ATTACH_WAIT_SECS bound on a path mdev
+                # never makes (30s wait, then token_missing on an INTACT seal).
+                # nlplug-findfs is the same resolver init uses: it waits for
+                # the uevent matching the spec (-t: ms of uevent silence) and
+                # prints the /dev node. by-uuid stays the fallback for
+                # udev-equipped images, keeping FDE_DISK_BY_UUID_DIR meaningful.
+                _fdh_nf=$($FDE_NLPLUG_FINDFS -t 5000 "$1" 2>/dev/null) && {
+                    printf '%s\n' "$_fdh_nf"
+                    return 0
+                }
+            fi
             printf '%s/%s\n' "$FDE_DISK_BY_UUID_DIR" "${1#UUID=}"
             ;;
         /dev/*) printf '%s\n' "$1" ;;
