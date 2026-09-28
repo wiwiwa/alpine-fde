@@ -191,18 +191,24 @@ fw_var_write() {
 }
 
 # fw_auth_esp_fallback ESP_DIR KEYDIR — the graceful degradation when the
-# firmware refuses NVRAM enrollment (blocker #12 declutter): stages ONLY
-# db.auth/kek.auth/pk.auth + README.txt (the numbered import steps, printable
-# before the reboot) + the empty at-firmware marker !import_all_auth_files
-# (sorts first in firmware file browsers; the filename IS the instruction) to
-# <ESP_DIR>/alpine-fde-keys — the .esl/.dbx/.cert material stays on the
-# target's /etc/alpine-fde/keys for repair use — and prints ONE info line;
-# the numbered manual-import instructions are DEFERRED to the very end of the
+# firmware refuses NVRAM enrollment (blocker #12 declutter): stages the three
+# .auth packets (db.auth/kek.auth/pk.auth) + the operator's OWN certificates
+# as import-ready db.cer/KEK.cer/PK.cer (REAL-SERVER 2026-09-28, Dell
+# PowerEdge R640: the firmware setup UI imports X.509 .cer/.der/.crt ONLY —
+# it cannot import .auth packets, so without the certs the operator had NO
+# importable files for PK/KEK/db and had to unlock the LUKS target to fish
+# release.crt/kek.cert.der/pk.cert.der out of /etc/alpine-fde/keys) + the
+# vendor .cer set + README.txt (the operator decision tree, printable before
+# the reboot) + the empty at-firmware marker !import_all_auth_files (sorts
+# first in firmware file browsers; the filename IS the instruction) to
+# <ESP_DIR>/alpine-fde-keys — the .esl/.dbx material stays on the target's
+# /etc/alpine-fde/keys for repair use — and prints ONE info line; the
+# numbered manual-import instructions are DEFERRED to the very end of the
 # install (the plan tail). Historical note: the queue-26-ext directive ("write
 # the key material to the EFI partition when the efivars write fails and show
 # how to import it") is still satisfied — the staging is unchanged in spirit;
 # the numbered instructions moved to the install tail and the staged set is
-# decluttered to the three import files.
+# the import-ready file set (packets + certs).
 fw_auth_esp_fallback() {
     _fef_esp=$1
     _fef_keys=$2
@@ -210,13 +216,15 @@ fw_auth_esp_fallback() {
     mkdir -p "$_fef_dst" ||
         die "firmware: cannot create $_fef_dst to stage the Secure Boot key material (firmware refused NVRAM enrollment AND the ESP fallback is unavailable) — copy the .auth files from $_fef_keys to a FAT USB stick and enroll via the firmware setup UI / KeyTool.efi manually"
     # USER DIRECTIVE (blocker #12 ESP staging declutter): the user-facing
-    # import directory stages ONLY the three import files — db.auth, kek.auth,
-    # pk.auth — plus a printable README.txt (host-side reference before the
-    # reboot) and the EMPTY at-firmware marker !import_all_auth_files (the `!`
-    # prefix sorts FIRST in firmware file browsers and the filename IS the
+    # import directory stages ONLY import-ready material — the three .auth
+    # packets (db.auth, kek.auth, pk.auth), the operator's OWN certificates as
+    # import-ready db.cer/KEK.cer/PK.cer (REAL-SERVER 2026-09-28, below), the
+    # vendor .cer set, plus a printable README.txt (host-side reference before
+    # the reboot) and the EMPTY at-firmware marker !import_all_auth_files (the
+    # `!` prefix sorts FIRST in firmware file browsers and the filename IS the
     # instruction; no recognizable key extension, so import pickers that
     # filter by extension won't offer it — it is a reminder, not an
-    # importable). The .esl/.dbx/.cert material is NOT staged: it stays on the
+    # importable). The .esl/.dbx material is NOT staged: it stays on the
     # target's /etc/alpine-fde/keys for repair use. The numbered manual-import
     # instructions are NOT printed here — they are DEFERRED to the very end of
     # the install (the plan tail, immediately before the final
@@ -227,6 +235,27 @@ fw_auth_esp_fallback() {
         cp "$_fef_keys/$_fef_f" "$_fef_dst/$_fef_f" ||
             die "firmware: cannot stage $_fef_keys/$_fef_f -> $_fef_dst/$_fef_f (ESP fallback)"
         info "firmware: staged $_fef_f into $_fef_dst (ESP fallback)"
+    done
+    # REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the firmware's setup UI
+    # cannot import .auth packets — it imports X.509 certificates (.cer/.der/
+    # .crt) only. Stage the operator's OWN certificates alongside the packets,
+    # named after the variables the UI manages, so a UI-only repair never
+    # needs an extra LUKS unlock to copy the certs out of
+    # /etc/alpine-fde/keys. These ARE the inputs the .auth packets were built
+    # from (provision stage1: db.esl = release.crt + vendor certs — blocker
+    # #25 cert-mixup fix, the db authorizes BOOT-IMAGE signers; kek.esl =
+    # kek.cert.der; pk.esl = pk.cert.der), so the keydir must already carry
+    # them; a missing cert is a custody bug and dies fail-closed like a
+    # missing packet. Formats as stored: release.crt is PEM, kek/pk
+    # .cert.der are DER — firmware UIs accept both.
+    for _fef_pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+        _fef_cer=${_fef_pair%% *}
+        _fef_src=${_fef_pair#* }
+        [ -f "$_fef_keys/$_fef_src" ] ||
+            die "firmware: cannot stage $_fef_dst/$_fef_cer — $_fef_src is missing from $_fef_keys (the .auth packets are built from these certs; provision stage1 custody bug)"
+        cp "$_fef_keys/$_fef_src" "$_fef_dst/$_fef_cer" ||
+            die "firmware: cannot stage $_fef_keys/$_fef_src -> $_fef_dst/$_fef_cer (ESP fallback, operator cert)"
+        info "firmware: staged $_fef_cer (from $_fef_src) into $_fef_dst (ESP fallback)"
     done
     # DECIDED 2026-09-27 (db reset + release+vendor rebuild, UEFI0072): stage
     # every vendor .cer under its basename alongside the import files — on
@@ -252,32 +281,64 @@ EOF
     fi
     : >"$_fef_dst/!import_all_auth_files"
     cat >"$_fef_dst/README.txt" <<'EOF'
-alpine-fde — Secure Boot key import (the firmware refused NVRAM enrollment)
+alpine-fde — Secure Boot key import (decision tree)
 
-This directory holds EXACTLY the three files to import, in this order:
+STEP 1 — did the firmware ACCEPT the installer's NVRAM writes?
 
-  1. db.auth   — Key Database (trusts the alpine-fde signatures)
-  2. kek.auth  — Key Exchange Key
-  3. pk.auth   — Platform Key — import LAST; it locks the key database
+  (a) YES (the install reported enrollment complete, or Secure Boot /
+      Key Management in firmware setup already shows the alpine-fde
+      Platform Key) -> NOTHING to do. This directory is a leftover
+      staging copy and may be deleted.
+
+  (b) NO (the install said the firmware REFUSED the writes) -> import
+      from THIS directory through the firmware setup UI, as below.
+
+STEP 2 (refused case only) — import order in the firmware UI:
+
+  The firmware setup UI imports X.509 CERTIFICATES (.cer/.der/.crt) — it
+  cannot import .auth packets. The import-ready certificates are staged
+  here next to the packets:
+
+    1. db.cer  — Key Database (the alpine-fde release certificate;
+                 trusts the signed bootloader/kernel)
+       microsoft-option-rom-uefi-ca-2023.cer — vendor option-ROM CA,
+                 import into db AS WELL (see WHY below)
+    2. KEK.cer — Key Exchange Key
+    3. PK.cer  — Platform Key — import LAST: enrolling the Platform Key
+                 flips the platform to User Mode and locks the key
+                 database (after PK, no more key imports are possible
+                 until the PK is removed again)
+
+  WHY db needs BOTH certificates: under custom keys the db must carry the
+  release certificate PLUS the vendor option-ROM CA (Microsoft Option ROM
+  UEFI CA 2023) — without the vendor cert, signed NIC PXE / storage (PERC)
+  option ROMs fail the firmware's UEFI0072 Secure Boot policy at POST (seen
+  live on Dell PowerEdge: a refused PERC option ROM blocks the RAID
+  controller and the disks vanish). The db.auth packet stages both in one
+  write; when importing through the UI you import them as the two files
+  listed above.
+
+  Formats: db.cer is PEM, KEK.cer / PK.cer are DER — firmware UIs accept
+  both. (The vendor .cer basename matches certs/vendor/; it differs when
+  ALPINE_FDE_DB_VENDOR_DIR points elsewhere.)
+
+  The .auth packets staged alongside (db.auth kek.auth pk.auth) are for
+  KeyTool.efi / efi-updatevar repair only — the firmware setup UI cannot
+  import them.
+
+How: reboot into the firmware setup (BIOS/UEFI; Dell PowerEdge: F2 during
+POST). Under Security / Secure Boot / Key Management (wording varies by
+vendor) use the certificate "enqueue" / "import from file" action — pick
+each file above IN THE ORDER above, db (both certificates) -> KEK -> PK
+last. Then enable Secure Boot (the platform must show User Mode, Custom
+mode). Then set an administrator (supervisor) password while still in
+setup. Reboot: the first boot unlocks via the sealed TPM token and
+auto-finalizes under Secure Boot; it REFUSES to boot until the keys are
+imported (that is the design, ADR-20).
 
 (!import_all_auth_files is only a reminder marker — not importable.)
-
-How: reboot into the firmware setup (BIOS/UEFI). Under Security / Secure
-Boot / Key Management (wording varies by vendor) use "enqueue", "import" or
-KeyTool.efi "enroll from file" — pick each file above IN THE ORDER above.
-Then set an administrator (supervisor) password while still in setup.
-Reboot: the first boot unlocks via the sealed TPM token and auto-finalizes
-under Secure Boot; it REFUSES to boot until the keys are imported (that is
-the design, ADR-20).
-
-Vendor certificates: the db.auth above already carries the vendor trust
-anchors (db is rebuilt as release cert + vendor certs, e.g. Microsoft
-Option ROM UEFI CA 2023 for NIC PXE / storage option ROMs). The .cer files
-in this directory are the same vendor certs — append them via the firmware
-UI ONLY if your board's db ends up release-cert-only (ALPINE_FDE_DB_VENDOR
-=none) and device option ROMs fail the Secure Boot policy (UEFI0072).
 EOF
-    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware (staged: db.auth kek.auth pk.auth README.txt !import_all_auth_files${_fef_vcerts:+; vendor certs:$_fef_vcerts})"
+    info "firmware: Secure Boot key material staged to $_fef_dst — NVRAM enrollment was refused by the firmware (staged: db.auth kek.auth pk.auth db.cer KEK.cer PK.cer README.txt !import_all_auth_files${_fef_vcerts:+; vendor certs:$_fef_vcerts})"
     info "firmware: the manual-import instructions are DEFERRED to the very end of the install (after every other step, immediately before the final confirm/reboot) — the install continues"
     warn "firmware enrollment incomplete — first boot stays guarded until the keys are imported; the manual-import instructions print at the end of the install"
     return 0

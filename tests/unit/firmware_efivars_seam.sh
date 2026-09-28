@@ -302,6 +302,13 @@ mkdir -p "$FAKEYS"
 mkauth "$FAKEYS/db.auth" db "$DBXGUID" 'DB1'
 mkauth "$FAKEYS/kek.auth" KEK "$GUID" 'KEK1'
 mkauth "$FAKEYS/pk.auth" PK "$GUID" 'PK1'
+# the operator's OWN certificates — the exact inputs the .auth packets were
+# built from (REAL-SERVER 2026-09-28: staged as db.cer/KEK.cer/PK.cer because
+# the firmware setup UI imports X.509 certs, not .auth packets). Formats as
+# stored in a real keydir: release.crt is PEM, kek/pk .cert.der are DER.
+printf 'RELEASE-CRT-PEM' >"$FAKEYS/release.crt"
+printf 'KEK-CERT-DER' >"$FAKEYS/kek.cert.der"
+printf 'PK-CERT-DER' >"$FAKEYS/pk.cert.der"
 # the ESP fallback stages the .auth packets AND the .esl lists (KeyTool.efi
 # "enroll from file" consumes the signed .esl form)
 printf 'DB-ESL' >"$FAKEYS/db.esl"
@@ -394,8 +401,21 @@ for _b_f in db.auth kek.auth pk.auth; do
         "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
 done
 for _b_f in db.esl kek.esl pk.esl dbx.auth dbx.esl; do
-    assert_eq "enroll: fallback does NOT stage $_b_f (declutter: import dir = 3 files + README)" "0" \
+    assert_eq "enroll: fallback does NOT stage $_b_f (declutter: import dir = packets + certs + README)" "0" \
         "$([ -e "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
+done
+# REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the firmware setup UI imports
+# X.509 certificates ONLY — the operator's OWN certs must land on the staged
+# ESP under the variable names, mapped from the keydir artifacts (db.cer from
+# release.crt — the db ESL carries the RELEASE cert per the blocker #25
+# cert-mixup fix; KEK.cer from kek.cert.der; PK.cer from pk.cert.der)
+for _b_pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+    _b_cer=${_b_pair%% *}
+    _b_src=${_b_pair#* }
+    assert_eq "enroll: fallback staged the import-ready $_b_cer" "1" \
+        "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_cer" ] && echo 1 || echo 0)"
+    assert_eq "enroll: $_b_cer is a byte-for-byte copy of $_b_src" \
+        "$(cat "$FAKEYS/$_b_src")" "$(cat "$tmp/esp-b/alpine-fde-keys/$_b_cer")"
 done
 assert_eq "enroll: README.txt staged with the numbered steps" "1" \
     "$([ -f "$tmp/esp-b/alpine-fde-keys/README.txt" ] && echo 1 || echo 0)"
@@ -413,6 +433,30 @@ assert_contains "enroll: README names the firmware menu area" \
     "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Secure Boot"
 assert_contains "enroll: README carries the admin-password reminder" \
     "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "administrator"
+# REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the README is the operator
+# decision tree — (a) firmware accepted the writes -> nothing to do; (b)
+# refused -> UI import of the CERTIFICATES (the UI cannot read .auth), order
+# db (BOTH db.cer and the vendor .cer) -> KEK -> PK last, then enable Secure
+# Boot. The db carries BOTH the release cert and the vendor option-ROM cert,
+# and the README must state WHY (option-ROM authorization under custom keys,
+# UEFI0072).
+_b_readme=$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")
+assert_contains "enroll: README decision tree (a): accepted writes -> nothing to do" \
+    "$_b_readme" "NOTHING to do"
+assert_contains "enroll: README states the UI imports X.509 certificates, not .auth" \
+    "$_b_readme" "cannot import .auth"
+assert_contains "enroll: README names db.cer in the import order" \
+    "$_b_readme" "db.cer"
+assert_contains "enroll: README names KEK.cer in the import order" \
+    "$_b_readme" "KEK.cer"
+assert_contains "enroll: README names PK.cer as LAST (flips to User Mode)" \
+    "$_b_readme" "import LAST"
+assert_contains "enroll: README says import the vendor option-ROM cert into db AS WELL" \
+    "$_b_readme" "microsoft-option-rom-uefi-ca-2023.cer"
+assert_contains "enroll: README states the vendor-cert rationale (UEFI0072 option-ROM policy)" \
+    "$_b_readme" "UEFI0072"
+assert_contains "enroll: README says enable Secure Boot after the imports (User Mode)" \
+    "$_b_readme" "User Mode"
 # at-firmware marker (user directive): the firmware UI cannot read README.txt —
 # an EMPTY marker file named !import_all_auth_files sorts FIRST in firmware
 # file browsers and its filename IS the instruction; no recognizable key
@@ -423,7 +467,7 @@ assert_eq "enroll: the marker is EMPTY (a reminder, not an importable)" "0" \
     "$(wc -c <"$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" | tr -d '[:space:]')"
 assert_eq "enroll: the marker sorts FIRST in the firmware file browser" \
     "!import_all_auth_files" "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | head -n 1)"
-assert_eq "enroll: staged-file set is db.auth kek.auth pk.auth README.txt !import_all_auth_files + the shipped vendor certs" "6" \
+assert_eq "enroll: staged-file set is db.auth kek.auth pk.auth db.cer KEK.cer PK.cer README.txt !import_all_auth_files + the shipped vendor certs" "9" \
     "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | wc -l)"
 assert_eq "enroll: the shipped Microsoft Option ROM UEFI CA 2023 .cer is staged (DECIDED 2026-09-27)" "1" \
     "$([ -f "$tmp/esp-b/alpine-fde-keys/microsoft-option-rom-uefi-ca-2023.cer" ] && echo 1 || echo 0)"

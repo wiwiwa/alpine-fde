@@ -226,6 +226,12 @@ printf 'KEKPRIV' >"$EK/kek.priv.pem"
 printf 'KEKCERT' >"$EK/kek.cert.pem"
 printf 'PKPRIV' >"$EK/pk.priv.pem"
 printf 'PKCERT' >"$EK/pk.cert.pem"
+# the operator's OWN certs in the keydir artifact forms (REAL-SERVER
+# 2026-09-28: the ESP fallback stages them as import-ready db.cer/KEK.cer/
+# PK.cer — the firmware setup UI cannot import .auth packets)
+printf 'RELEASE-CRT-PEM' >"$EK/release.crt"
+printf 'KEK-CERT-DER' >"$EK/kek.cert.der"
+printf 'PK-CERT-DER' >"$EK/pk.cert.der"
 
 # (7) ordering pin: pre-existing vendor db (a DIRECTORY: the plain rm is
 # refused, so the RESET must go through the signed-empty delete machinery)
@@ -296,6 +302,15 @@ RC3=$?
 assert_eq "write-refused enrollment degrades to the ESP fallback (rc 0)" "0" "$RC3"
 for f in db.auth kek.auth pk.auth README.txt '!import_all_auth_files' a-vendor.cer b-vendor.cer c-option-rom.cer; do
     assert_eq "ESP fallback staged $f" "1" "$([ -e "$ESP3/alpine-fde-keys/$f" ] && echo 1 || echo 0)"
+done
+# REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the operator's OWN certs land
+# as import-ready db.cer/KEK.cer/PK.cer (the UI imports X.509, not .auth)
+for pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+    cer=${pair%% *}; src=${pair#* }
+    assert_eq "ESP fallback staged the import-ready $cer" "1" \
+        "$([ -f "$ESP3/alpine-fde-keys/$cer" ] && echo 1 || echo 0)"
+    assert_eq "$cer is a byte-for-byte copy of $src" \
+        "$(cat "$EK/$src")" "$(cat "$ESP3/alpine-fde-keys/$cer")"
 done
 assert_contains "the ESP staging info names the staged vendor certs" "$OUT3" "vendor certs:"
 assert_contains "the fallback README explains the vendor .cer files" \
