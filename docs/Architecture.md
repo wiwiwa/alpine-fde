@@ -50,7 +50,7 @@ Verified present in the Alpine Linux `main` and `community` components:
 |---|---|---|
 | Init system, service manager, getty | `openrc`, `busybox` | base |
 | LUKS2 volume manipulation | `cryptsetup` | standard upstream tool |
-| Boot manager + `bootctl` | `systemd-boot` | Alpine ≥ 3.24 ships 260.2 in main (`apk add systemd-boot`; subpackages `systemd-efistub`, `ukify`, `ukify-kernel-hook`) |
+| Boot manager (loader EFI binary — installed by guarded file copy; Alpine ships **no** `bootctl` binary, real-server blocker #7) | `systemd-boot` | Alpine ≥ 3.24 ships 260.2 in main (`apk add systemd-boot`; subpackages `systemd-efistub`, `ukify`, `ukify-kernel-hook`) |
 | EFI Boot Stub | `systemd-efistub` | measures UKI into PCR 11, injects `/.extra/` signatures |
 | UKI assembly + PCR measurement/signing | `ukify`, `py3-pefile` | available in Alpine (`apk add ukify`) |
 | Initramfs generator | `mkinitfs` | Alpine-native default for `linux-lts`; early-boot unlock hook is a POSIX-sh script + features.d entry (§8.2). dracut rejected: its module framework buys nothing when the unlock hook is custom, and it drags an unnecessary second init framework into the system |
@@ -77,7 +77,7 @@ The installed system is deliberately minimal — only what boot, unlock, audit, 
 
 ## 4. Disk layout
 
-The default filesystem for the encrypted root is **Btrfs**, configured with standard subvolumes (`@` for root, `@home` for user data, and `@snapshots` for atomic pre-upgrade snapshots — the snapshot flow of `lib/cmd/pre-upgrade.sh`, §8.1: library-only, the snapshot is taken automatically before upgrades, no CLI verb). `ext4` is available via `--fs ext4`.
+The default filesystem for the encrypted root is **Btrfs**, configured with standard subvolumes (`@` for root, `@home` for user data, and `@snapshots` for atomic pre-upgrade snapshots — the snapshot flow of `lib/cmd/pre-upgrade.sh`, §8.1: library-only, no CLI verb; **automatic** pre-upgrade snapshotting is a design commitment — no trigger wires it to upgrades yet, so until it lands the snapshot is taken manually, per [UserGuide](UserGuide.md#btrfs-snapshots--userspace-rollback)). `ext4` is available via `--fs ext4`.
 
 ### 4.1 Topology Variants
 
@@ -250,7 +250,7 @@ The user-facing surface is **7 verbs**. The `alpine-fde` executable is the singl
 | `pcrsign` | Release-key signature over the combined PCR 7+11 policy digest (build-time signer) |
 | `finalize` | First-boot trust finalization (normally run by the `alpine-fde-finalize` OpenRC service) |
 
-The retired `pre-upgrade` verb is **library-only**: `lib/cmd/pre-upgrade.sh` stays sourceable (its snapshot functions are the callable seam for the automatic snapshot flow), with no CLI dispatch row. Full subcommand syntax, options (e.g. `--disk`, `--bcache`, `--swap`), and operational runbooks are documented in [docs/UserGuide.md §4](UserGuide.md#4-daily-operations).
+The retired `pre-upgrade` verb is **library-only**: `lib/cmd/pre-upgrade.sh` stays sourceable (its snapshot functions are the callable seam for the planned automatic snapshot flow — not yet wired to any trigger, §4), with no CLI dispatch row. Full subcommand syntax, options (e.g. `--disk`, `--bcache`, `--swap`), and operational runbooks are documented in [docs/UserGuide.md §4](UserGuide.md#4-daily-operations).
 
 #### Internal Automation & Background Components (Not for Daily Operator Use)
 
@@ -458,7 +458,7 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
 - **Firmware admin password set** (manual step; keeps the evil maid out of firmware setup).
 - **Firmware in Setup Mode prior to install** (`SetupMode=1`, vendor PK cleared; verified by `doctor` and `install` preflight, §9.1 preflight) — or a platform key already enrolled (`SetupMode=0` with a PK present), which takes the deferred-enrollment mode (release certificate imported via the firmware UI after the install; no NVRAM writes).
 - Recovery passphrase safely stored off-machine (the sole required offline credential).
-- Keyslot-0 passphrase: minimum **heuristic entropy estimate** (zxcvbn-class, threshold-blocked) enforced interactively by `install` (all install paths) and by `passwd`; LUKS2 KDF pinned to **Argon2id** (`--pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000`, matching [Runbook 2](UserGuide.md#runbook-2-multi-disk-raid1-member-replacement--re-sync); the passphrase is the one offline-guessable secret, T2b). The same entropy floor applies to the `release.pem` encryption passphrase.
+- Keyslot-0 passphrase: minimum **heuristic entropy estimate** (zxcvbn-class, threshold-blocked) enforced interactively by `install` (all install paths) and by `passwd`; LUKS2 KDF pinned to **Argon2id** (`--pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000`, matching [Runbook 2](UserGuide.md#runbook-2-failed-drive-replacement-in-btrfs-raid1); the passphrase is the one offline-guessable secret, T2b). The same entropy floor applies to the `release.pem` encryption passphrase.
 - ESP sized from **measured UKI size × retention + headroom** (verified in CI, §12; minimum 128 MB, recommended 512 MB for multi-kernel retention).
 - Alpine Linux target; root on **Btrfs** with subvolumes (`@`, `@home`, `@snapshots`), enabling atomic pre-upgrade snapshots (ext4 optional via `--fs ext4`).
 - **Host installer tools** (verified by `install` preflight before disk mutation): `apk`, `sfdisk` (the standalone `sfdisk` package — Alpine 3.24 split it out of `util-linux`, which no longer ships the binary), `cryptsetup`, `btrfs-progs` (or `e2fsprogs`), `mkfs.vfat` (`dosfstools`), optional `bcache-tools` (if `--bcache` enabled), `lsblk` (likewise the standalone `lsblk` package since the 3.24 split).

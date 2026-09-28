@@ -34,7 +34,7 @@ Before beginning installation, your target machine must be configured in UEFI se
 1. **Set Firmware Administrator Password (recommended, not enforced):** Protects UEFI settings against physical tampering. This is a manual prerequisite — `alpine-fde doctor` cannot probe it, so verify it yourself. Without it, an attacker with physical access can enter firmware setup, enroll their own boot keys, and install a bootkit. The disk still cannot be decrypted (the TPM seal fails closed on any Secure Boot key change), but the bootkit can fake the passphrase prompt to phish your recovery passphrase. The firmware admin password closes that first step.
 2. **Clear Secure Boot Keys (Enter Setup Mode) — OR keep a platform key enrolled (deferred-enrollment mode):**
    - Default (write flow): in firmware setup, choose **Clear Secure Boot Keys** or **Delete All Keys** (sets `SetupMode: 1`), and ensure **Secure Boot is OFF** during initial installation.
-   - Alternative (factory/custom PK deployments, proven on a real Dell PowerEdge R640): keep the platform's own PK/KEK/db (e.g. via the firmware's **Restore Default Policy Entries**) with Secure Boot ON. The installer then makes **no NVRAM writes**; after the install it stages the release certificate (`db.cer` + the vendor option-ROM certificate) on the ESP and reboots into firmware setup for you to import them into the **existing** key database via the firmware UI. Do not import the staged `KEK.cer`/`PK.cer` in this mode — the platform's own PK/KEK stay.
+   - Alternative (factory/custom PK deployments, proven on a real Dell PowerEdge R640): keep the platform's own PK/KEK/db (e.g. via the firmware's **Restore Default Policy Entries**) with Secure Boot ON. The installer then makes **no NVRAM writes**; after the install it stages the release certificate (`db.cer` + the vendor option-ROM certificate) on the ESP and, as its final output, prints the step-by-step firmware-UI import instructions and reboots into firmware setup (after your explicit Enter confirmation) for you to import them into the **existing** key database via the firmware UI. Secure Boot can stay enabled throughout this mode. Do not import the staged `KEK.cer`/`PK.cer` in this mode — the platform's own PK/KEK stay.
    > [!IMPORTANT]
    > Authenticated NVRAM variable writes (`PK`, `KEK`, `db`) require `SetupMode == 1`. If a platform key IS enrolled (`SetupMode == 0` with a PK present), the install switches to the deferred-enrollment mode above instead of writing NVRAM. Only a contradictory state (`SetupMode == 0` with no PK) aborts preflight (`exit 64`).
 3. **Boot Live Installation Media:** Boot an official Alpine Linux Standard live USB on the target machine.
@@ -46,8 +46,8 @@ Findings from a live Dell PowerEdge install (2026-09). The installer and boot ho
 1. **No software reboot-to-firmware-setup (`OsIndications` unsupported).** This firmware exposes no `OsIndicationsSupported` variable, so the UEFI-defined software boot-to-setup mechanism is impossible — nothing an OS writes can make it reboot straight into setup. Enter firmware setup with **F2 during POST**. The early-boot Secure Boot guard detects the missing support at boot, prints the full manual steps (import `db.auth`, `kek.auth`, `pk.auth` from the ESP's `alpine-fde-keys` in that order, enable Secure Boot, save and exit), prompts *Press Enter to reboot*, and reboots plainly — press **F2 during the next POST** to reach the firmware UI (see [§3 Step 3](#step-3-first-boot--automated-trust-finalization)).
 2. **Key import goes through `efi-updatevar`, not raw efivarfs writes.** This firmware refused `sign-efi-sig-list`-format packets written directly to `efivarfs`, but accepts the native `EFI_VARIABLE_AUTHENTICATION_2` packets the installer emits via `efi-updatevar` (efitools). Authenticated **deletes** additionally need signed-empty packets plus `chattr -i` on the efivarfs node first — efivarfs marks authenticated variables immutable at creation, so any removal attempt dies `EPERM` without it. The installer handles all of this; the operator takeaways are: make sure `efitools` (`efi-updatevar`) and `e2fsprogs` (`chattr`) are available on the live host, and never hand-write the variables with `cat`/`printf` redirection.
 3. **Flash SB-capable PERC and NIC firmware BEFORE enabling Secure Boot.** With Secure Boot enforced, out-of-band device firmware — NIC PXE option ROMs and the Integrated RAID Controller (PERC) option ROM — can fail the firmware's UEFI0072 Secure Boot policy checks at POST if the option ROM is stale or unsigned. In the verified failure, the PERC option ROM's refusal blocked the RAID controller from initializing (disks invisible to the installer). **Prerequisite: flash current, SB-capable PERC and NIC firmware via iDRAC before enabling Secure Boot.** If it bites anyway, the POST screen offers **F1 (continue)** / **F2 (setup)**.
-4. **DECIDED — db contents: reset + release+vendor rebuild.** The db is no longer custom-only. During enrollment (Setup Mode, before the KEK and PK writes) the installer **resets db** — an authenticated delete of its existing content — and then **rebuilds it in one authenticated write** as the Alpine FDE release certificate **plus the vendor trust anchors** shipped in `certs/vendor/` (default: **Microsoft Option ROM UEFI CA 2023**, the option-ROM CA that authorizes signed NIC PXE / storage option ROMs, which is what fails UEFI0072 when missing). `dbx` is never touched — it stays the revocation list. The rebuild **replaces** the whole variable, so re-installs never accumulate duplicate certificates. Knobs: `ALPINE_FDE_DB_VENDOR=none` restores the minimal release-cert-only db (the old behavior); `ALPINE_FDE_DB_VENDOR_DIR` points at an alternative vendor directory. The vendor `.cer` files are additionally staged to the ESP's `alpine-fde-keys/` directory so an operator can append them via the firmware UI on boards where the NVRAM writes cannot run.
-5. **DECIDED — after "Delete All Policy Entries", OS-side NVRAM writes may be refused: recover via the firmware UI and the staged files (observed live 2026-09-28).** On this firmware, OS-side authenticated writes of PK/KEK/db (`efi-updatevar`) that succeeded the day before were refused with `EACCES` ("wrong filesystem permissions") after the operator used the firmware's **Delete All Policy Entries** — the wipe changes the variable-storage state in a way the kernel-visible efivarfs does not explain, and the installer cannot work around it. The install degrades gracefully: it stages the key material to the ESP's `alpine-fde-keys/` directory and continues. That directory now carries everything the firmware UI needs, **no extra LUKS unlock required**: the `.auth` packets (for `KeyTool.efi` / `efi-updatevar` repair only — the setup UI cannot import them), the **import-ready certificates** `db.cer` (the release cert, from `release.crt`), `KEK.cer` (from `kek.cert.der`), `PK.cer` (from `pk.cert.der`), the vendor `microsoft-option-rom-uefi-ca-2023.cer`, and a `README.txt` repeating the runbook below. Documented recovery:
+4. **db contents: reset + release+vendor rebuild.** The db is no longer custom-only. During enrollment (Setup Mode, before the KEK and PK writes) the installer **resets db** — an authenticated delete of its existing content — and then **rebuilds it in one authenticated write** as the Alpine FDE release certificate **plus the vendor trust anchors** shipped in `certs/vendor/` (default: **Microsoft Option ROM UEFI CA 2023**, the option-ROM CA that authorizes signed NIC PXE / storage option ROMs, which is what fails UEFI0072 when missing). `dbx` is never touched — it stays the revocation list. The rebuild **replaces** the whole variable, so re-installs never accumulate duplicate certificates. Knobs: `ALPINE_FDE_DB_VENDOR=none` restores the minimal release-cert-only db (the old behavior); `ALPINE_FDE_DB_VENDOR_DIR` points at an alternative vendor directory. The vendor `.cer` files are additionally staged to the ESP's `alpine-fde-keys/` directory so an operator can append them via the firmware UI on boards where the NVRAM writes cannot run.
+5. **After "Delete All Policy Entries", OS-side NVRAM writes may be refused: recover via the firmware UI and the staged files (observed live 2026-09-28).** On this firmware, OS-side authenticated writes of PK/KEK/db (`efi-updatevar`) that succeeded the day before were refused with `EACCES` ("wrong filesystem permissions") after the operator used the firmware's **Delete All Policy Entries** — the wipe changes the variable-storage state in a way the kernel-visible efivarfs does not explain, and the installer cannot work around it. The install degrades gracefully: it stages the key material to the ESP's `alpine-fde-keys/` directory and continues. That directory now carries everything the firmware UI needs, **no extra LUKS unlock required**: the `.auth` packets (for `KeyTool.efi` / `efi-updatevar` repair only — the setup UI cannot import them), the **import-ready certificates** `db.cer` (the release cert, from `release.crt`), `KEK.cer` (from `kek.cert.der`), `PK.cer` (from `pk.cert.der`), the vendor `microsoft-option-rom-uefi-ca-2023.cer`, and a `README.txt` repeating the runbook below. Documented recovery:
    1. Reboot into firmware setup (**F2 during POST** on Dell PowerEdge) and open Security / Secure Boot / Key Management.
    2. Import **`db.cer`** into the Key Database — **and then the vendor `microsoft-option-rom-uefi-ca-2023.cer` into db as well.** The db holds BOTH the release certificate (it authorizes the signed bootloader/kernel) and the vendor option-ROM CA: under custom keys, without the vendor cert, signed NIC PXE / PERC option ROMs fail the firmware's UEFI0072 Secure Boot policy at POST (the PERC can refuse to initialize and the disks vanish — see item 3).
    3. Import **`KEK.cer`** into the Key Exchange Key.
@@ -130,10 +130,11 @@ The installer executes all heavy system, package, and firmware setup operations 
 1. **Disk Partitioning & Formatting:** Partitions the target disk(s) into ESP and LUKS2 containers formatted with Btrfs.
 2. **Base System Bootstrap:** Installs the Alpine base system, kernel, boot manager, and administration tools (`doas`).
 3. **Platform Key Generation:** Generates your custom Secure Boot platform keys (`PK`, `KEK`, `db`) and your release signing key on the encrypted target root.
-4. **Firmware NVRAM Enrollment:** Enrolls your custom platform keys into UEFI NVRAM (`db → KEK → PK`), closing Setup Mode.
+4. **Firmware NVRAM Enrollment:** Enrolls your custom platform keys into UEFI NVRAM (`db → KEK → PK`), closing Setup Mode. In deferred-enrollment mode (a platform key is already enrolled — see [§1](#1-prerequisites--firmware-preparation)) this step makes **no** NVRAM writes; the certificate import happens via the firmware UI after the install.
 5. **Bootloader & UKI Build:** Builds and Authenticode-signs `systemd-boot` and the initial Unified Kernel Image (UKI).
 6. **Initial TPM Sealing:** Seals an initial TPM 2.0 token to the signed UKI measurement (PCR 11), ensuring the upcoming reboot unlocks without manual password intervention.
 7. **UEFI Boot Entry:** Creates the firmware boot entry **`Alpine FDE`** (capitalized) pointing at `\EFI\BOOT\BOOTX64.EFI` on the ESP, first in `BootOrder` — previously the operator ran `efibootmgr` by hand after every fresh install (on firmware with no EFI variable support, the step prints the exact manual command instead of failing).
+8. **Dual Console:** Kernel and initrd messages print to **both** the video and the serial console (`console=tty0 console=ttyS0,115200` by default), and the installed system gets a serial login prompt (getty) on `ttyS0` at 115200 baud — headless machines are usable out of the box.
 
 > [!TIP]
 > **Fast Fail-Debug Loop:** All disk operations, package downloads, firmware writes, and UKI signing execute before asking for credentials. If any hardware, network, or firmware step fails, the installer aborts immediately so failures are discovered fast during setup without wasting time re-typing passwords.
@@ -156,7 +157,7 @@ Upon reboot, the machine boots from the target disk:
    - **If Secure Boot is ON / enabled:** The initrd proceeds to evaluate the TPM 2.0 token against PCR 11, unsealing the root container **100% automatically with zero password prompts**.
 2. **Automated Finalization (Runs on First Boot Until Success):**
    - The standalone OpenRC service (`alpine-fde-finalize`) runs automatically before reaching the login prompt:
-     - Detects provisional state directly from the LUKS2 token (`pcrs: [11]`) and `baseline.json` (`expected_pcr7: "pending"`).
+     - Detects the provisional state from ground truth on disk (the LUKS2 token's PCR binding and the pending baseline — details in [Architecture §9.1](Architecture.md#91-provision--install-lifecycle-unattended-until-reboot-install--in-chroot-credential-ceremony--first-boot-auto-finalization-adr-20-amended)).
      - Captures the verified Secure Boot state (`PCR 7`) as the trusted baseline (`audit --init`), updating `/etc/alpine-fde/baseline.json`.
      - Upgrades the TPM seal from provisional {PCR 11} to **{PCR 7, PCR 11}** (bound to both firmware configuration and the signed UKI).
      - Purges the temporary setup key from Keyslot 2.
@@ -179,19 +180,19 @@ Alpine FDE implements a **Zero-Exfiltration** security posture:
 
 ### Command Reference
 
-Everything runs through a single tool with **7 verbs**: `./bin/alpine-fde <command>` (examples earlier in this guide show the full path; on an installed system the commands are on `PATH` as `alpine-fde <command>`). Lifecycle steps such as TPM enrollment, snapshotting, and first-boot finalization run **automatically** — you never invoke them (see [§3](#3-installation--first-boot-experience)).
+Everything runs through a single tool with **7 verbs**: `./bin/alpine-fde <command>` (examples earlier in this guide show the full path; on an installed system the commands are on `PATH` as `alpine-fde <command>`). Lifecycle steps such as TPM enrollment and first-boot finalization run **automatically** — you never invoke them (see [§3](#3-installation--first-boot-experience)).
 
 | Command | What it does | When you use it |
 |---|---|---|
 | `install` | The guided installation ceremony: partitions and encrypts disk(s) (supports single-disk, `--bcache` hybrid, multi-disk RAID1, and optional ephemeral encrypted swap via `--swap [size]`), installs Alpine base, enrolls Secure Boot keys, and seals the disk key to the TPM (see [§2](#2-installation-ceremonies) and [§3](#3-installation--first-boot-experience)). | Setting up a new machine — run once, from live media. |
 | `audit` | Verifies the running machine against its trusted baseline (firmware state and boot measurements). `--init` records the first baseline; `--accept` accepts a verified new one after a legitimate change. | After firmware/BIOS updates that prompt for the recovery passphrase ([Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)). |
-| `reseal` | Seals or re-enrolls the LUKS2 container to the TPM 2.0 policy. Runs automatically during installation and UKI builds. | During disaster recovery ([Runbook 2](#runbook-2-multi-disk-raid1-member-replacement--re-sync), [Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)) after drive replacement or PCR 7 drift re-baselining, or after a TPM clear. |
+| `reseal` | Seals or re-enrolls the LUKS2 container to the TPM 2.0 policy. Runs automatically during installation and UKI builds. | During disaster recovery ([Runbook 2](#runbook-2-failed-drive-replacement-in-btrfs-raid1), [Runbook 3](#runbook-3-pcr-7-drift-after-firmwarebios-update)) after drive replacement or PCR 7 drift re-baselining, or after a TPM clear. |
 | `passwd` | Changes the recovery passphrase — no re-encryption, no TPM re-enrollment. | When the passphrase was shared or may be compromised ([Runbook 4](#runbook-4-recovery-passphrase-rotation)). |
 | `status` | Shows the current trust state at a glance: Secure Boot state, TPM seal, keyslots, and boot images. | Any time you want to confirm the machine is sealed, signed, and finalized. |
 | `doctor` | Checks the environment before an install (missing packages, TPM presence, Secure Boot state), and the trust chain afterwards. | Before installing on a new machine, and as the first sanity check when something looks wrong. |
 | `kernel` | Manages the signed boot images per kernel: `kernel build` / `kernel remove` / `kernel prune`, plus `kernel next` to boot a retained kernel once, on the next reboot only. Build/remove run automatically on kernel upgrades; you run them manually when rebuilding boot images during recovery ([Runbook 1](#runbook-1-broken-cache-ssd--esp-rebuild-hybrid-bcache-setup), [Runbook 2](#runbook-2-failed-drive-replacement-in-btrfs-raid1)) or for custom kernels. `kernel next` — see [Booting Alternative or Retained Kernels](#booting-alternative-or-retained-kernels). | Only in recovery, rollback-testing, or custom-kernel scenarios. |
 
-**Internal (machine tier):** `provision`, `pcrsign`, and `finalize` remain callable for human recovery but are NOT part of the daily operator surface — scripts, daemons, and hooks must source the lib modules directly instead of exec'ing `alpine-fde` ([Architecture §8.1](Architecture.md#81-alpine-fde-cli--the-user-facing-tool)). There is no `pre-upgrade` verb: snapshots are taken automatically before upgrades (see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback)).
+**Internal (machine tier):** `provision`, `pcrsign`, and `finalize` remain callable for human recovery but are NOT part of the daily operator surface (the internal automation boundary is defined in [Architecture §8.1](Architecture.md#81-alpine-fde-cli--the-user-facing-tool)). There is no `pre-upgrade` verb (see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback)).
 
 > [!NOTE]
 > **Flags and exit codes:** Global flags (`--disk`, `--bcache`, `--swap`, `--yes`, `--root`, `--esp`, `--fs`) must come **before** the subcommand — e.g. `alpine-fde --root /mnt audit --accept`, as used in the runbooks below. `--version` and `--help` are always available. Exit codes are stable and safe to rely on in scripts: `0` success, `1` drift or check failed, `2` usage error, `3` not implemented, `64` fail-closed error.
@@ -220,9 +221,16 @@ Alpine package upgrades (`apk upgrade`) that install or update a kernel are hand
 3. Next boot: boots into the new kernel **100% passwordless**. No TPM re-enrollment is required.
 
 ### Btrfs Snapshots & Userspace Rollback
-Before major system changes or upgrades, a read-only snapshot of the root is taken **automatically** (there is no snapshot command to run — the snapshot flow of `lib/cmd/pre-upgrade.sh` writes it for you before upgrades):
+A read-only snapshot of the root taken before major system changes gives you an instant, passwordless rollback path. Take one before experiments or risky upgrades (it is one command; snapshots land under `/.snapshots/<name>` on the `@snapshots` subvolume):
 
-This creates a read-only snapshot of `@` under `/.snapshots/<timestamp>` (subvolume `@snapshots`). If an upgrade breaks userspace, restore the snapshot:
+```sh
+btrfs subvolume snapshot -r / /.snapshots/pre-upgrade-$(date +%Y%m%d-%H%M%S)
+```
+
+> [!NOTE]
+> **Automatic pre-upgrade snapshots are a design commitment, not a shipped behavior yet**: the snapshot machinery exists (the `@snapshots` subvolume is created at install; the snapshot flow is specified in [Architecture §4](Architecture.md#4-disk-layout)), but no hook currently takes a snapshot before `apk upgrade`. Until that lands, take the snapshot yourself before major changes.
+
+If an upgrade breaks userspace, restore the snapshot:
 ```sh
 # Mount top-level Btrfs volume
 mount -o subvolid=5 /dev/mapper/root-crypt /mnt
@@ -241,21 +249,22 @@ reboot
 Up to 3 kernels are retained on the ESP. To boot a previous kernel one time:
 
 ```sh
-# View available entries
-bootctl list
+# View the retained boot images (the digest-manifest section lists them; the
+# entry id is the UKI file name without the .efi suffix)
+alpine-fde status
 
 # Select kernel for next boot only
-alpine-fde kernel next alpine-fde-6.6.x-lts.efi
+alpine-fde kernel next alpine-fde-6.6.9-0-lts
 ```
 
-The system reboots into the previous kernel **without requiring a password**, because each retained boot image carries its own signature that the TPM accepts.
+The setting is one-shot: it is consumed by the **next** boot only, after which the boot menu default applies again. The system reboots into the previous kernel **without requiring a password**, because each retained boot image carries its own signature that the TPM accepts.
 
 ### Automated Boot & Login Auditing (Firmware Drift Detection)
 
 In addition to manual `alpine-fde audit` execution, platform firmware integrity is monitored automatically at two key points without any background daemons:
 
 1. **On Every Boot (`alpine-fde-audit` oneshot service):**
-   Runs in the OpenRC `default` runlevel scheduled with `after *` to execute **last immediately before the login prompt**. This guarantees that its warning notice is not scrolled off-screen by startup logs from other services (networking, sshd, chrony, etc.). It compares current PCR 0..3, PCR 7, and the TCG event log against `/etc/alpine-fde/baseline.json` using the same comparison logic as `alpine-fde audit` (the init script sources the audit library directly — it never execs the CLI). If any measurement drifts, it logs an explicit warning to syslog and writes a security notice to `/etc/issue` and `/etc/motd` (the machine's own banner text is preserved — the alert is a self-delimiting block prepended above it), and stages the detailed login banner at `/run/alpine-fde/audit-drift`. When a later boot audit **matches** the baseline, the standing alert (marker + banners) is retired automatically. A missing baseline (pre-provisioning) skips quietly with a syslog line; a failed check (TPM unreachable) is logged and skipped without ever clearing an existing alert or blocking the boot — drift is a result, not a boot failure. The service then terminates immediately (0 MB resident memory, 0 CPU overhead). The first-boot finalizer (`alpine-fde-finalize`) never touches this service — each oneshot manages only itself.
+   Runs **last, immediately before the login prompt**. This guarantees that its warning notice is not scrolled off-screen by startup logs from other services (networking, sshd, chrony, etc.). It compares current PCR 0..3, PCR 7, and the TCG event log against `/etc/alpine-fde/baseline.json` using the same comparison logic as `alpine-fde audit`. If any measurement drifts, it logs an explicit warning to syslog and writes a security notice to `/etc/issue` and `/etc/motd` (the machine's own banner text is preserved — the alert is a self-delimiting block prepended above it), and stages the detailed login banner at `/run/alpine-fde/audit-drift`. When a later boot audit **matches** the baseline, the standing alert (marker + banners) is retired automatically. A missing baseline (pre-provisioning) skips quietly with a syslog line; a failed check (TPM unreachable) is logged and skipped without ever clearing an existing alert or blocking the boot — drift is a result, not a boot failure. The service then terminates immediately (0 MB resident memory, 0 CPU overhead). The first-boot finalizer (`alpine-fde-finalize`) never touches this service — each oneshot manages only itself.
 
 2. **On Every Login (`/etc/profile.d/alpine-fde.sh`):**
    When an operator logs into an **interactive** shell (non-interactive sessions such as `scp` or CI runners stay silent), the profile hook checks for the staged drift marker (`/run/alpine-fde/audit-drift`). If present, it displays the high-visibility security alert banner right at the terminal, instructing the user on how to verify and accept or investigate.
@@ -305,24 +314,24 @@ Every class also prints the same closing line before the prompt: `after boot, ru
 If the machine boots while Secure Boot is disabled in firmware setup during the provisional window, the early-boot hook in the initrd **strictly refuses to boot**. It halts immediately before attempting any unsealing or prompting for passphrases:
 
 ```text
-:: Alpine FDE: Pre-unseal Secure Boot guard FAILED!
-:: REASON: Secure Boot is disabled or in Setup Mode (secureboot=0, setup_mode=0).
-::
-:: CRITICAL: The initrd strictly refuses to boot while Secure Boot is OFF!
-:: The encrypted root volume will NOT be unlocked.
-:: You must enable Secure Boot in your UEFI/BIOS firmware setup.
-::
-Press Enter to reboot into UEFI Firmware Setup...
+alpine-fde-unseal: Secure Boot guard: secureboot=0 setup_mode=0 — Secure Boot is OFF — refusing to unlock (pre-unseal guard, ADR-20)
+alpine-fde-unseal: the container will NOT be unlocked: no token path, no recovery passphrase — enable Secure Boot with this machine's platform keys in the firmware setup (UEFI)
+alpine-fde-unseal: OsIndications: boot-to-firmware-setup requested
+alpine-fde-unseal: Press Enter to reboot into the firmware setup (the container was NOT unlocked; no passphrase was requested)
+alpine-fde-unseal: rebooting into the firmware setup (Secure Boot must be enabled)
 ```
 
 On firmware **without** the `OsIndications` boot-to-setup mechanism (e.g. Dell PowerEdge — the `OsIndicationsSupported` variable is absent, so no OS request can reboot straight into setup), the tail of the exchange differs: the guard prints the manual import/enable steps and reboots plainly instead of expecting the firmware to auto-enter setup:
 
 ```text
-:: OsIndications not supported by this firmware — at the next boot, press F2 during POST to enter the firmware setup and:
-::   1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order, or the .cer certificates) or verify they are present
-::   2. enable Secure Boot
-::   3. save and exit
-:: Press Enter to reboot (press F2 during POST to enter the firmware setup)
+alpine-fde-unseal: Secure Boot guard: secureboot=0 setup_mode=0 — Secure Boot is OFF — refusing to unlock (pre-unseal guard, ADR-20)
+alpine-fde-unseal: the container will NOT be unlocked: no token path, no recovery passphrase — enable Secure Boot with this machine's platform keys in the firmware setup (UEFI)
+alpine-fde-unseal: OsIndications not supported by this firmware — at the next boot, press F2 during POST to enter the firmware setup and:
+alpine-fde-unseal:   1. import the keys from the ESP partition (alpine-fde-keys: db.auth, kek.auth, pk.auth — in that order, or the .cer certificates) or verify they are present
+alpine-fde-unseal:   2. enable Secure Boot
+alpine-fde-unseal:   3. save and exit
+alpine-fde-unseal: Press Enter to reboot (press F2 during POST to enter the firmware setup)
+alpine-fde-unseal: rebooting — press F2 during POST to enter the firmware setup
 ```
 
 #### 3. Boot-Time Firmware Drift Warning (`alpine-fde-audit` OpenRC Service)
@@ -371,15 +380,14 @@ The banner disappears once the drift is resolved and acknowledged: the next matc
 
 #### 5. First-Boot Finalization Failure (`alpine-fde-finalize`)
 
-Because the initrd pre-unseal guard already blocks boot if Secure Boot is disabled, by the time the OS reaches userspace, Secure Boot is already active (`secureboot=1, setup_mode=0`). Any failure during first-boot finalization would stem from a hardware TPM communication error or storage/keyslot update fault:
+Because the initrd pre-unseal guard already blocks boot if Secure Boot is disabled, by the time the OS reaches userspace, Secure Boot is already active (`secureboot=1, setup_mode=0`). Any failure during first-boot finalization would stem from a hardware TPM communication error or storage/keyslot update fault. The service never fails the boot: it reports loudly, stays provisional, and retries on the next boot:
 
 ```text
  * Starting alpine-fde-finalize ...
-WARNING: Alpine FDE trust finalization failed!
-ERROR: TPM token upgrade failed (tpm2_create returned exit code 1).
-The provisional seal and keyslot remain intact to retry on next boot,
-or you can inspect and complete manually with: alpine-fde finalize
- [ !! ]
+WARNING: Alpine FDE trust is NOT finalized (install state: provisional-booted).
+First-boot finalization FAILED (see the messages above; details in the finalize-attempt marker).
+The volume stays safely locked under the provisional seal; the service will retry on the next boot,
+or complete it manually with: alpine-fde finalize
 ```
 
 *(Note: If an operator manually executes `alpine-fde finalize` from an external live media environment where Secure Boot is toggled off, it will guard against that and report `Secure Boot guard failed: secureboot=0 setup_mode=0`).*
@@ -467,15 +475,21 @@ export NEW_SSD="/dev/nvme0n1"
 ESP_PARTUUID=$(blkid -s PARTUUID -o value "${NEW_SSD}p1")
 sed -i -E "s#(UUID|PARTUUID)=[^ ]+ /efi#PARTUUID=$ESP_PARTUUID /efi#" /etc/fstab
 
-# 2. Install systemd-boot onto the new ESP
-bootctl install --esp-path=/efi
+# 2. Install the systemd-boot boot manager onto the new ESP: a guarded file
+#    copy of the loader binary the systemd-boot package ships (Alpine ships
+#    no bootctl binary — never invoke bootctl)
+ldr=''
+for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do
+  [ -f "$p" ] && { ldr="$p"; break; }
+done
+[ -n "$ldr" ] || { echo "ERROR: no systemd-boot loader EFI binary found (apk add systemd-boot)" >&2; exit 1; }
+mkdir -p /efi/EFI/systemd /efi/EFI/BOOT
 
-# 3. Sign systemd-boot with your custom release key (prompts for release.pem passphrase)
-sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt --output /efi/EFI/systemd/systemd-bootx64.efi.signed /efi/EFI/systemd/systemd-bootx64.efi
-mv /efi/EFI/systemd/systemd-bootx64.efi.signed /efi/EFI/systemd/systemd-bootx64.efi
-
-sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt --output /efi/EFI/BOOT/BOOTX64.EFI.signed /efi/EFI/BOOT/BOOTX64.EFI
-mv /efi/EFI/BOOT/BOOTX64.EFI.signed /efi/EFI/BOOT/BOOTX64.EFI
+# 3. Sign the loader with your custom release key and install it to BOTH ESP
+#    homes (prompts for release.pem passphrase). The firmware verifies the
+#    FIRST loaded image, so the fallback path must be signed too.
+sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt "$ldr" --output /efi/EFI/BOOT/BOOTX64.EFI
+cp /efi/EFI/BOOT/BOOTX64.EFI /efi/EFI/systemd/systemd-bootx64.efi
 
 # 4. Rebuild signed UKIs on the new ESP for the target kernel
 TARGET_KVER=$(ls -1 /lib/modules | sort -V | tail -n1)
