@@ -36,9 +36,11 @@ mkinitfs:mkinitfs
 # host-installer tools (§13): enforced by the `install` preflight before disk
 # mutation; doctor only surfaces them — missing entries are warnings and never
 # gate the verdict. make-bcache matters only for --bcache (§4.1).
+# Alpine 3.24 split: lsblk/sfdisk ship in their own standalone packages, no
+# longer in util-linux (mirrors inst_live_tool_pairs).
 ALPINE_FDE_DOCTOR_HOST_PKGS='
-sfdisk:util-linux
-lsblk:util-linux
+sfdisk:sfdisk
+lsblk:lsblk
 mkfs.vfat:dosfstools
 mkfs.btrfs:btrfs-progs
 make-bcache:bcache-tools

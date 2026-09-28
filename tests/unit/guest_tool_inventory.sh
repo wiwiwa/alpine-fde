@@ -219,7 +219,10 @@ done <"$TMP/tools.txt"
 # util-linux, which the spool subset does not carry (present in Alpine main;
 # the on-demand install fails closed at run time if ever reached — a separate
 # mirror decision, NOT silently waved through here).
-KNOWN_GAP_RE='^(flock:util-linux|sfdisk:util-linux)$'
+# (the old sfdisk:util-linux gap entry is gone: Alpine 3.24 split — sfdisk is
+# now its own standalone package, pinned as sfdisk:sfdisk in
+# inst_live_tool_pairs / the doctor host pairs)
+KNOWN_GAP_RE='^(flock:util-linux)$'
 grep -hEo 'require_pkgs [A-Za-z0-9_:-]+([[:space:]]+[A-Za-z0-9_:-]+)*' \
     "$REPO"/lib/*.sh "$REPO"/lib/cmd/*.sh 2>/dev/null |
     sed 's/^require_pkgs //' | tr ' ' '\n' |

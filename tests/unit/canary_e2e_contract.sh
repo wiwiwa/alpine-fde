@@ -426,7 +426,9 @@ fi
 # --- 6e. the mirror closure must cover the LIVE-env tool set (the boot
 # lane's live finding #4, attempt 4) -------------------------------------------
 # The real installer's FIRST mirror consumption is the preflight's
-# require_pkgs: the virt ISO lacks sfdisk/lsblk (util-linux), mkfs.vfat
+# require_pkgs: the virt ISO lacks sfdisk/lsblk (Alpine 3.24 split: the
+# standalone `sfdisk` and `lsblk` packages — util-linux 2.42.3 no longer
+# ships either binary), mkfs.vfat
 # (dosfstools) and the cryptsetup CLI, and the installer `apk add`s them from
 # ALPINE_FDE_MIRROR — observed live: "apk add util-linux failed ... (no such
 # packaage)" (INSTALL-RC=64). The closure derivation covered ONLY
@@ -454,19 +456,19 @@ MIRROR_COVER=$(bash -c "
     INST_ROOT_FS=btrfs INST_BCACHE=0 install_package_list
     mirror_package_list" 2>/dev/null || true)
 _miss=''
-for p in util-linux dosfstools apk-tools cryptsetup openssl btrfs-progs e2fsprogs; do
+for p in sfdisk lsblk dosfstools apk-tools cryptsetup openssl btrfs-progs e2fsprogs; do
     case " $MIRROR_COVER " in
         *" $p "*) : ;;
         *) _miss="$_miss $p" ;;
     esac
 done
 if [ -z "$_miss" ]; then
-    _pass "mirror_package_list covers the live tool union (util-linux dosfstools apk-tools ...)"
+    _pass "mirror_package_list covers the live tool union (sfdisk lsblk dosfstools apk-tools ...)"
 else
     _fail "mirror_package_list is missing the live tool set:$_miss"
 fi
 if grep -q 'require_pkgs \$(inst_live_tool_pairs)' "$REPO/lib/cmd/install.sh" \
-    && ! grep -q 'require_pkgs apk:apk-tools sfdisk:util-linux' "$REPO/lib/cmd/install.sh"; then
+    && ! grep -q 'require_pkgs apk:apk-tools sfdisk:sfdisk' "$REPO/lib/cmd/install.sh"; then
     _pass "the preflight consumes inst_live_tool_pairs (single source — no drift)"
 else
     _fail "the preflight still hardcodes the require_pkgs pairs (drifts from the mirror derivation)"
@@ -487,7 +489,7 @@ bash -c "
     . '$REPO/lib/cmd/install.sh'
     PATH=/nonexistent require_pkgs \$(inst_live_tool_pairs)" >/dev/null 2>&1
 LIVE_RC=$?
-if [ "$LIVE_RC" = "64" ] && printf '%s' "$LIVE_ERR" | grep -q "util-linux" \
+if [ "$LIVE_RC" = "64" ] && printf '%s' "$LIVE_ERR" | grep -q "sfdisk" \
     && printf '%s' "$LIVE_ERR" | grep -q "dosfstools"; then
     _pass "executed record: require_pkgs(inst_live_tool_pairs) fails closed 64 naming the operands"
 else

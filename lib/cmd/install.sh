@@ -880,9 +880,16 @@ install_package_list() {
 # closure must cover it, or a real install dies at the first preflight probe;
 # boot-lane finding #4: the virt ISO lacks sfdisk/lsblk, and the closure had
 # no util-linux). Topology-conditional exactly like the preflight checks.
+# Alpine 3.24 util-linux SPLIT (real R640 install, 2026-09-28): util-linux
+# 2.42.3 no longer ships the lsblk/sfdisk binaries — upstream split them into
+# standalone packages (pkgs.alpinelinux.org contents DB, v3.24/main: /bin/lsblk
+# ships in `lsblk`, /sbin/sfdisk in `sfdisk`). The old sfdisk:util-linux /
+# lsblk:util-linux pairs apk-added a package that does not provide the probed
+# binary — a non-media live env dies at the first preflight probe (the ISO
+# media itself still carried the tools, masking the split on the real run).
 inst_live_tool_pairs() {
-  printf '%s\n' apk:apk-tools sfdisk:util-linux cryptsetup:cryptsetup \
-    mkfs.vfat:dosfstools lsblk:util-linux openssl:openssl
+  printf '%s\n' apk:apk-tools sfdisk:sfdisk cryptsetup:cryptsetup \
+    mkfs.vfat:dosfstools lsblk:lsblk openssl:openssl
   case $(inst_root_fs) in
   ext4) printf '%s\n' mkfs.ext4:e2fsprogs ;;
   *) printf '%s\n' mkfs.btrfs:btrfs-progs ;;
