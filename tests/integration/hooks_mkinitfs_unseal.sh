@@ -59,6 +59,15 @@
 #      and every passphrase prompt carries the "(attempt N of 3)" counter.
 #      A partial member-open failure is NOT a refusal class (the blob
 #      verified) and prompts unwarned; the success path prints no preamble.
+#  11. device-attach race (real-server blocker, Dell PowerEdge R640 first
+#      verified boot 2026-09-28): when the token scan finds NO token AND a
+#      crypttab member's by-uuid path was missing at probe time (the LAST
+#      kernel line before the old verdict was "[sdb] Attached SCSI disk"),
+#      the hook WAITS — bounded (FDE_ATTACH_WAIT_SECS), `sleep 1` probes of
+#      the SAME by-uuid paths the lookup uses — and re-scans. A member that
+#      appears during the wait continues the NORMAL passwordless flow with
+#      NO token_missing sentinel and NO warn preamble; only an EXHAUSTED
+#      bound takes the genuine token_missing verdict (preamble + prompt).
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -262,6 +271,25 @@ if [ "\$1" = "token" ]; then
         [ "\$_fdt_prev" = "--token-id" ] && _fdt_tid=\$_fdt_a
         _fdt_prev=\$_fdt_a
     done
+    # FDE_TEST_REQUIRE_NODE seam (device-attach race, R640): when set, token
+    # export models a NOT-YET-ATTACHED member — it refuses while the device
+    # path (the last positional argv word) does not exist, with real
+    # cryptsetup's refusal line
+    if [ "\${FDE_TEST_REQUIRE_NODE:-0}" = 1 ]; then
+        _fdt_dev=
+        _fdt_prev=
+        for _fdt_a in "\$@"; do
+            case \$_fdt_a in
+                -*) : ;;
+                *) [ "\$_fdt_prev" != "--token-id" ] && _fdt_dev=\$_fdt_a ;;
+            esac
+            _fdt_prev=\$_fdt_a
+        done
+        if [ -n "\$_fdt_dev" ] && [ ! -e "\$_fdt_dev" ]; then
+            printf 'Device %s does not exist or access denied.\\n' "\$_fdt_dev" >&2
+            exit 1
+        fi
+    fi
     if [ "\$_fdt_tid" -lt "\${FDE_TEST_TOKEN_MIN_ID:-0}" ]; then
         exit 1
     fi
@@ -509,11 +537,14 @@ assert_eq "tpm absent: exactly ONE preamble+closing emission (no repetition per 
 # =============================================================================
 # 3b. token_missing class (§8.2 step 2): the token scan exhausts the FULL
 #     LUKS2 range 0..31 with NO systemd-tpm2 token on any member -> the
-#     token_missing warn preamble + closing line, then the bounded prompt
+#     token_missing warn preamble + closing line, then the bounded prompt.
+#     FDE_ATTACH_WAIT_SECS is pinned small here: the default by-uuid dir has
+#     no member node in the sandbox, so the bounded attach wait runs to its
+#     exhaustion BEFORE the (genuine) token_missing verdict.
 # =============================================================================
 reset_leg
 write_state installed
-rc=$(run_hook "$TMP/stdin-rec" FDE_TEST_TOKEN_MIN_ID=32)
+rc=$(run_hook "$TMP/stdin-rec" FDE_TEST_TOKEN_MIN_ID=32 FDE_ATTACH_WAIT_SECS=2)
 assert_rc "token missing: recovery passphrase still unlocks" 0 "$rc"
 assert_contains "token missing: the no-token refusal sentinel is printed" \
     "$(cat "$TMP/out.log")" "$(sentinel_of unseal_token_missing)"
@@ -526,6 +557,71 @@ assert_precedes "token missing: preamble precedes the passphrase prompt" "$TMP/o
 assert_contains "token missing: prompt carries the (attempt 1 of 3) counter" \
     "$(cat "$TMP/out.log")" "(attempt 1 of 3) enter the recovery passphrase"
 assert_eq "token missing: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
+
+# =============================================================================
+# 3c. DEVICE-ATTACH RACE (real-server blocker, Dell PowerEdge R640 first
+#     verified boot 2026-09-28): the member's by-uuid node appears LATE — the
+#     fixture node is created only after 2 probe cycles (a background creator
+#     sleeps past the hook's first two `sleep 1` probes, exactly the shape of
+#     "[sdb] Attached SCSI disk" arriving after the token lookup gave up).
+#     The hook must WAIT (bounded) and RE-SCAN: recovery passphrase path NOT
+#     taken, NO token_missing preamble, normal passwordless unlock.
+# =============================================================================
+reset_leg
+write_state installed
+mkdir -p "$TMP/late-uuid"
+# the fixture "device node": a plain path the -e probe matches (the probe
+# targets the SAME by-uuid path the lookup opens; block-dev-ness is out of
+# scope for the sandbox — cryptsetup is stubbed)
+( sleep 2; : >"$TMP/late-uuid/$UUID1" ) &
+rc=$(run_hook "$TMP/stdin1" FDE_DISK_BY_UUID_DIR="$TMP/late-uuid" FDE_ATTACH_WAIT_SECS=10 FDE_TEST_REQUIRE_NODE=1)
+wait $! 2>/dev/null || :
+assert_rc "attach race: hook rc 0 (member appeared during the bounded wait)" 0 "$rc"
+assert_contains "attach race: the wait notice is printed (console diagnosability)" \
+    "$(cat "$TMP/out.log")" "waiting up to 10s"
+assert_contains "attach race: the re-scan notice is printed" \
+    "$(cat "$TMP/out.log")" "retrying the token scan"
+assert_eq "attach race: unseal reached after the re-scan" "1" "$(argv_count '^tpm2_unseal')"
+assert_eq "attach race: exactly one open (normal passwordless flow)" "1" "$(argv_count '^cryptsetup open')"
+assert_eq "attach race: open via the late member's by-uuid path" "1" \
+    "$(grep -c "cryptsetup open --type luks --key-file - $TMP/late-uuid/$UUID1 root$" "$LOG" || true)"
+assert_eq "attach race: NO recovery passphrase prompt (path NOT taken)" "0" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/out.log" || true)"
+assert_eq "attach race: NO token_missing sentinel (the race is NOT a verdict)" "0" \
+    "$(grep -cF "$(sentinel_of unseal_token_missing)" "$TMP/out.log" || true)"
+assert_eq "attach race: NO warn-before-prompt preamble on the race path" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
+assert_eq "attach race: NO audit/reseal closing line" "0" \
+    "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
+assert_eq "attach race: no poweroff" "0" "$(argv_count '^poweroff')"
+assert_contains "attach race: marker moved to provisional-booted" \
+    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+
+# =============================================================================
+# 3d. EXHAUSTED attach bound -> GENUINE token_missing (§8.2 step 2): the
+#     member never appears, the bounded wait runs out, and only THEN is the
+#     token_missing verdict taken — preamble + closing line + bounded prompt.
+# =============================================================================
+reset_leg
+write_state installed
+mkdir -p "$TMP/never-uuid"
+rc=$(run_hook "$TMP/stdin-rec" FDE_DISK_BY_UUID_DIR="$TMP/never-uuid" FDE_ATTACH_WAIT_SECS=2 FDE_TEST_REQUIRE_NODE=1)
+assert_rc "attach bound exhausted: recovery passphrase still unlocks" 0 "$rc"
+assert_contains "attach bound exhausted: the wait notice is printed" \
+    "$(cat "$TMP/out.log")" "waiting up to 2s"
+assert_eq "attach bound exhausted: NO re-scan notice (the bound expired)" "0" \
+    "$(grep -c 'retrying the token scan' "$TMP/out.log" || true)"
+assert_contains "attach bound exhausted: token_missing sentinel printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_token_missing)"
+assert_contains "attach bound exhausted: token_missing warn preamble printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_token_missing)"
+assert_contains "attach bound exhausted: the audit/reseal closing line printed" \
+    "$(cat "$TMP/out.log")" "$(sentinel_of unseal_warn_reclose)"
+assert_precedes "attach bound exhausted: preamble precedes the passphrase prompt" "$TMP/out.log" \
+    "$(sentinel_of unseal_warn_token_missing)" "$(sentinel_of unseal_prompt_re)"
+assert_contains "attach bound exhausted: open used the prompted passphrase" \
+    "$(cat "$LOG")" "cryptsetup-pass recovery-pass"
+assert_eq "attach bound exhausted: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
 
 # =============================================================================
 # 4. 3-STRIKE -> poweroff -f exactly once, rc != 0 (§8.2 fail-closed)

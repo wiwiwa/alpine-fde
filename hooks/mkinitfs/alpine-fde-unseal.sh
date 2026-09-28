@@ -46,7 +46,7 @@
 #      write, atomic tmp+mv, only when the state file says `installed`).
 #
 # Test seams (the real boot path uses the defaults): FDE_NEWROOT, FDE_CRYPTTAB,
-# FDE_EXTRA_DIR, FDE_TMPDIR.
+# FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS.
 #
 # Busybox mkinitfs environment only: no bashisms, no GNU tools beyond busybox
 # (sha256sum/od/dd/sed/awk/tr/mktemp/date), openssl + cryptsetup + tpm2-tools
@@ -60,6 +60,18 @@ FDE_EXTRA_DIR=${FDE_EXTRA_DIR:-/.extra}
 FDE_TMPDIR=${FDE_TMPDIR:-/tmp}
 FDE_MAX_ATTEMPTS=3
 FDE_PCR_PHASE=enter-initrd
+# REAL-SERVER RACE (Dell PowerEdge R640, first verified boot 2026-09-28): the
+# token scan resolved crypttab members via /dev/disk/by-uuid/ and gave up the
+# moment one member was not yet visible — the LAST kernel line before the
+# token_missing verdict was a disk still attaching ("sd 14:2:5:0: [sdb]
+# Attached SCSI disk"), i.e. the seal/token was intact and the verdict was a
+# FALSE token_missing. FDE_DISK_BY_UUID_DIR is the directory the UUID= fields
+# resolve against (the SAME paths the token lookup opens); FDE_ATTACH_WAIT_SECS
+# bounds the wait for every member to appear before the token_missing verdict
+# is taken (§8.2 step 2). A timeout after the bound is a GENUINE token_missing;
+# the race path itself never prints the warn-before-prompt preamble.
+FDE_DISK_BY_UUID_DIR=${FDE_DISK_BY_UUID_DIR:-/dev/disk/by-uuid}
+FDE_ATTACH_WAIT_SECS=${FDE_ATTACH_WAIT_SECS:-30}
 
 # Warn-before-prompt REASON preambles (user decision queue item 8, §8.2 step
 # 5): ONE canonical sentence per refusal class, printed verbatim by the branch
@@ -268,7 +280,7 @@ _fdh_resolve_dev() {
             case ${1#UUID=} in
                 *[!0-9a-fA-F-]*) return 1 ;;
             esac
-            printf '/dev/disk/by-uuid/%s\n' "${1#UUID=}"
+            printf '%s/%s\n' "$FDE_DISK_BY_UUID_DIR" "${1#UUID=}"
             ;;
         /dev/*) printf '%s\n' "$1" ;;
         *) return 1 ;;
@@ -296,34 +308,17 @@ _fdh_prompt_pass() {
     printf '%s' "$_fdh_pass"
 }
 
-# --- §8.2 step 1: extend the ukify phase string into PCR 11 ---------------------
-_fdh_tpm_ok=1
-_fdh_phase_dgst=$(printf '%s' "$FDE_PCR_PHASE" | sha256sum | awk '{print $1}')
-tpm2_pcrextend "11:sha256=$_fdh_phase_dgst" >/dev/null 2>&1 || _fdh_tpm_ok=0
-if [ "$_fdh_tpm_ok" = 1 ]; then
-    _msg "extended '$FDE_PCR_PHASE' into PCR 11 (ukify --measure phase alignment)"
-else
-    _msg "TPM absent or refused the PCR 11 extend — recovery passphrase path (§8.2)"
-    # token_missing class: no TPM path exists at all (§8.2 step 5)
-    _fdh_warn "$FDE_WARN_TOKEN_MISSING"
-fi
-
-# --- §8.2 steps 2+3: token path -------------------------------------------------
-_fdh_pass_file=''
-_fdh_w=''
-if [ "$_fdh_tpm_ok" = 1 ]; then
-    _fdh_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-unseal.XXXXXX") 2>/dev/null || _fdh_w=''
-    [ -n "$_fdh_w" ] && chmod 700 "$_fdh_w" 2>/dev/null || :
-fi
-if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
-    [ -r "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" ]; then
-    # the first member carrying a systemd-tpm2 token pins policy + blob
-    # (§8.2: all RAID1 members are enrolled with matching parameters).
-    # Member pairing walks the whitespace-split word list (crypttab root
-    # target/device fields are whitespace-free by grammar): odd word = target,
-    # even word = device.
+# _fdh_scan_token — walk the crypttab members and export the FIRST
+# systemd-tpm2 token found (full LUKS2 token-id range 0..31). Sets:
+#   _fdh_tok          the raw token JSON ('' when none found)
+#   _fdh_exp_err      first export-refusal line (console diagnosability)
+#   _fdh_attach_missing  1 when ANY resolved member device path did not exist
+#                     at probe time — the device-attach race signal (R640)
+# re-scan-safe: callable twice (the bounded attach wait re-invokes it).
+_fdh_scan_token() {
     _fdh_tok=''
     _fdh_exp_err=''
+    _fdh_attach_missing=0
     _fdh_pos=0
     for _fdh_wd in $_fdh_members; do
         _fdh_pos=$((_fdh_pos + 1))
@@ -332,6 +327,11 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
             continue
         fi
         _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
+        if [ ! -e "$_fdh_dev" ]; then
+            # member not attached (yet): remember the race signal — the
+            # export below still runs so the refusal stays VISIBLE
+            _fdh_attach_missing=1
+        fi
         _fdh_tid=0
         # LUKS2 allows up to 32 tokens (ids 0..31): scan the FULL valid range —
         # a token parked at id >=16 must still be found, never silently
@@ -361,6 +361,74 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         done
         [ -n "$_fdh_tok" ] && break
     done
+    return 0
+}
+
+# _fdh_wait_members — bounded wait for EVERY crypttab member device to appear
+# (the R640 device-attach race, §8.2 step 2). Probes the SAME by-uuid paths
+# the token lookup opens, plain POSIX loop, `sleep 1` between probes (no
+# busy-spin), total bound FDE_ATTACH_WAIT_SECS. Returns 0 the moment all
+# members exist (caller re-runs the token scan — the normal flow continues);
+# returns 1 only after the bound expires — from THERE a token_missing verdict
+# is genuine, and ONLY that timeout path may take it (the race path itself
+# never prints the warn-before-prompt preamble).
+_fdh_wait_members() {
+    _fdh_left=$FDE_ATTACH_WAIT_SECS
+    while [ "$_fdh_left" -gt 0 ]; do
+        _fdh_all=1
+        _fdh_pos=0
+        for _fdh_wd in $_fdh_members; do
+            _fdh_pos=$((_fdh_pos + 1))
+            [ $((_fdh_pos % 2)) -eq 1 ] && continue # odd word = target
+            _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
+            [ -e "$_fdh_dev" ] || _fdh_all=0
+        done
+        [ "$_fdh_all" = 1 ] && return 0
+        _fdh_left=$((_fdh_left - 1))
+        [ "$_fdh_left" -gt 0 ] && sleep 1
+    done
+    return 1
+}
+
+# --- §8.2 step 1: extend the ukify phase string into PCR 11 ---------------------
+_fdh_tpm_ok=1
+_fdh_phase_dgst=$(printf '%s' "$FDE_PCR_PHASE" | sha256sum | awk '{print $1}')
+tpm2_pcrextend "11:sha256=$_fdh_phase_dgst" >/dev/null 2>&1 || _fdh_tpm_ok=0
+if [ "$_fdh_tpm_ok" = 1 ]; then
+    _msg "extended '$FDE_PCR_PHASE' into PCR 11 (ukify --measure phase alignment)"
+else
+    _msg "TPM absent or refused the PCR 11 extend — recovery passphrase path (§8.2)"
+    # token_missing class: no TPM path exists at all (§8.2 step 5)
+    _fdh_warn "$FDE_WARN_TOKEN_MISSING"
+fi
+
+# --- §8.2 steps 2+3: token path -------------------------------------------------
+_fdh_pass_file=''
+_fdh_w=''
+if [ "$_fdh_tpm_ok" = 1 ]; then
+    _fdh_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-unseal.XXXXXX") 2>/dev/null || _fdh_w=''
+    [ -n "$_fdh_w" ] && chmod 700 "$_fdh_w" 2>/dev/null || :
+fi
+if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
+    [ -r "$FDE_EXTRA_DIR/tpm2-pcr-public-key.pem" ]; then
+    # the first member carrying a systemd-tpm2 token pins policy + blob
+    # (§8.2: all RAID1 members are enrolled with matching parameters).
+    # Member pairing walks the whitespace-split word list (crypttab root
+    # target/device fields are whitespace-free by grammar): odd word = target,
+    # even word = device.
+    _fdh_scan_token
+    if [ -z "$_fdh_tok" ] && [ "$_fdh_attach_missing" = 1 ]; then
+        # R640 device-attach race: a member device was not visible during the
+        # scan — WAIT (bounded) for the crypttab members before ANY verdict.
+        # A member that appears here continues the NORMAL flow (re-scan); the
+        # warn-before-prompt preamble is NOT printed on this path — only an
+        # exhausted bound below reaches the genuine token_missing verdict.
+        _msg "crypttab member device(s) not attached yet — waiting up to ${FDE_ATTACH_WAIT_SECS}s for /dev/disk/by-uuid to settle (device-attach race)"
+        if _fdh_wait_members; then
+            _msg "crypttab member(s) attached — retrying the token scan"
+            _fdh_scan_token
+        fi
+    fi
 
     if [ -n "$_fdh_tok" ]; then
         # §7.2 dash-form token (lib/token.sh schema): tpm2-blob, tpm2-pcrs,
