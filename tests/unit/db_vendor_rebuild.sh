@@ -14,8 +14,10 @@
 #   (7) fw_auth_enroll ordering pin: db reset (authenticated delete) precedes
 #       the db write, db write precedes KEK, KEK precedes PK; dbx is NEVER
 #       targeted by the reset or the write;
-#   (8) SetupMode != 1 -> fail-closed 64 with an actionable message, and
-#       nothing is written;
+#   (8) SetupMode=0 WITH a platform PK -> the DEFERRED-ENROLLMENT path (no
+#       NVRAM writes, .cer staging, rc 0 — DECIDED 2026-09-28, real Dell
+#       PowerEdge R640); SetupMode=0 with NO PK (no real firmware state) ->
+#       fail-closed 64 with an actionable message, and nothing is written;
 #   (9) the ESP fallback stages every vendor .cer under its basename.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -268,22 +270,42 @@ assert_contains "the db reset is announced as the db RESET (not a generic rm)" "
 assert_contains "the reset reused the signed-empty delete machinery (sign-efi-sig-list over /dev/null)" \
     "$(cat "$SESL_LOG")" "db /dev/null"
 
-# (8) SetupMode=0 -> fail-closed 64, actionable, NOTHING written
+# (8) SetupMode=0 WITH a platform PK -> the DEFERRED-ENROLLMENT path (DECIDED
+# Samuel, 2026-09-28, real Dell PowerEdge R640): NO NVRAM writes, the
+# import-ready .cer staging with the defer note, rc 0 (install continues).
+# SetupMode=0 WITHOUT a PK (a state no real firmware reports) stays
+# fail-closed 64 with the actionable Setup-Mode remedy.
 E2=$TMP/enroll-usermode
 mkdir -p "$E2"
 printf '\007\000\000\000\001' >"$E2/SecureBoot-$GUID_GLOBAL"
 printf '\007\000\000\000\000' >"$E2/SetupMode-$GUID_GLOBAL" # payload 0 = user mode
 printf '\007\000\000\000\001' >"$E2/PK-$GUID_GLOBAL"        # a PK is enrolled
 : >"$EUV_LOG"
-RC=$( (PATH="$SB:$PATH" ALPINE_FDE_DB_VENDOR=none ALPINE_FDE_DB_VENDOR_DIR="$EMPTY" \
-    fw_auth_enroll "$E2" "$EK") >/dev/null 2>&1; echo $? )
-assert_eq "SetupMode=0 (user mode) -> fail-closed 64" "64" "$RC"
+ESP2=$TMP/esp-usermode
 OUT2=$(PATH="$SB:$PATH" ALPINE_FDE_DB_VENDOR=none ALPINE_FDE_DB_VENDOR_DIR="$EMPTY" \
-    fw_auth_enroll "$E2" "$EK" 2>&1)
+    fw_auth_enroll "$E2" "$EK" "$ESP2" 2>&1)
+RC2=$?
+assert_eq "SetupMode=0 with a platform PK -> DEFERRED path, rc 0 (install continues)" "0" "$RC2"
+assert_contains "the deferred info line names the platform PK + the firmware-UI route" \
+    "$OUT2" "enrollment DEFERS to the firmware-UI import"
+assert_contains "the deferred info line says the platform PK/KEK stay" \
+    "$OUT2" "the platform's PK/KEK stay"
+assert_eq "SetupMode=0: NOTHING was written (log empty)" "0" "$(grep -c . "$EUV_LOG")"
+assert_eq "the deferred staging carries db.cer (the import-ready release cert)" "1" \
+    "$([ -f "$ESP2/alpine-fde-keys/db.cer" ] && echo 1 || echo 0)"
+E2B=$TMP/enroll-usermode-nopk
+mkdir -p "$E2B"
+printf '\007\000\000\000\001' >"$E2B/SecureBoot-$GUID_GLOBAL"
+printf '\007\000\000\000\000' >"$E2B/SetupMode-$GUID_GLOBAL"
+RC=$( (PATH="$SB:$PATH" ALPINE_FDE_DB_VENDOR=none ALPINE_FDE_DB_VENDOR_DIR="$EMPTY" \
+    fw_auth_enroll "$E2B" "$EK") >/dev/null 2>&1; echo $? )
+assert_eq "SetupMode=0 with NO platform PK -> fail-closed 64" "64" "$RC"
+OUT2B=$(PATH="$SB:$PATH" ALPINE_FDE_DB_VENDOR=none ALPINE_FDE_DB_VENDOR_DIR="$EMPTY" \
+    fw_auth_enroll "$E2B" "$EK" 2>&1)
 assert_contains "the SetupMode gate message is actionable (names the Setup Mode remedy)" \
-    "$OUT2" "Clear Secure Boot Keys"
+    "$OUT2B" "Clear Secure Boot Keys"
 assert_contains "the SetupMode gate names the design boundary (not this flow's job)" \
-    "$OUT2" "not this flow's job"
+    "$OUT2B" "not this flow's job"
 assert_eq "SetupMode=0: NOTHING was written (log empty)" "0" "$(grep -c . "$EUV_LOG")"
 
 # (9) ESP fallback stages vendor certs under their basenames

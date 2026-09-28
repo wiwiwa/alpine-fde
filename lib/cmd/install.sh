@@ -4,9 +4,11 @@
 # with the internal ephemeral install key (never persisted, I1), minimal
 # Alpine rootfs (§3.3 apk populate), and the in-chroot provisioning ceremony
 # ending in a provisional TPM token (PCR 11 only) + a direct reboot to disk —
-# or, when the firmware REFUSED NVRAM enrollment, the manual key-import
-# instructions, an explicit Enter confirmation, and a reboot INTO FIRMWARE
-# SETUP (OsIndications) instead.
+# or, when the firmware REFUSED NVRAM enrollment (or a platform key was
+# ALREADY enrolled — factory or custom: the DEFERRED-ENROLLMENT mode, no
+# NVRAM writes, the release certificate is imported via the firmware UI), the
+# manual key-import instructions, an explicit Enter confirmation, and a reboot
+# INTO FIRMWARE SETUP (OsIndications) instead.
 #
 # FLOW ORDER (user directives, real-server blocker #7): every MECHANICAL step
 # that needs no ceremony secret (NVRAM enrollment, boot-manager file copy,
@@ -540,8 +542,11 @@ Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
                           [--bcache CACHE_DEV] [--no-reboot] [--yes]
 
 Unattended-until-reboot Stage-1 install (§9.1/ADR-20 amended; unattended
-except for the §9.1 step 4 credential-ceremony prompts): firmware Setup
-Mode gate (SetupMode=1 required — clear the vendor PK in BIOS first),
+except for the §9.1 step 4 credential-ceremony prompts): firmware SetupMode
+gate (SetupMode=1 for the NVRAM write flow — clear the vendor PK in BIOS
+first — OR a platform key already enrolled, which takes the
+deferred-enrollment mode: no NVRAM writes, the release certificate is
+imported via the firmware UI after the install),
 partition + block layer, LUKS2 formatted in the TEMPORARY keyslot 2 with the
 INTERNAL EPHEMERAL INSTALL KEY (openssl rand, >=256-bit, staged on tmpfs
 mode 0600, scrubbed at teardown; keyslot 0 is reserved for the recovery
@@ -566,7 +571,9 @@ credential ceremony sits LAST; only the secret-dependent steps follow it
 into keyslot 1, Mechanism B, PCR 11 only, from the UKI's .pcrsig), then
 teardown (unmount + ephemeral-key scrub) and: a direct reboot to disk when
 NVRAM enrollment succeeded — or, when the firmware refused it (key material
-staged to <esp>/alpine-fde-keys), the manual-import instructions, an explicit
+staged to <esp>/alpine-fde-keys) or a platform key was already enrolled (the
+deferred-enrollment mode: import db.cer into the EXISTING db via the firmware
+UI), the manual-import instructions, an explicit
 Enter confirmation, and a reboot INTO FIRMWARE SETUP (OsIndications) for the
 manual key import: the first boot unlocks via the provisional token and
 alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
@@ -953,10 +960,20 @@ inst_live_tool_pairs() {
 }
 
 # inst_setupmode_gate — G-IL2 (§9.1 preflight, UserGuide §1): the FIRST
-# preflight check, BEFORE any disk mutation. Authenticated NVRAM writes
-# (db/KEK/PK) require SetupMode==1; a vendor PK still installed would make the
-# in-chroot enrollment fail (or worse, brick the boot entry) — fail closed 64
-# with the operator fix. Runs over the ALPINE_FDE_EFIVARS_DIR seam.
+# preflight check, BEFORE any disk mutation. TWO firmware states are supported:
+#   SetupMode==1 (Setup Mode)            the NVRAM write flow (db reset +
+#                                        release+vendor rebuild -> KEK -> PK)
+#   SetupMode==0 WITH a platform PK      the DEFERRED-ENROLLMENT mode (DECIDED
+#                                        Samuel, 2026-09-28, real Dell
+#                                        PowerEdge R640): factory or custom
+#                                        PK stays; the release certificate is
+#                                        imported into the existing db via
+#                                        the firmware UI after the install
+#                                        (fw_auth_enroll stages the .cer set
+#                                        and makes NO NVRAM writes)
+# Anything else (SetupMode==0 with NO PK — a state no real firmware reports;
+# SetupMode variable absent) fails closed 64 with the operator fix. Runs over
+# the ALPINE_FDE_EFIVARS_DIR seam.
 inst_setupmode_gate() {
   _isg_dir=$(fw_efivars_dir)
   [ -d "$_isg_dir" ] ||
@@ -966,8 +983,13 @@ inst_setupmode_gate() {
   _isg_state=$(fw_sb_state || true)
   _isg_setup=${_isg_state#*setup_mode=}
   _isg_setup=${_isg_setup%% *}
-  [ "$_isg_setup" = "1" ] ||
-    die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first (§9.1 preflight)"
+  if [ "$_isg_setup" != "1" ]; then
+    if [ "$_isg_setup" = "0" ] && fw_var_present "$_isg_dir" PK; then
+      info "install: a platform key is already enrolled ($_isg_state) — deferred-enrollment mode: the installer makes NO NVRAM writes; the release certificate is imported via the firmware setup UI after the install"
+      return 0
+    fi
+    die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first, or keep the platform key enrolled (deferred-enrollment mode: the release certificate is imported via the firmware UI) (§9.1 preflight)"
+  fi
   info "install: firmware Setup Mode confirmed ($_isg_state)"
   return 0
 }
@@ -2074,13 +2096,22 @@ cmd_install_main() {
     inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody'
   fi
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
-  # efivars (SetupMode was gate-checked host-side in preflight). The in-chroot
+  # efivars (the firmware state was gate-checked host-side in preflight:
+  # Setup Mode — or a platform PK already enrolled, the DEFERRED-enrollment
+  # mode). The in-chroot
   # ESP mount ($_im_esp_mnt, §8.1 --esp/env ALPINE_FDE_ESP/default /efi) is
   # passed as the fallback staging dir (queue 26 ext): when the firmware
   # refuses the SetVariable, fw_auth_enroll stages the .auth/.esl key material
   # to <ESP>/alpine-fde-keys and prints manual-import instructions instead of
-  # dying — the install continues.
-  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
+  # dying — the install continues. In the DEFERRED-enrollment mode (a platform
+  # PK is already enrolled — factory or custom, REAL-SERVER 2026-09-28 Dell
+  # PowerEdge R640) fw_auth_enroll makes NO NVRAM writes and stages the
+  # import-ready .cer set instead; the ALPINE_FDE_ENROLL_DEFERRED_MARKER seam
+  # (host /dev/shm, bind-mounted into the chroot at the H-02 step above) tells
+  # the §9 tail verdict to route the deferred instructions + firmware-setup
+  # reboot.
+  inst_plan_run host "rm -f /dev/shm/alpine-fde-enroll-deferred # stale deferred marker from a previous boot/install must not misroute the §9 verdict"
+  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
   # step 4b (REPLACED + MOVED BEFORE the ceremony — real-server blocker #7:
   # Alpine ships NO bootctl binary; the retired `bootctl install` record died
   # "/bin/sh: bootctl: not found" AFTER the credential ceremony had already
@@ -2210,7 +2241,8 @@ cmd_install_main() {
   # + seal run inside the chroot this unmounts): unmount, container close, the
   # explicit ephemeral-key scrub (I1). The FINAL reboot is the plan's tail
   # (§9 below): a direct reboot to disk when the NVRAM enrollment succeeded —
-  # or, when the firmware refused it, the manual-import instructions, an
+  # or, when the firmware refused it OR a platform key was already enrolled
+  # (the deferred-enrollment mode), the manual-import instructions, an
   # explicit Enter confirmation, and a reboot INTO FIRMWARE SETUP
   # (OsIndications) for the manual key import.
   # boot-lane findings #20 + #21 (s23 attempts 20-21): (a) the efivars bind is
@@ -2223,18 +2255,35 @@ cmd_install_main() {
   inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
-  # The NVRAM enrollment ran BEFORE the ceremony (mechanical); whether the
-  # firmware ACCEPTED it is only knowable at RUN time (generate-time cannot
-  # know machine state — the reset-record idiom): probe PK on the LIVE
-  # efivars (the in-chroot enrollment wrote the bind-mounted live NVRAM).
-  inst_plan_run host "if fw_var_present $(fw_efivars_dir) PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi # enrollment verdict: PK absent = NVRAM enrollment refused — manual key import still pending (deferred)"
+  # The NVRAM enrollment ran BEFORE the ceremony (mechanical); the outcome is
+  # only knowable at RUN time (generate-time cannot know machine state — the
+  # reset-record idiom): a DEFERRED-enrollment marker (the in-chroot
+  # fw_auth_enroll wrote it on the bind-mounted host tmpfs when a platform PK
+  # was already enrolled) routes to the deferred-import tail; otherwise probe
+  # PK on the LIVE efivars (the in-chroot enrollment wrote the bind-mounted
+  # live NVRAM): PK present = NVRAM enrollment succeeded, PK absent = refused
+  # (staged, manual import pending).
+  inst_plan_run host "if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present $(fw_efivars_dir) PK; then INST_SB_ENROLLED=1; INST_SB_DEFERRED=0; else INST_SB_ENROLLED=0; INST_SB_DEFERRED=0; fi # enrollment verdict: deferred marker = a platform PK was already enrolled (factory or custom) — the release certificate import via the firmware UI is still pending; PK present = NVRAM enrollment succeeded; PK absent = enrollment refused — manual key import still pending (deferred)"
+  inst_plan_run host "rm -f /dev/shm/alpine-fde-enroll-deferred # the verdict consumed the deferred marker (I1 seam hygiene)"
   # DEFERRED path (user directive 3): the manual-import instructions print at
   # the VERY END of the install — after every mechanical step — naming the
   # DIRECT-from-ESP import FIRST (user directive 2: the key material is staged
   # on the internal ESP precisely so the firmware can load it from there).
   # The explicit Enter confirmation + the firmware-setup reboot follow
   # (emitted only when the reboot is not suppressed by the CI seam).
-  inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s\n' 'alpine-fde: Secure Boot key material is staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition — the firmware refused NVRAM enrollment; finish the import manually:' '  1. import DIRECTLY from the internal ESP when the firmware key-management UI can browse it (the three files to import are already at $_im_esp_mnt/alpine-fde-keys — this is why they are staged on the EFI partition); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import the THREE staged files in this order: db.auth (Key Database), then kek.auth (Key Exchange Key), then pk.auth (Platform Key — import LAST; it locks the key database)' '  4. in the firmware file browser you will see the marker file !import_all_auth_files — import the three .auth files (README.txt on the ESP repeats these steps — no need to memorize them)' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until the keys are imported (that is the design, ADR-20)'; fi # deferred enrollment: manual-import instructions printed LAST (user directive: instructions at the very end; direct-from-ESP import first; three .auth files + README.txt + marker enumerated)"
+  # Two instruction blocks, one per non-enrolled outcome:
+  #   INST_SB_DEFERRED=1  a platform PK is ALREADY enrolled (factory or
+  #                       custom): import db.cer + the vendor certificate
+  #                       INTO THE EXISTING db; the PK/KEK stay (REAL-SERVER
+  #                       2026-09-28, Dell PowerEdge R640 — the firmware UI
+  #                       imports X.509 certificates only, and the vendor db
+  #                       already carries the option-ROM CAs)
+  #   otherwise (PK absent) the firmware refused the NVRAM writes: import the
+  #                       staged CERTIFICATES in the db -> KEK -> PK order
+  #                       (the UI cannot import .auth packets — those are
+  #                       KeyTool.efi / efi-updatevar repair material)
+  inst_plan_run host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then printf '%s\n' 'alpine-fde: a platform key is ALREADY enrolled (factory or custom) — the installer made NO NVRAM writes; finish by importing the release certificate via the firmware UI:' '  1. the import-ready certificates are staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition: db.cer (the alpine-fde release certificate) plus the vendor option-ROM certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import db.cer AND the vendor certificate INTO THE EXISTING key database (db) — Secure Boot can stay ENABLED throughout' '  4. do NOT import KEK.cer or PK.cer and do NOT clear or replace the platform key — the existing PK and KEK stay (README.txt on the ESP and the marker file !import_all_auth_files repeat these steps — no need to memorize them)' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until db.cer is imported (that is the design, ADR-20)'; fi # deferred enrollment (platform PK present): UI import of db.cer + the vendor cert into the EXISTING db printed LAST"
+  inst_plan_run host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then :; elif [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s\n' 'alpine-fde: Secure Boot key material is staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition — the firmware refused NVRAM enrollment; finish the import manually:' '  1. import DIRECTLY from the internal ESP when the firmware key-management UI can browse it (the files to import are already at $_im_esp_mnt/alpine-fde-keys — this is why they are staged on the EFI partition); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import the staged CERTIFICATES in this order (the firmware UI imports X.509 .cer files — it CANNOT import .auth packets): db.cer AND the vendor certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer) for the Key Database, then KEK.cer (Key Exchange Key), then PK.cer (Platform Key — import LAST; it locks the key database)' '  4. the .auth packets staged alongside (db.auth kek.auth pk.auth) are for KeyTool.efi / efi-updatevar repair only; in the firmware file browser the marker file !import_all_auth_files and README.txt on the ESP repeat these steps — no need to memorize them' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until the keys are imported (that is the design, ADR-20)'; fi # deferred enrollment (firmware refused): manual-import instructions printed LAST (user directive: instructions at the very end; direct-from-ESP import first; the UI-importable .cer set db.cer + vendor cert + KEK.cer + PK.cer enumerated, the .auth packets named as repair-only; README.txt + marker enumerated)"
   if [ "$_im_no_reboot" = "0" ] && [ "${ALPINE_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
     inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s' 'alpine-fde: review the manual-import instructions above, then press Enter to reboot into firmware setup (UEFI): ' >&2; IFS= read -r _im_enter || :; fi # deferred enrollment: EXPLICIT user confirmation before the firmware reboot (user directive)"
     inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else fw_osindications_set $(fw_efivars_dir) && reboot; fi # deferred enrollment: next boot enters firmware setup (OsIndications bit 0) for the manual key import"
@@ -2249,6 +2298,8 @@ cmd_install_main() {
     rm -f "$_im_lukskey" "${_im_pf_host:-}" 2>/dev/null
     if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
       printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
+    elif [ "${INST_SB_DEFERRED:-}" = "1" ]; then
+      printf 'alpine-fde: install complete — a platform key is ALREADY enrolled (factory or custom): NO NVRAM writes were attempted; import the release certificate db.cer plus the vendor certificate INTO THE EXISTING key database via the firmware UI from %s/alpine-fde-keys — the installer reboots into firmware setup for the import (the existing PK and KEK stay; first boot stays guarded until db.cer is imported, ADR-20)\n' "$_im_esp_mnt" >&2
     else
       printf 'alpine-fde: install complete — firmware NVRAM enrollment was REFUSED: the Secure Boot key material is staged under %s/alpine-fde-keys; the installer reboots into firmware setup for the manual key import (first boot stays guarded until the keys are imported, ADR-20)\n' "$_im_esp_mnt" >&2
     fi

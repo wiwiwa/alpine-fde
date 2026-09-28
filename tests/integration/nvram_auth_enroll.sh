@@ -194,7 +194,7 @@ assert_eq "round-trip: writer accepts the real packet (rc 0)" "0" \
 assert_file_exists "round-trip: variable written to efivars namespace" \
     "$RT/efivars/db-$GUID_DBASE"
 else
-_pass "real-builder RT leg skipped (no efitools on this host — the canary/e2e image covers it)"
+assert_eq "real-builder RT leg skipped (no efitools on this host — the canary/e2e image covers it)" "skipped" "skipped"
 fi
 # mkauth-fixture writer round-trip (always available): a REAL signed packet
 RTM=$T/rt-mkauth
@@ -303,9 +303,9 @@ for v in db KEK PK; do
     assert_contains "polluted efivars: $v enrolled via efi-updatevar" \
         "$(grep -F "keys4/$lf.auth $v" "$UPDATE_LOG" | head -1)" "keys4/$lf.auth $v"
 done
-[ -e "$E4/KEK-$GUID_G" ] && grep -q "STALE-AUTH-BODY" "$E4/KEK-$GUID_G" 2>/dev/null &&
-    _fail "stale auth body survived the cleanup" ||
-    _pass "stale auth bodies were replaced (cleared + re-enrolled)"
+STALE_SURVIVED=0
+[ -e "$E4/KEK-$GUID_G" ] && grep -q "STALE-AUTH-BODY" "$E4/KEK-$GUID_G" 2>/dev/null && STALE_SURVIVED=1
+assert_eq "stale auth bodies were replaced (cleared + re-enrolled)" "0" "$STALE_SURVIVED"
 
 # --- Leg B: STUBBORN vars (the rm physically fails) -> the SIGNED-EMPTY
 # delete branch fires: sign-efi-sig-list over /dev/null + efi-updatevar -f
@@ -339,9 +339,8 @@ assert_contains "stubborn-var residue die names the cleanup" \
 # the chattr requirement is pinned textually: targets where chattr is absent
 # (busybox-only initramfs/minimal chroots) get the loud remedy naming the
 # package, from fw_auth_enroll's own cleanup path
-grep -qF 'apk add e2fsprogs' "$REPO/lib/firmware.sh" &&
-    _pass "the chattr remedy names 'apk add e2fsprogs' (source-pinned)" ||
-    _fail "the chattr remedy text is missing from lib/firmware.sh"
+assert_contains "the chattr remedy names 'apk add e2fsprogs' (source-pinned)" \
+    "$(cat "$REPO/lib/firmware.sh")" "apk add e2fsprogs"
 
 # =============================================================================
 # fw_auth_enroll — SetupMode gate + strict db → KEK → PK (last) order,
@@ -365,6 +364,59 @@ assert_rc "fw_auth_enroll: SetupMode variable absent -> fail-closed 64" 64 \
     die_rc fw_auth_enroll "$E3" "$T/keys"
 assert_eq "fw_auth_enroll: absent SetupMode enrolled nothing" "0" \
     "$([ -e "$E3/db-$GUID_DBASE" ] && echo 1 || echo 0)"
+
+# =============================================================================
+# DEFERRED-ENROLLMENT path (DECIDED Samuel, 2026-09-28, real Dell PowerEdge
+# R640): SetupMode=0 WITH a platform PK present (factory or custom) — the
+# enroll makes NO NVRAM write attempts, stages the import-ready .cer set
+# (db.cer/KEK.cer/PK.cer + the vendor certs — the 0ec17a1 fallback staging,
+# reused) with the DEFER note, records the deferred marker seam, and returns
+# SUCCESS so the install continues. That day's proven deployment: factory
+# Dell PK/KEK/db restored ('Restore Default Policy Entries'), the release
+# db.cer imported into the factory db via the firmware UI — PK present,
+# SetupMode=0, Secure Boot enforced, our release cert in db verifies our UKI;
+# the old SetupMode!=1 die 64 would have aborted the install.
+# =============================================================================
+E7=$T/enroll-deferred
+mkdir -p "$E7" "$T/esp-defer"
+mkvar "$E7" SetupMode "$GUID_GLOBAL" 0
+printf '\007\000\000\000FACTORY-PK' >"$E7/PK-$GUID_GLOBAL"
+KD7=$T/keys-defer
+cp -r "$T/keys" "$KD7"
+printf -- '-----BEGIN CERTIFICATE-----\nRELEASE-CRT\n-----END CERTIFICATE-----\n' >"$KD7/release.crt"
+printf 'KEK-CERT-DER-BYTES' >"$KD7/kek.cert.der"
+printf 'PK-CERT-DER-BYTES' >"$KD7/pk.cert.der"
+DEFER_MARKER="$T/deferred-marker"
+rm -f "$DEFER_MARKER"
+UPDATE_LOG3="$T/update3.log"; CHATTR_LOG3="$T/chattr3.log"
+: >"$UPDATE_LOG3"
+ENROLL7_OUT=$( ( PATH="$T/psb:$PATH" UPDATE_LOG="$UPDATE_LOG3" CHATTR_LOG="$CHATTR_LOG3" \
+    PSB_EFIVARS_DIR="$E7" ALPINE_FDE_ENROLL_DEFERRED_MARKER="$DEFER_MARKER" \
+    fw_auth_enroll "$E7" "$KD7" "$T/esp-defer" ) 2>&1 )
+ENROLL7_RC=$?
+assert_eq "deferred enroll: platform PK present (SetupMode=0) -> rc 0 (install continues)" "0" "$ENROLL7_RC"
+assert_eq "deferred enroll: ZERO NVRAM write attempts (efi-updatevar never invoked)" "0" \
+    "$(wc -l <"$UPDATE_LOG3")"
+assert_eq "deferred enroll: db was NOT written" "0" \
+    "$([ -e "$E7/db-$GUID_DBASE" ] && echo 1 || echo 0)"
+assert_contains "deferred enroll: info line names the platform PK situation" \
+    "$ENROLL7_OUT" "a platform key is enrolled (SetupMode 0"
+assert_contains "deferred enroll: info line states NO NVRAM writes + the firmware-UI route" \
+    "$ENROLL7_OUT" "NO NVRAM writes are attempted"
+assert_contains "deferred enroll: info line names db.cer for the import" \
+    "$ENROLL7_OUT" "db.cer"
+for v in db.cer KEK.cer PK.cer; do
+    assert_file_exists "deferred enroll: staged the import-ready $v" \
+        "$T/esp-defer/alpine-fde-keys/$v"
+done
+assert_file_exists "deferred enroll: README.txt staged" \
+    "$T/esp-defer/alpine-fde-keys/README.txt"
+assert_contains "deferred enroll: README leads with the DEFER note" \
+    "$(cat "$T/esp-defer/alpine-fde-keys/README.txt")" "DEFERRED ENROLLMENT"
+assert_contains "deferred enroll: README forbids importing KEK.cer/PK.cer (factory PK/KEK stay)" \
+    "$(cat "$T/esp-defer/alpine-fde-keys/README.txt")" "Do NOT import KEK.cer or PK.cer"
+assert_file_exists "deferred enroll: the deferred marker seam was recorded for the install tail" \
+    "$DEFER_MARKER"
 
 # happy path: db → KEK → PK (all three land in their canonical namespaces)
 E4=$T/enroll-happy

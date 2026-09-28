@@ -32,11 +32,11 @@ Alpine FDE satisfies the following core functional requirements:
 Before beginning installation, your target machine must be configured in UEFI setup:
 
 1. **Set Firmware Administrator Password (recommended, not enforced):** Protects UEFI settings against physical tampering. This is a manual prerequisite — `alpine-fde doctor` cannot probe it, so verify it yourself. Without it, an attacker with physical access can enter firmware setup, enroll their own boot keys, and install a bootkit. The disk still cannot be decrypted (the TPM seal fails closed on any Secure Boot key change), but the bootkit can fake the passphrase prompt to phish your recovery passphrase. The firmware admin password closes that first step.
-2. **Clear Secure Boot Keys (Enter Setup Mode):**
-   - In firmware setup, choose **Clear Secure Boot Keys** or **Delete All Keys** (sets `SetupMode: 1`).
-   - Ensure **Secure Boot is OFF** during initial installation.
+2. **Clear Secure Boot Keys (Enter Setup Mode) — OR keep a platform key enrolled (deferred-enrollment mode):**
+   - Default (write flow): in firmware setup, choose **Clear Secure Boot Keys** or **Delete All Keys** (sets `SetupMode: 1`), and ensure **Secure Boot is OFF** during initial installation.
+   - Alternative (factory/custom PK deployments, proven on a real Dell PowerEdge R640): keep the platform's own PK/KEK/db (e.g. via the firmware's **Restore Default Policy Entries**) with Secure Boot ON. The installer then makes **no NVRAM writes**; after the install it stages the release certificate (`db.cer` + the vendor option-ROM certificate) on the ESP and reboots into firmware setup for you to import them into the **existing** key database via the firmware UI. Do not import the staged `KEK.cer`/`PK.cer` in this mode — the platform's own PK/KEK stay.
    > [!IMPORTANT]
-   > Authenticated NVRAM variable writes (`PK`, `KEK`, `db`) require `SetupMode == 1`. If the vendor PK is not cleared, installation preflight will abort (`exit 64`) to prevent write errors or bricked firmware states.
+   > Authenticated NVRAM variable writes (`PK`, `KEK`, `db`) require `SetupMode == 1`. If a platform key IS enrolled (`SetupMode == 0` with a PK present), the install switches to the deferred-enrollment mode above instead of writing NVRAM. Only a contradictory state (`SetupMode == 0` with no PK) aborts preflight (`exit 64`).
 3. **Boot Live Installation Media:** Boot an official Alpine Linux Standard live USB on the target machine.
 
 ### Dell PowerEdge Real-Hardware Prerequisites

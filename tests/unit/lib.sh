@@ -49,6 +49,19 @@ assert_contains() {
     esac
 }
 
+# assert_not_contains <desc> <haystack> <needle> — the negative form; a needle
+# that IS present is a failure (mirrors tests/lib/assert.sh's assert_not_contains)
+assert_not_contains() {
+    case $2 in
+        *"$3"*)
+            _fail "$1 ([$2] must not contain [$3])"
+            ;;
+        *)
+            _pass "$1"
+            ;;
+    esac
+}
+
 # finish — print summary; exit nonzero if any assert failed
 finish() {
     printf -- '---- %d passed, %d failed ----\n' "$TEST_PASS" "$TEST_FAIL"

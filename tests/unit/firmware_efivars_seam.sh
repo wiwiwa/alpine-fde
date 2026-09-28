@@ -575,6 +575,74 @@ assert_contains "fw_var_write wrapper: die keeps the manual-enrollment remedy" "
 assert_contains "fw_var_write wrapper: die names KeyTool.efi" "$out" \
     "KeyTool.efi"
 
+# (f) DEFERRED-ENROLLMENT mode (DECIDED Samuel, 2026-09-28, real Dell
+# PowerEdge R640): SetupMode==0 WITH a platform PK (factory or custom) — NO
+# NVRAM writes AT ALL; the enroll stages the import-ready .cer set (the
+# 0ec17a1 staging, reused) with the DEFER note prepended to README.txt,
+# records the ALPINE_FDE_ENROLL_DEFERRED_MARKER seam for the install tail's
+# verdict record, and returns SUCCESS so the install continues. That day's
+# proven deployment: 'Restore Default Policy Entries' (factory Dell
+# PK/KEK/db/dbx back — the vendor db carries the option-ROM CAs), then the
+# release db.cer imported into the factory db via the firmware UI; the old
+# SetupMode!=1 die 64 would have aborted the install.
+ff="$tmp/enroll-deferred"
+mkdir -p "$ff"
+mkvar_byte "$ff" SetupMode 0
+mkvar_str "$ff" PK 'FACTORY-PK-PAYLOAD'
+rm -rf "$tmp/esp-f"
+FFMARKER="$tmp/deferred-marker"
+rm -f "$FFMARKER"
+rc=0
+out=$(ALPINE_FDE_SEAM_EFIVARS="$ff" ALPINE_FDE_ENROLL_DEFERRED_MARKER="$FFMARKER" \
+    fw_auth_enroll "$ff" "$FAKEYS" "$tmp/esp-f" 2>&1) || rc=$?
+assert_rc "enroll deferred: platform PK present (SetupMode 0) -> rc 0, install continues" 0 "$rc"
+assert_eq "enroll deferred: ZERO write attempts against the efivars seam" "0" \
+    "$(printf '%s\n' "$out" | grep -c 'cannot write')"
+assert_eq "enroll deferred: the efivars seam gained NO variable (db untouched)" "0" \
+    "$([ -e "$ff/db-$DBXGUID" ] && echo 1 || echo 0)"
+assert_contains "enroll deferred: info line names the platform PK" "$out" \
+    "a platform key is enrolled (SetupMode 0"
+assert_contains "enroll deferred: info line states NO NVRAM writes" "$out" \
+    "NO NVRAM writes are attempted"
+assert_contains "enroll deferred: info line routes db.cer through the firmware UI" "$out" \
+    "import the release certificate (db.cer)"
+assert_contains "enroll deferred: info line says the platform PK/KEK stay" "$out" \
+    "the platform's PK/KEK stay"
+assert_contains "enroll deferred: fallback summary names the platform-PK reason (not a refusal)" "$out" \
+    "a platform key is already enrolled (factory or custom) — NO NVRAM writes were attempted"
+assert_contains "enroll deferred: the guarded-first-boot warn still fires" "$out" \
+    "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+# the staged set is byte-identical to the refused-mode staging (0ec17a1 reuse)
+for _f_f in db.auth kek.auth pk.auth db.cer KEK.cer PK.cer README.txt '!import_all_auth_files'; do
+    assert_eq "enroll deferred: staged $_f_f" "1" \
+        "$([ -f "$tmp/esp-f/alpine-fde-keys/$_f_f" ] && echo 1 || echo 0)"
+done
+assert_eq "enroll deferred: db.cer is a byte-for-byte copy of release.crt" \
+    "$(cat "$FAKEYS/release.crt")" "$(cat "$tmp/esp-f/alpine-fde-keys/db.cer")"
+_f_readme=$(cat "$tmp/esp-f/alpine-fde-keys/README.txt")
+assert_contains "enroll deferred: README leads with the DEFER note" "$_f_readme" \
+    "DEFERRED ENROLLMENT"
+assert_contains "enroll deferred: README says import db.cer INTO THE EXISTING db" "$_f_readme" \
+    "INTO THE EXISTING key database"
+assert_contains "enroll deferred: README forbids the KEK/PK import (factory PK/KEK stay)" \
+    "$_f_readme" "Do NOT import KEK.cer or PK.cer"
+assert_eq "enroll deferred: the deferred marker seam was recorded for the install tail" "1" \
+    "$([ -f "$FFMARKER" ] && echo 1 || echo 0)"
+
+# (g) SetupMode==0 WITHOUT a platform PK — a state no real firmware reports
+# (user mode with no PK) — stays FAIL-CLOSED 64 (the gate below the deferred
+# branch must not swallow genuinely unexpected states).
+fg="$tmp/enroll-usermode-nopk"
+mkdir -p "$fg"
+mkvar_byte "$fg" SetupMode 0
+rc=0
+out=$(fw_auth_enroll "$fg" "$FAKEYS" 2>&1) || rc=$?
+assert_rc "enroll: SetupMode=0 with NO platform PK -> fail-closed 64" 64 "$rc"
+assert_contains "enroll: the unexpected-state die names the observed SetupMode" "$out" \
+    "SetupMode is 0"
+assert_eq "enroll: the unexpected-state die enrolled nothing" "0" \
+    "$([ -e "$fg/db-$DBXGUID" ] && echo 1 || echo 0)"
+
 # same hazard, decided call for the other direct writer: fw_osindications_set
 # removes a pre-existing OsIndications before rewriting (same-attrs overwrite
 # is legal, but rm-first is harmless and keeps the write shape uniform)

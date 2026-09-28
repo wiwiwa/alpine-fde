@@ -2,10 +2,16 @@
 # tests/integration/install_preflight_setupmode.sh — G-IL2 (docs/Architecture.md §9.1
 # Stage-1 preflight, UserGuide §1): `install` must gate on firmware Setup Mode
 # BEFORE ANY disk mutation:
-#   * inst_preflight's FIRST check is the firmware SetupMode==1 gate
+#   * inst_preflight's FIRST check is the firmware SetupMode gate
 #     (fw_sb_state over the ALPINE_FDE_EFIVARS_DIR seam)
-#   * SetupMode=0        ⇒ fail-closed 64, "clear vendor PK in BIOS" guidance,
-#                          ZERO plan records (no destructive command executed)
+#   * SetupMode=0 (NO platform PK) ⇒ fail-closed 64, "clear vendor PK in BIOS"
+#                          guidance, ZERO plan records (no destructive command
+#                          executed)
+#   * SetupMode=0 WITH a platform PK ⇒ the DEFERRED-ENROLLMENT mode (DECIDED
+#                          Samuel, 2026-09-28, real Dell PowerEdge R640:
+#                          factory PK/KEK/db restored + the release db.cer
+#                          imported via the firmware UI) — the install
+#                          proceeds and the enroll makes NO NVRAM writes
 #   * SetupMode=1        ⇒ proceed — the full ADR-20 unattended plan runs
 #                          under stubs: G-C23 ephemeral key, G-C25 NO banner
 #                          (ADR-20 #4: the banner path is removed — /etc/motd
@@ -240,6 +246,34 @@ assert_eq "SetupMode=1: NO OsIndications write (G-C26)" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
 assert_not_contains "SetupMode=1: NO interactive disk-passphrase prompt (retired; the ceremony is the only credential seam)" "$OUT" \
     "Set disk encryption passphrase"
+
+# =============================================================================
+# SetupMode=0 WITH a platform PK present (factory or custom) -> the
+# DEFERRED-ENROLLMENT mode (DECIDED 2026-09-28, real Dell PowerEdge R640):
+# the gate ADMITS the install — no 'clear the vendor PK' abort — and the
+# enroll flow must make NO NVRAM writes against the efivars seam. (The
+# chroot-stub harness does not execute the in-chroot enroll, so the §9
+# deferred-marker verdict is not observable here — the executed deferred-PK
+# tail leg lives in install_chroot_plan.sh.)
+# =============================================================================
+mkvar SetupMode 0
+printf '\007\000\000\000FACTORY-PK' >"$ALPINE_FDE_EFIVARS_DIR/PK-$GUID_GLOBAL"
+run_install
+assert_eq "SetupMode=0 + platform PK -> chroot install rc 0 (deferred-enrollment mode)" "0" "$RC"
+assert_contains "deferred mode: the gate names the deferred-enrollment mode" "$OUT" \
+    "deferred-enrollment mode"
+assert_not_contains "deferred mode: NO 'clear the vendor PK' abort" "$OUT" \
+    "clear the vendor PK in BIOS"
+assert_eq "deferred mode: the factory PK variable is UNTOUCHED" "FACTORY-PK" \
+    "$(tail -c +5 "$ALPINE_FDE_EFIVARS_DIR/PK-$GUID_GLOBAL")"
+assert_eq "deferred mode: NO db/KEK variable appeared in the efivars seam (zero NVRAM writes)" "0" \
+    "$(find "$ALPINE_FDE_EFIVARS_DIR" \( -name 'db-*' -o -name 'KEK-*' \) | wc -l)"
+assert_file_exists "deferred mode: install-state written" \
+    "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
+assert_contains "deferred mode: state=installed" \
+    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
+rm -f "$ALPINE_FDE_EFIVARS_DIR"/PK-*
+mkvar SetupMode 1
 
 # =============================================================================
 # Exhausted stdin at the ceremony is FAIL-CLOSED (EOF): die 64 with the

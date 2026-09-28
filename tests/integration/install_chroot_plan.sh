@@ -227,6 +227,15 @@ case "\$*" in
         # the empty-Enter default REALLY reused the recovery passphrase
         cat >"\$CHPASSWD_CAPTURE"
         ;;
+    *"fw_auth_enroll"*)
+        # deferred-enrollment seam (DECIDED 2026-09-28, Dell PowerEdge R640):
+        # when the DEFER_FLAG fixture is set, the stub emulates what the real
+        # in-chroot fw_auth_enroll does on a platform with a FACTORY/CUSTOM PK
+        # already enrolled — it makes NO NVRAM writes and records the deferred
+        # marker on the bind-mounted host tmpfs. Unset flag = the Setup-Mode
+        # refused/stubbed behavior of every other leg (PK absent at verdict).
+        [ -n "\$DEFER_FLAG" ] && [ -f "\$DEFER_FLAG" ] && : >"\$DEFER_MARK"
+        ;;
 esac
 exit 0
 EOF
@@ -534,8 +543,16 @@ assert_eq "G-C28: inst_state_write installed is a host plan record" "1" \
 # emitted — the verdict probe + the deferred instructions are.
 assert_eq "G-C26: efivars dir holds NO OsIndications variable under the CI seam" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
-assert_contains "deferred enrollment: the verdict probe record probes PK on the live efivars" "$OUT" \
-    "if fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi"
+assert_contains "deferred enrollment: the verdict probe record routes the deferred marker, then probes PK on the live efivars" "$OUT" \
+    "if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; INST_SB_DEFERRED=0; else INST_SB_ENROLLED=0; INST_SB_DEFERRED=0; fi"
+assert_contains "deferred enrollment (platform PK present): the deferred-import instructions record is in the plan" "$OUT" \
+    "a platform key is ALREADY enrolled (factory or custom) — the installer made NO NVRAM writes"
+assert_contains "deferred enrollment (platform PK present): instructions name db.cer + the vendor cert INTO THE EXISTING db" "$OUT" \
+    "import db.cer AND the vendor certificate INTO THE EXISTING key database (db)"
+assert_contains "deferred enrollment (platform PK present): instructions forbid the KEK/PK import" "$OUT" \
+    "do NOT import KEK.cer or PK.cer"
+assert_contains "deferred enrollment: the enroll guest line exports the deferred-marker seam" "$OUT" \
+    "export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred"
 assert_contains "deferred enrollment: the manual-import instructions print at the VERY END (EXECUTED output, not the record echo)" "$OUT" \
     "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys"
 assert_contains "deferred enrollment: instructions name the DIRECT-from-ESP import FIRST (user directive 2)" "$OUT" \
@@ -1402,6 +1419,48 @@ assert_eq "success tail: NO Enter-confirmation EXECUTION output" "0" \
     "$(grep -c '^alpine-fde: review the manual-import instructions above' <<<"$OUT")"
 rm -f "$ALPINE_FDE_EFIVARS_DIR"/PK-*
 ALPINE_FDE_INSTALL_NO_REBOOT=1
+
+# deferred-ENROLLMENT tail (DECIDED 2026-09-28, real Dell PowerEdge R640):
+# the in-chroot enroll found a platform PK ALREADY enrolled (factory or
+# custom) and recorded the deferred marker seam — the tail routes the
+# deferred-import instructions + the firmware-setup reboot EVEN THOUGH the
+# efivars fixture stays PK-free: a PK-absent probe alone would misread this
+# as 'refused', and a PK-present probe alone would misread it as 'enrolled' —
+# the marker is the ONLY discriminator between 'we enrolled the PK' and 'the
+# PK was already there' (this leg pins exactly that).
+DEFER_FLAG=$T/defer-flag
+: >"$DEFER_FLAG"
+DEFER_MARK=/dev/shm/alpine-fde-enroll-deferred
+export DEFER_FLAG DEFER_MARK
+rm -f "$DEFER_MARK"
+ALPINE_FDE_INSTALL_NO_REBOOT=0
+: >"$ALPINE_FDE_TEST_LOG"
+rm -rf "$ALPINE_FDE_INSTALL_MNT"
+OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS5" 2>&1)
+RC=$?
+unset DEFER_FLAG
+rm -f "$DEFER_MARK"
+assert_eq "deferred-PK tail: install rc 0" "0" "$RC"
+assert_eq "deferred-PK tail: the DEFERRED instructions EXECUTED (line-anchored)" "1" \
+    "$(grep -c '^alpine-fde: a platform key is ALREADY enrolled (factory or custom)' <<<"$OUT")"
+assert_eq "deferred-PK tail: instructions name db.cer + the vendor cert INTO THE EXISTING db (executed line)" "1" \
+    "$(grep -c '^  3\. in the firmware key-management UI import db\.cer AND the vendor certificate INTO THE EXISTING key database (db)' <<<"$OUT")"
+assert_eq "deferred-PK tail: instructions forbid the KEK/PK import — factory PK/KEK stay (executed line)" "1" \
+    "$(grep -c '^  4\. do NOT import KEK\.cer or PK\.cer and do NOT clear or replace the platform key' <<<"$OUT")"
+assert_eq "deferred-PK tail: NO refused-mode instructions EXECUTED" "0" \
+    "$(grep -c '^alpine-fde: Secure Boot key material is staged under' <<<"$OUT")"
+assert_contains "deferred-PK tail: EXPLICIT Enter confirmation before the firmware reboot" "$OUT" \
+    "press Enter to reboot into firmware setup"
+assert_eq "deferred-PK tail: OsIndications bit 0 SET for the firmware-setup reboot" "1" \
+    "$([ -f "$ALPINE_FDE_EFIVARS_DIR/OsIndications-$GUID_GLOBAL" ] && echo 1 || echo 0)"
+assert_eq "deferred-PK tail: the reboot executed (into firmware setup)" "1" \
+    "$(grep -c '^reboot ' "$ALPINE_FDE_TEST_LOG")"
+assert_contains "deferred-PK tail: the final message names the deferred mode (no NVRAM writes)" "$OUT" \
+    "a platform key is ALREADY enrolled (factory or custom): NO NVRAM writes were attempted"
+assert_not_contains "deferred-PK tail: NO direct-disk reboot message on the deferred-PK path" "$OUT" \
+    "direct reboot to disk (NVRAM enrollment succeeded)"
+assert_not_contains "deferred-PK tail: NO refused-enrollment final message on the deferred-PK path" "$OUT" \
+    "firmware NVRAM enrollment was REFUSED"
 
 # =============================================================================
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort

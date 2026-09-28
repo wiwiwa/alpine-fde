@@ -377,6 +377,21 @@ assert_contains "plan: explicit ephemeral-key scrub record (I1, §9.1 teardown; 
     "$INS_OUT" "rm -f <ephemeral-keyfile> <release-passfile> # I1: ephemeral install key + release-passphrase seam file scrubbed"
 assert_contains "plan: direct reboot record, runtime-gated on the success path (ADR-20)" "$INS_OUT" \
     "reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
+# deferred-ENROLLMENT mode (DECIDED 2026-09-28, real Dell PowerEdge R640):
+# the plan carries the deferred-marker seam end to end — the stale-marker
+# scrub before the enroll, the guest-side export into fw_auth_enroll, and the
+# three-way verdict (marker -> PK probe -> refused) that routes the deferred
+# instructions + firmware-setup reboot.
+assert_contains "plan: stale deferred-marker scrub precedes the enroll" "$INS_OUT" \
+    "rm -f /dev/shm/alpine-fde-enroll-deferred # stale deferred marker"
+assert_contains "plan: the enroll guest line exports the deferred-marker seam" "$INS_OUT" \
+    "export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred"
+assert_contains "plan: verdict routes the deferred marker BEFORE the PK probe" "$INS_OUT" \
+    'if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present'
+assert_contains "plan: deferred-PK instructions import db.cer INTO THE EXISTING db" "$INS_OUT" \
+    "import db.cer AND the vendor certificate INTO THE EXISTING key database (db)"
+assert_contains "plan: deferred-PK instructions forbid the KEK/PK import (factory PK/KEK stay)" "$INS_OUT" \
+    "do NOT import KEK.cer or PK.cer"
 assert_contains "plan: efivars bound into the target (§9.1)" "$INS_OUT" \
     "mount --bind /sys/firmware/efi/efivars /mnt/sys/firmware/efi/efivars"
 # blocker-#23-era reconciliation: the teardown is ONE record, child-before-parent

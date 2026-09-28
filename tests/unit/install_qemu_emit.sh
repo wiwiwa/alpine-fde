@@ -283,7 +283,7 @@ assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir, custody 
 assert_contains "emitted: defer-custody — provision record defers release.pem encryption to ceremony 3/3 (release-key prompt may not precede the LUKS recovery)" \
     "$(grep -m1 'provision stage1' "$SCRIPT")" "--defer-custody"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
+    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
 # real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
 # the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
 # ships NO bootctl binary; the retired record died POST-ceremony)
@@ -399,8 +399,8 @@ assert_eq "emitted order (user flow directive): state write BEFORE the credentia
 # instructions as the LAST records (host comments for the harness); under the
 # CI seam (NO_REBOOT=1) the Enter-confirmation + firmware-setup trip + direct
 # reboot records are not emitted.
-assert_contains "tail: enrollment verdict probe record (runtime-conditional PK probe on the live efivars seam)" "$(cat "$SCRIPT")" \
-    "if fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; else INST_SB_ENROLLED=0; fi"
+assert_contains "tail: enrollment verdict record (deferred-marker seam FIRST, then the runtime PK probe on the live efivars seam)" "$(cat "$SCRIPT")" \
+    "if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present $ALPINE_FDE_EFIVARS_DIR PK; then INST_SB_ENROLLED=1; INST_SB_DEFERRED=0; else INST_SB_ENROLLED=0; INST_SB_DEFERRED=0; fi"
 S_SCRUB=$(grep -n '^# HOST: rm -f /dev/shm/alpine-fde-ephkey' "$SCRIPT" | cut -d: -f1)
 S_PROBE=$(grep -n 'INST_SB_ENROLLED=1' "$SCRIPT" | cut -d: -f1)
 S_INSTR=$(grep -n 'alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys' "$SCRIPT" | cut -d: -f1)
