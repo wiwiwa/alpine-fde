@@ -959,6 +959,13 @@ assert_contains "blocker #14b: mkinitfs.conf custom_files registers the hook + b
     'alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules'
 assert_contains "target: alpine-fde feature registered in mkinitfs.conf (§8.2/ADR-13)" \
     "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" "alpine-fde"
+# R640 initramfs-udev blocker (Dell PowerEdge R640, 2026-09-28): the features
+# list must ALSO carry udev — no udev feature = no udevd in the initramfs =
+# the shipped udev rules never execute (69-bcache.rules never registers the
+# backing devices, /dev/disk/by-uuid never materializes, the unseal hook's
+# member resolution starves → token_missing on an intact seal)
+assert_contains "udev blocker: mkinitfs.conf features= carries udev (the initramfs must run udevd)" \
+    "$(cat "$MNT_ETC/mkinitfs/mkinitfs.conf")" 'features="alpine-fde udev"'
 assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"
 assert_eq "target: apk trigger executable" "1" \
     "$([ -x "$MNT_ETC/apk/triggers/alpine-fde.trigger" ] && echo 1 || echo 0)"

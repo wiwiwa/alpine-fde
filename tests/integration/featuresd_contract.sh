@@ -285,10 +285,41 @@ assert_file_exists "blocker #14b: shipped 60-tpm.rules staged to /usr/lib/udev/r
     "$ALPINE_FDE_INSTALL_MNT/usr/lib/udev/rules.d/60-tpm.rules"
 assert_file_exists "blocker #14a: staged alpine-fde.modules ships" \
     "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/features.d/alpine-fde.modules"
+
+# =============================================================================
+# (d) R640 initramfs-udev blocker (Dell PowerEdge R640, 2026-09-28): the
+#     features list must ALSO carry `udev`. With no udev feature mkinitfs
+#     ships NO udevd — the initramfs init runs nlplug-findfs + mdev, which
+#     never executes udev rules: 69-bcache.rules never registers the bcache
+#     backing devices (/dev/bcache* may never appear) and /dev/disk/by-uuid/*
+#     (a udev artifact) never materializes — the unseal hook's member
+#     resolution starves: today's boot showed 30s device wait → token_missing
+#     on an INTACT seal. Shape 2 first: the suite's apk stub lays down no
+#     package conf, so the first run exercises the FRESH-conf fallback.
+# =============================================================================
+assert_eq "udev blocker: FRESH conf features line is exactly alpine-fde + udev" \
+    'features="alpine-fde udev"' \
+    "$(grep '^features=' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")"
+
+# --- shape 1: an EXISTING package-default conf (base features, no alpine-fde,
+#     no custom_files yet) — both features must append, base list preserved.
+#     The udev guard must test the features LINE (never the whole file: the
+#     custom_files value carries /usr/lib/udev/ paths that would satisfy a
+#     naive whole-file grep and silently skip the feature — the exact pre-fix
+#     R640 re-run state).
+printf 'features="ata base scsi usb virtio ext4"\n' \
+    >"$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf"
+run_install
+assert_eq "udev blocker: EXISTING conf keeps base features + appends BOTH features" \
+    'features="ata base scsi usb virtio ext4 alpine-fde udev"' \
+    "$(grep '^features=' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")"
+
 run_install
 assert_eq "featuresd contract: re-run rc 0 (idempotency fixture)" "0" "$RC"
 assert_eq "mkinitfs.conf feature registration is idempotent (ONE alpine-fde token in features= after re-run)" "1" \
     "$(sed -n 's/^features=//p' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf" | grep -o alpine-fde | wc -l)"
+assert_eq "udev blocker: udev registration is idempotent (ONE udev token in features= after re-run)" "1" \
+    "$(sed -n 's/^features=//p' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf" | grep -o udev | wc -l)"
 assert_eq "mkinitfs.conf custom_files registration is idempotent (ONE line after re-run)" "1" \
     "$(grep -c '^custom_files=' "$ALPINE_FDE_INSTALL_MNT/etc/mkinitfs/mkinitfs.conf")"
 assert_contains "re-run: registration host record present (grep-guard form)" \

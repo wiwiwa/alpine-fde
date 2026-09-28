@@ -284,6 +284,15 @@ assert_contains "plan: build record fails closed when the target has NO module t
 assert_contains "plan: build record exports ALPINE_FDE_ROOT=/ (blocker #12)" "$INS_OUT" \
     'export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys'
 assert_contains "plan: /etc/alpine-fde conf drop" "$INS_OUT" "etc/alpine-fde/alpine-fde.conf"
+# R640 initramfs-udev blocker (Dell PowerEdge R640, 2026-09-28): the mkinitfs
+# conf record must enable the udev feature — no udev feature = no udevd in the
+# initramfs = the shipped udev rules never execute (69-bcache.rules never
+# registers the backing devices, /dev/disk/by-uuid never materializes, the
+# unseal hook's member resolution starves → token_missing on an intact seal)
+assert_contains "plan: conf record enables the udev mkinitfs feature (fresh-conf fallback carries BOTH features)" "$INS_OUT" \
+    'features="alpine-fde udev"'
+assert_contains "plan: conf record guards udev on the features LINE (a whole-file grep would be satisfied by the custom_files /usr/lib/udev/ paths — the pre-fix R640 re-run state)" "$INS_OUT" \
+    "grep -qw udev"
 # real-server blocker #10: the conf persists the resolved TOPOLOGY (BCACHE=1
 # covered both bcache AND bcache-multi, which made crypttab_tpm2_check's
 # exactly-one count rule false-positive on bcache-multi's correct crypttab)

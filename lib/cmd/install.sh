@@ -2006,12 +2006,29 @@ cmd_install_main() {
   # package-default conf); grep-guard makes the patch idempotent under
   # re-run; a missing conf (package not yet installed) is created with the
   # feature-only line rather than silently skipped.
+  # REAL-SERVER BLOCKER (initramfs ran NO udevd — Dell PowerEdge R640 first
+  # verified boot 2026-09-28): the features list carried `alpine-fde` but
+  # never `udev`. With no udev feature mkinitfs ships no udevd — the
+  # initramfs init runs nlplug-findfs + mdev, which never EXECUTES udev
+  # rules. The shipped/registered rules (69-bcache.rules, 60-tpm.rules) sat
+  # inert in the initrd: 69-bcache.rules never registered the bcache backing
+  # devices (/dev/bcache* may never appear) and /dev/disk/by-uuid/* — udev
+  # artifacts — never materialized, so the unseal hook's member resolution
+  # starved: 30s device wait → token_missing on an INTACT seal. The record
+  # therefore also ensures `udev` in the features list. The udev guard tests
+  # the features LINE (sed-extracted), never the whole file: custom_files
+  # carries /usr/lib/udev/ paths, and a whole-file word grep would be
+  # satisfied by them — silently skipping the feature on the exact pre-fix
+  # R640 re-run state (alpine-fde + custom_files present, udev absent).
+  # With udev running, rule registration and by-uuid both work; the unseal
+  # hook's nlplug resolver stays as belt-and-braces (nlplug-findfs functions
+  # alongside udev).
   # REAL-SERVER BLOCKER #14: the same record registers `custom_files` —
   # mkinitfs 3.14.1 routes .files entries through ldtree(1), which silently
   # DROPS every non-ELF file (the unseal hook script and the udev rules);
   # custom_files copies them into the initramfs verbatim. Staged later at
   # step 7; mkinitfs reads the list at build time (idempotent).
-  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde\"\n' >\"\$f\"; }; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde mkinitfs feature + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
+  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
   inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
   inst_plan_run guest 'rc-update add networking boot'
   # REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
