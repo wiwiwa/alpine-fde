@@ -727,6 +727,30 @@ inst_plan_run() {
   inst_plan_add "$_ipr_kind" "$*"
 }
 
+# inst_inittab_getty_cmd INITTAB — the guarded, IDEMPOTENT guest record that
+# ensures a busybox getty on ttyS0 (serial console, `console=ttyS0,115200` in
+# ALPINE_FDE_CMDLINE_EXTRA): appends the respawn line ONLY when no ttyS0 line
+# exists yet (crash-resume / re-run safe; an operator's own ttyS0 line wins).
+# REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 2026-09-28): the guest
+# shipped no serial getty, so on a headless server the operator had NO way
+# into the booted system (the installer only MENTIONED console=ttyS0 in the
+# cmdline docs).
+inst_inittab_getty_cmd() {
+  printf '%s\n' "grep -q '^ttyS0:' $1 2>/dev/null || printf '%s\\n' '# alpine-fde: serial console getty (headless access — real-server blocker, Dell PowerEdge R640 2026-09-28)' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >>$1 # blocker: headless serial getty (idempotent guarded append)"
+}
+
+# inst_sshd_config_cmd SSHD_CONFIG — the guarded, IDEMPOTENT guest record that
+# ensures the headless-access sshd policy: PermitRootLogin no (root login via
+# SSH stays DISABLED by design — the admin path is the §9.1 step 4 ceremony
+# user account, whose password is set in-chroot) + PasswordAuthentication yes
+# (password login for that account; key-only auth is not provisioned by the
+# install). Appends a marked block ONLY when the marker is absent. The docs'
+# "openssh-server (optional)" opinion (docs/Architecture.md §3.1) is
+# OVERRIDDEN to REQUIRED by the same R640 headless blocker.
+inst_sshd_config_cmd() {
+  printf '%s\n' "grep -q 'alpine-fde: headless access' $1 2>/dev/null || printf '%s\\n' '' '# alpine-fde: headless access (real-server blocker, Dell PowerEdge R640 2026-09-28) — root SSH stays disabled; the ceremony account is the login path' 'PermitRootLogin no' 'PasswordAuthentication yes' >>$1 # blocker: sshd headless access (idempotent guarded append)"
+}
+
 # inst_execute_plan — run accumulated records (non-dry-run runners)
 inst_execute_plan() {
   case $(inst_runner) in
@@ -859,7 +883,10 @@ inst_resolve_target_metadata() {
 # The §3.3 explicit additions (Alpine): one in-chroot `apk add --no-cache`
 # transaction. §3.1 rows: mkinitfs (the initramfs generator, ADR-13),
 # py3-pefile (ukify's PCR-signature parsing, ADR-16 delivery), doas (admin,
-# §3.1), and ukify-kernel-hook (fires /etc/kernel-hooks.d on kernel
+# §3.1), openssh (headless access — real-server blocker, Dell PowerEdge R640
+# 2026-09-28: WITHOUT it a headless server has NO way into the booted guest;
+# sshd is enabled + pinned PermitRootLogin no in the §9.1 step 1 records), and
+# ukify-kernel-hook (fires /etc/kernel-hooks.d on kernel
 # transactions, §8.3/ADR-19). Topology-conditional: btrfs-progs by default,
 # e2fsprogs for --fs ext4, bcache-tools when --bcache is given.
 # NO zram-init (item 26a, ADR-7 AMENDED): zram is removed from the design —
@@ -870,7 +897,7 @@ install_package_list() {
   # after the build (inst_bootentry_ensure) — the target must ship the tool
   # (efivar-libs rides as its apk dependency), and the mirror closure derives
   # from this list, so the pair can never under-approximate.
-  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool efibootmgr openssl jq doas efitools'
+  _ipl='cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool efibootmgr openssl jq doas efitools openssh'
   case $(inst_root_fs) in
   ext4) _ipl="$_ipl e2fsprogs" ;;
   *) _ipl="$_ipl btrfs-progs" ;;
@@ -1987,6 +2014,16 @@ cmd_install_main() {
   inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde\"\n' >\"\$f\"; }; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde mkinitfs feature + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
   inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
   inst_plan_run guest 'rc-update add networking boot'
+  # REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
+  # 2026-09-28): the guest shipped NEITHER a serial getty NOR sshd — on a
+  # headless server the operator was locked out of the booted system entirely.
+  # All records run AFTER the in-chroot apk transaction (real-server failure
+  # #2 discipline: never enable/configure a service before its package
+  # exists — openssh is in the §3.3 additions set above; /etc/inittab and
+  # /etc/ssh/sshd_config come from alpine-base/openssh).
+  inst_plan_run guest "$(inst_inittab_getty_cmd /etc/inittab)"
+  inst_plan_run guest "$(inst_sshd_config_cmd /etc/ssh/sshd_config)"
+  inst_plan_run guest 'rc-update add sshd default'
   # step 2: pending baseline written ON-TARGET via the baseline writer
   inst_plan_run host "inst_baseline_pending_write $_im_mnt"
   # step 3: platform-key ceremony — with --keydir the operator-supplied

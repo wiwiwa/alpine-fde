@@ -213,6 +213,22 @@ assert_not_contains "plan: NO operator passphrase env consumption" "$INS_OUT" \
     "ALPINE_FDE_DISK_PASSPHRASE"
 assert_contains "plan: user account created (§8.1 user account row)" "$INS_OUT" "adduser"
 assert_contains "plan: OpenRC networking enabled (§9.1 step 1)" "$INS_OUT" "rc-update add networking boot"
+# REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
+# 2026-09-28): the guest shipped NEITHER a serial getty NOR sshd — on a
+# headless server the operator was locked out of the booted system. The plan
+# must carry the guarded serial-getty record, the sshd policy record, and the
+# sshd enable — ALL AFTER the in-chroot apk transaction (real-server failure
+# #2 discipline: never enable a service before its package exists).
+assert_contains "plan: serial getty on ttyS0 (headless access)" "$INS_OUT" \
+    "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100"
+assert_contains "plan: the serial-getty record is a guarded append (idempotent)" "$INS_OUT" \
+    "grep -q '^ttyS0:' /etc/inittab"
+assert_contains "plan: sshd policy pins PermitRootLogin no (root SSH disabled by design)" "$INS_OUT" \
+    "PermitRootLogin no"
+assert_contains "plan: sshd policy pins PasswordAuthentication yes (ceremony-account login)" "$INS_OUT" \
+    "PasswordAuthentication yes"
+assert_contains "plan: sshd enabled for the default runlevel (headless access)" "$INS_OUT" \
+    "rc-update add sshd default"
 assert_contains "plan: network interfaces drop" "$INS_OUT" "etc/network/interfaces"
 assert_not_contains "plan: systemd-networkd drop retired" "$INS_OUT" "20-alpine-fde.network"
 # G-ST4/§8.2: single-disk crypttab is ONE root entry, NO password-cache
@@ -460,6 +476,15 @@ I_TXN=$(line_no "$INS_OUT" "apk add --no-cache")
 assert_eq "order: repositories drop BEFORE apk populate (real-install defect 6: apk resolves against the TARGET's repositories — populate-first dies 'unable to select packages: alpine-base'; real apk path is e2e-invisible, this pin is the harness-level guard)" "1" \
     "$(( I_REPOS > 0 && I_REPOS < I_POPULATE ? 1 : 0 ))"
 assert_eq "order: apk populate before the additions txn" "1" "$(( I_POPULATE < I_TXN ? 1 : 0 ))"
+# headless-access ordering (real-server blocker, Dell PowerEdge R640
+# 2026-09-28): the serial-getty + sshd records must run AFTER the in-chroot
+# apk txn — openssh (the §3.3 additions set) provides /etc/ssh/sshd_config,
+# and enabling a service before its package exists is the real-server
+# failure #2 discipline the plan must keep
+I_GETTY=$(line_no "$INS_OUT" "ttyS0::respawn:/sbin/getty")
+I_SSHD_ENABLE=$(line_no "$INS_OUT" "rc-update add sshd default")
+assert_eq "order: headless-access records AFTER the in-chroot apk txn (openssh provides sshd_config; failure #2 discipline)" "1" \
+    "$(( I_TXN > 0 && I_TXN < I_GETTY && I_GETTY < I_SSHD_ENABLE ? 1 : 0 ))"
 
 # --- 2b-item26b. target DNS seed (real-install failure #3): the in-chroot apk
 #         transaction resolves the mirror via the TARGET's /etc/resolv.conf —
@@ -903,7 +928,7 @@ assert_contains "esp: default stays /efi (enrollment ESP_DIR)" "$INS_OUT" \
 
 # --- 10. package-list lint (§3.3, topology-conditional) ------------------------
 PKG_LIST=$(install_package_list)
-REQUIRED="cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas btrfs-progs"
+REQUIRED="cryptsetup systemd-boot systemd-efistub ukify ukify-kernel-hook py3-pefile mkinitfs linux-lts tpm2-tools tpm2-tss-policy tpm2-tss-tcti-device sbsigntool openssl jq doas openssh btrfs-progs"
 for want in $REQUIRED; do
     FOUND=0
     for w in $PKG_LIST; do

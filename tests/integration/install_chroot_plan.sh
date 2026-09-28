@@ -475,7 +475,7 @@ assert_eq "fstab: zero swap lines (ADR-7: no disk swap)" "0" \
     "$(grep -c 'swap' "$MNT_ETC/fstab")"
 # §3.1 additions set lands in the in-guest apk transaction
 CHROOT_TXN=$(grep -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG")
-for want in mkinitfs py3-pefile doas ukify-kernel-hook efitools; do
+for want in mkinitfs py3-pefile doas ukify-kernel-hook efitools openssh; do
     assert_contains "apk txn includes $want (§3.1, executed)" "$CHROOT_TXN" "$want"
 done
 assert_not_contains "apk txn has NO zram-init (item 26a, ADR-7 amended)" "$CHROOT_TXN" "zram-init"
@@ -570,6 +570,26 @@ assert_contains "§9.1 step 1: user account created in-guest (locked; password s
     "adduser -D -s /bin/ash admin"
 assert_contains "§9.1 step 1: OpenRC networking enabled in-guest" "$LOG" \
     "rc-update add networking boot"
+# REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
+# 2026-09-28): the guest shipped NEITHER a serial getty NOR sshd — the
+# operator was locked out of the booted system on a headless server. The
+# executed plan must carry the guarded getty append, the sshd policy append,
+# and the sshd enable — AFTER the in-guest apk txn (failure #2 discipline).
+assert_contains "§9.1 step 1: serial getty appended in-guest (headless access)" "$LOG" \
+    "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100"
+assert_contains "§9.1 step 1: the getty record is guarded (idempotent append)" "$LOG" \
+    "grep -q '^ttyS0:' /etc/inittab"
+assert_contains "§9.1 step 1: sshd policy appended in-guest (PermitRootLogin no — root SSH disabled by design)" "$LOG" \
+    "PermitRootLogin no"
+assert_contains "§9.1 step 1: sshd policy appended in-guest (PasswordAuthentication yes — ceremony-account login)" "$LOG" \
+    "PasswordAuthentication yes"
+assert_contains "§9.1 step 1: sshd enabled in-guest (headless access)" "$LOG" \
+    "rc-update add sshd default"
+L_APK=$(grep -n -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+L_GETTY=$(grep -n -m1 'ttyS0::respawn:/sbin/getty' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+L_SSHD_EN=$(grep -n -m1 'rc-update add sshd default' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+assert_eq "order: getty + sshd-enable records executed AFTER the in-guest apk txn (real-server failure #2 discipline)" "1" \
+    "$(( L_APK > 0 && L_APK < L_GETTY && L_GETTY < L_SSHD_EN ? 1 : 0 ))"
 assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot (custody DEFERRED to ceremony 3/3)" "$LOG" \
     "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody"
 # item 12/reorder close-out (user ruling: LUKS recovery is the FIRST password
