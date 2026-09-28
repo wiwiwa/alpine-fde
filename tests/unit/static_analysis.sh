@@ -116,14 +116,24 @@ EXEMPT_VIOLATIONS=$(grep -lE '^set -ex' "$REPO"/lib/*.sh "$REPO"/lib/cmd/*.sh 2>
 assert_eq "no sourced lib module sets -ex at top level (exemption discipline)" "" "$EXEMPT_VIOLATIONS"
 
 # =============================================================================
-# 3. retired user-facing --dry-run stays retired; the RUNNER lane stays
+# 3. retired user-facing --dry-run stays retired; the install dry-run RUNNER
+#    lane is retired too (item 17d: the qemu emission is the inspectable shape)
 # =============================================================================
 DISPATCHER="$REPO/bin/alpine-fde"
 assert_not_contains "dispatcher has no --dry-run flag/usage text" "$(cat "$DISPATCHER")" "--dry-run"
 assert_not_contains "dispatcher does not reference the DRY_RUN variable" "$(cat "$DISPATCHER")" "DRY_RUN"
 DRY_INFO=$(grep -rn 'info "dry-run' "$REPO/lib/cmd/" 2>/dev/null)
 assert_eq "no dry-run plan printers (info \"dry-run ...) in lib/cmd" "" "$DRY_INFO"
-assert_contains "install dry-run RUNNER lane retained (distinct mechanism)" \
-    "$(cat "$REPO/lib/cmd/install.sh")" 'SPC_INSTALL_RUNNERS='
+INSTALL_SRC=$(cat "$REPO/lib/cmd/install.sh")
+assert_contains "install runners are chroot + qemu ONLY (item 17d: the dry-run runner lane is retired)" \
+    "$INSTALL_SRC" "SPC_INSTALL_RUNNERS='chroot qemu'"
+assert_not_contains "no dry-run runner branch survives in install.sh (item 17d)" \
+    "$INSTALL_SRC" 'dry-run | chroot'
+assert_not_contains "no dry-run plan printer survives in install.sh (item 17d: no PLAN-format lines)" \
+    "$INSTALL_SRC" "printf 'PLAN"
+assert_not_contains "no plan accumulator survives in install.sh (item 17d: direct execution)" \
+    "$INSTALL_SRC" 'SPC_PLAN='
+assert_contains "the direct-execution seam exists (item 17d: inst_exec at the point of decision)" \
+    "$INSTALL_SRC" 'inst_exec() {'
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

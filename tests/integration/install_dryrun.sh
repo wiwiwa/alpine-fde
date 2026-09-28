@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# tests/integration/install_dryrun.sh — `alpine-fde install` dry-run plan contract
+# tests/integration/install_dryrun.sh — `alpine-fde install` record contract,
+# pinned over the qemu EMISSION shape (item 17d: the dry-run plan printer and
+# its runner lane are RETIRED — the qemu emission is the inspectable shape
+# that remains; the preflight runs in this lane, so the collaborators are
+# stubbed, and NOTHING executes)
 # (docs/Architecture.md §3.3, §4/§4.1, §8.1, §9.1, §13; ADR-17/ADR-20):
-#   * default runner is dry-run; prints the COMPLETE action plan and EXECUTES
+#   * the COMPLETE action plan is emitted to ALPINE_FDE_INSTALL_SCRIPT (guest
+#     records executable, host records as `# HOST:` comments) and EXECUTES
 #     nothing
 #   * G-C23/ADR-20: UNATTENDED — no operator passphrase prompt anywhere; the
 #     internal ephemeral install key is staged on tmpfs (never persisted),
@@ -45,19 +50,58 @@ source "$REPO/lib/cmd/install.sh"
 
 T=$(mktemp -d /tmp/alpine-fde-install-dryrun.XXXXXX)
 export ALPINE_FDE_NO_INSTALL=1
-export ALPINE_FDE_HOOKS_DIR=$T/hooks   # dry-run must not require the real hooks tree
+export ALPINE_FDE_HOOKS_DIR=$T/hooks   # the emission lane must not require the real hooks tree
 FAKEDISK=$T/disk.img
 : >"$FAKEDISK"
 
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
+# --- emission fixture: the qemu lane runs the preflight, so the collaborators
+# --- are stubbed exactly like tests/unit/install_osindications.sh
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
+export ALPINE_FDE_TMPDIR=$T
+export ALPINE_FDE_INSTALL_SCRIPT=$T/guest.sh
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
+mkdir -p "$T/stub" "$T/efivars" "$T/hooks"/kernel-hooks.d "$T/hooks"/mkinitfs/features.d \
+    "$T/hooks/apk/triggers" "$T/hooks/openrc" "$T/hooks/profile.d"
+make_stub() {
+    printf '#!/bin/sh\nexit 0\n' >"$T/stub/$1"
+    chmod +x "$T/stub/$1"
+}
+for s in sfdisk mkfs.btrfs mkfs.ext4 mkfs.vfat mount umount apk adduser addgroup rc-update cert-to-efi-sig-list sign-efi-sig-list \
+    lsblk btrfs cryptsetup make-bcache; do
+    make_stub "$s"
+done
+printf '#!/bin/sh\ncase " $* " in *" rand "*) printf "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";; esac\nexit 0\n' >"$T/stub/openssl"
+chmod +x "$T/stub/openssl"
+printf '#!/bin/sh\nprintf "0\\n"\n' >"$T/stub/id"
+chmod +x "$T/stub/id"
+export PATH="$T/stub:$PATH"
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    mkinitfs/features.d/alpine-fde.modules \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
+    printf '#!/bin/sh\nexit 0\n' >"$T/hooks/$h"
+    chmod +x "$T/hooks/$h"
+done
+printf '\007\000\000\000\001' >"$T/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
 run_install() { # args...
+    rm -f "$ALPINE_FDE_INSTALL_SCRIPT"
     INS_OUT=$("$REPO/bin/alpine-fde" install "$@" 2>&1)
     INS_RC=$?
+    # the emitted plan is the assertion surface: records never appear on the
+    # streams and stream text never appears in the script, so concatenating is
+    # unambiguous (stderr/stdout FIRST, then the emitted records in order)
+    INS_OUT="$INS_OUT
+$(cat "$ALPINE_FDE_INSTALL_SCRIPT" 2>/dev/null || :)"
 }
 
 # --- 1. usage errors ---------------------------------------------------------------
+unset ALPINE_FDE_YES
 run_install
 assert_eq "no --disk -> usage rc 2" "2" "$INS_RC"
 export ALPINE_FDE_INSTALL_RUNNER=nonsense
@@ -66,7 +110,8 @@ assert_eq "unknown runner -> usage rc 2" "2" "$INS_RC"
 export ALPINE_FDE_INSTALL_RUNNER=chroot
 run_install --disk "$FAKEDISK"
 assert_eq "destructive runner without --yes -> usage rc 2" "2" "$INS_RC"
-export ALPINE_FDE_INSTALL_RUNNER=dry-run
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
 run_install --fs xfs --disk "$FAKEDISK"
 assert_eq "G-ST1: --fs xfs rejected (btrfs|ext4 only) -> usage rc 2" "2" "$INS_RC"
 assert_contains "--fs error names the valid values" "$INS_OUT" "btrfs or ext4"
@@ -76,23 +121,24 @@ assert_contains "--bcache without --disk: error says what is needed" "$INS_OUT" 
 run_install --fs ext4 --disk a --disk b
 assert_eq "G-ST3: --fs ext4 is single-disk only -> rc 2" "2" "$INS_RC"
 
-# --- 2. dry-run prints the full plan (G-ST1: btrfs default, ADR-20 unattended) -----
-export ALPINE_FDE_INSTALL_RUNNER=dry-run
+# --- 2. the emission carries the full plan (G-ST1: btrfs default, ADR-20 unattended)
 run_install --disk "$FAKEDISK"
-assert_eq "dry-run rc 0" "0" "$INS_RC"
+assert_eq "emission rc 0" "0" "$INS_RC"
 assert_contains "plan: sfdisk GPT partitioning" "$INS_OUT" "sfdisk"
 assert_contains "plan: uefi ESP partition" "$INS_OUT" "type=uefi"
 assert_contains "plan: luksFormat luks2" "$INS_OUT" "luksFormat --type luks2"
 # Comment-proof --batch-mode check (w2-lint-leg1): the plan record's trailing
 # comment NAMES --batch-mode, so a plain `grep -vc -- --batch-mode` is defeated
-# by it — strip the trailing ` #` comment FIRST, then count unbatched records
+# by it — strip the `# HOST: ` record prefix and the trailing ` #` comment
+# FIRST, then count unbatched records (a bare `s/#.*$//` would eat the whole
+# host record — in the emission lane it IS a comment line — and false-positive)
 assert_eq "plan: EVERY luksFormat runs --batch-mode on the COMMAND, comment stripped (no interactive dangerous-action YES, real-install defect 5)" "0" \
-    "$(grep 'luksFormat' <<<"$INS_OUT" | sed 's/ *#.*$//' | grep -vc -- '--batch-mode')"
+    "$(grep 'luksFormat' <<<"$INS_OUT" | sed 's/^# HOST: //; s/ *#.*$//' | grep -vc -- '--batch-mode')"
 # RED guard: the check must be able to FAIL — drop the flag while the comment
 # still vouches for it, on a scratch copy of the plan, and the fixed expr flags it
 NOBATCH_PLAN=$(grep 'luksFormat' <<<"$INS_OUT" | sed 's/cryptsetup --batch-mode luksFormat/cryptsetup luksFormat/')
 assert_eq "plan: --batch-mode check is comment-proof (flag dropped, comment kept -> flagged)" "1" \
-    "$(grep 'luksFormat' <<<"$NOBATCH_PLAN" | sed 's/ *#.*$//' | grep -vc -- '--batch-mode')"
+    "$(grep 'luksFormat' <<<"$NOBATCH_PLAN" | sed 's/^# HOST: //; s/ *#.*$//' | grep -vc -- '--batch-mode')"
 assert_contains "plan: Argon2id KDF pinned" "$INS_OUT" "--pbkdf argon2id"
 assert_contains "plan: argon2id memory pin" "$INS_OUT" "--pbkdf-memory 1048576"
 assert_contains "plan: argon2id time pin" "$INS_OUT" "--iter-time 2000"
@@ -147,7 +193,7 @@ assert_not_contains "plan: apt sources drop retired" "$INS_OUT" "apt/sources.lis
 assert_not_contains "plan: dpkg trims drop retired" "$INS_OUT" "dpkg.cfg.d"
 # G-C23/ADR-20 amended: unattended until REBOOT — the plan carries the three
 # §9.1 step 4 credential-ceremony records; the no-echo prompts themselves live
-# ONLY in the qemu/chroot execution path (never in the dry-run plan text) and
+# ONLY in the qemu/chroot execution path (never in the emitted record text) and
 # there is NO flag/env credential seam (S-24).
 assert_not_contains "plan: NO passphrase prompt text in the plan" "$INS_OUT" \
     "Set disk encryption passphrase"
@@ -189,8 +235,8 @@ assert_eq "plan: exactly three ceremony records" "3" \
 # fixture pre-seeds keyslot 0 and the host ceremony path is never really
 # executed there — these plan-level pins are the harness guard.
 CER_REC_LINE=$(grep -m1 'inst_ceremony_recovery' <<<"$INS_OUT")
-assert_contains "item 27: ceremony recovery record targets the PRIMARY LUKS CONTAINER dev (the luksFormat target)" \
-    "$CER_REC_LINE" "inst_ceremony_recovery <ephemeral-keyfile> ${FAKEDISK}2"
+assert_contains "item 27: ceremony recovery record targets the PRIMARY LUKS CONTAINER dev (the luksFormat target; the staged ephemeral-key path rides along — the emission runner stages for real)" \
+    "$CER_REC_LINE" " ${FAKEDISK}2 # §9.1 step 4 credential ceremony (1/3)"
 assert_not_contains "item 27: ceremony recovery record NEVER names /dev/mapper (mapper = decrypted view)" \
     "$CER_REC_LINE" "/dev/mapper/"
 assert_eq "item 27 lint: ZERO cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) target /dev/mapper anywhere in the plan" "0" \
@@ -203,10 +249,10 @@ assert_eq "item 27 sanity: mkfs still targets the MAPPER (decrypted view — cor
 assert_not_contains "plan: NO credential env seam in the plan (ADR-20 amended)" "$INS_OUT" \
     "ALPINE_FDE_RECOVERY_PASSPHRASE"
 # blocker #8 amendment: the build record may reference ALPINE_FDE_KEY_PASSPHRASE
-# only as an assignment FROM the staged seam file (dry-run: the literal
-# <release-passfile> placeholder) — never a value in the plan text.
+# only as an assignment FROM the staged seam file (the in-target /run path —
+# blocker #9) — never a value in the plan text.
 assert_eq "plan: the ONLY release-key passphrase-env reference is the seam-file assignment (blocker #8)" "1" \
-    "$(grep -Fc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>)' <<<"$INS_OUT")"
+    "$(grep -Fc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass)' <<<"$INS_OUT")"
 assert_eq "plan: NO release-key passphrase-env assignment other than the seam file" "0" \
     "$(grep 'ALPINE_FDE_KEY_PASSPHRASE=' <<<"$INS_OUT" | grep -vFc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat')"
 assert_not_contains "plan: NO operator passphrase env consumption" "$INS_OUT" \
@@ -281,12 +327,12 @@ assert_eq "plan: ZERO bootctl invocations anywhere (blocker #7: Alpine ships no 
     "$(grep -Ec 'bootctl( |$)' <<<"$INS_OUT")"
 # real-server blocker #8: the build record configures the release-key dir
 # (kernel build resolves keys_dir() with NO default) and consumes the
-# ceremony-staged 0600 passphrase seam file — dry-run carries the literal
-# placeholder (nothing staged, no secret in plan text)
+# ceremony-staged 0600 passphrase seam file at the in-target /run path
+# (blocker #9 — never argv, never the log)
 assert_contains "plan: build record exports the in-chroot release-key dir (blocker #8)" "$INS_OUT" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
-assert_contains "plan: build record consumes the staged passphrase seam via the DRY-RUN placeholder (in-target path, blocker #9)" "$INS_OUT" \
-    '[ -s <release-passfile> ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat <release-passfile>) && rm -f <release-passfile>'
+assert_contains "plan: build record consumes the staged passphrase seam at the IN-TARGET path (blocker #9)" "$INS_OUT" \
+    '[ -s /run/alpine-fde-release-pass ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass'
 # real-server blocker #11: the record derives the TARGET's installed kernel
 # in-guest and passes it to kernel build (the no-arg form fell back to
 # uname -r — the LIVE ISO kernel, absent from the target)
@@ -366,9 +412,9 @@ assert_contains "plan: step 6 authorizes luksAddKey with the ephemeral key" \
 # records for /etc/motd or /etc/issue, and none of the banner vocabulary
 # anywhere in the plan output
 assert_eq "plan: ZERO /etc/motd write records (banner path removed, ADR-20 #4)" "0" \
-    "$(grep -c 'PLAN  write  /etc/motd' <<<"$INS_OUT")"
+    "$(grep -c '>/etc/motd' <<<"$INS_OUT")"
 assert_eq "plan: ZERO /etc/issue write records (banner path removed, ADR-20 #4)" "0" \
-    "$(grep -c 'PLAN  write  /etc/issue' <<<"$INS_OUT")"
+    "$(grep -c '>/etc/issue' <<<"$INS_OUT")"
 assert_not_contains "plan: no NOT-finalized banner text (G-C25 removed)" "$INS_OUT" \
     "NOT finalized"
 assert_not_contains "plan: no banner finalize directive" "$INS_OUT" \
@@ -386,9 +432,11 @@ assert_not_contains "plan: no inst_state_write record" "$INS_OUT" \
 assert_eq "plan: exactly ONE OsIndications record — the DEFERRED-enrollment firmware trip (G-C26 amended)" "1" \
     "$(grep -c 'fw_osindications_set' <<<"$INS_OUT")"
 assert_contains "plan: the firmware trip is runtime-gated on the deferred branch (PK absent)" "$INS_OUT" \
-    'else fw_osindications_set /sys/firmware/efi/efivars && reboot; fi'
+    "else fw_osindications_set $T/efivars && reboot; fi"
 assert_contains "plan: explicit ephemeral-key scrub record (I1, §9.1 teardown; incl. the blocker #8 passphrase seam file)" \
-    "$INS_OUT" "rm -f <ephemeral-keyfile> <release-passfile> # I1: ephemeral install key + release-passphrase seam file scrubbed"
+    "$INS_OUT" "# I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
+assert_eq "plan: the scrub record names BOTH staged secrets (the real ephemeral-key path + the in-target release-pass seam)" "1" \
+    "$(grep -Ec 'rm -f .*alpine-fde-ephkey\.[A-Za-z0-9]+ /mnt/run/alpine-fde-release-pass # I1:' <<<"$INS_OUT")"
 assert_contains "plan: direct reboot record, runtime-gated on the success path (ADR-20)" "$INS_OUT" \
     "reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
 # deferred-ENROLLMENT mode (DECIDED 2026-09-28, real Dell PowerEdge R640):
@@ -428,11 +476,11 @@ assert_eq "plan: teardown lazy -l fallback for every umount (never a hard failur
 # substrings — pin the command records). Exactly ONE record: removing the
 # bootmgr sbsign OR adding any other sbsign to the plan both fail this.
 assert_eq "plan: exactly ONE sbsign record — the boot-manager release-sign (rest is in-chroot build)" "1" \
-    "$(grep -Ec 'PLAN  (host|guest) .*sbsign --' <<<"$INS_OUT")"
+    "$(grep -c 'sbsign --' <<<"$INS_OUT")"
 assert_eq "plan: zero ukify command records (in-chroot build)" "0" \
-    "$(grep -Ec 'PLAN  (host|guest) .*ukify build' <<<"$INS_OUT")"
+    "$(grep -Ec '(^# HOST: |^ukify )ukify build' <<<"$INS_OUT")"
 assert_eq "plan: zero sbverify records" "0" \
-    "$(grep -Ec 'PLAN  (host|guest) .*sbverify' <<<"$INS_OUT")"
+    "$(grep -c 'sbverify' <<<"$INS_OUT")"
 assert_not_contains "plan: no <signing-medium> placeholder" "$INS_OUT" "<signing-medium>"
 assert_eq "plan: release.pem named by exactly TWO records (ceremony + bootmgr release-sign, post-cc3f280)" "2" \
     "$(grep -c 'release.pem' <<<"$INS_OUT")"
@@ -463,7 +511,7 @@ I_META=$(line_no "$INS_OUT" "inst_resolve_target_metadata")
 # anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the
 # reset block also carries a bare `umount -R /mnt` (earlier in the plan)
 I_TEARDOWN=$(line_no "$INS_OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
-I_SCRUB=$(line_no "$INS_OUT" "rm -f <ephemeral-keyfile>")
+I_SCRUB=$(line_no "$INS_OUT" "# I1: ephemeral install key + release-passphrase seam file scrubbed")
 I_PROBE=$(line_no "$INS_OUT" "INST_SB_ENROLLED=1")
 I_SBINSTR=$(line_no "$INS_OUT" "alpine-fde: Secure Boot key material is staged under /efi/alpine-fde-keys")
 I_SBCONF=$(line_no "$INS_OUT" "press Enter to reboot into firmware setup")
@@ -639,7 +687,7 @@ assert_contains "default: reboot records present (deferred trip + direct reboot)
 
 # --- 3. G-ST1b: --fs ext4 keeps the flat path verbatim -------------------------------
 run_install --disk "$FAKEDISK" --fs ext4
-assert_eq "ext4 dry-run rc 0" "0" "$INS_RC"
+assert_eq "ext4 emission rc 0" "0" "$INS_RC"
 assert_contains "ext4: mkfs.ext4 verbatim" "$INS_OUT" "mkfs.ext4 -F -U"
 assert_contains "ext4: flat mount verbatim" "$INS_OUT" \
     "mount /dev/mapper/root-crypt /mnt && mkdir -p /mnt/efi && mount"
@@ -665,7 +713,7 @@ assert_contains "ext4: reset keeps the single guarded recursive umount (item 26d
 CACHEDEV=$T/cache.img
 : >"$CACHEDEV"
 run_install --disk "$FAKEDISK" --bcache "$CACHEDEV"
-assert_eq "bcache dry-run rc 0" "0" "$INS_RC"
+assert_eq "bcache emission rc 0" "0" "$INS_RC"
 assert_contains "bcache: cache dev partitioned (ESP p1 + cache p2)" "$INS_OUT" 'name="cache"'
 # PHYSICAL-MEDIA BLOCK (real-install defects 1-4): modules are not auto-loaded
 # on a physical boot, /dev needs coldplug after sfdisk, stale superblocks make
@@ -752,7 +800,7 @@ assert_contains "bcache: provisional seal loop covers the single container (/dev
 DISKB=$T/diskb.img
 : >"$DISKB"
 run_install --disk "$FAKEDISK" --disk "$DISKB" --bcache "$CACHEDEV"
-assert_eq "bcache-multi dry-run rc 0" "0" "$INS_RC"
+assert_eq "bcache-multi emission rc 0" "0" "$INS_RC"
 assert_contains "bcache-multi: cache dev partitioned (ESP p1 + shared cache p2)" "$INS_OUT" \
     'name="cache"'
 assert_eq "bcache-multi: backing disks NOT partitioned (backing = WHOLE disk)" "0" \
@@ -789,9 +837,9 @@ assert_eq "bcache-multi: writethrough pinned on BOTH members" "2" \
 assert_eq "bcache-multi: one independent LUKS2 container per /dev/bcacheN" "2" \
     "$(grep -Ec 'luksFormat --type luks2 [^ ]*.* /dev/bcache[01]($| )' <<<"$INS_OUT")"
 assert_eq "bcache-multi: bcache0 opened as root1" "1" \
-    "$(grep -Ec 'open +/dev/bcache0 root1($| )' <<<"$INS_OUT")"
+    "$(grep -Ec 'open .* /dev/bcache0 root1($| )' <<<"$INS_OUT")"
 assert_eq "bcache-multi: bcache1 opened as root2" "1" \
-    "$(grep -Ec 'open +/dev/bcache1 root2$' <<<"$INS_OUT")"
+    "$(grep -Ec 'open .* /dev/bcache1 root2$' <<<"$INS_OUT")"
 assert_contains "bcache-multi: btrfs raid1 pool across the opened mappers" "$INS_OUT" \
     "-d raid1 -m raid1 /dev/mapper/root1 /dev/mapper/root2"
 assert_eq "bcache-multi: ESP formatted ONCE, ONLY on the cache dev" "1" \
@@ -816,7 +864,7 @@ assert_contains "bcache-multi: conf records BCACHE=1" "$INS_OUT" "BCACHE=1"
 DISK2=$T/disk2.img
 : >"$DISK2"
 run_install --disk "$FAKEDISK" --disk "$DISK2"
-assert_eq "raid1 dry-run rc 0" "0" "$INS_RC"
+assert_eq "raid1 emission rc 0" "0" "$INS_RC"
 assert_contains "raid1: primary partitioned ESP p1 + LUKS p2" "$INS_OUT" "sfdisk $FAKEDISK"
 assert_contains "raid1: secondary partitioned (single root partition)" "$INS_OUT" "sfdisk $DISK2"
 assert_not_contains "raid1: secondary has NO ESP partition" "$INS_OUT" "type=uefi*$DISK2"
@@ -840,18 +888,19 @@ assert_eq "raid1: target metadata carries BOTH member uuids" "1" \
 assert_contains "raid1: teardown closes both members" "$INS_OUT" \
     "cryptsetup close root1 && cryptsetup close root2"
 assert_eq "raid1: single topology crypttab entry (root, no suffix) absent" "0" \
-    "$(grep -Ec 'PLAN    \| root UUID=' <<<"$INS_OUT")"
+    "$(grep -c 'root UUID=' <<<"$INS_OUT")"
 assert_contains "raid1: provisional seal loop covers both member CONTAINERS (primary p2 + secondary p1, item 27)" "$INS_OUT" \
     "for d in ${FAKEDISK}2 ${DISK2}1; do"
 
-# --- 6. dry-run has no side effects -----------------------------------------------------
+# --- 6. the emission lane has no side effects -------------------------------------------
 CSUM_BEFORE=$(sha256sum <"$FAKEDISK")
 run_install --disk "$FAKEDISK"
 CSUM_AFTER=$(sha256sum <"$FAKEDISK")
-assert_eq "fake disk untouched by dry-run" "$CSUM_BEFORE" "$CSUM_AFTER"
-assert_not_contains "dry-run: no real ephemeral keyfile path leaks into the plan (M-01 tmpfs seam)" \
-    "$INS_OUT" "/dev/shm/alpine-fde-ephkey"
-assert_contains "dry-run: ephemeral keyfile is a placeholder" "$INS_OUT" "<ephemeral-keyfile>"
+assert_eq "fake disk untouched by the emission lane" "$CSUM_BEFORE" "$CSUM_AFTER"
+assert_eq "emission: no /dev/shm keyfile path leaks into the plan (M-01: the staged seam is ALPINE_FDE_TMPDIR)" "0" \
+    "$(grep -c '/dev/shm/alpine-fde-ephkey' <<<"$INS_OUT")"
+assert_contains "emission: the staged ephemeral-key path is REAL (the emission runner stages for real, unlike the retired dry-run placeholder)" \
+    "$INS_OUT" "alpine-fde-ephkey."
 
 # --- 7. L-06: ALPINE_FDE_YES only counts as consent when it is exactly "1" -----
 export ALPINE_FDE_INSTALL_RUNNER=chroot
@@ -861,7 +910,8 @@ assert_eq "L-06: ALPINE_FDE_YES=0 is NOT consent -> usage rc 2" "2" "$INS_RC"
 assert_contains "L-06: refusal explains the --yes requirement" "$INS_OUT" "requires --yes"
 ALPINE_FDE_YES=no run_install --disk "$FAKEDISK"
 assert_eq "L-06: ALPINE_FDE_YES=no is NOT consent -> usage rc 2" "2" "$INS_RC"
-export ALPINE_FDE_INSTALL_RUNNER=dry-run
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
 unset ALPINE_FDE_INSTALL_NO_REBOOT
 
 # --- 8. M-02: injected operator inputs die at the boundary (usage rc 2) --------
@@ -883,16 +933,11 @@ assert_contains "M-02: injected keydir error names the variable" "$INS_OUT" "ALP
 
 # --- 9. G-C23: ephemeral-key staging contract (direct call, THIS shell) --------
 # unattended: openssl rand (>=256-bit) staged under the tmpfs seam, mode 0600,
-# byte-stable for luksFormat/open/--key-file consumers; dry-run stages nothing.
+# byte-stable for luksFormat/open/--key-file consumers.
 export ALPINE_FDE_INSTALL_RUNNER=chroot
 export ALPINE_FDE_INSTALL_RUNNER
 export ALPINE_FDE_YES=1
 export ALPINE_FDE_TMPDIR=$T
-ALPINE_FDE_INSTALL_RUNNER=dry-run inst_stage_ephemeral_key
-assert_eq "G-C23: dry-run stages NOTHING (empty _IME_KEYFILE)" "1" \
-    "$([ -z "${_IME_KEYFILE:-}" ] && echo 1 || echo 0)"
-inst_stage_ephemeral_key
-_EPH_RC=0
 assert_rc "G-C23: direct call returns rc 0" 0 inst_stage_ephemeral_key
 assert_eq "G-C23: resolver stages _IME_KEYFILE (non-empty)" "1" \
     "$([ -n "${_IME_KEYFILE:-}" ] && echo 1 || echo 0)"
@@ -903,10 +948,10 @@ assert_eq "G-C23: key material is 256-bit hex (64 chars, openssl rand -hex 32)" 
     "$(wc -c <"${_IME_KEYFILE:-/dev/null}" | tr -d '[:space:]')"
 assert_eq "G-C23: _ime_kf carrier matches the staged key-file" "${_IME_KEYFILE:-}" "${_ime_kf:-}"
 rm -f "${_IME_KEYFILE:-}"
-unset _IME_KEYFILE _ime_kf ALPINE_FDE_TMPDIR
+unset _IME_KEYFILE _ime_kf
 trap cleanup EXIT # the resolver re-armed the EXIT trap; restore fixture cleanup
-export ALPINE_FDE_INSTALL_RUNNER=dry-run
-unset ALPINE_FDE_YES
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
 
 # --- 9b. §8.1 provision row / ADR-18: --keydir is CONSUMED (staged from the ---
 #         signing medium, NO in-chroot keygen) — README "provision stage1 on
@@ -918,7 +963,7 @@ for f in release.pem release.pub release.crt db.cert.der kek.cert.der pk.cert.de
     printf 'key-material' >"$KEYDIR/$f"
 done
 ALPINE_FDE_KEYDIR=$KEYDIR run_install --disk "$FAKEDISK" --keydir "$KEYDIR"
-assert_eq "keydir: dry-run rc 0" "0" "$INS_RC"
+assert_eq "keydir: emission rc 0" "0" "$INS_RC"
 assert_contains "keydir: plan stages release.pem FROM the medium onto the encrypted root" \
     "$INS_OUT" "cp $KEYDIR/release.pem"
 assert_contains "keydir: plan stages the db.auth packet (fw_auth_enroll input)" \
@@ -948,7 +993,7 @@ printf 'key-material' >"$KEYDIR/kek.auth"
 #         (relative to the target root; flows into fstab, mount plan,
 #         ESP_PATH, bootctl and the UKI extraction path)
 run_install --disk "$FAKEDISK" --esp /boot/efi
-assert_eq "esp: --esp /boot/efi dry-run rc 0" "0" "$INS_RC"
+assert_eq "esp: --esp /boot/efi emission rc 0" "0" "$INS_RC"
 assert_contains "esp: fstab entry uses the flag mount point" "$INS_OUT" \
     "PARTUUID=<esp-partuuid> /boot/efi vfat umask=0077 0 2"
 assert_contains "esp: ESP_PATH persisted from the flag" "$INS_OUT" "ESP_PATH=/boot/efi"
@@ -964,7 +1009,7 @@ assert_contains "esp: UKI extraction reads the flag mount point" "$INS_OUT" \
     "/boot/efi/EFI/Linux/alpine-fde-*.efi"
 # dispatcher global --esp (env ALPINE_FDE_ESP) is consumed too
 ALPINE_FDE_ESP=/boot/efi run_install --disk "$FAKEDISK"
-assert_eq "esp: env ALPINE_FDE_ESP dry-run rc 0" "0" "$INS_RC"
+assert_eq "esp: env ALPINE_FDE_ESP emission rc 0" "0" "$INS_RC"
 assert_contains "esp: env ALPINE_FDE_ESP flows into ESP_PATH" "$INS_OUT" "ESP_PATH=/boot/efi"
 # invalid values fail loudly rc 2 BEFORE any plan record
 run_install --disk "$FAKEDISK" --esp /
@@ -990,7 +1035,7 @@ assert_contains "esp: default stays /efi (enrollment ESP_DIR)" "$INS_OUT" \
 #         initramfs crypttab is spliced from /etc/crypttab), and no-swap
 #         layouts stay byte-for-byte unchanged.
 run_install --disk "$FAKEDISK" --swap
-assert_eq "swap: --swap (bare) dry-run rc 0" "0" "$INS_RC"
+assert_eq "swap: --swap (bare) emission rc 0" "0" "$INS_RC"
 assert_contains "swap: plan info names the default size" "$INS_OUT" "swap=4G"
 SWAP_SFD=$(grep -F 'sfdisk' <<<"$INS_OUT" | grep -F 'name="swap"')
 assert_contains "swap: sfdisk record carries the ephemeral swap partition (LAST)" "$SWAP_SFD" \
@@ -1021,7 +1066,7 @@ SWAP_TXN=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
 assert_contains "swap: apk txn includes cryptsetup-openrc (the dmcrypt service provider)" "$SWAP_TXN" \
     "cryptsetup-openrc"
 assert_eq "swap: the crypttab write carries NO swap entry (the initramfs crypttab is spliced from /etc/crypttab — the swap mounts late, normal boot)" "0" \
-    "$(sed -n '/PLAN  write  \/etc\/crypttab/,/^PLAN  write/p' <<<"$INS_OUT" | grep -c '^PLAN    | swap ')"
+    "$(grep -F '>/etc/crypttab' <<<"$INS_OUT" | grep -c 'swap')"
 assert_eq "swap: cryptsetup NEVER touches the swap partition device (plain dm-crypt is created per boot by dmcrypt, not at install)" "0" \
     "$(grep 'cryptsetup' <<<"$INS_OUT" | grep -c "${FAKEDISK}3")"
 # dmcrypt + enable records AFTER the in-chroot apk txn (failure-#2 discipline:
@@ -1034,7 +1079,7 @@ assert_eq "swap: order — apk txn (cryptsetup-openrc) BEFORE the dmcrypt conf d
     "$(( I_SWAP_TXN > 0 && I_SWAP_TXN < I_SWAP_DMC && I_SWAP_DMC < I_SWAP_EN ? 1 : 0 ))"
 # explicit size
 run_install --disk "$FAKEDISK" --swap 8G
-assert_eq "swap: --swap 8G dry-run rc 0" "0" "$INS_RC"
+assert_eq "swap: --swap 8G emission rc 0" "0" "$INS_RC"
 assert_contains "swap: 8G sized partition" "$INS_OUT" 'name="swap", size=+8192M'
 assert_contains "swap: 8G named in the plan info" "$INS_OUT" "swap=8G"
 # garbage size: fail-closed 2 before any record
@@ -1057,7 +1102,7 @@ assert_eq "swap: default apk txn has NO cryptsetup-openrc" "0" \
 # bcache + swap: the backing dev cannot carry a partition — the swap is p3 of
 # the CACHE dev (which plays the primary role in the bcache topologies)
 run_install --disk "$FAKEDISK" --bcache "$CACHEDEV" --swap
-assert_eq "swap (bcache): dry-run rc 0" "0" "$INS_RC"
+assert_eq "swap (bcache): emission rc 0" "0" "$INS_RC"
 BCSWAP_SFD=$(grep -F "sfdisk $CACHEDEV" <<<"$INS_OUT" | grep -F 'name="swap"')
 assert_contains "swap (bcache): swap is p3 of the CACHE dev" "$BCSWAP_SFD" \
     'type=swap, name="swap", size=+4096M'
@@ -1069,7 +1114,7 @@ assert_not_contains "swap (bcache): the backing dev is NEVER partitioned" "$INS_
     "sfdisk $FAKEDISK"
 # raid1 + swap: p3 of the PRIMARY only; secondaries unchanged
 run_install --disk "$FAKEDISK" --disk "$DISK2" --swap
-assert_eq "swap (raid1): dry-run rc 0" "0" "$INS_RC"
+assert_eq "swap (raid1): emission rc 0" "0" "$INS_RC"
 assert_contains "swap (raid1): swap on the primary p3" "$INS_OUT" "source='${FAKEDISK}3'"
 assert_eq "swap (raid1): exactly ONE swap-partition record" "1" \
     "$(grep -c 'name="swap"' <<<"$INS_OUT")"

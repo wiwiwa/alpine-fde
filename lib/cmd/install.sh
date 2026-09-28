@@ -54,15 +54,16 @@
 #               is reached exactly there.
 #
 # RUNNER SEAM (ALPINE_FDE_INSTALL_RUNNER) — default chroot (the product);
-#   the seam exists for tests (dry-run plan capture) and CI (qemu emission):
+#   the seam exists for tests/CI (the qemu emission is the inspectable shape —
+#   item 17d: the dry-run plan printer is RETIRED):
 #   chroot (default)   guided local install from the live ISO: host steps run
 #                      now, guest steps run via `chroot <mnt> sh -c`
-#   dry-run            print the complete action plan, execute nothing
 #   qemu               emit the guest-side plan as a script for the CI harness
 #                      (host steps emitted as comments) — no execution
 #
-# Plan steps are tagged host|guest; file drops into the target root are done
-# host-side at $MNT (chroot) or emitted as guest printf lines (qemu).
+# Steps are tagged host|guest and EXECUTE AT THE POINT OF DECISION (item 17d:
+# no plan accumulator); file drops into the target root are done host-side at
+# $MNT (chroot) or emitted as guest printf lines (qemu).
 #
 # ALPINE_FDE_INSTALL_NO_REBOOT=1 (or --no-reboot) suppresses the final reboot
 # records (CI seam): the plan ends after teardown + ephemeral-key scrub + the
@@ -93,7 +94,7 @@ if [ -z "${ALPINE_FDE_FIRMWARE_LOADED:-}" ]; then
   . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
 
-SPC_INSTALL_RUNNERS='dry-run chroot qemu'
+SPC_INSTALL_RUNNERS='chroot qemu'
 
 inst_runner() { printf '%s\n' "${ALPINE_FDE_INSTALL_RUNNER:-chroot}"; }
 inst_mnt() { printf '%s\n' "${ALPINE_FDE_INSTALL_MNT:-/mnt}"; }
@@ -656,8 +657,8 @@ header ever persists. mkswap/swapon never run at install time. Hibernation
 
 Runner: chroot executes (default; root, live ISO, --yes required; the three
 credential ceremony prompts are asked in the execution path). ALPINE_FDE_INSTALL_RUNNER
-is a test/CI seam, not a user setting: dry-run prints the plan only (no
-prompt, no secret); qemu emits a guest script (CI artifact job).
+is a test/CI seam, not a user setting: qemu emits a guest script (CI artifact
+job; host steps as comments) without executing anything.
 Env: ALPINE_FDE_ESP_SIZE (default 512M), ALPINE_FDE_MIRROR,
 ALPINE_FDE_INSTALL_MNT, ALPINE_FDE_INSTALL_USER, ALPINE_FDE_DISKS
 (dispatcher-provided disk list), ALPINE_FDE_TMPDIR (ephemeral-key staging
@@ -681,7 +682,7 @@ inst_part() {
 # `make-bcache`. dd (head + tail) is the deterministic choice — wipefs is not
 # guaranteed in the installer env. The tail seek is derived at RUN time from
 # `blockdev --getsize64` (the plan line is eval'd / sh -c'd, so the
-# substitution stays literal in dry-run/qemu output); head and tail are `&&`-
+# substitution stays literal in the qemu emission); head and tail are `&&`-
 # chained so a failed wipe aborts the plan instead of reaching make-bcache.
 inst_wipe_superblocks_line() {
   printf '%s\n' "dd if=/dev/zero of=$1 bs=1M count=1 && dd if=/dev/zero of=$1 bs=1M count=1 seek=\$(( \$(blockdev --getsize64 $1) / 1048576 - 1 )) # wipe stale superblocks (head+tail): bcache refuses devices with leftover signatures"
@@ -693,7 +694,7 @@ inst_wipe_superblocks_line() {
 # topologies) sized "disk - esp - swap" at RUN time, and the EPHEMERAL SWAP as
 # the LAST partition at its fixed size. The runtime arithmetic mirrors the
 # wipe-superblocks record idiom above: the command substitution stays literal
-# in dry-run/qemu plan output and resolves at execution; the 8 MiB slack
+# in the qemu emission and resolves at execution; the 8 MiB slack
 # absorbs the GPT overhead (33 backup sectors) + 1MiB alignment so the
 # fixed-size swap partition always fits. A disk too small for its layout dies
 # in sfdisk — fail-closed, never a silently truncated swap.
@@ -751,66 +752,127 @@ inst_reset_bcache_line() {
   printf '%s\n' "for d in $1/*/; do [ -f \"\${d}stop\" ] || continue; u=\"\${d%/}\"; echo \"\${u##*/}\" > \"\$u/stop\" && echo \"alpine-fde: info: reset: stopped live bcache set \${u##*/}\" || echo \"alpine-fde: warn: reset: could not stop bcache set \${u##*/}\"; done || :"
 }
 
-# --- plan records -----------------------------------------------------------
-# SPC_PLAN holds "KIND<TAB>CMD" lines (guest cmds must be single-line shell);
-# file drops are executed/emitted at plan-build time (order-independent).
-SPC_PLAN=''
+# --- plan records (item 17d: DIRECT EXECUTION — no accumulator) --------------
+# The two-phase accumulator (SPC_PLAN / inst_plan_add / inst_plan_run /
+# inst_execute_plan) is RETIRED: every record EXECUTES at the point of
+# decision via inst_exec — the chroot runner runs it now (host records via
+# `eval` in THIS shell, guest records via `chroot <mnt> sh -c`), the qemu
+# runner appends it to the guest script (guest records executable, host
+# records as `# HOST:` comments for the CI harness). The emitted script is
+# BYTE-IDENTICAL to the retired accumulator's emission (pinned against
+# fixtures/install-guest-script/golden-single-btrfs.sh in
+# tests/unit/install_qemu_emit.sh). Guest cmds must be single-line shell;
+# file drops are executed/emitted at decision time (order-independent).
 
-inst_plan_add() {
-  _ipa_kind=$1
-  shift
-  if [ "$(inst_runner)" = "dry-run" ]; then
-    printf 'PLAN  %-6s %s\n' "$_ipa_kind" "$*"
-    return 0
-  fi
-  SPC_PLAN="$SPC_PLAN$_ipa_kind	$*
-"
-  return 0
-}
+# inst_emit_out — the qemu guest-script path (test seam
+# ALPINE_FDE_INSTALL_SCRIPT; the CI artifact job consumes it)
+inst_emit_out() { printf '%s\n' "${ALPINE_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}"; }
 
-# inst_plan_write RELPATH LINE... — drop a file into the target root.
-# Config drops execute IN PLAN ORDER (§3.3: after mount, before the first
-# in-guest apk use; EXCEPTION — the /etc/apk/repositories drop deliberately
-# PRECEDES the apk populate, real-install defect 6: apk resolves against the
-# TARGET's repositories): the chroot runner defers them as host plan records
-# (eager writes would land before the target is mounted, G-I1); dry-run
-# prints them; qemu emits guest printf lines.
-inst_plan_write() {
-  _ipw_p=$1
+# inst_exec KIND CMD... — execute ONE record at the point of decision (17d).
+# chroot: host records eval in THIS shell — the §9.1 step 4 ceremony prompts
+# read the real stdin directly (the retired fd3 plan-file indirection existed
+# only to keep the read loop from eating plan lines); guest records run via
+# `chroot <mnt> /usr/bin/env -u ALPINE_FDE_DISK_PASSPHRASE /bin/sh -c` with
+# the same fail-closed die on failure. qemu: nothing executes — the record is
+# appended to the guest script (header written on the FIRST record; the
+# retired accumulator wrote the identical bytes in one shot at execute time).
+# L-04a + WR-02: armed on the FIRST record — a die mid-plan leaves NOTHING
+# behind: one combined EXIT trap scrubs the staged ephemeral key-file AND the
+# in-target release-passphrase seam file (blocker #8/#9, best-effort), then
+# tears the H-02 binds down best-effort (never masking the real exit code;
+# skipped when we died before the mountpoint was even resolved).
+inst_exec() {
+  _iex_kind=$1
   shift
   case $(inst_runner) in
-  dry-run)
-    printf 'PLAN  write  %s (%s lines)\n' "$_ipw_p" "$#"
-    for _ipw_l in "$@"; do
-      printf 'PLAN    | %s\n' "$_ipw_l"
-    done
-    ;;
   chroot)
-    _ipw_cmd="printf '%s\\n'"
-    for _ipw_l in "$@"; do
-      _ipw_q=$(printf '%s' "$_ipw_l" | sed "s/'/'\\\\''/g")
-      _ipw_cmd="$_ipw_cmd '$_ipw_q'"
-    done
-    inst_plan_add host "mkdir -p $(inst_mnt)${_ipw_p%/*} && $_ipw_cmd >$(inst_mnt)$_ipw_p"
+    if [ -z "${_IEX_TRAP_ARMED:-}" ]; then
+      _IEX_TRAP_ARMED=1
+      trap '
+                rm -f "${_ime_kf:-}" "${_im_pf_host:-}" 2>/dev/null
+                if [ -n "${_im_mnt:-}" ]; then
+                    # boot-lane finding #20: CHILD MOUNTS FIRST — the efivars
+                    # bind hangs under /mnt/sys, so the parent must unmount
+                    # after it (parent-first is EBUSY on every real install).
+                    umount "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
+                    umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" 2>/dev/null || :
+                fi
+            ' EXIT
+    fi
+    if [ "$_iex_kind" = "host" ]; then
+      info "host: $*"
+      # shellcheck disable=SC2086  # plan lines are shell
+      eval "$*" || die "install: host step failed: $*"
+    else
+      info "guest: $*"
+      # shellcheck disable=SC2086
+      # L-04b: strip the legacy passphrase variable at the boundary —
+      # chroot(1) passes the parent environment to the guest (the
+      # unattended flow stages no operator passphrase at all; the
+      # strip stays as defense against stale operator environments)
+      chroot "$(inst_mnt)" /usr/bin/env -u ALPINE_FDE_DISK_PASSPHRASE /bin/sh -c "$*" ||
+        die "install: guest step failed: $*"
+    fi
     ;;
   qemu)
-    # guest-side write, single command line; single-quote escape each line
-    _ipw_cmd="printf '%s\\n'"
-    for _ipw_l in "$@"; do
-      _ipw_q=$(printf '%s' "$_ipw_l" | sed "s/'/'\\\\''/g")
-      _ipw_cmd="$_ipw_cmd '$_ipw_q'"
-    done
-    inst_plan_add guest "$_ipw_cmd >$_ipw_p"
+    _iex_out=$(inst_emit_out)
+    if [ -z "${_IEX_EMIT_STARTED:-}" ]; then
+      _IEX_EMIT_STARTED=1
+      printf '#!/bin/sh -ex\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eux\n' >"$_iex_out"
+    fi
+    if [ "$_iex_kind" = "guest" ]; then
+      printf '%s\n' "$*" >>"$_iex_out"
+    else
+      printf '# HOST: %s\n' "$*" >>"$_iex_out"
+    fi
     ;;
   esac
   return 0
 }
 
-# inst_plan_run KIND CMD... — append a command plan record
-inst_plan_run() {
-  _ipr_kind=$1
+# inst_emit_finish — the tail of the retired inst_execute_plan: chroot disarms
+# the combined L-04a/WR-02 trap (the caller then scrubs the staged secrets
+# explicitly); qemu closes the guest script (chmod 700 + the stderr pointer).
+inst_emit_finish() {
+  case $(inst_runner) in
+  chroot)
+    trap - EXIT
+    ;;
+  qemu)
+    _ief_out=$(inst_emit_out)
+    chmod 700 "$_ief_out"
+    printf 'alpine-fde: guest install script written: %s\n' "$_ief_out" >&2
+    ;;
+  esac
+  return 0
+}
+
+# inst_plan_write RELPATH LINE... — drop a file into the target root at the
+# point of decision. Config drops keep §3.3 plan order (after mount, before
+# the first in-guest apk use; EXCEPTION — the /etc/apk/repositories drop
+# deliberately PRECEDES the apk populate, real-install defect 6: apk resolves
+# against the TARGET's repositories): the chroot runner executes the drop as a
+# HOST step now — safe because the mount records precede every drop in
+# decision order (the retired accumulator deferred them as plan records for
+# the same reason, G-I1); qemu emits a guest printf line.
+inst_plan_write() {
+  _ipw_p=$1
   shift
-  inst_plan_add "$_ipr_kind" "$*"
+  _ipw_cmd="printf '%s\\n'"
+  for _ipw_l in "$@"; do
+    _ipw_q=$(printf '%s' "$_ipw_l" | sed "s/'/'\\\\''/g")
+    _ipw_cmd="$_ipw_cmd '$_ipw_q'"
+  done
+  case $(inst_runner) in
+  chroot)
+    inst_exec host "mkdir -p $(inst_mnt)${_ipw_p%/*} && $_ipw_cmd >$(inst_mnt)$_ipw_p"
+    ;;
+  qemu)
+    # guest-side write, single command line; single-quote escape each line
+    inst_exec guest "$_ipw_cmd >$_ipw_p"
+    ;;
+  esac
+  return 0
 }
 
 # inst_inittab_getty_cmd INITTAB — the guarded, IDEMPOTENT guest record that
@@ -852,70 +914,6 @@ inst_sshd_config_cmd() {
 # absent (crash-resume / re-run safe; the package default conf coexists).
 inst_dmcrypt_conf_cmd() {
   printf '%s\n' "grep -q 'alpine-fde: ephemeral crypt swap' $1 2>/dev/null || printf '%s\\n' '# alpine-fde: ephemeral crypt swap (ADR-7 amended, --swap: fresh /dev/urandom key per boot, wiped on poweroff; hibernation unsupported)' \"swap='swap'\" \"source='$2'\" \"options='-c aes-xts-plain64 -s 512 -d /dev/urandom'\" >>$1 # ADR-7: ephemeral swap (idempotent guarded append; dmcrypt default pre_mount='mkswap')"
-}
-
-# inst_execute_plan — run accumulated records (non-dry-run runners)
-inst_execute_plan() {
-  case $(inst_runner) in
-  chroot)
-    # plan on fd3: executed commands keep the real stdin (tty) so
-    # interactive prompts never eat plan lines
-    _ie_plan=$(mktemp "${ALPINE_FDE_TMPDIR:-${TMPDIR:-/tmp}}/alpine-fde-plan.XXXXXX")
-    printf '%s' "$SPC_PLAN" >"$_ie_plan"
-    # L-04a + WR-02: a die mid-plan must leave NOTHING behind — one
-    # combined EXIT trap scrubs the plan file AND the staged ephemeral
-    # key-file AND the in-target release-passphrase seam file (blocker
-    # #8/#9, best-effort), then tears the H-02 binds down best-effort (never
-    # masking the real exit code; skipped when we died before the
-    # mountpoint was even resolved)
-    trap '
-                rm -f "$_ie_plan" "${_ime_kf:-}" "${_im_pf_host:-}" 2>/dev/null
-                if [ -n "${_im_mnt:-}" ]; then
-                    # boot-lane finding #20: CHILD MOUNTS FIRST — the efivars
-                    # bind hangs under /mnt/sys, so the parent must unmount
-                    # after it (parent-first is EBUSY on every real install).
-                    umount "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
-                    umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" 2>/dev/null || :
-                fi
-            ' EXIT
-    while IFS='	' read -r _ie_kind _ie_cmd <&3; do
-      [ -n "$_ie_cmd" ] || continue
-      if [ "$_ie_kind" = "host" ]; then
-        info "host: $_ie_cmd"
-        # shellcheck disable=SC2086  # plan lines are shell
-        eval "$_ie_cmd" || die "install: host step failed: $_ie_cmd"
-      else
-        info "guest: $_ie_cmd"
-        # shellcheck disable=SC2086
-        # L-04b: strip the legacy passphrase variable at the boundary —
-        # chroot(1) passes the parent environment to the guest (the
-        # unattended flow stages no operator passphrase at all; the
-        # strip stays as defense against stale operator environments)
-        chroot "$(inst_mnt)" /usr/bin/env -u ALPINE_FDE_DISK_PASSPHRASE /bin/sh -c "$_ie_cmd" ||
-          die "install: guest step failed: $_ie_cmd"
-      fi
-    done 3<"$_ie_plan"
-    trap - EXIT
-    rm -f "$_ie_plan"
-    ;;
-  qemu)
-    _ie_out=${ALPINE_FDE_INSTALL_SCRIPT:-/tmp/alpine-fde-install-guest.sh}
-    {
-      printf '#!/bin/sh -ex\n# alpine-fde install — guest-side plan (generated; runner=qemu)\n# Host-side steps are comments; the CI harness executes them itself.\nset -eux\n'
-      printf '%s' "$SPC_PLAN" | while IFS='	' read -r _ie_kind _ie_cmd; do
-        [ -n "$_ie_cmd" ] || continue
-        if [ "$_ie_kind" = "guest" ]; then
-          printf '%s\n' "$_ie_cmd"
-        else
-          printf '# HOST: %s\n' "$_ie_cmd"
-        fi
-      done
-    } >"$_ie_out"
-    chmod 700 "$_ie_out"
-    printf 'alpine-fde: guest install script written: %s\n' "$_ie_out" >&2
-    ;;
-  esac
-  return 0
 }
 
 # inst_baseline_members_set FILE VALUE — additively set target.member_uuids
@@ -1200,14 +1198,11 @@ inst_preflight() {
 # input — the key itself is never shown or persisted. I1: the key NEVER
 # persists — scrubbed by the explicit teardown plan record and on ANY exit
 # path by the EXIT trap armed here (BR-01: callers MUST invoke this DIRECTLY
-# in the main shell — inst_execute_plan's combined L-04a/WR-02 trap replaces
+# in the main shell — inst_exec's combined L-04a/WR-02 trap replaces
 # it mid-plan and keeps scrubbing via the ${_ime_kf:-} carrier).
-# Sets the global _IME_KEYFILE (empty for dry-run: nothing staged).
+# Sets the global _IME_KEYFILE.
 inst_stage_ephemeral_key() {
   _IME_KEYFILE=''
-  if [ "$(inst_runner)" = "dry-run" ]; then
-    return 0
-  fi
   _ime_dir=${ALPINE_FDE_TMPDIR:-/dev/shm}
   _IME_KEYFILE=$(mktemp "$_ime_dir/alpine-fde-ephkey.XXXXXX") ||
     die "install: cannot stage the ephemeral install key ($_ime_dir usable?)"
@@ -1222,7 +1217,7 @@ inst_stage_ephemeral_key() {
     die "install: staged ephemeral key has unexpected length ($_ime_len) — refusing"
   }
   # scrub on any exit path; cleared after a successful execute. THIS shell:
-  # inst_execute_plan's combined L-04a/WR-02 trap replaces it mid-plan, and
+  # inst_exec's combined L-04a/WR-02 trap replaces it mid-plan, and
   # the `${_ime_kf:-}` in that trap only expands to this key-file because we
   # never left this shell (BR-01).
   _ime_kf=$_IME_KEYFILE
@@ -1256,7 +1251,7 @@ inst_stage_ephemeral_key() {
 # the in-chroot build: the ceremony writes it to the 0600 tmpfs seam file
 # staged at generate time (real-server blocker #8) so `kernel build`'s
 # keys_unlock can decrypt release.pem — never argv, never the log, scrubbed
-# with the ephemeral key (I1). Dry-run/qemu emit the records as inert text —
+# with the ephemeral key (I1). qemu emits the records as inert text —
 # secrets never appear in plan text, argv, the environment, or on disk/ESP
 # (I1/I4).
 # DEVICE CONTRACT (item 27, real-server failure #4): the recovery enrollment
@@ -1613,12 +1608,12 @@ cmd_install_main() {
   _im_disks=${_im_disks# }
 
   case $(inst_runner) in
-  dry-run | chroot | qemu) : ;;
+  chroot | qemu) : ;;
   *)
     die -r "$ALPINE_FDE_USAGE" "install: unknown runner '$(inst_runner)' (want: $SPC_INSTALL_RUNNERS)"
     ;;
   esac
-  if [ "$(inst_runner)" != "dry-run" ] && [ "$_im_yes" -eq 0 ] && [ "${ALPINE_FDE_YES:-}" != "1" ]; then
+  if [ "$_im_yes" -eq 0 ] && [ "${ALPINE_FDE_YES:-}" != "1" ]; then
     # L-06: gate on the AFFIRMATIVE value — "0"/"no" are refusals, not
     # consent (aligns with prov_stage2's = "1" comparison)
     die -r "$ALPINE_FDE_USAGE" "install: destructive run (runner=$(inst_runner)) requires --yes"
@@ -1715,11 +1710,9 @@ cmd_install_main() {
     info "install: --keydir given — key material will be staged from the medium ($_im_kd); NO in-chroot keygen (§8.1/ADR-18)"
   fi
 
-  if [ "$(inst_runner)" != "dry-run" ]; then
-    inst_preflight $_im_disks
-  fi
+  inst_preflight $_im_disks
 
-  # --- resolved layout values (placeholders stay literal in dry-run) --------
+  # --- resolved layout values -------------------------------------------------
   _im_mnt=$(inst_mnt)
   _im_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || _im_uuid='<luks-uuid>'
   _im_rootfs_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || _im_rootfs_uuid='<rootfs-uuid>'
@@ -1830,7 +1823,7 @@ cmd_install_main() {
   # bcache semantics and cannot carry a partition). The ESP + root layout keeps
   # its roles; the middle partition's size becomes "disk - esp - swap",
   # computed at RUN time inside the sfdisk record (the wipe-superblocks record
-  # idiom: command substitution stays literal in dry-run/qemu output). No
+  # idiom: command substitution stays literal in the qemu emission). No
   # --swap: the layout is byte-for-byte what it was before.
   _im_swap_dev=''
   if [ "$(inst_swap_enabled)" = "1" ]; then
@@ -1855,9 +1848,6 @@ cmd_install_main() {
   _im_lukskey=$_IME_KEYFILE
   _im_keyfile_arg=''
   [ -n "$_im_lukskey" ] && _im_keyfile_arg="--key-file $_im_lukskey"
-  # plan-level display path: the real staged path (dry-run: literal
-  # placeholder — nothing is staged, nothing persists)
-  _im_lukskey_disp=${_im_lukskey:-'<ephemeral-keyfile>'}
 
   # real-server blocker #8 + #9: the release-key PASSPHRASE SEAM for the
   # in-chroot build. Blocker #8 staged it on the HOST tmpfs (/dev/shm) —
@@ -1872,17 +1862,11 @@ cmd_install_main() {
   # alpine-fde-release-pass), 0600, on the LUKS2 container, written by the
   # ceremony (3/3) at execute time, consumed-and-REMOVED by the build record
   # in the same breath, scrubbed by teardown + the die-path traps (I1).
-  # Paths are plan-static; dry-run carries the literal <release-passfile>
-  # placeholder (nothing staged, no secret in plan text).
-  if [ "$(inst_runner)" = "dry-run" ]; then
-    _im_pf_host=''
-    _im_pf_guest='<release-passfile>'
-    _im_passfile_disp='<release-passfile>'
-  else
-    _im_pf_host=$_im_mnt/run/alpine-fde-release-pass
-    _im_passfile_disp=$_im_pf_host
-    _im_pf_guest=/run/alpine-fde-release-pass
-  fi
+  # Paths are plan-static and resolve for real in every lane (nothing is
+  # staged until the ceremony writes the file at execute time).
+  _im_pf_host=$_im_mnt/run/alpine-fde-release-pass
+  _im_passfile_disp=$_im_pf_host
+  _im_pf_guest=/run/alpine-fde-release-pass
 
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
   # 1a. RESET a previous FAILED attempt (user-reported, e2e-invisible class):
@@ -1894,12 +1878,12 @@ cmd_install_main() {
   #     released device — 7619960).
   _im_mdir=$(inst_mapper_dir)
   _im_bsys=$(inst_bcache_sysfs)
-  inst_plan_run host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || [ -e $_im_mdir/swap ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
+  inst_exec host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || [ -e $_im_mdir/swap ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
   # item 26d: ONE recursive umount replaces the fixed per-mount list — it
   # covers the subvols, the ESP and any stale chroot binds in a single record
-  inst_plan_run host "$(inst_reset_umount_rec_line $_im_mnt)"
-  inst_plan_run host "$(inst_reset_mapper_line "$_im_mdir")"
-  inst_plan_run host "$(inst_reset_bcache_line "$_im_bsys")"
+  inst_exec host "$(inst_reset_umount_rec_line $_im_mnt)"
+  inst_exec host "$(inst_reset_mapper_line "$_im_mdir")"
+  inst_exec host "$(inst_reset_bcache_line "$_im_bsys")"
 
   # PHYSICAL-MEDIA preconditions (real-install defects 1+2): a physical boot
   # does NOT auto-load the block modules and /dev is not necessarily settled —
@@ -1909,18 +1893,18 @@ cmd_install_main() {
   # fixture environments the records stay inert no-ops while remaining
   # fail-closed (`set -e` + the plan runner) for any REAL absence.
   if [ "$(inst_bcache)" = "1" ]; then
-    inst_plan_run host "if command -v modprobe >/dev/null 2>&1; then modprobe bcache; fi # physical boot: the bcache module is not auto-loaded"
+    inst_exec host "if command -v modprobe >/dev/null 2>&1; then modprobe bcache; fi # physical boot: the bcache module is not auto-loaded"
   fi
   if [ "$(inst_root_fs)" = "btrfs" ]; then
-    inst_plan_run host "if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi # physical boot: the btrfs module is not auto-loaded"
+    inst_exec host "if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi # physical boot: the btrfs module is not auto-loaded"
   fi
-  inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: settle /dev before partitioning"
+  inst_exec host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: settle /dev before partitioning"
   case $_im_topology in
   single)
     if [ "$(inst_swap_enabled)" = "1" ]; then
-      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
+      inst_exec host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
     fi
     ;;
   bcache)
@@ -1930,20 +1914,20 @@ cmd_install_main() {
       # --swap (ADR-7 amended): the backing dev cannot carry a partition, so
       # the swap is the LAST partition (p3) on the CACHE dev; the cache set
       # keeps p2, sized disk - esp - swap.
-      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
+      inst_exec host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
     fi
     # coldplug AFTER sfdisk (defect 2): the cache p1/p2 device nodes only
     # appear once the partition table is re-read and coldplug settles.
-    inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
+    inst_exec host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
     # wipe stale superblocks BEFORE make-bcache (defect 3)
-    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_cache")"
-    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_backing")"
-    inst_plan_run host "make-bcache -C $_im_cache"
-    inst_plan_run host "make-bcache -B $_im_backing"
-    inst_plan_run host "echo $_im_cache > /sys/fs/bcache/register && echo $_im_backing > /sys/fs/bcache/register"
-    inst_plan_run host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}') && echo \"\$CSET_UUID\" > /sys/block/bcache0/bcache/attach && echo writethrough > /sys/block/bcache0/bcache/cache_mode # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
+    inst_exec host "$(inst_wipe_superblocks_line "$_im_cache")"
+    inst_exec host "$(inst_wipe_superblocks_line "$_im_backing")"
+    inst_exec host "make-bcache -C $_im_cache"
+    inst_exec host "make-bcache -B $_im_backing"
+    inst_exec host "echo $_im_cache > /sys/fs/bcache/register && echo $_im_backing > /sys/fs/bcache/register"
+    inst_exec host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}') && echo \"\$CSET_UUID\" > /sys/block/bcache0/bcache/attach && echo writethrough > /sys/block/bcache0/bcache/cache_mode # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
     ;;
   bcache-multi)
     # G-C27/§4.1 topology 4 (18f1213): ESP p1 + SHARED cache set p2 on the
@@ -1955,42 +1939,42 @@ cmd_install_main() {
       # --swap (ADR-7 amended): the backing disks cannot carry partitions, so
       # the swap is the LAST partition (p3) on the shared CACHE dev; the cache
       # set keeps p2, sized disk - esp - swap.
-      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
+      inst_exec host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
     fi
     # coldplug AFTER sfdisk (defect 2), then stale-superblock wipes
     # BEFORE make-bcache (defect 3) — cache p2 + every whole backing disk.
-    inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
-    inst_plan_run host "$(inst_wipe_superblocks_line "$_im_cache")"
+    inst_exec host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
+    inst_exec host "$(inst_wipe_superblocks_line "$_im_cache")"
     for _im_d in $_im_disks; do
-      inst_plan_run host "$(inst_wipe_superblocks_line "$_im_d")"
+      inst_exec host "$(inst_wipe_superblocks_line "$_im_d")"
     done
-    inst_plan_run host "make-bcache -C $_im_cache"
+    inst_exec host "make-bcache -C $_im_cache"
     for _im_d in $_im_disks; do
-      inst_plan_run host "make-bcache -B $_im_d"
+      inst_exec host "make-bcache -B $_im_d"
     done
     _im_reg="echo $_im_cache > /sys/fs/bcache/register"
     for _im_d in $_im_disks; do
       _im_reg="$_im_reg && echo $_im_d > /sys/fs/bcache/register"
     done
-    inst_plan_run host "$_im_reg"
+    inst_exec host "$_im_reg"
     _im_att=''
     _im_i=0
     for _im_d in $_im_disks; do
       _im_att="$_im_att && echo \"\$CSET_UUID\" > /sys/block/bcache$_im_i/bcache/attach && echo writethrough > /sys/block/bcache$_im_i/bcache/cache_mode"
       _im_i=$((_im_i + 1))
     done
-    inst_plan_run host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}')$_im_att # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
+    inst_exec host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}')$_im_att # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
     ;;
   raid1)
     if [ "$(inst_swap_enabled)" = "1" ]; then
       # --swap (ADR-7 amended): the swap rides the PRIMARY disk only (p3);
       # secondaries keep the single whole-disk root partition — btrfs raid1
       # tolerates member size differences (the smallest member bounds the pool)
-      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
+      inst_exec host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
     fi
     # secondaries: LUKS2 container p1 ONLY (no ESP on member disks)
     _im_i=1
@@ -1999,7 +1983,7 @@ cmd_install_main() {
         _im_i=2
         continue
       }
-      inst_plan_run host "printf 'label: gpt\nstart=2048, type=linux, name=\"root\"\n' | sfdisk $_im_d"
+      inst_exec host "printf 'label: gpt\nstart=2048, type=linux, name=\"root\"\n' | sfdisk $_im_d"
       _im_i=$((_im_i + 1))
     done
     ;;
@@ -2009,45 +1993,45 @@ cmd_install_main() {
   #     TEMPORARY keyslot 2 (unattended; see the SLOT CONTRACT at the top of
   #     this file — keyslot 0 is reserved for the §9.1 step 4 recovery
   #     ceremony, keyslot 1 for the provisional token)
-  inst_plan_run host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20); --batch-mode: NO interactive dangerous-action YES prompt (real-install defect 5)"
-  inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
+  inst_exec host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_uuid $_im_keyfile_arg $_im_luks # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20); --batch-mode: NO interactive dangerous-action YES prompt (real-install defect 5)"
+  inst_exec host "cryptsetup open $_im_keyfile_arg $_im_luks root-crypt"
   if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
     # close/rename: primary mapper is root1 in multi-member topologies;
     # member luksFormat/open zipped with the uuids resolved in the layout
     # block — ONE independent LUKS2 container per member device (G-C27)
-    inst_plan_run host "cryptsetup close root-crypt && cryptsetup open $_im_keyfile_arg $_im_luks root1"
+    inst_exec host "cryptsetup close root-crypt && cryptsetup open $_im_keyfile_arg $_im_luks root1"
     _im_i=1
     set -- $_im_members_uuids
     for _im_md in $_im_members_devs; do
       _im_i=$((_im_i + 1))
       _im_mu=$1
       shift
-      inst_plan_run host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_mu $_im_keyfile_arg $_im_md # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2); --batch-mode: no interactive YES"
-      inst_plan_run host "cryptsetup open $_im_keyfile_arg $_im_md root$_im_i"
+      inst_exec host "cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid $_im_mu $_im_keyfile_arg $_im_md # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2); --batch-mode: no interactive YES"
+      inst_exec host "cryptsetup open $_im_keyfile_arg $_im_md root$_im_i"
     done
   fi
 
   # --- 3. filesystem + subvolumes (§4/§9.1) ----------------------------------
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
-      inst_plan_run host "mkfs.btrfs -U $_im_rootfs_uuid -d raid1 -m raid1 $_im_mapper $_im_members_mappers"
+      inst_exec host "mkfs.btrfs -U $_im_rootfs_uuid -d raid1 -m raid1 $_im_mapper $_im_members_mappers"
     else
-      inst_plan_run host "mkfs.btrfs -U $_im_rootfs_uuid $_im_mapper"
+      inst_exec host "mkfs.btrfs -U $_im_rootfs_uuid $_im_mapper"
     fi
-    inst_plan_run host "mount $_im_mapper $_im_mnt"
-    inst_plan_run host "btrfs subvolume create $_im_mnt/@"
-    inst_plan_run host "btrfs subvolume create $_im_mnt/@home"
-    inst_plan_run host "btrfs subvolume create $_im_mnt/@snapshots"
-    inst_plan_run host "umount $_im_mnt"
-    inst_plan_run host "mount -o subvol=@ $_im_mapper $_im_mnt && mkdir -p $_im_mnt/home $_im_mnt/.snapshots $_im_mnt$_im_esp_mnt"
-    inst_plan_run host "mount -o subvol=@home $_im_mapper $_im_mnt/home"
-    inst_plan_run host "mount -o subvol=@snapshots $_im_mapper $_im_mnt/.snapshots"
-    inst_plan_run host "mkfs.vfat -F 32 -n EFI $_im_esp"
-    inst_plan_run host "mount $_im_esp $_im_mnt$_im_esp_mnt"
+    inst_exec host "mount $_im_mapper $_im_mnt"
+    inst_exec host "btrfs subvolume create $_im_mnt/@"
+    inst_exec host "btrfs subvolume create $_im_mnt/@home"
+    inst_exec host "btrfs subvolume create $_im_mnt/@snapshots"
+    inst_exec host "umount $_im_mnt"
+    inst_exec host "mount -o subvol=@ $_im_mapper $_im_mnt && mkdir -p $_im_mnt/home $_im_mnt/.snapshots $_im_mnt$_im_esp_mnt"
+    inst_exec host "mount -o subvol=@home $_im_mapper $_im_mnt/home"
+    inst_exec host "mount -o subvol=@snapshots $_im_mapper $_im_mnt/.snapshots"
+    inst_exec host "mkfs.vfat -F 32 -n EFI $_im_esp"
+    inst_exec host "mount $_im_esp $_im_mnt$_im_esp_mnt"
   else
-    inst_plan_run host "mkfs.ext4 -F -U $_im_rootfs_uuid $_im_mapper"
-    inst_plan_run host "mkfs.vfat -F 32 -n EFI $_im_esp"
-    inst_plan_run host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt$_im_esp_mnt && mount $_im_esp $_im_mnt$_im_esp_mnt"
+    inst_exec host "mkfs.ext4 -F -U $_im_rootfs_uuid $_im_mapper"
+    inst_exec host "mkfs.vfat -F 32 -n EFI $_im_esp"
+    inst_exec host "mount $_im_mapper $_im_mnt && mkdir -p $_im_mnt$_im_esp_mnt && mount $_im_esp $_im_mnt$_im_esp_mnt"
   fi
 
   # --- 4. minimal rootfs (§3.3): apk populate (self-authored bootstrap) -------
@@ -2065,8 +2049,8 @@ cmd_install_main() {
   # dies `WARNING: ... APKINDEX.tar.gz: UNTRUSTED signature` on any real server
   # (the repositories drop alone is half the fix). Guarded host record: no-op +
   # warn when the live env has no keyring.
-  inst_plan_run host "mkdir -p $_im_mnt/etc/apk && if [ -d /etc/apk/keys ]; then cp -a /etc/apk/keys $_im_mnt/etc/apk/ && echo 'alpine-fde: info: apk keyring seeded from the live env (apk verifies the mirror indexes against the target keyring)'; else echo 'alpine-fde: warn: no keyring on the live env (/etc/apk/keys) — apk will not trust any mirror'; fi || : # item 26 ext: seed the target keyring before the populate"
-  inst_plan_run host "apk add --root $_im_mnt --initdb alpine-base"
+  inst_exec host "mkdir -p $_im_mnt/etc/apk && if [ -d /etc/apk/keys ]; then cp -a /etc/apk/keys $_im_mnt/etc/apk/ && echo 'alpine-fde: info: apk keyring seeded from the live env (apk verifies the mirror indexes against the target keyring)'; else echo 'alpine-fde: warn: no keyring on the live env (/etc/apk/keys) — apk will not trust any mirror'; fi || : # item 26 ext: seed the target keyring before the populate"
+  inst_exec host "apk add --root $_im_mnt --initdb alpine-base"
 
   # --- 5. config drops (host-side writes; guest printf lines under qemu) -----
   # (the §3.3 /etc/apk/repositories drop now precedes the populate above —
@@ -2172,27 +2156,27 @@ cmd_install_main() {
   # before the first guest step so the in-chroot ceremony behaves. §9.1 also
   # binds the efivars so the in-chroot NVRAM enrollment reaches the live
   # firmware.
-  inst_plan_run host "mkdir -p $_im_mnt/proc $_im_mnt/sys $_im_mnt/dev && mount -t proc proc $_im_mnt/proc && mount --bind /sys $_im_mnt/sys && mount --bind /dev $_im_mnt/dev"
+  inst_exec host "mkdir -p $_im_mnt/proc $_im_mnt/sys $_im_mnt/dev && mount -t proc proc $_im_mnt/proc && mount --bind /sys $_im_mnt/sys && mount --bind /dev $_im_mnt/dev"
   # boot-lane finding #8 (s23 attempt 8): the ceremony's 0600 release-key
   # passphrase seam file lives in the LIVE env's /dev/shm (a tmpfs SUBMOUNT)
   # — a plain `mount --bind /dev` does NOT carry submounts, so the in-chroot
   # kernel build could not read the seam and fell back to its interactive
   # prompt (hung the unattended install). Bind the shm tree explicitly; the
   # blocker #8 contract (never argv, never on disk) then actually holds.
-  inst_plan_run host "mkdir -p $_im_mnt/dev/shm && mount --bind /dev/shm $_im_mnt/dev/shm"
+  inst_exec host "mkdir -p $_im_mnt/dev/shm && mount --bind /dev/shm $_im_mnt/dev/shm"
   # boot-lane finding #25 (s23 attempt 24): the LIVE env must have efivarfs
   # MOUNTED or the chroot's efivars bind is an empty sysfs dir — the in-chroot
   # NVRAM enrollment then fails and the install defers key import to the
   # operator ("staged kek.auth ... ESP fallback"; PK absent at the verdict).
-  inst_plan_run host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
-  inst_plan_run host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
+  inst_exec host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
+  inst_exec host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
 
   # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/alpine-fde ---
   info "tooling copy: product script tree only (bin lib hooks docs) — VCS/harness residue excluded (§3.3)"
-  inst_plan_run host "$(inst_tooling_copy_cmd "$_im_tree" "$_im_mnt")"
+  inst_exec host "$(inst_tooling_copy_cmd "$_im_tree" "$_im_mnt")"
   # G-U7: the boot-manager self-update service is masked — ESP binaries are
   # only ever written by our SIGNED flow (§8.3)
-  inst_plan_run host "mkdir -p $_im_mnt/etc/systemd/system && ln -sf /dev/null $_im_mnt/etc/systemd/system/systemd-boot-update.service"
+  inst_exec host "mkdir -p $_im_mnt/etc/systemd/system && ln -sf /dev/null $_im_mnt/etc/systemd/system/systemd-boot-update.service"
 
   # --- 7. in-chroot provisioning (§9.1 steps 1-9, STRICTLY ORDERED) ----------
   # step 1: apk §3.3 additions set (one --no-cache transaction), user account
@@ -2204,13 +2188,13 @@ cmd_install_main() {
   # resolver into the target BEFORE the transaction; guarded host record:
   # no-op + warn when the live env has no resolv.conf (the preflight probe
   # above already covered the live side).
-  inst_plan_run host "if [ -f /etc/resolv.conf ]; then mkdir -p $_im_mnt/etc && cp /etc/resolv.conf $_im_mnt/etc/resolv.conf && echo 'alpine-fde: info: seeded target /etc/resolv.conf from the live env (in-chroot apk needs DNS)'; else echo 'alpine-fde: warn: live env has no /etc/resolv.conf — target DNS seed skipped (in-chroot apk may fail to resolve the mirror)'; fi || : # item 26b: seed the target resolver before the in-chroot transaction"
+  inst_exec host "if [ -f /etc/resolv.conf ]; then mkdir -p $_im_mnt/etc && cp /etc/resolv.conf $_im_mnt/etc/resolv.conf && echo 'alpine-fde: info: seeded target /etc/resolv.conf from the live env (in-chroot apk needs DNS)'; else echo 'alpine-fde: warn: live env has no /etc/resolv.conf — target DNS seed skipped (in-chroot apk may fail to resolve the mirror)'; fi || : # item 26b: seed the target resolver before the in-chroot transaction"
   # boot-lane finding #7 (companion to the hosts-aware preflight probe): a
   # hosts-based mirror name resolves through /etc/hosts, NOT the resolver —
   # seed the live env's hosts table too, or the IN-CHROOT transaction (which
   # resolves via the TARGET's files) cannot see it.
-  inst_plan_run host "if [ -f /etc/hosts ]; then mkdir -p $_im_mnt/etc && cp /etc/hosts $_im_mnt/etc/hosts && echo 'alpine-fde: info: seeded target /etc/hosts from the live env (in-chroot apk resolves hosts-based mirror names)'; else echo 'alpine-fde: warn: live env has no /etc/hosts — target hosts seed skipped (in-chroot apk may fail to resolve a hosts-based mirror)'; fi || : # item 26b: seed the target hosts table before the in-chroot transaction"
-  inst_plan_run guest "apk add --no-cache $(install_package_list)"
+  inst_exec host "if [ -f /etc/hosts ]; then mkdir -p $_im_mnt/etc && cp /etc/hosts $_im_mnt/etc/hosts && echo 'alpine-fde: info: seeded target /etc/hosts from the live env (in-chroot apk resolves hosts-based mirror names)'; else echo 'alpine-fde: warn: live env has no /etc/hosts — target hosts seed skipped (in-chroot apk may fail to resolve a hosts-based mirror)'; fi || : # item 26b: seed the target hosts table before the in-chroot transaction"
+  inst_exec guest "apk add --no-cache $(install_package_list)"
   # step 1b (§8.2/ADR-13): register the `alpine-fde` mkinitfs feature in the
   # target's /etc/mkinitfs/mkinitfs.conf. mkinitfs packs a feature's
   # features.d/<name>.files entries ONLY when the feature is enabled in that
@@ -2242,9 +2226,9 @@ cmd_install_main() {
   # DROPS every non-ELF file (the unseal hook script and the udev rules);
   # custom_files copies them into the initramfs verbatim. Staged later at
   # step 7; mkinitfs reads the list at build time (idempotent).
-  inst_plan_run host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
-  inst_plan_run guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
-  inst_plan_run guest 'rc-update add networking boot'
+  inst_exec host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
+  inst_exec guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
+  inst_exec guest 'rc-update add networking boot'
   # REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
   # 2026-09-28): the guest shipped NEITHER a serial getty NOR sshd — on a
   # headless server the operator was locked out of the booted system entirely.
@@ -2252,9 +2236,9 @@ cmd_install_main() {
   # #2 discipline: never enable/configure a service before its package
   # exists — openssh is in the §3.3 additions set above; /etc/inittab and
   # /etc/ssh/sshd_config come from alpine-base/openssh).
-  inst_plan_run guest "$(inst_inittab_getty_cmd /etc/inittab)"
-  inst_plan_run guest "$(inst_sshd_config_cmd /etc/ssh/sshd_config)"
-  inst_plan_run guest 'rc-update add sshd default'
+  inst_exec guest "$(inst_inittab_getty_cmd /etc/inittab)"
+  inst_exec guest "$(inst_sshd_config_cmd /etc/ssh/sshd_config)"
+  inst_exec guest 'rc-update add sshd default'
   # ADR-7 amended (--swap): ephemeral swap activation — ONLY with --swap, ONLY
   # after the in-chroot txn that installed cryptsetup-openrc (the `dmcrypt`
   # service provider; failure-#2 discipline). dmcrypt creates the plain
@@ -2265,12 +2249,12 @@ cmd_install_main() {
   # the swap must never be resolved by the initramfs (it mounts late, normal
   # boot). Idempotent guarded append (crash-resume safe).
   if [ "$(inst_swap_enabled)" = "1" ]; then
-    inst_plan_run guest "$(inst_dmcrypt_conf_cmd /etc/conf.d/dmcrypt "$_im_swap_dev")"
-    inst_plan_run guest 'rc-update add dmcrypt boot'
-    inst_plan_run guest 'rc-update add swap boot'
+    inst_exec guest "$(inst_dmcrypt_conf_cmd /etc/conf.d/dmcrypt "$_im_swap_dev")"
+    inst_exec guest 'rc-update add dmcrypt boot'
+    inst_exec guest 'rc-update add swap boot'
   fi
   # step 2: pending baseline written ON-TARGET via the baseline writer
-  inst_plan_run host "inst_baseline_pending_write $_im_mnt"
+  inst_exec host "inst_baseline_pending_write $_im_mnt"
   # step 3: platform-key ceremony — with --keydir the operator-supplied
   # material is staged FROM THE MEDIUM onto the encrypted root (restrictive
   # perms; NEVER anything under the ESP, I2) and the in-chroot keygen is
@@ -2285,9 +2269,9 @@ cmd_install_main() {
   # skips on an ALREADY-encrypted file, so the natural flow completes custody.
   _im_keys=$_im_mnt/etc/alpine-fde/keys
   if [ -n "$_im_kd" ]; then
-    inst_plan_run host "mkdir -p $_im_keys && cp $_im_kd/release.pem $_im_kd/release.pub $_im_kd/release.crt $_im_kd/db.cert.der $_im_kd/kek.cert.der $_im_kd/pk.cert.der $_im_kd/db.esl $_im_kd/kek.esl $_im_kd/pk.esl $_im_kd/db.auth $_im_kd/kek.auth $_im_kd/pk.auth $_im_keys/ && chmod 700 $_im_keys && chmod 600 $_im_keys/* # ADR-18/§8.1: operator-supplied key material staged from the signing medium (no in-chroot keygen)"
+    inst_exec host "mkdir -p $_im_keys && cp $_im_kd/release.pem $_im_kd/release.pub $_im_kd/release.crt $_im_kd/db.cert.der $_im_kd/kek.cert.der $_im_kd/pk.cert.der $_im_kd/db.esl $_im_kd/kek.esl $_im_kd/pk.esl $_im_kd/db.auth $_im_kd/kek.auth $_im_kd/pk.auth $_im_keys/ && chmod 700 $_im_keys && chmod 600 $_im_keys/* # ADR-18/§8.1: operator-supplied key material staged from the signing medium (no in-chroot keygen)"
   else
-    inst_plan_run guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody'
+    inst_exec guest '/opt/alpine-fde/bin/alpine-fde provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody'
   fi
   # step 4: NVRAM enrollment db → KEK → PK (last) via the bind-mounted
   # efivars (the firmware state was gate-checked host-side in preflight:
@@ -2304,8 +2288,8 @@ cmd_install_main() {
   # (host /dev/shm, bind-mounted into the chroot at the H-02 step above) tells
   # the §9 tail verdict to route the deferred instructions + firmware-setup
   # reboot.
-  inst_plan_run host "rm -f /dev/shm/alpine-fde-enroll-deferred # stale deferred marker from a previous boot/install must not misroute the §9 verdict"
-  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
+  inst_exec host "rm -f /dev/shm/alpine-fde-enroll-deferred # stale deferred marker from a previous boot/install must not misroute the §9 verdict"
+  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
   # step 4b (REPLACED + MOVED BEFORE the ceremony — real-server blocker #7:
   # Alpine ships NO bootctl binary; the retired `bootctl install` record died
   # "/bin/sh: bootctl: not found" AFTER the credential ceremony had already
@@ -2317,7 +2301,7 @@ cmd_install_main() {
   # firmware with NO NVRAM dependency; the harness fixtures already model
   # BOOTX64 as the default entry). The in-chroot build signs it (§8.3); the
   # §6 systemd-boot-update.service mask stays consistent.
-  inst_plan_run guest "$(inst_bootmgr_copy_line $_im_esp_mnt)"
+  inst_exec guest "$(inst_bootmgr_copy_line $_im_esp_mnt)"
   # step 7 (MOVED BEFORE the credential ceremony — no ceremony secret; the
   # staging is also a kernel-build INPUT — the kernel hook fires on every
   # build): hooks + trigger + first-boot AUTO-FINALIZER (§9.1 step 7;
@@ -2343,22 +2327,22 @@ cmd_install_main() {
   # path unresolved and the hook silently omitted. The repo-wide convention
   # (hooks_mkinitfs_unseal + initrd_audit inventories) pins the
   # /usr/share/alpine-fde spelling.
-  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/usr/lib/udev/rules.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/conf.d $_im_mnt/etc/init.d $_im_mnt/etc/profile.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/mkinitfs/features.d/alpine-fde.modules $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules && cp $_im_hooks/udev/60-tpm.rules $_im_mnt/usr/lib/udev/rules.d/60-tpm.rules && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/apk/triggers/alpine-fde-snapshot.trigger $_im_mnt/etc/apk/triggers/alpine-fde-snapshot.trigger && cp $_im_hooks/conf.d/alpine-fde-snapshot $_im_mnt/etc/conf.d/alpine-fde-snapshot && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && cp $_im_hooks/openrc/alpine-fde-audit $_im_mnt/etc/init.d/alpine-fde-audit && cp $_im_hooks/profile.d/alpine-fde.sh $_im_mnt/etc/profile.d/alpine-fde.sh && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde-snapshot.trigger $_im_mnt/etc/init.d/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-audit && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt/lib/modules/[^/]*/:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature files pack every found tpm/btrfs/bcache module, blocker #12/#14)\"; :"
-  inst_plan_run guest 'rc-update add alpine-fde-finalize default'
+  inst_exec host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/usr/lib/udev/rules.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/conf.d $_im_mnt/etc/init.d $_im_mnt/etc/profile.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/mkinitfs/features.d/alpine-fde.modules $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules && cp $_im_hooks/udev/60-tpm.rules $_im_mnt/usr/lib/udev/rules.d/60-tpm.rules && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/apk/triggers/alpine-fde-snapshot.trigger $_im_mnt/etc/apk/triggers/alpine-fde-snapshot.trigger && cp $_im_hooks/conf.d/alpine-fde-snapshot $_im_mnt/etc/conf.d/alpine-fde-snapshot && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && cp $_im_hooks/openrc/alpine-fde-audit $_im_mnt/etc/init.d/alpine-fde-audit && cp $_im_hooks/profile.d/alpine-fde.sh $_im_mnt/etc/profile.d/alpine-fde.sh && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde-snapshot.trigger $_im_mnt/etc/init.d/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-audit && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt/lib/modules/[^/]*/:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature files pack every found tpm/btrfs/bcache module, blocker #12/#14)\"; :"
+  inst_exec guest 'rc-update add alpine-fde-finalize default'
   # FR-6 (user decision queue item 10): the boot-time audit oneshot is enabled
   # for the default runlevel (runs LAST before the login prompt via `after *`)
   # — placed AFTER the package transaction per the real-server failure-#2
   # discipline (an rc-update record for a service the txn has not installed
   # kills the plan), and the record is idempotent (rc-update add on an enabled
   # service is a no-op; crash resume re-runs it safely).
-  inst_plan_run guest 'rc-update add alpine-fde-audit default'
+  inst_exec guest 'rc-update add alpine-fde-audit default'
   # §8.4 (MOVED BEFORE the ceremony — no ceremony secret): resolve the ESP
   # PARTUUID into fstab + target metadata on the
   # on-target pending baseline (luks_uuid = primary; member_uuids additive)
   if [ "$_im_topology" = "raid1" ] || [ "$_im_topology" = "bcache-multi" ]; then
-    inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid $_im_members_uuids"
+    inst_exec host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid $_im_members_uuids"
   else
-    inst_plan_run host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid"
+    inst_exec host "inst_resolve_target_metadata $_im_esp $_im_mnt $_im_uuid"
   fi
   # step 8 (G-C25, ADR-20 #4): NO unfinalized banner is written — /etc/motd
   # and /etc/issue stay untouched (the banner path is removed).
@@ -2374,7 +2358,7 @@ cmd_install_main() {
   # path (these records are eval'd host-side by the chroot runner), every
   # typed secret is §13-floored with re-prompt until met, and no credential
   # ever appears in plan text, argv, the environment, or on disk/ESP (I1/I4).
-  # Dry-run/qemu emit the records as inert text. ORDER (item 12 AMENDED,
+  # qemu emits the records as inert text. ORDER (item 12 AMENDED,
   # normative): the recovery passphrase FIRST (1/3); the user password (2/3)
   # and the release-key passphrase (3/3) DEFAULT to it on bare Enter, each
   # prompt carrying a reuse hint. POSITION (user flow directive): the ceremony
@@ -2387,9 +2371,9 @@ cmd_install_main() {
   # seal (so keyslot 0 is occupied and token_free_slot yields 1). DEVICE
   # CONTRACT (item 27): the recovery record passes the CONTAINER devices
   # ($_im_containers, the luksFormat targets) — never the /dev/mapper/* views.
-  inst_plan_run host "inst_ceremony_recovery $_im_lukskey_disp $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
-  inst_plan_run host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
-  inst_plan_run host "inst_ceremony_release_key $_im_keys $_im_passfile_disp # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400; 2nd arg = the 0600 passphrase seam file IN THE TARGET ROOT (<mnt>/run/... — guest /run/...; blocker #8/#9)"
+  inst_exec host "inst_ceremony_recovery $_im_lukskey $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
+  inst_exec host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
+  inst_exec host "inst_ceremony_release_key $_im_keys $_im_passfile_disp # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400; 2nd arg = the 0600 passphrase seam file IN THE TARGET ROOT (<mnt>/run/... — guest /run/...; blocker #8/#9)"
   # step 5 (SECRET-dependent — stays AFTER the ceremony): signed boot manager
   # + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is
   # state-gated OFF — the PROVISIONAL seal below is the only enrollment of
@@ -2414,7 +2398,7 @@ cmd_install_main() {
   # the linux-lts package did not install) and PASSES it to kernel build:
   # the retired no-arg form fell back to `uname -r` — the LIVE ISO's kernel
   # — whose module tree does not exist in the target.
-  inst_plan_run guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde kernel build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
+  inst_exec guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde kernel build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
   # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
@@ -2425,8 +2409,8 @@ cmd_install_main() {
   # live ISO runs a different flavor+version) — in-chroot modprobe can never
   # load the driver, /dev/tpmrm0 never appears, and the seal dies
   # "no usable TPM via TCTI '<default>'" after a successful UKI build.
-  inst_plan_run host "modprobe tpm_crb 2>/dev/null; modprobe tpm_tis 2>/dev/null; : # blocker #18 companion: ensure the live kernel's TPM driver is loaded (host-side; the in-chroot modprobe resolves the target's module tree)"
-  inst_plan_run guest "$(inst_provisional_enroll_line "$_im_lukskey_disp" $_im_containers)"
+  inst_exec host "modprobe tpm_crb 2>/dev/null; modprobe tpm_tis 2>/dev/null; : # blocker #18 companion: ensure the live kernel's TPM driver is loaded (host-side; the in-chroot modprobe resolves the target's module tree)"
+  inst_exec guest "$(inst_provisional_enroll_line "$_im_lukskey" $_im_containers)"
   # step 6b (task #27, real-server follow-up): the UEFI BOOT ENTRY — the
   # install must end with the firmware pointing at the staged ESP, not leave
   # efibootmgr to the operator (done BY HAND on the real Dell PowerEdge after
@@ -2440,7 +2424,7 @@ cmd_install_main() {
   # re-partitioned ESP leaves entries that boot "Boot Failed"). No EFI
   # variable support (container): the record SKIPS with the exact manual
   # command instead of failing the completed install.
-  inst_plan_run guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt # task #27: the Alpine FDE NVRAM boot entry -> HD(1,GPT,<esp-part-guid>) \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder (idempotent; stale-GUID entries replaced)"
+  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt # task #27: the Alpine FDE NVRAM boot entry -> HD(1,GPT,<esp-part-guid>) \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder (idempotent; stale-GUID entries replaced)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
   # Operationally AFTER the ceremony + secret-dependent steps (the guest build
@@ -2457,8 +2441,8 @@ cmd_install_main() {
   # device references keep it busy at teardown. The install is COMPLETE at this
   # point (sealed, state written) — a busy host bind must not fail it: every
   # umount gets a lazy (-l) fallback, best-effort, never fatal.
-  inst_plan_run host "umount $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || :; umount $_im_mnt/dev 2>/dev/null || umount -l $_im_mnt/dev 2>/dev/null || :; umount $_im_mnt/sys 2>/dev/null || umount -l $_im_mnt/sys 2>/dev/null || :; umount $_im_mnt/proc 2>/dev/null || umount -l $_im_mnt/proc 2>/dev/null || :; umount -R $_im_mnt 2>/dev/null || umount -l $_im_mnt 2>/dev/null || :; $_im_close"
-  inst_plan_run host "rm -f $_im_lukskey_disp $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
+  inst_exec host "umount $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || :; umount $_im_mnt/dev 2>/dev/null || umount -l $_im_mnt/dev 2>/dev/null || :; umount $_im_mnt/sys 2>/dev/null || umount -l $_im_mnt/sys 2>/dev/null || :; umount $_im_mnt/proc 2>/dev/null || umount -l $_im_mnt/proc 2>/dev/null || :; umount -R $_im_mnt 2>/dev/null || umount -l $_im_mnt 2>/dev/null || :; $_im_close"
+  inst_exec host "rm -f $_im_lukskey $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
   # The NVRAM enrollment ran BEFORE the ceremony (mechanical); the outcome is
@@ -2469,8 +2453,8 @@ cmd_install_main() {
   # PK on the LIVE efivars (the in-chroot enrollment wrote the bind-mounted
   # live NVRAM): PK present = NVRAM enrollment succeeded, PK absent = refused
   # (staged, manual import pending).
-  inst_plan_run host "if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present $(fw_efivars_dir) PK; then INST_SB_ENROLLED=1; INST_SB_DEFERRED=0; else INST_SB_ENROLLED=0; INST_SB_DEFERRED=0; fi # enrollment verdict: deferred marker = a platform PK was already enrolled (factory or custom) — the release certificate import via the firmware UI is still pending; PK present = NVRAM enrollment succeeded; PK absent = enrollment refused — manual key import still pending (deferred)"
-  inst_plan_run host "rm -f /dev/shm/alpine-fde-enroll-deferred # the verdict consumed the deferred marker (I1 seam hygiene)"
+  inst_exec host "if [ -e /dev/shm/alpine-fde-enroll-deferred ]; then INST_SB_ENROLLED=0; INST_SB_DEFERRED=1; elif fw_var_present $(fw_efivars_dir) PK; then INST_SB_ENROLLED=1; INST_SB_DEFERRED=0; else INST_SB_ENROLLED=0; INST_SB_DEFERRED=0; fi # enrollment verdict: deferred marker = a platform PK was already enrolled (factory or custom) — the release certificate import via the firmware UI is still pending; PK present = NVRAM enrollment succeeded; PK absent = enrollment refused — manual key import still pending (deferred)"
+  inst_exec host "rm -f /dev/shm/alpine-fde-enroll-deferred # the verdict consumed the deferred marker (I1 seam hygiene)"
   # DEFERRED path (user directive 3): the manual-import instructions print at
   # the VERY END of the install — after every mechanical step — naming the
   # DIRECT-from-ESP import FIRST (user directive 2: the key material is staged
@@ -2488,29 +2472,24 @@ cmd_install_main() {
   #                       staged CERTIFICATES in the db -> KEK -> PK order
   #                       (the UI cannot import .auth packets — those are
   #                       KeyTool.efi / efi-updatevar repair material)
-  inst_plan_run host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then printf '%s\n' 'alpine-fde: a platform key is ALREADY enrolled (factory or custom) — the installer made NO NVRAM writes; finish by importing the release certificate via the firmware UI:' '  1. the import-ready certificates are staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition: db.cer (the alpine-fde release certificate) plus the vendor option-ROM certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import db.cer AND the vendor certificate INTO THE EXISTING key database (db) — Secure Boot can stay ENABLED throughout' '  4. do NOT import KEK.cer or PK.cer and do NOT clear or replace the platform key — the existing PK and KEK stay (README.txt on the ESP and the marker file !import_all_auth_files repeat these steps — no need to memorize them)' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until db.cer is imported (that is the design, ADR-20)'; fi # deferred enrollment (platform PK present): UI import of db.cer + the vendor cert into the EXISTING db printed LAST"
-  inst_plan_run host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then :; elif [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s\n' 'alpine-fde: Secure Boot key material is staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition — the firmware refused NVRAM enrollment; finish the import manually:' '  1. import DIRECTLY from the internal ESP when the firmware key-management UI can browse it (the files to import are already at $_im_esp_mnt/alpine-fde-keys — this is why they are staged on the EFI partition); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import the staged CERTIFICATES in this order (the firmware UI imports X.509 .cer files — it CANNOT import .auth packets): db.cer AND the vendor certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer) for the Key Database, then KEK.cer (Key Exchange Key), then PK.cer (Platform Key — import LAST; it locks the key database)' '  4. the .auth packets staged alongside (db.auth kek.auth pk.auth) are for KeyTool.efi / efi-updatevar repair only; in the firmware file browser the marker file !import_all_auth_files and README.txt on the ESP repeat these steps — no need to memorize them' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until the keys are imported (that is the design, ADR-20)'; fi # deferred enrollment (firmware refused): manual-import instructions printed LAST (user directive: instructions at the very end; direct-from-ESP import first; the UI-importable .cer set db.cer + vendor cert + KEK.cer + PK.cer enumerated, the .auth packets named as repair-only; README.txt + marker enumerated)"
+  inst_exec host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then printf '%s\n' 'alpine-fde: a platform key is ALREADY enrolled (factory or custom) — the installer made NO NVRAM writes; finish by importing the release certificate via the firmware UI:' '  1. the import-ready certificates are staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition: db.cer (the alpine-fde release certificate) plus the vendor option-ROM certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import db.cer AND the vendor certificate INTO THE EXISTING key database (db) — Secure Boot can stay ENABLED throughout' '  4. do NOT import KEK.cer or PK.cer and do NOT clear or replace the platform key — the existing PK and KEK stay (README.txt on the ESP and the marker file !import_all_auth_files repeat these steps — no need to memorize them)' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until db.cer is imported (that is the design, ADR-20)'; fi # deferred enrollment (platform PK present): UI import of db.cer + the vendor cert into the EXISTING db printed LAST"
+  inst_exec host "if [ \"\${INST_SB_DEFERRED:-}\" = \"1\" ]; then :; elif [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s\n' 'alpine-fde: Secure Boot key material is staged under $_im_esp_mnt/alpine-fde-keys on the EFI System Partition — the firmware refused NVRAM enrollment; finish the import manually:' '  1. import DIRECTLY from the internal ESP when the firmware key-management UI can browse it (the files to import are already at $_im_esp_mnt/alpine-fde-keys — this is why they are staged on the EFI partition); otherwise copy the alpine-fde-keys directory to a FAT USB stick' '  2. reboot into the firmware setup (BIOS/UEFI) — this installer reboots there after your confirmation below' '  3. in the firmware key-management UI import the staged CERTIFICATES in this order (the firmware UI imports X.509 .cer files — it CANNOT import .auth packets): db.cer AND the vendor certificate (e.g. microsoft-option-rom-uefi-ca-2023.cer) for the Key Database, then KEK.cer (Key Exchange Key), then PK.cer (Platform Key — import LAST; it locks the key database)' '  4. the .auth packets staged alongside (db.auth kek.auth pk.auth) are for KeyTool.efi / efi-updatevar repair only; in the firmware file browser the marker file !import_all_auth_files and README.txt on the ESP repeat these steps — no need to memorize them' '  5. while in firmware setup, set an administrator (supervisor) password' '  6. boot the installed system — completed install steps skip via crash resume; the first boot REFUSES to boot until the keys are imported (that is the design, ADR-20)'; fi # deferred enrollment (firmware refused): manual-import instructions printed LAST (user directive: instructions at the very end; direct-from-ESP import first; the UI-importable .cer set db.cer + vendor cert + KEK.cer + PK.cer enumerated, the .auth packets named as repair-only; README.txt + marker enumerated)"
   if [ "$_im_no_reboot" = "0" ] && [ "${ALPINE_FDE_INSTALL_NO_REBOOT:-}" != "1" ]; then
-    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s' 'alpine-fde: review the manual-import instructions above, then press Enter to reboot into firmware setup (UEFI): ' >&2; IFS= read -r _im_enter || :; fi # deferred enrollment: EXPLICIT user confirmation before the firmware reboot (user directive)"
-    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else fw_osindications_set $(fw_efivars_dir) && reboot; fi # deferred enrollment: next boot enters firmware setup (OsIndications bit 0) for the manual key import"
-    inst_plan_run host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
+    inst_exec host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else printf '%s' 'alpine-fde: review the manual-import instructions above, then press Enter to reboot into firmware setup (UEFI): ' >&2; IFS= read -r _im_enter || :; fi # deferred enrollment: EXPLICIT user confirmation before the firmware reboot (user directive)"
+    inst_exec host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then :; else fw_osindications_set $(fw_efivars_dir) && reboot; fi # deferred enrollment: next boot enters firmware setup (OsIndications bit 0) for the manual key import"
+    inst_exec host "if [ \"\${INST_SB_ENROLLED:-}\" = \"1\" ]; then reboot; fi # §9.1: direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
   else
     info "install: reboot suppressed (ALPINE_FDE_INSTALL_NO_REBOOT/--no-reboot) — CI seam"
   fi
 
-  if [ "$(inst_runner)" != "dry-run" ]; then
-    inst_execute_plan
-    trap - EXIT
-    rm -f "$_im_lukskey" "${_im_pf_host:-}" 2>/dev/null
-    if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
-      printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
-    elif [ "${INST_SB_DEFERRED:-}" = "1" ]; then
-      printf 'alpine-fde: install complete — a platform key is ALREADY enrolled (factory or custom): NO NVRAM writes were attempted; import the release certificate db.cer plus the vendor certificate INTO THE EXISTING key database via the firmware UI from %s/alpine-fde-keys — the installer reboots into firmware setup for the import (the existing PK and KEK stay; first boot stays guarded until db.cer is imported, ADR-20)\n' "$_im_esp_mnt" >&2
-    else
-      printf 'alpine-fde: install complete — firmware NVRAM enrollment was REFUSED: the Secure Boot key material is staged under %s/alpine-fde-keys; the installer reboots into firmware setup for the manual key import (first boot stays guarded until the keys are imported, ADR-20)\n' "$_im_esp_mnt" >&2
-    fi
+  inst_emit_finish
+  rm -f "$_im_lukskey" "${_im_pf_host:-}" 2>/dev/null
+  if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
+    printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
+  elif [ "${INST_SB_DEFERRED:-}" = "1" ]; then
+    printf 'alpine-fde: install complete — a platform key is ALREADY enrolled (factory or custom): NO NVRAM writes were attempted; import the release certificate db.cer plus the vendor certificate INTO THE EXISTING key database via the firmware UI from %s/alpine-fde-keys — the installer reboots into firmware setup for the import (the existing PK and KEK stay; first boot stays guarded until db.cer is imported, ADR-20)\n' "$_im_esp_mnt" >&2
   else
-    printf 'alpine-fde: dry-run plan complete (%s) — real execution: re-run with --yes (§9.1)\n' "$(inst_runner)" >&2
+    printf 'alpine-fde: install complete — firmware NVRAM enrollment was REFUSED: the Secure Boot key material is staged under %s/alpine-fde-keys; the installer reboots into firmware setup for the manual key import (first boot stays guarded until the keys are imported, ADR-20)\n' "$_im_esp_mnt" >&2
   fi
   return 0
 }

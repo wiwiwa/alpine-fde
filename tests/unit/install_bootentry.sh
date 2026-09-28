@@ -42,7 +42,7 @@ export ALPINE_FDE_NO_INSTALL=1
 export ALPINE_FDE_ROOT=$T/root          # baseline seam: <root>/etc/alpine-fde/baseline.json
 export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 export ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr
-export ALPINE_FDE_HOOKS_DIR=$T/hooks    # dry-run must not require the real hooks tree
+export ALPINE_FDE_HOOKS_DIR=$T/hooks    # the emission lane must not require the real hooks tree
 
 GUID=11111111-2222-3333-4444-555555555555   # the CURRENT ESP partition GUID
 OLD=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee    # a dead/old partition GUID
@@ -325,22 +325,58 @@ assert_eq "parse: inst_bootentry_find picks OURS" "0009" "$(inst_bootentry_find 
 
 # =============================================================================
 # 8. the PLAN: exactly one in-guest boot-entry record, after the provisional
-#    seal, before the teardown; efibootmgr pinned in the target package set
+#    seal, before the teardown; efibootmgr pinned in the target package set.
+#    (Item 17d: the dry-run plan printer is RETIRED — the record-level pins
+#    moved to the qemu EMISSION shape, the inspectable lane that remains; the
+#    preflight now runs in this lane, so the collaborators are stubbed.)
 # =============================================================================
-export ALPINE_FDE_INSTALL_RUNNER=dry-run
+export ALPINE_FDE_INSTALL_RUNNER=qemu
+export ALPINE_FDE_YES=1
 export ALPINE_FDE_INSTALL_NO_REBOOT=1
+export ALPINE_FDE_INSTALL_MNT=$T/mnt
+export ALPINE_FDE_TMPDIR=$T
+export ALPINE_FDE_INSTALL_SCRIPT=$T/guest.sh
+export ALPINE_FDE_EFIVARS_DIR=$T/efivars
+mkdir -p "$T/stub" "$T/efivars" "$ALPINE_FDE_HOOKS_DIR"/kernel-hooks.d "$ALPINE_FDE_HOOKS_DIR"/mkinitfs/features.d \
+    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_HOOKS_DIR/profile.d"
+make_stub() {
+    printf '#!/bin/sh\nexit 0\n' >"$T/stub/$1"
+    chmod +x "$T/stub/$1"
+}
+for s in sfdisk mkfs.btrfs mkfs.vfat mount umount apk adduser addgroup rc-update cert-to-efi-sig-list sign-efi-sig-list \
+    lsblk btrfs cryptsetup; do
+    make_stub "$s"
+done
+printf '#!/bin/sh\ncase " $* " in *" rand "*) printf "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";; esac\nexit 0\n' >"$T/stub/openssl"
+chmod +x "$T/stub/openssl"
+printf '#!/bin/sh\nprintf "0\\n"\n' >"$T/stub/id"
+chmod +x "$T/stub/id"
+export PATH="$T/stub:$PATH"
+for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
+    mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
+    mkinitfs/features.d/alpine-fde.modules \
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
+    printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
+    chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
+done
+printf '\007\000\000\000\001' >"$T/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 DISK=$T/disk.img
 : >"$DISK"
+rm -f "$ALPINE_FDE_INSTALL_SCRIPT"
 OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1)
-assert_eq "dry-run rc 0" "0" "$?"
+PLAN_RC=$?
+OUT="$OUT
+$(cat "$ALPINE_FDE_INSTALL_SCRIPT" 2>/dev/null || :)"
+assert_eq "qemu emit rc 0" "0" "$PLAN_RC"
 assert_eq "plan: exactly ONE boot-entry record" "1" "$(grep -c 'inst_bootentry_ensure' <<<"$OUT")"
 assert_eq "plan: the record is a GUEST step (in-chroot, task #27)" "1" \
-    "$(grep -cE '^PLAN  guest +.*inst_bootentry_ensure' <<<"$OUT")"
+    "$(grep -cE '^export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; .*inst_bootentry_ensure' <<<"$OUT")"
 assert_contains "plan: the record probes require_pkgs efibootmgr:efibootmgr" "$OUT" \
     "require_pkgs efibootmgr:efibootmgr"
 I_SEAL=$(line_no "$OUT" "seal_provisional")
 I_ENTRY=$(line_no "$OUT" "inst_bootentry_ensure")
-I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
+I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
 assert_eq "order: boot entry AFTER the provisional seal (loader staged)" "1" \
     "$(( I_SEAL > 0 && I_ENTRY > I_SEAL ? 1 : 0 ))"
 assert_eq "order: boot entry BEFORE the teardown (chroot still sees the ESP)" "1" \

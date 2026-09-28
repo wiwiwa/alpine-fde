@@ -14,7 +14,7 @@
 #   1. TOOL EXTRACTION (mechanical, command-position approximated) over
 #      - lib/cmd/kernel-build.sh (the guest UKI build script, wholesale) and
 #      - every GUEST RECORD emitted by lib/cmd/install.sh
-#        (inst_plan_run guest '...' / printf '%s\n' "..." lines).
+#        (inst_exec guest '...' / printf '%s\n' "..." lines).
 #   2. PROVISION: each extracted command word must come from
 #      (a) a binary entry in some spool apk (usr/bin, usr/sbin, bin, sbin),
 #      (b) a busybox applet, or
@@ -181,7 +181,7 @@ extract_commands() {
 extract_commands <"$REPO/lib/cmd/kernel-build.sh" >"$TMP/tools-build.txt"
 # install.sh: only the GUEST RECORD strings (the in-chroot steps)
 {
-    grep -h "inst_plan_run guest " "$REPO/lib/cmd/install.sh" | sed -E 's/^[^"'"'"']*["'"'"']//; s/["'"'"'].*$//'
+    grep -h "inst_exec guest " "$REPO/lib/cmd/install.sh" | sed -E 's/^[^"'"'"']*["'"'"']//; s/["'"'"'].*$//'
     grep -h "printf '%s..n' \"" "$REPO/lib/cmd/install.sh" | sed -E 's/^[^"]*"//; s/".*$//'
 } | extract_commands >"$TMP/tools-records.txt"
 sort -u "$TMP/tools-build.txt" "$TMP/tools-records.txt" -o "$TMP/tools.txt"

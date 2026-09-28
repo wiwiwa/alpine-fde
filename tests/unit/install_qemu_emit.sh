@@ -443,4 +443,32 @@ assert_contains "conf drop emitted: ESP_PATH=/efi (CR-01)" "$(cat "$SCRIPT")" "E
 # --- permissions -------------------------------------------------------------------
 assert_eq "emitted script chmod 700" "700" "$(stat -c '%a' "$SCRIPT")"
 
+# =============================================================================
+# BYTE-IDENTITY PIN (item 17d regression guard): the direct-execution refactor
+# (inst_exec at the point of decision) must emit the guest script BYTE-IDENTICAL
+# to the retired two-phase accumulator (SPC_PLAN + inst_execute_plan). The
+# golden below was captured from the PRE-refactor accumulator emission with
+# THIS EXACT scenario (single-disk btrfs, NO_REBOOT=1, default --esp /efi, the
+# fixture above); volatile values are normalized on BOTH sides:
+#   $T -> <TMP>, $REPO -> <REPO>, the staged ephemeral-key mktemp suffix,
+#   and the random LUKS/rootfs UUIDs.
+# Any drift in record text, lane (host comment vs guest line), or ORDER fails
+# here before it can fail anything else.
+# =============================================================================
+GOLDEN=$REPO/fixtures/install-guest-script/golden-single-btrfs.sh
+normalize_script() {
+    sed -e "s|$T|<TMP>|g" \
+        -e "s|$REPO|<REPO>|g" \
+        -e "s|alpine-fde-ephkey\.[A-Za-z0-9]\{6\}|alpine-fde-ephkey.<X>|g" \
+        -e "s|[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}|<UUID>|g" "$1"
+}
+assert_file_exists "byte-identity: golden fixture present" "$GOLDEN"
+normalize_script "$SCRIPT" >"$T/script-normalized.sh"
+if cmp -s "$T/script-normalized.sh" "$GOLDEN"; then
+    assert_eq "byte-identity: emitted guest script IDENTICAL to the pre-refactor accumulator emission (item 17d guard)" "1" "1"
+else
+    diff "$GOLDEN" "$T/script-normalized.sh" >"$T/golden.diff" || true
+    assert_eq "byte-identity: emitted guest script IDENTICAL to the pre-refactor accumulator emission (item 17d guard) — diff: $(head -5 "$T/golden.diff")" "1" "0"
+fi
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
