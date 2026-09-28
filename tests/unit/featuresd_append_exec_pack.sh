@@ -39,8 +39,6 @@ source "$REPO/lib/common.sh"
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/install-state.sh
-source "$REPO/lib/install-state.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 

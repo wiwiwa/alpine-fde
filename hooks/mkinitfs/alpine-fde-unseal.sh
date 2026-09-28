@@ -41,13 +41,14 @@
 #      (shared across RAID1 members) end in `poweroff -f`. This hook NEVER
 #      spawns an interactive shell; no interactive fallback of any kind exists
 #      here by construction.
-#   5. After a successful unlock, flips the ADR-20 install-state marker on the
-#      mounted NEWROOT from `installed` to `provisional-booted` (direct JSON
-#      write, atomic tmp+mv, only when the state file says `installed`).
+#   5. (RETIRED with install-state.json — item 10b) There is NO post-unlock
+#      marker write: the lifecycle is GROUND TRUTH (lib/trust-state.sh
+#      derives provisional vs finalized from the token pcrs + keyslot
+#      inventory + baseline expected_pcr7); the hook persists nothing.
 #
-# Test seams (the real boot path uses the defaults): FDE_NEWROOT, FDE_CRYPTTAB,
+# Test seams (the real boot path uses the defaults): FDE_CRYPTTAB,
 # FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
-# FDE_NLPLUG_FINDFS.
+# FDE_NLPLUG_FINDFS. (FDE_NEWROOT retired with the state flip, item 10b.)
 #
 # Busybox mkinitfs environment only: no bashisms, no GNU tools beyond busybox
 # (sha256sum/od/dd/sed/awk/tr/mktemp/date), openssl + cryptsetup + tpm2-tools
@@ -55,7 +56,6 @@
 
 set -u
 
-FDE_NEWROOT=${FDE_NEWROOT:-/sysroot}
 FDE_CRYPTTAB=${FDE_CRYPTTAB:-/etc/crypttab}
 FDE_EXTRA_DIR=${FDE_EXTRA_DIR:-/.extra}
 FDE_TMPDIR=${FDE_TMPDIR:-/tmp}
@@ -119,47 +119,18 @@ _fdh_poweroff() {
     exit 1
 }
 
-# _fdh_state_flip — the §9.1 Stage 2 / ADR-20 marker flip (installed ->
-# provisional-booted on the mounted NEWROOT; atomic tmp+mv; only when the
-# state file says installed). Best-effort: a missing state file (NEWROOT not
-# mounted) is a silent skip — the caller decides when the NEWROOT is right.
-# Also reachable STANDALONE via FDE_STATE_ONLY=1 (the blocker-#23 splice's
-# post-mount point in the stock mkinitfs initramfs-init, where the root is
-# mounted but the unseal itself already ran at the pre-mount splice point).
-_fdh_state_flip() {
-    _fdh_state_dir="$FDE_NEWROOT/etc/alpine-fde"
-    _fdh_state_file="$_fdh_state_dir/install-state.json"
-    [ -f "$_fdh_state_file" ] || return 0
-    _fdh_cur=$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$_fdh_state_file" | head -n 1)
-    [ "$_fdh_cur" = "installed" ] || return 0
-    _fdh_tmp=$(mktemp "$_fdh_state_dir/.install-state.XXXXXX") || _fdh_tmp=''
-    [ -n "$_fdh_tmp" ] || {
-        _msg "warning: could not stage the install-state marker (finalize resumes on the next boot)"
-        return 0
-    }
-    {
-        printf '{\n'
-        printf '  "schema_version": 1,\n'
-        printf '  "state": "provisional-booted",\n'
-        printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
-        printf '}\n'
-    } >"$_fdh_tmp" 2>/dev/null &&
-        chmod 600 "$_fdh_tmp" 2>/dev/null || :
-    if mv -f "$_fdh_tmp" "$_fdh_state_file" 2>/dev/null; then
-        _msg "install-state: installed -> provisional-booted"
-    else
-        rm -f "$_fdh_tmp" 2>/dev/null || :
-        _msg "warning: could not update the install-state marker (finalize resumes on the next boot)"
-    fi
-    return 0
-}
-
-# blocker #23: the stock-init splice's post-mount point runs the hook in
-# STATE-ONLY mode — the unseal itself already ran at the pre-mount splice.
-if [ "${FDE_STATE_ONLY:-0}" = "1" ]; then
-    _fdh_state_flip
-    exit 0
-fi
+# _fdh_state_flip — RETIRED with install-state.json (item 10b). The hook used
+# to flip a persisted `installed` -> `provisional-booted` marker on the
+# mounted NEWROOT after a successful unlock; nothing reads such a document
+# any more (the trust state is derived from the LUKS2 metadata, lib/
+# trust-state.sh), and a boot-time hook persisting lifecycle state was the
+# one write path this design removes. The hook now persists NOTHING, ever —
+# it is a pure unlock path.
+#
+# blocker #23: the stock-init splice's post-mount STATE-ONLY mode
+# (FDE_STATE_ONLY=1) is RETIRED with the marker flip (item 10b) — no post-mount
+# work left, so the splice carries exactly ONE hook invocation (pre-mount,
+# splice A).
 
 
 # --- §8.2 step 0: PRE-UNSEAL SECURE BOOT GUARD (ADR-20 amended, FIRST) --------
@@ -578,7 +549,6 @@ fi
 
 # --- open every member with the unsealed secret (§8.2 step 3; RAID1: the
 # unsealed passphrase is reused across all members without re-prompting) -------
-_fdh_opened=0
 _fdh_opened_list=''
 if [ -n "$_fdh_pass_file" ]; then
     _fdh_pos=0
@@ -590,7 +560,6 @@ if [ -n "$_fdh_pass_file" ]; then
         fi
         _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
         if cryptsetup open --type luks --key-file - "$_fdh_dev" "$_fdh_target" <"$_fdh_pass_file" >/dev/null 2>&1; then
-            _fdh_opened=$((_fdh_opened + 1))
             _fdh_opened_list="$_fdh_opened_list $_fdh_target "
             _msg "unlocked $_fdh_target ($_fdh_dev) via the TPM token"
         else
@@ -625,7 +594,6 @@ for _fdh_wd in $_fdh_members; do
         if [ -n "$_fdh_cached" ]; then
             if printf '%s' "$_fdh_cached" | cryptsetup open --type luks --key-file - \
                 "$_fdh_dev" "$_fdh_target" >/dev/null 2>&1; then
-                _fdh_opened=$((_fdh_opened + 1))
                 _fdh_done=1
                 _msg "unlocked $_fdh_target ($_fdh_dev) via the recovery passphrase"
                 continue
@@ -640,8 +608,7 @@ for _fdh_wd in $_fdh_members; do
     done
 done
 
-if [ "$_fdh_opened" -gt 0 ]; then
-    _fdh_state_flip
-fi
+# (item 10b) NO post-unlock marker write: the unlock itself is the only fact
+# this hook produces; the trust state stays derivable from the container.
 
 exit 0

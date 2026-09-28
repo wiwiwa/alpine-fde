@@ -79,19 +79,11 @@ if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
   . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
 
-# The install ceremony state machine (§8.4 install-state.json) is owned by the
-# install-state module; consume its API when landed (istate_write), else the
-# additive documented schema is written in place (see inst_state_write).
-if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
-  _spci_state_lib=$(sp_cmd_dir)/install-state.sh
-  [ -f "$_spci_state_lib" ] ||
-    _spci_state_lib=$(sp_cmd_dir)/../install-state.sh
-  if [ -f "$_spci_state_lib" ]; then
-    # shellcheck disable=SC1090
-    . "$_spci_state_lib"
-  fi
-  unset _spci_state_lib
-fi
+# The install ceremony's lifecycle state is GROUND TRUTH (item 10b: there is
+# no install-state.json (item 10b) — lib/trust-state.sh derives provisional vs finalized
+# from the token pcrs + keyslot inventory + baseline expected_pcr7). Stage 1
+# writes its anchoring facts: the pending baseline (step 2) and the
+# provisional {PCR 11} token + temporary ephemeral keyslot 2 (step 6).
 
 # firmware seam (fw_sb_state/fw_var_present/fw_efivars_dir — the §9.1
 # Setup Mode preflight gate; the OsIndications firmware trip is RETIRED,
@@ -626,7 +618,7 @@ seam for any credential) — with EVERY mechanical step BEFORE the ceremony
 (firmware NVRAM enrollment db -> KEK -> PK, the boot manager installed by
 guarded file copy of the systemd-boot loader EFI binary to
 <esp>/EFI/BOOT/BOOTX64.EFI — Alpine ships no bootctl binary —, hooks, target
-metadata, install-state=installed) so the
+metadata) so the
 credential ceremony sits LAST; only the secret-dependent steps follow it
 (signed UKI + boot manager via `kernel build`, PROVISIONAL TPM token sealed
 into keyslot 1, Mechanism B, PCR 11 only, from the UKI's .pcrsig), then
@@ -1537,32 +1529,12 @@ inst_baseline_pending_write() {
   return 0
 }
 
-# inst_state_write STATE — §9.1 Stage-1 step 9: record the ceremony state
-# machine (installed → provisional-booted → finalized) in
-# <mnt>/etc/alpine-fde/install-state.json. Consumes the install-state module's
-# istate_write STATE (target root via ALPINE_FDE_ROOT, atomic write); if the
-# module is not landed, the additive documented schema is written in place.
-# NOTE (§9.1): install writes only `installed` — the `provisional-booted`
-# middle state is written by the first-boot finalize service (Stage 2).
-inst_state_write() {
-  _isw_state=$1
-  if command -v istate_write >/dev/null 2>&1; then
-    _isw_saved=${ALPINE_FDE_ROOT:-}
-    ALPINE_FDE_ROOT=$(inst_mnt)
-    istate_write "$_isw_state"
-    unset ALPINE_FDE_ROOT
-    [ -n "$_isw_saved" ] && ALPINE_FDE_ROOT=$_isw_saved
-    info "install: install-state written: $_isw_state ($(inst_mnt)/etc/alpine-fde/install-state.json)"
-    return 0
-  fi
-  _isw_file=$(inst_mnt)/etc/alpine-fde/install-state.json
-  mkdir -p "${_isw_file%/*}"
-  printf '{\n  "schema_version": 1,\n  "state": "%s",\n  "updated_at": "%s"\n}\n' \
-    "$_isw_state" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$_isw_file" ||
-    die "install: cannot write $_isw_file"
-  info "install: install-state written: $_isw_state ($_isw_file)"
-  return 0
-}
+# §9.1 Stage-1 step 9 is RETIRED with install-state.json (item 10b): install
+# records NO lifecycle document. The anchoring facts it used to summarize are
+# written by their owning steps — the pending baseline (step 2,
+# inst_baseline_pending_write) and the provisional {PCR 11} seal + temporary
+# ephemeral keyslot 2 (step 6, the provisional enrollment) — and the trust
+# state is DERIVED from them at every read (lib/trust-state.sh).
 
 cmd_install_main() {
   _im_yes=0
@@ -2385,10 +2357,10 @@ cmd_install_main() {
   fi
   # step 8 (G-C25, ADR-20 #4): NO unfinalized banner is written — /etc/motd
   # and /etc/issue stay untouched (the banner path is removed).
-  # step 9 (G-C28, MOVED BEFORE the ceremony — no ceremony secret): ceremony
-  # state machine — `installed` (the last state write; the provisional-booted
-  # middle state is written by the first-boot service)
-  inst_plan_run host "inst_state_write installed"
+  # step 9 is RETIRED (item 10b): NO install-state.json is written — the
+  # anchoring facts live in the pending baseline (step 2) and, after the
+  # ceremony, the provisional {PCR 11} seal + temporary ephemeral keyslot 2
+  # (step 6). The trust state is derived from them (lib/trust-state.sh).
   # step 4 (ADR-20 AMENDED, §9.1 step 4): the interactive CREDENTIAL CEREMONY —
   # three no-echo questions, the only interactive input of the whole lifecycle,
   # run in-chroot while the ephemeral install key (TEMPORARY keyslot 2) is
@@ -2402,7 +2374,7 @@ cmd_install_main() {
   # and the release-key passphrase (3/3) DEFAULT to it on bare Enter, each
   # prompt carrying a reuse hint. POSITION (user flow directive): the ceremony
   # is the LAST interactive section — EVERY mechanical step precedes it
-  # (enrollment, boot-manager copy, hooks, metadata, state above);
+  # (enrollment, boot-manager copy, hooks, target metadata above);
   # only the SECRET-dependent steps follow (the signed UKI + boot-manager
   # build, which consumes the release-key custody the ceremony just
   # completed, and the provisional seal). The ceremony runs AFTER the

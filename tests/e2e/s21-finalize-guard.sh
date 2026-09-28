@@ -13,7 +13,7 @@
 #     guided completion chain under test seals the {7,11} token itself);
 #   * Btrfs rootfs with the §9.1 @/@home/@snapshots subvolumes, populated from
 #     the pinned rootfs base tree ENRICHED scenario-locally with the Stage-1
-#     payload: /etc/alpine-fde/{install-state.json=installed, baseline.json
+#     payload: /etc/alpine-fde/{baseline.json
 #     PENDING, alpine-fde.conf, keys/{release.pub,release.pem}}, /etc/crypttab
 #     (member UUID), the REAL advisory oneshot hooks/openrc/alpine-fde-finalize
 #     at /etc/init.d/alpine-fde-finalize + the rc-update enable symlink
@@ -364,14 +364,8 @@ chmod 755 "$TOOLING/etc/init.d/alpine-fde-finalize"
 ln -sfn /etc/init.d/alpine-fde-finalize \
     "$TOOLING/etc/runlevels/default/alpine-fde-finalize"
 
-# Stage-1 payload documents (the §8.4 `installed` handoff state)
-cat >"$TOOLING/etc/alpine-fde/install-state.json" <<JSON
-{
-  "schema_version": 1,
-  "state": "installed",
-  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
+# (item 10b: install-state.json is DEAD — no state doc is staged; the
+# provisional handoff state is the container shape the installer leaves.)
 # pending baseline: the pub path is where the DISK rootfs carries it (finalize
 # runs with ALPINE_FDE_ROOT=/mnt); boot B's in-guest audit --init finalizes it
 cat >"$TOOLING/etc/alpine-fde/baseline.json" <<JSON
@@ -425,7 +419,6 @@ printf 'Welcome to the Alpine FDE harness fixture — operator content stays.\n'
 run_stage tooling-tar 300 tar -C "$TOOLING" -czf "$RUN/tooling.tar.gz" opt etc usr
 tar -tzf "$RUN/tooling.tar.gz" >"$RUN/tooling.listing"
 if grep -qx "opt/alpine-fde/bin/alpine-fde" "$RUN/tooling.listing" \
-    && grep -qx "etc/alpine-fde/install-state.json" "$RUN/tooling.listing" \
     && grep -qx "etc/alpine-fde/baseline.json" "$RUN/tooling.listing" \
     && grep -qx "etc/alpine-fde/keys/release.pub" "$RUN/tooling.listing" \
     && grep -qx "etc/alpine-fde/keys/release.pem" "$RUN/tooling.listing" \
@@ -472,7 +465,7 @@ _aligned=$(((ROOTFS_BYTES + 1048575) / 1048576 * 1048576))
 truncate -s "$_aligned" "$RUN/payload.img"
 dd if="$RUN/enriched.tar.gz" of="$RUN/payload.img" conv=notrunc status=none
 assert_file_exists "S-21 fixture: enriched payload drive (installer input)" "$RUN/payload.img"
-tar -tzf "$RUN/enriched.tar.gz" | grep -qxE '\./?etc/alpine-fde/install-state.json' \
+tar -tzf "$RUN/enriched.tar.gz" | grep -qxE '\./?etc/alpine-fde/baseline.json' \
     || { echo "s21: additions missing from the enriched payload"; exit 1; }
 _assert_result ok "S-21 fixture: Stage-1 additions present in the enriched payload tar" ""
 
@@ -591,7 +584,7 @@ _feed_common() {
     feed_line "$bdir/serial.sock" 'tar -xf /tooling.tgz -C / && echo P2B-$((40+2))-OK'
     wait_console "$bdir" "P2B-42-OK" 300
     feed_line "$bdir/serial.sock" \
-        'mkdir -p /mnt /run/bu && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && cat /mnt/etc/alpine-fde/install-state.json && ls -l /mnt/etc/init.d/alpine-fde-finalize /mnt/etc/runlevels/default/ && cat /mnt/etc/crypttab && ln -sf /dev/vdb /run/bu/'"$DISK_UUID"' && echo P4-$((41+3))-OK'
+        'mkdir -p /mnt /run/bu && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && ls -l /mnt/etc/init.d/alpine-fde-finalize /mnt/etc/runlevels/default/ && cat /mnt/etc/crypttab && ln -sf /dev/vdb /run/bu/'"$DISK_UUID"' && echo P4-$((41+3))-OK'
     wait_console "$bdir" "P4-44-OK" 300
     # the CLI/service environment: by-uuid seam (no udev reliance), payload
     # wrappers, and ALPINE_FDE_ROOT=/mnt — the legs mutate the DISK documents.
@@ -621,7 +614,7 @@ _rekey_slot0() {
 _feed_postcheck() {
     local bdir="$1"
     feed_line "$bdir/serial.sock" \
-        'echo "P7STATE $(grep -o "\"state\": \"[a-z-]*\"" /mnt/etc/alpine-fde/install-state.json | head -1)"; echo "P7TOK $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq "[.tokens[] | select(.type==\"systemd-tpm2\")] | length")"; echo "P7SLOTS $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq -c ".keyslots | keys")"; grep expected_pcr7 /mnt/etc/alpine-fde/baseline.json; echo "P7ATT $(cat /mnt/etc/alpine-fde/finalize-attempt.txt 2>/dev/null | grep -o "will retry next boot" || echo none)"; echo "P7MOTD $(cat /mnt/etc/motd)"; echo P7-$((41+4))-DONE'
+        'echo "P7PCRS $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq -c "first(.tokens // {} | to_entries[] | select(.value.type? == \"systemd-tpm2\") | .value[\"tpm2-pcrs\"] // empty)")"; echo "P7TOK $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq "[.tokens[] | select(.type==\"systemd-tpm2\")] | length")"; echo "P7SLOTS $(cryptsetup luksDump --dump-json-metadata /dev/vdb | jq -c ".keyslots | keys")"; grep expected_pcr7 /mnt/etc/alpine-fde/baseline.json; echo "P7ATT $(cat /mnt/etc/alpine-fde/finalize-attempt.txt 2>/dev/null | grep -o "will retry next boot" || echo none)"; echo "P7MOTD $(cat /mnt/etc/motd)"; echo P7-$((41+4))-DONE'
     wait_console "$bdir" "P7-45-DONE" 300
     feed_line "$bdir/serial.sock" 'sync; poweroff -f'
     run_stage "qemu_wait:$(basename "$bdir")" "$((QEMU_TIMEOUT + 60))" qemu_wait "$bdir" "$QEMU_TIMEOUT"
@@ -840,8 +833,8 @@ else
     _assert_result not-ok "[boot B] token upgrade precedes the finalized transition" \
         "upgrade=$_upgrb_line finalized=$_finb_line"
 fi
-assert_contains "[boot B] post: install state NOW finalized (written to the DISK doc)" "$LOG_B" \
-    "P7STATE \"state\": \"finalized\""
+assert_contains "[boot B] post: ground truth NOW finalized (token {PCR 7, PCR 11} in the DISK container)" "$LOG_B" \
+    "P7PCRS [7,11]"
 assert_not_contains "[boot B] post: baseline no longer pending" "$LOG_B" \
     '"expected_pcr7": "pending"'
 if grep -qE '"expected_pcr7": "[0-9a-f]{64}"' "$B/console.log"; then
@@ -852,7 +845,7 @@ else
 fi
 assert_contains "[boot B] post: exactly ONE systemd-tpm2 token" "$LOG_B" "P7TOK 1"
 assert_contains "[boot B] post: token on a fresh keyslot (0+1)" "$LOG_B" 'P7SLOTS ["0","1"]'
-assert_contains "[boot B] post: NO attempt marker stands after the completion (clean exit, istate_attempt_clear)" "$LOG_B" \
+assert_contains "[boot B] post: NO attempt marker stands after the completion (clean exit, fde_attempt_clear)" "$LOG_B" \
     "P7ATT none"
 assert_contains "[boot B] post: motd carries the operator line byte-exactly (finalize never touches it, ADR-20 #4)" "$LOG_B" \
     "P7MOTD Welcome to the Alpine FDE harness fixture — operator content stays."

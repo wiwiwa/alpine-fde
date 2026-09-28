@@ -54,6 +54,10 @@ if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
+if [ -z "${ALPINE_FDE_TRUST_STATE_LOADED:-}" ]; then
+    # shellcheck disable=SC1090
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../trust-state.sh"
+fi
 if [ -z "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../seal.sh"
@@ -465,53 +469,34 @@ reseal_run() {
     return 0
 }
 
-# reseal_install_state — the persisted installation state (state sibling's API:
-# lib/install-state.sh; the state file is resolved by istate_file() —
-# $ALPINE_FDE_INSTALL_STATE test override, else $(sp_etc_dir)/install-state.json).
-# Empty output ⇒ no state file (legacy / not-installed build context — the
-# G-IL7 gate PASSES, backward compat with pre-install-state builds and the
-# existing unit tests) or an unreadable document (istate_state reports empty;
-# the sibling owns the file contract and decides warn semantics). The lib is
-# sourced when present; until it lands, a local jq fallback reads .state
-# (same schema contract: {"state": "installed"|"finalized", ...}).
-reseal_install_state() {
-    if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
-        _eis_lib="$(sp_cmd_dir)/../install-state.sh"
-        if [ -r "$_eis_lib" ]; then
-            # shellcheck disable=SC1090
-            . "$_eis_lib"
-        fi
-    fi
-    if command -v istate_state >/dev/null 2>&1; then
-        # landed state sibling API: existence is checked here first so the
-        # legacy absent-file case stays silent (istate_state warns on absence)
-        _eis_file=$(istate_file)
-        [ -f "$_eis_file" ] || return 0
-        istate_state 2>/dev/null || :
-    else
-        _eis_file="$(sp_etc_dir)/install-state.json"
-        [ -f "$_eis_file" ] || return 0
-        jq -r '.state // empty' "$_eis_file" 2>/dev/null || :
-    fi
-}
-
 # reseal_ensure_gate_skip — G-IL7 (§8.1 kernel-build row): the build's ensure-once
 # enrollment must NEVER fire while the installation is unfinalized — Stage-1
 # in-chroot provisioning presents the exact trap (reachable volume, zero
-# tokens, SB off). SKIP (warn; caller returns rc 0, bookkeeping stays empty)
-# when the persisted install state exists and is not `finalized`, or when the
-# baseline expected_pcr7 is still pending. Absent install-state file ⇒ legacy
-# context ⇒ proceed. rc 0 ⇒ SKIP, rc 1 ⇒ run the enrollment path.
+# tokens, SB off). Ground-truth gate (item 10b: no install-state.json —
+# lib/trust-state.sh): SKIP (warn; caller returns rc 0, bookkeeping stays
+# empty) when the baseline expected_pcr7 is still pending, or when a standing
+# token is NOT the finalized {PCR 7, PCR 11} (a provisional {11} seal — or any
+# unrecognized shape — means the ceremony has not completed). No baseline ⇒
+# no anchoring evidence either way ⇒ proceed (the legacy context; the
+# ensure-once inspection below owns the zero-token case). rc 0 ⇒ SKIP,
+# rc 1 ⇒ run the enrollment path.
 reseal_ensure_gate_skip() {
-    _eg_state=$(reseal_install_state)
-    if [ -n "$_eg_state" ] && [ "$_eg_state" != "finalized" ]; then
-        warn "enroll: install state is '$_eg_state' (not finalized) — skipping the ensure-once enrollment; finalize after first boot ('alpine-fde audit --init') and rebuild (§8.1)"
-        return 0
-    fi
     _eg_bl=$(sp_baseline_file)
     if [ -f "$_eg_bl" ] && ! baseline_is_final "$_eg_bl"; then
         warn "enroll: baseline expected_pcr7 is pending — skipping the ensure-once enrollment (finalize via 'alpine-fde audit --init', §8.1)"
         return 0
+    fi
+    if [ -f "$_eg_bl" ] && _eg_dev=$(ts_first_member); then
+        _eg_meta=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-gate.XXXXXX") || return 0
+        if ts_read_meta "$_eg_dev" "$_eg_meta"; then
+            _eg_pcrs=$(ts_token_pcrs "$_eg_meta")
+            if [ -n "$_eg_pcrs" ] && [ "$_eg_pcrs" != "[7,11]" ]; then
+                warn "enroll: trust state is not finalized (standing token pcrs: $_eg_pcrs) — skipping the ensure-once enrollment; finalize after first boot ('alpine-fde finalize') and rebuild (§8.1)"
+                rm -f "$_eg_meta"
+                return 0
+            fi
+        fi
+        rm -f "$_eg_meta"
     fi
     return 1
 }
@@ -520,7 +505,8 @@ reseal_ensure_gate_skip() {
 #   * volume unreachable → warn + rc 0 (a build context may not have the target
 #     volume attached; under the pinned pubkey+signed-policy construction
 #     kernel updates are TPM-free either way, s14)
-#   * G-IL7: install state not finalized / baseline pending → warn + rc 0
+#   * G-IL7: unfinalized ground truth (baseline pending / a non-{7,11}
+#     standing token) → warn + rc 0
 #     (Stage-1 builds must never enroll; RESEAL_SKIPPED=1 signals the skip)
 #   * inspect + enroll run UNDER the enrollment lock (§8.3: concurrent builds /
 #     postinst passes must serialize on the one-enrollment decision, HW-3)

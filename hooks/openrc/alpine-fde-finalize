@@ -3,17 +3,21 @@
 # ADR-20 amended, user amendments #3+#4).
 #
 # ADR-20 amended makes the first boot complete trust finalization AUTOMATICALLY
-# (never the operator): when the install state is provisional
-# (installed | provisional-booted) and the final Secure Boot state holds
-# (secureboot=1 AND setup_mode=0, read-only guard) this service runs the
-# NON-INTERACTIVE completion fin_service_main (lib/cmd/finalize.sh):
+# (never the operator): when the GROUND-TRUTH trust state is provisional
+# (lib/trust-state.sh — item 10b: NO persisted state document; the standing
+# token's pcrs + the keyslot inventory + the baseline expected_pcr7 ARE the
+# state) and
+# the final Secure Boot state holds (secureboot=1 AND setup_mode=0, read-only
+# guard) this service runs the NON-INTERACTIVE completion fin_service_main
+# (lib/cmd/finalize.sh):
 #   guarded baseline capture (audit --init)
+#   -> temporary ephemeral install keyslot purge per member
 #   -> token upgrade to Mechanism B {PCR 7, PCR 11} per member (authorized by
 #      RE-UNSEALING the standing provisional token in userspace — never a
 #      stored credential)
-#   -> temporary ephemeral install keyslot purge per member
-#   -> state `finalized` written LAST (ADR-20 #4: there is NO MOTD/issue
-#      banner step — the provisional banner path is removed).
+#   -> the ADR-8 attempt marker cleared (completion is a GROUND TRUTH: the
+#      upgraded token + purged ephemeral keyslot, read back by
+#      lib/trust-state.sh — no state document is ever written).
 #
 # The SB guard here is the SECOND BLOCKING LAYER (ADR-20 #3): the first is the
 # initramfs pre-unseal guard (§8.2 step 0 — an SB-off machine reboots into
@@ -22,11 +26,11 @@
 # purged — the loud BLOCKED notice is printed, the state stays provisional and
 # the next boot retries (§12 S-21). Boot itself is never failed by this
 # service: on any NON-guard completion step failing, or on any missing/corrupt
-# state or library, it prints the ADR-8 advisory warning (when unfinalized),
-# leaves the state untouched and exits 0 — the next boot retries (§9.1: "any
-# step failure => stay provisional, warn loudly, exit 0, retry next boot").
-# state `finalized` is silent and idempotent. The GUIDED crash-resume entry
-# point remains `alpine-fde finalize` (Stage 3).
+# library or underivable ground truth, it prints the ADR-8 advisory warning
+# (when unfinalized), leaves everything untouched and exits 0 — the next boot
+# retries (§9.1: "any step failure => stay provisional, warn loudly, exit 0,
+# retry next boot"). A `finalized` ground truth is silent and idempotent. The
+# GUIDED crash-resume entry point remains `alpine-fde finalize` (Stage 3).
 #
 # Install: copied to /etc/init.d/ and enabled via
 # `rc-update add alpine-fde-finalize default` (Stage 1 step 7).
@@ -40,18 +44,18 @@ depend() {
 start() {
     _aff_dir=${ALPINE_FDE_CMD_DIR:-/opt/alpine-fde/lib/cmd}
     _aff_lib=${_aff_dir%/*}
-    if [ -r "$_aff_lib/install-state.sh" ]; then
+    if [ -r "$_aff_lib/trust-state.sh" ]; then
         ALPINE_FDE_CMD_DIR=$_aff_dir
         # shellcheck disable=SC1090
-        . "$_aff_lib/install-state.sh"
+        . "$_aff_lib/trust-state.sh"
     fi
-    # degrade-safe: no state machine => nothing to do, boot unblocked
-    command -v istate_state >/dev/null 2>&1 || return 0
-    _aff_state=$(istate_state 2>/dev/null)
+    # degrade-safe: no ground-truth reader => nothing to do, boot unblocked
+    command -v ts_label >/dev/null 2>&1 || return 0
+    _aff_state=$(ts_label 2>/dev/null)
     case $_aff_state in
         finalized) return 0 ;;              # idempotent: silent no-op
-        installed | provisional-booted) : ;;
-        *) return 0 ;;                      # missing/corrupt: degrade safe
+        provisional) : ;;
+        *) return 0 ;;                      # unknown/underivable: degrade safe
     esac
 
     # --- read-only final Secure Boot guard (§9.1 Stage 2 step 1; ADR-20 #3) ---
@@ -67,10 +71,10 @@ start() {
     case $_aff_sb in
         secureboot=1\ setup_mode=0\ *) : ;;
         *)
-            command -v istate_attempt_write >/dev/null 2>&1 &&
-                istate_attempt_write "service: SB guard failed ($_aff_sb) — staying provisional, retry next boot"
+            command -v fde_attempt_write >/dev/null 2>&1 &&
+                fde_attempt_write "service: SB guard failed ($_aff_sb) — staying provisional, retry next boot"
             printf '%s\n' \
-                "BLOCKED: Alpine FDE trust finalization is NOT permitted (install state: $_aff_state)." \
+                "BLOCKED: Alpine FDE trust finalization is NOT permitted (trust state: $_aff_state)." \
                 "Secure Boot guard failed: $_aff_sb" \
                 "The initramfs pre-unseal guard reboots Secure-Boot-off machines into firmware setup (ADR-20, §8.2);" \
                 "enable Secure Boot with this machine's platform keys in BIOS setup — this service will" \
@@ -90,10 +94,10 @@ start() {
             # shellcheck disable=SC1090
             . "$_aff_dir/finalize.sh"
         else
-            command -v istate_attempt_write >/dev/null 2>&1 &&
-                istate_attempt_write "service: finalize.sh missing at $_aff_dir"
+            command -v fde_attempt_write >/dev/null 2>&1 &&
+                fde_attempt_write "service: finalize.sh missing at $_aff_dir"
             printf '%s\n' \
-                "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+                "WARNING: Alpine FDE trust is NOT finalized (trust state: $_aff_state)." \
                 "The completion implementation is missing ($_aff_dir/finalize.sh) —" \
                 "the service will retry on the next boot, or run: alpine-fde finalize" \
                 >&2
@@ -104,9 +108,9 @@ start() {
         return 0
     fi
     printf '%s\n' \
-        "WARNING: Alpine FDE trust is NOT finalized (install state: $_aff_state)." \
+        "WARNING: Alpine FDE trust is NOT finalized (trust state: $_aff_state)." \
         "First-boot finalization FAILED (see the messages above; details in" \
-        "$(command -v istate_attempt_read >/dev/null 2>&1 && istate_attempt_read 2>/dev/null || echo 'the finalize-attempt marker'))." \
+        "$(command -v fde_attempt_read >/dev/null 2>&1 && fde_attempt_read 2>/dev/null || echo 'the finalize-attempt marker'))." \
         "The volume stays safely locked under the provisional seal; the service will retry on the next boot," \
         "or complete it manually with: alpine-fde finalize" \
         >&2

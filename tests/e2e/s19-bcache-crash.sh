@@ -601,15 +601,9 @@ if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs-etc/etc/alpine-fde/baseline
     echo "s19: baseline still pending after audit --init — refusing to continue"; exit 1
 fi
 run_stage baseline-copy 60 cp "$RUN/rootfs-etc/etc/alpine-fde/baseline.json" "$TOOLING/etc/alpine-fde/baseline.json"
-# §8.4 state doc at `installed` — finalize's state gate requires it (a missing
-# doc is a loud no-op); the `finalized` write stays scenario-ephemeral in-guest
-cat >"$TOOLING/etc/alpine-fde/install-state.json" <<JSON
-{
-  "schema_version": 1,
-  "state": "installed",
-  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
+# (item 10b: install-state.json is DEAD — no state doc is staged. The
+# provisional ground truth lives IN the container: the standing {PCR 11}
+# token + the temporary ephemeral keyslot; finalize derives it.)
 run_stage tooling-tar-full 300 tar -C "$TOOLING" -czf "$RUN/tooling-full.tar.gz" opt etc usr
 # --- the {PCR 7, PCR 11} policy signature for the finalize token upgrade -----
 # Under Mechanism B the payload .pcrsig must carry a release-key-signed

@@ -373,9 +373,12 @@ assert_not_contains "plan: no NOT-finalized banner text (G-C25 removed)" "$INS_O
     "NOT finalized"
 assert_not_contains "plan: no banner finalize directive" "$INS_OUT" \
     "alpine-fde finalize"
-# G-C28/§9.1 step 9: state `installed` — the last state write
-assert_contains "plan: §9.1 step 9 — state installed via istate_write" "$INS_OUT" \
-    "inst_state_write installed"
+# G-C28/§9.1 step 9 RETIRED (item 10b: install-state.json is DEAD) — the plan
+# writes NO lifecycle document anywhere
+assert_not_contains "plan: NO install-state record anywhere (item 10b)" "$INS_OUT" \
+    "install-state"
+assert_not_contains "plan: no inst_state_write record" "$INS_OUT" \
+    "inst_state_write"
 # G-C26 (AMENDED by the user's flow directives): the OsIndications firmware
 # trip is BACK — but ONLY as the runtime-conditional DEFERRED-enrollment tail
 # (firmware refused NVRAM enrollment -> manual import); the success path
@@ -456,7 +459,7 @@ I_APPEND=$(line_no "$INS_OUT" '>> /mnt/etc/mkinitfs/features.d/alpine-fde.module
 assert_eq "blocker #12: the module-append staging precedes the build record" "1" \
     "$(( I_APPEND > 0 && I_APPEND < I_BUILD ? 1 : 0 ))"
 I_SEAL=$(line_no "$INS_OUT" "seal_provisional")
-I_STATE=$(line_no "$INS_OUT" "inst_state_write installed")
+I_META=$(line_no "$INS_OUT" "inst_resolve_target_metadata")
 # anchor on the TEARDOWN record's `&& umount -R /mnt` — since item 26d the
 # reset block also carries a bare `umount -R /mnt` (earlier in the plan)
 I_TEARDOWN=$(line_no "$INS_OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
@@ -481,16 +484,16 @@ assert_eq "order (user flow directive): boot-manager guarded copy BEFORE the cre
     "$(( I_COPY > 0 && I_COPY < I_CERR ? 1 : 0 ))"
 assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a build input)" "1" \
     "$(( I_HOOKS > 0 && I_HOOKS < I_CERR ? 1 : 0 ))"
-assert_eq "order (user flow directive): state write BEFORE the credential ceremony (mechanical)" "1" \
-    "$(( I_STATE > 0 && I_STATE < I_CERR ? 1 : 0 ))"
+assert_eq "order (user flow directive): target metadata BEFORE the credential ceremony (mechanical; the §9.1 step-9 state write is RETIRED, item 10b)" "1" \
+    "$(( I_META > 0 && I_META < I_CERR ? 1 : 0 ))"
 assert_eq "order: enrollment before kernel build" "1" "$(( I_ENROLL < I_BUILD ? 1 : 0 ))"
 assert_eq "order: build before provisional seal (the .pcrsig comes from the UKI)" "1" \
     "$(( I_BUILD < I_SEAL ? 1 : 0 ))"
-assert_eq "order: state write BEFORE the provisional seal (mechanical first — the seal is secret-dependent, it follows the ceremony)" "1" \
-    "$(( I_STATE > 0 && I_STATE < I_SEAL ? 1 : 0 ))"
+assert_eq "order: target metadata BEFORE the provisional seal (mechanical first — the seal is secret-dependent, it follows the ceremony)" "1" \
+    "$(( I_META > 0 && I_META < I_SEAL ? 1 : 0 ))"
 assert_eq "order: provisional seal (secret-dependent) BEFORE the teardown" "1" \
     "$(( I_SEAL > 0 && I_SEAL < I_TEARDOWN ? 1 : 0 ))"
-assert_eq "order: state write before teardown" "1" "$(( I_STATE < I_TEARDOWN ? 1 : 0 ))"
+assert_eq "order: target metadata before teardown" "1" "$(( I_META < I_TEARDOWN ? 1 : 0 ))"
 assert_eq "order: teardown before the ephemeral scrub" "1" \
     "$(( I_TEARDOWN < I_SCRUB ? 1 : 0 ))"
 # user directive 3: instructions LAST — after the scrub — then the explicit

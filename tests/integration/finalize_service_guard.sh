@@ -25,12 +25,17 @@
 # by re-unsealing the standing provisional token.
 #
 # Pinned invariants:
-#   * state gate: installed | provisional-booted proceed; finalized loud
-#     no-op; absent loud no-op; anything else fail-closed 64
+#   * ground-truth gate (lib/trust-state.sh; item 10b: install-state.json is
+#     DEAD): provisional (standing token [11], or a mid-completion shape)
+#     proceeds; finalized (token {7,11} + NO ephemeral keyslot + baseline
+#     final) is a loud no-op; nothing derivable (no baseline AND no reachable
+#     container) is a loud no-op; a recognizable-but-wrong shape fails closed
+#     64 — the SAME refusal surface the old state document provided
 #   * completion chain (Stage 2 == Stage 3, fin_completion_steps): SB guard
-#     -> audit --init -> token upgrade {PCR 7, PCR 11} per member -> TEMPORARY
-#     ephemeral keyslot purge per member -> state `finalized` LAST (ADR-8
-#     attempt marker cleared, §8.4). ADR-20 amendment #4: the MOTD/issue
+#     -> audit --init -> TEMPORARY ephemeral keyslot purge per member ->
+#     token upgrade {PCR 7, PCR 11} per member -> ADR-8 attempt marker
+#     cleared LAST (NO state write: the upgraded token IS the finalized
+#     fact). ADR-20 amendment #4: the MOTD/issue
 #     provisional banner path is REMOVED — no banner is ever written and
 #     finalize never touches /etc/motd or /etc/issue.
 #   * SB-off / SetupMode=1 => 64 + the §9.1 instruction text; NO audit, NO
@@ -47,11 +52,13 @@
 #     already {7,11}, the purge skips when the ephemeral slot is gone;
 #     exactly keyslot 0 (recovery) remains beyond the sealed slot after
 #     completion (I1 two-keyslot at-rest state)
-#   * Stage-2 service (fin_service_main): NON-INTERACTIVE — rc 0 + finalized
-#     when provisional + SB final; on ANY failure the ADR-8 attempt marker is
-#     written and a NONZERO rc is returned (the OpenRC wrapper maps it to the
-#     advisory + exit 0; boot is never blocked); finalized / missing /
-#     corrupt state are silent degrade-safe no-ops
+#   * Stage-2 service (fin_service_main): NON-INTERACTIVE — rc 0 when the
+#     ground truth reads finalized; the completion runs when provisional +
+#     SB final; on ANY failure the ADR-8 attempt marker is written and a
+#     NONZERO rc is returned (the OpenRC wrapper maps it to the advisory +
+#     exit 0; boot is never blocked); an underivable ground truth (no
+#     container / unreadable metadata / no token) is a silent degrade-safe
+#     no-op
 #   * zero systemd-cryptenroll invocations anywhere (ADR-19)
 
 set -u
@@ -72,8 +79,8 @@ source "$REPO/lib/keys.sh"
 source "$REPO/lib/seal.sh"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/install-state.sh
-source "$REPO/lib/install-state.sh"
+# shellcheck source=../../lib/trust-state.sh
+source "$REPO/lib/trust-state.sh"
 
 command -v swtpm >/dev/null 2>&1 || {
     echo "FAIL: swtpm not available — this test is normative and must run where swtpm exists" >&2
@@ -276,6 +283,7 @@ mk_member() { # IMG — real file-backed LUKS2 container in the amended handoff 
         "$1" "$T/rec.bin"
     cryptsetup luksAddKey "${KDFARGS[@]}" --key-slot 1 --key-file "$T/eph.bin" \
         "$1" "$T/prov.bin"
+    [ -z "${MK_MEMBER_NO_TOKEN:-}" ] || return 0
     jq -n '{type: "systemd-tpm2", keyslots: ["1"], "tpm2-blob": "AAEAC0RhdGE=",
         "tpm2-pcrs": [11], "tpm2-pcr-bank": "sha256"}' >"$T/tok-prov.json"
     cryptsetup token import "$1" --token-id 0 --json-file "$T/tok-prov.json" \
@@ -285,6 +293,14 @@ fresh_members() {
     rm -f "$LUKS_DIR/$U1.img" "$LUKS_DIR/$U2.img"
     mk_member "$LUKS_DIR/$U1.img"
     mk_member "$LUKS_DIR/$U2.img"
+    ln -sfn "$LUKS_DIR/$U1.img" "$BYUUID/$U1"
+    ln -sfn "$LUKS_DIR/$U2.img" "$BYUUID/$U2"
+}
+fresh_members_bare() { # — containers with NO token at all: an unrecognized
+    # ground-truth shape (the gate must fail closed 64 on it)
+    rm -f "$LUKS_DIR/$U1.img" "$LUKS_DIR/$U2.img"
+    MK_MEMBER_NO_TOKEN=1 mk_member "$LUKS_DIR/$U1.img"
+    MK_MEMBER_NO_TOKEN=1 mk_member "$LUKS_DIR/$U2.img"
     ln -sfn "$LUKS_DIR/$U1.img" "$BYUUID/$U1"
     ln -sfn "$LUKS_DIR/$U2.img" "$BYUUID/$U2"
 }
@@ -324,7 +340,7 @@ fresh_stage() { # — full amended first-boot state: members + pending baseline 
     fresh_members
     pending_baseline
     rm -f "$(sp_last_audit_file)" 2>/dev/null || :
-    istate_attempt_clear
+    fde_attempt_clear
     fresh_banners
 }
 
@@ -370,6 +386,13 @@ tok_pcrs() { # DEV — the standing systemd-tpm2 token's pcrs (jq -c)
     cryptsetup luksDump --dump-json-metadata "$1" 2>/dev/null | jq -c \
         'first(.tokens // {} | to_entries[] | select(.value.type? == "systemd-tpm2") | .value["tpm2-pcrs"] // empty) // empty'
 }
+ts_of() { # IMG — the ground-truth classification of a member (lib/trust-state.sh)
+    local m
+    m=$(mktemp)
+    cryptsetup luksDump --dump-json-metadata "$1" >"$m" 2>/dev/null
+    ts_state "$m" "$(sp_baseline_file)"
+    rm -f "$m"
+}
 tok_count() {
     cryptsetup luksDump --dump-json-metadata "$1" 2>/dev/null |
         jq '[.tokens // {} | .[] | select(.type? == "systemd-tpm2")] | length'
@@ -396,7 +419,7 @@ cs_for() { # DEV-SUBSTRING VERB-NEEDLE — count of logged calls touching DEV
     echo "$n"
 }
 marker_rc() { # — rc of the attempt-marker presence check, captured for assert_rc
-    istate_attempt_present >/dev/null 2>&1
+    fde_attempt_present >/dev/null 2>&1
     echo $?
 }
 assert_member_final() { # DESC UUID — the I1 at-rest shape after completion
@@ -417,25 +440,35 @@ assert_member_final() { # DESC UUID — the I1 at-rest shape after completion
 }
 
 # =================================================================================
-# 1. state gate: absent / finalized / garbage (§8.4) -------------------------------
-rm -f "$(sp_etc_dir)/install-state.json"
+# 1. ground-truth gate: nothing derivable / unrecognized (item 10b) ----------------
+# NOTE: the finalized loud no-op is covered end-to-end by leg 3b (re-run after
+# the happy path) — the ground truth there IS a completed finalization.
+rm -f "$(sp_baseline_file)"
+rm -f "$BYUUID/$U1" "$BYUUID/$U2"   # no container reachable either
 reset_logs
 run_finalize
-assert_eq "absent state: rc 0" "0" "$FIN_RC"
-assert_contains "absent state: loud no-op" "$FIN_OUT" "nothing to finalize"
-assert_eq "absent state: zero cryptsetup calls" "0" "$(grep -c . "$CS_LOG")"
+assert_eq "nothing derivable (no baseline, no container): rc 0" "0" "$FIN_RC"
+assert_contains "nothing derivable: loud no-op" "$FIN_OUT" "nothing to finalize"
+assert_eq "nothing derivable: zero cryptsetup calls" "0" "$(grep -c . "$CS_LOG")"
 
-istate_write finalized
+# our baseline stands but the container carries NO token: recognizable-but-wrong
+pending_baseline
+fresh_members_bare
+reset_logs
 run_finalize
-assert_eq "already finalized: rc 0" "0" "$FIN_RC"
-assert_contains "already finalized: loud no-op message" "$FIN_OUT" "already finalized"
-assert_eq "already finalized: zero cryptsetup calls" "0" "$(grep -c . "$CS_LOG")"
+assert_eq "unrecognized ground truth (no token): rc 64" "64" "$FIN_RC"
+assert_contains "unrecognized ground truth: fail-closed message names it" "$FIN_OUT" \
+    "unrecognized ground-truth state"
 
-printf '{"schema_version": 1, "state": "weird", "updated_at": "2026-09-19T00:00:00Z"}' \
-    >"$(sp_etc_dir)/install-state.json"
+# a provisional seal WITHOUT a baseline (Stage 1 died before its step 2) is
+# never a silent no-op either
+rm -f "$(sp_baseline_file)"
+fresh_members
+reset_logs
 run_finalize
-assert_eq "garbage state: rc 64" "64" "$FIN_RC"
-assert_contains "garbage state: message names the state" "$FIN_OUT" "unexpected install state"
+assert_eq "provisional seal, no baseline: rc 64" "64" "$FIN_RC"
+assert_contains "provisional seal, no baseline: names the missing pending baseline" "$FIN_OUT" \
+    "pending baseline before finalization"
 
 # --- 1b. CLI surface: help + unknown arg -------------------------------------------
 run_finalize --help
@@ -453,7 +486,6 @@ assert_contains "finalize --bogus: named in the error" "$FIN_OUT" "unknown argum
 # guard is the FIRST completion step — no local keyslot work precedes it) ----------
 sb_state 0 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 run_finalize
 assert_eq "SB off: rc 64" "64" "$FIN_RC"
@@ -461,8 +493,10 @@ assert_contains "SB off: §9.1 instruction text" "$FIN_OUT" \
     "Secure Boot is not enabled with your custom keys"
 assert_contains "SB off: instruction names the BIOS action" "$FIN_OUT" \
     "Reboot into BIOS setup and toggle Secure Boot ON"
-assert_eq "SB off: install state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "SB off: ground truth stays provisional (token [11])" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
+assert_eq "SB off: ground truth stays provisional (classification)" "provisional" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
 baseline_is_pending "$(sp_baseline_file)"
 assert_rc "SB off: baseline still pending (no audit --init)" 0 $?
 assert_eq "SB off: no last-audit written" "absent" \
@@ -488,8 +522,8 @@ sb_state 1 1
 run_finalize
 assert_eq "SetupMode=1: rc 64" "64" "$FIN_RC"
 assert_contains "SetupMode=1: refusal names Secure Boot" "$FIN_OUT" "Secure Boot"
-assert_eq "SetupMode=1: state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "SetupMode=1: ground truth stays provisional" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 
 # =================================================================================
 # 3. Guided happy path (state provisional-booted, Secure Boot on) ⇒ the full
@@ -497,11 +531,15 @@ assert_eq "SetupMode=1: state stays provisional-booted" "provisional-booted" \
 # keyfile env set anywhere ----------------------------------------------------------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 run_finalize
 assert_eq "happy: rc 0" "0" "$FIN_RC"
-assert_eq "happy: state finalized" "finalized" "$(istate_state)"
+assert_eq "happy: ground truth reads finalized (member 1)" "finalized" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
+assert_eq "happy: ground truth reads finalized (member 2)" "finalized" \
+    "$(ts_of "$LUKS_DIR/$U2.img")"
+assert_eq "happy: NO install-state.json was ever created (item 10b)" "0" \
+    "$([ -e "$(sp_etc_dir)/install-state.json" ] && echo 1 || echo 0)"
 baseline_is_final "$(sp_baseline_file)"
 assert_rc "happy: baseline final" 0 $?
 assert_eq "happy: expected_pcr7 recorded from live" "$D7" \
@@ -533,25 +571,28 @@ assert_eq "happy: issue operator content preserved byte-exactly" \
     "$BANNER_LINE" "$(cat "$T/root/etc/issue")"
 
 # --- 3b. re-run after success ⇒ loud no-op -----------------------------------------
-CP_CS=$(cat "$CS_LOG")
+# (item 10b: "already finalized" is itself a GROUND-TRUTH read — the gate
+# luksDumps the container — so the pin is zero MUTATING work, not zero reads.)
+MUT_CALLS() { grep -cE 'CALL (luksAddKey|luksKillSlot|token import)' "$CS_LOG"; }
+CP_MUT=$(MUT_CALLS)
 run_finalize
 assert_eq "already finalized (post-run): rc 0" "0" "$FIN_RC"
 assert_contains "already finalized (post-run): loud no-op message" "$FIN_OUT" \
     "already finalized"
-assert_eq "already finalized (post-run): zero additional work" "$CP_CS" "$(cat "$CS_LOG")"
+assert_eq "already finalized (post-run): zero MUTATING work" "$CP_MUT" "$(MUT_CALLS)"
 
 # =================================================================================
 # 4. Crash matrix A: interrupted DURING the token upgrade ⇒ die 64 with the
 # member named; resume applies ONLY what is missing (§9.1 crash idempotency) -------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 FAIL_ADD_MEMBER=$U1 run_finalize
 FAIL_ADD_MEMBER=''
 assert_eq "crash A: rc 64" "64" "$FIN_RC"
 assert_contains "crash A: message names the failed member" "$FIN_OUT" "$U1"
-assert_eq "crash A: state stays provisional-booted" "provisional-booted" "$(istate_state)"
+assert_eq "crash A: ground truth stays provisional (member 1 [11])" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_eq "crash A: member 2 untouched (still provisional [11])" "[11]" \
     "$(tok_pcrs "$LUKS_DIR/$U2.img")"
 assert_eq "crash A: member 2 ephemeral slot intact" "0" \
@@ -562,7 +603,8 @@ LA_SNAP=$(md5sum "$(sp_last_audit_file)" | cut -d' ' -f1)
 reset_logs
 run_finalize
 assert_eq "crash A resume: rc 0" "0" "$FIN_RC"
-assert_eq "crash A resume: state finalized" "finalized" "$(istate_state)"
+assert_eq "crash A resume: ground truth finalized" "finalized" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
 assert_eq "crash A resume: audit NOT re-run" "$LA_SNAP" \
     "$(md5sum "$(sp_last_audit_file)" | cut -d' ' -f1)"
 for _m in "$U1" "$U2"; do
@@ -576,7 +618,6 @@ assert_eq "crash A resume: member 2 needed exactly ONE add + TWO kills (no re-ap
 # upgrade already stands; the ephemeral slot survives) ⇒ resume purges only ------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 # simulate the crash: perform the upgrade step by hand for BOTH members, then
 # stop — exactly the post-upgrade pre-purge state (§9.1 Stage 2 step 3 done)
 printf '%s' "$RECOVERY_PASS" >"$T/auth.bin"
@@ -596,8 +637,8 @@ assert_contains "crash B: message names the failed member + the purge" "$FIN_OUT
     "$U1"
 assert_contains "crash B: message names the ephemeral purge" "$FIN_OUT" \
     "ephemeral"
-assert_eq "crash B: state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "crash B: mid-completion ground truth still unfinalized" "provisional" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
 assert_eq "crash B: member 1 token already {7,11} (the upgrade HAD completed)" "[7,11]" \
     "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_eq "crash B: member 1 ephemeral slot STILL present (the purge died)" "0" \
@@ -605,7 +646,8 @@ assert_eq "crash B: member 1 ephemeral slot STILL present (the purge died)" "0" 
 reset_logs
 run_finalize
 assert_eq "crash B resume: rc 0" "0" "$FIN_RC"
-assert_eq "crash B resume: state finalized" "finalized" "$(istate_state)"
+assert_eq "crash B resume: ground truth finalized" "finalized" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
 for _m in "$U1" "$U2"; do
     assert_member_final "crash B resume: member $_m" "$_m"
 done
@@ -620,7 +662,6 @@ assert_eq "crash B resume: member 1 ran exactly ONE luksKillSlot (the missed pur
 # check, NO live TPM PCR read ----------------------------------------------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 printf '%s' "$RECOVERY_PASS" >"$T/auth-anch.bin"
 chmod 600 "$T/auth-anch.bin"
 ANCH_RC=0
@@ -632,7 +673,6 @@ assert_eq "anchored G-B6: member 1 token is the finalized {7,11}" "[7,11]" \
 # INCONSISTENT anchors (recorded d7 does not recompute to the signed pol):
 # the gate refuses BEFORE any LUKS2 mutation
 fresh_stage
-istate_write provisional-booted
 BROKEN_RC=0
 seal_upgrade_token "$KEYDIR" "$LUKS_DIR/$U1.img" "$T/pcrsig-anch-broken.json" \
     "$T/token-anch-broken.json" "$T/auth-anch.bin" 2>>"$T/anch.err" || BROKEN_RC=$?
@@ -647,7 +687,6 @@ assert_eq "anchored G-B6: refusal left the token provisional" "[11]" \
 # attempt marker; NO keyslot mutation at all (§9.1 Stage 3 authorization) ----------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 ALPINE_FDE_RECOVERY_PASSPHRASE='definitely-not-it-X9k2-!qmwjpz' run_finalize
 assert_eq "wrong passphrase: rc 64" "64" "$FIN_RC"
@@ -655,11 +694,11 @@ assert_contains "wrong passphrase: loud message names keyslot 0" "$FIN_OUT" \
     "keyslot 0"
 assert_contains "wrong passphrase: message names the bounded retry" "$FIN_OUT" \
     "after 3 attempts"
-assert_eq "wrong passphrase: state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "wrong passphrase: ground truth stays provisional" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_rc "wrong passphrase: ADR-8 attempt marker WRITTEN (§8.4)" 0 "$(marker_rc)"
 assert_contains "wrong passphrase: marker carries the guided reason" \
-    "$(istate_attempt_read)" "recovery passphrase rejected"
+    "$(fde_attempt_read)" "recovery passphrase rejected"
 assert_eq "wrong passphrase: exactly THREE verify attempts (bounded)" "3" \
     "$(grep -c 'CALL open --test-passphrase' "$CS_LOG")"
 assert_eq "wrong passphrase: ZERO mutations (no add, no kill, no import)" "0" \
@@ -672,20 +711,22 @@ reset_logs
 ALPINE_FDE_RECOVERY_PASSPHRASE='short1!' run_finalize
 assert_eq "weak passphrase: rc 64" "64" "$FIN_RC"
 assert_contains "weak passphrase: floor named" "$FIN_OUT" "entropy floor"
-assert_eq "weak passphrase: zero cryptsetup invocations" "0" "$(grep -c . "$CS_LOG")"
-assert_eq "weak passphrase: state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+# the ground-truth gate read (one luksDump) precedes the floor; ZERO mutations
+assert_eq "weak passphrase: zero MUTATING cryptsetup invocations" "0" \
+    "$(grep -cE 'CALL (luksAddKey|luksKillSlot|token import)' "$CS_LOG")"
+assert_eq "weak passphrase: ground truth stays provisional" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 
 # =================================================================================
 # 6. Stage-2 SERVICE (fin_service_main): non-interactive completion authorized
 # by re-unsealing the standing provisional token — NEVER a credential env -------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 run_service
 assert_eq "service: rc 0" "0" "$SVC_RC"
-assert_eq "service: state finalized" "finalized" "$(istate_state)"
+assert_eq "service: ground truth finalized" "finalized" \
+    "$(ts_of "$LUKS_DIR/$U1.img")"
 assert_contains "service: the provisional token WAS re-unsealed in userspace" \
     "$(cat "$SVC_LOG")" "seal_unseal mode=provisional"
 assert_eq "service: re-unseal happened exactly once" "1" "$(grep -c . "$SVC_LOG")"
@@ -708,22 +749,23 @@ reset_logs
 run_service
 assert_eq "service (finalized): rc 0" "0" "$SVC_RC"
 assert_eq "service (finalized): quiet" "" "$SVC_OUT"
-assert_eq "service (finalized): ZERO invocations" "0" "$(grep -c . "$CS_LOG")"
+# the ground-truth gate read (one luksDump) happens; ZERO mutations, no re-unseal
+assert_eq "service (finalized): ZERO MUTATING invocations" "0" \
+    "$(grep -cE 'CALL (luksAddKey|luksKillSlot|token import)' "$CS_LOG")"
 assert_eq "service (finalized): no re-unseal" "0" "$(grep -c . "$SVC_LOG")"
 
 # --- 6c. service: SB guard failure ⇒ nonzero rc + attempt marker + NO mutation;
 # the OpenRC wrapper maps this to the advisory + exit 0 (never blocks boot) -----
 sb_state 0 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 run_service
 assert_eq "service (SB off): rc NONZERO (wrapper maps to advisory + exit 0)" "1" "$SVC_RC"
-assert_eq "service (SB off): state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "service (SB off): ground truth stays provisional" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_rc "service (SB off): ADR-8 attempt marker WRITTEN" 0 "$(marker_rc)"
 assert_contains "service (SB off): marker names the completion failure" \
-    "$(istate_attempt_read)" "completion step failed"
+    "$(fde_attempt_read)" "completion step failed"
 assert_eq "service (SB off): token untouched" "[11]" \
     "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_eq "service (SB off): ephemeral slot untouched" "0" \
@@ -740,30 +782,36 @@ assert_eq "service (SB off): motd untouched (no banner path, ADR-20 #4)" "$BANNE
 # --- 6d. service: unseal failure (PCR drift / no .pcrsig) ⇒ marker + retry ------
 sb_state 1 0
 fresh_stage
-istate_write provisional-booted
 reset_logs
 run_service "$T/no-such-esp"
 assert_eq "service (unseal fail): rc NONZERO" "1" "$SVC_RC"
-assert_eq "service (unseal fail): state stays provisional-booted" "provisional-booted" \
-    "$(istate_state)"
+assert_eq "service (unseal fail): ground truth stays provisional" "[11]" \
+    "$(tok_pcrs "$LUKS_DIR/$U1.img")"
 assert_rc "service (unseal fail): ADR-8 attempt marker WRITTEN" 0 "$(marker_rc)"
 assert_contains "service (unseal fail): marker names the re-unseal" \
-    "$(istate_attempt_read)" "re-unseal"
+    "$(fde_attempt_read)" "re-unseal"
 assert_eq "service (unseal fail): ZERO cryptsetup mutations" "0" \
     "$(( $(grep -cE 'CALL (luksAddKey|luksKillSlot|token import)' "$CS_LOG") ))"
 
-# --- 6e. service: missing / corrupt state ⇒ silent degrade, rc 0 -----------------
+# --- 6e. service: underivable ground truth ⇒ silent degrade, rc 0 ---------------
+# (item 10b: there is no state document to be missing/corrupt — the old
+# absent/corrupt-state no-op maps to "no container reachable" and "metadata
+# unreadable".) Ground truth at this point: the provisional containers of leg
+# 6d — REMOVE their by-uuid links so nothing is derivable.
 sb_state 1 0
 reset_logs
-rm -f "$(sp_etc_dir)/install-state.json"
+rm -f "$BYUUID/$U1" "$BYUUID/$U2"
 run_service
-assert_eq "service (absent state): rc 0" "0" "$SVC_RC"
-assert_eq "service (absent state): quiet" "" "$SVC_OUT"
-assert_eq "service (absent state): zero cryptsetup calls" "0" "$(grep -c . "$CS_LOG")"
-printf 'not json {{\n' >"$(sp_etc_dir)/install-state.json"
+assert_eq "service (no container derivable): rc 0" "0" "$SVC_RC"
+assert_eq "service (no container derivable): quiet" "" "$SVC_OUT"
+assert_eq "service (no container derivable): zero cryptsetup calls" "0" \
+    "$(grep -c . "$CS_LOG")"
+# unrecognized METADATA (an unreadable container) degrades silently too
+printf 'this is not a LUKS2 container\n' >"$T/garbage.img"
+ln -sfn "$T/garbage.img" "$BYUUID/$U1"
 run_service
-assert_eq "service (corrupt state): rc 0" "0" "$SVC_RC"
-assert_eq "service (corrupt state): quiet" "" "$SVC_OUT"
-assert_eq "service (corrupt state): zero cryptsetup calls" "0" "$(grep -c . "$CS_LOG")"
+assert_eq "service (unreadable metadata): rc 0" "0" "$SVC_RC"
+assert_eq "service (unreadable metadata): quiet" "" "$SVC_OUT"
+rm -f "$BYUUID/$U1"
 
 finish

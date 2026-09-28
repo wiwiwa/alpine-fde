@@ -29,8 +29,10 @@
 #   The purge runs FIRST because the re-unsealed provisional credential
 #   authorizes both keyslot mutations and stops verifying once the upgrade
 #   retires the provisional keyslot — see the ORDER CONSTRAINT at the loop.
-#   Afterwards: ADR-8 marker clear -> state `finalized` written LAST (I1's
-#   two-keyslot at-rest state holds). ADR-20 #4: there is NO MOTD/issue
+#   Afterwards: the ADR-8 marker is cleared LAST (I1's two-keyslot at-rest
+#   state holds; there is no state write — completion is a GROUND TRUTH: the
+#   token stands at {PCR 7, PCR 11} with the ephemeral keyslot gone, lib/
+#   trust-state.sh). ADR-20 #4: there is NO MOTD/issue
 #   banner step — the unfinalized-banner path is removed (no banners, no
 #   manual commands; install no longer writes one either).
 #   Every step is crash-idempotent (§9.1: interrupted runs converge on the
@@ -59,9 +61,9 @@ if [ -z "${ALPINE_FDE_BASELINE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../baseline.sh"
 fi
-if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_TRUST_STATE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../trust-state.sh"
 fi
 if [ -z "${ALPINE_FDE_AUDIT_LOADED:-}" ]; then
     # shellcheck disable=SC1090
@@ -91,7 +93,8 @@ finalize_usage() {
 Usage: alpine-fde finalize
 
 Trust finalization (§8.1 finalize row; §9.1 Stage 3; ADR-20 amended). Requires
-install state `installed` or `provisional-booted` and Secure Boot ON with the
+an UNFINALIZED ground-truth state (a provisional {PCR 11} seal standing, or a
+mid-completion shape — lib/trust-state.sh) and Secure Boot ON with the
 custom keys (secureboot=1, setup_mode=0). The recovery passphrase set during
 the Stage-1 credential ceremony (keyslot 0) authorizes everything — you are
 prompted for it (no-echo; a wrong passphrase is retried up to 3 times).
@@ -106,8 +109,10 @@ Guided steps, in order:
       (§9.1 Stage 2 step 4; authorized by the same credential while it still
       verifies — see the ORDER CONSTRAINT in fin_completion_steps)
   6. upgrade every crypttab member's token to Mechanism B {PCR 7, PCR 11}
-      (I1's two-keyslot at-rest state)
-  7. write install state `finalized` and print the backup reminder
+      (I1's two-keyslot at-rest state) — the LAST mutation: completion is the
+      ground truth itself (token {7,11}, ephemeral keyslot gone), no state
+      document is written
+  7. print the backup reminder
       (ADR-20 #4: no banner step — /etc/motd and /etc/issue are never touched)
 Interrupted runs converge on the next invocation (crash idempotency, §9.1).
 EOF
@@ -167,43 +172,11 @@ fin_recovery_verifies() {
         --key-file "$2" >/dev/null 2>&1
 }
 
-# fin_ephemeral_slots DEV META_JSON — the TEMPORARY install keyslot candidates
-# (§7.2: keyslot 2; §9.1 Stage 2 step 4 purges it): the passphrase slots NOT
-# referenced by any systemd-tpm2 token AND not keyslot 0 — §7.2 pins the
-# operator's recovery passphrase at keyslot 0, so a non-token slot != 0 can
-# only be the temporary ephemeral slot. Prints candidates one per line; empty
-# when none (crash resume). The CALLER fails loud on more than one candidate
-# (a corrupted handoff is never silently purged).
-fin_ephemeral_slots() {
-    _fes_dev=$1
-    _fes_meta=$2
-    jq -r '
-        [.keyslots // {} | keys[] | tonumber] as $slots
-        | ([.tokens // {} | .[] | select(.type? == "systemd-tpm2")
-            | .keyslots[]? | tonumber]) as $sealed
-        | [$slots[] | select(. as $s | $sealed | index($s) | not)
-            | select(. != 0)] | sort | .[]' "$_fes_meta" 2>/dev/null || return 0
-}
-
-# fin_recovery_slot_ok META_JSON — rc 0 iff exactly ONE passphrase slot remains
-# beyond the token-referenced slots and it IS keyslot 0 (the recovery slot,
-# §7.2 — the amended at-rest shape after the ephemeral purge, I1)
-fin_recovery_slot_ok() {
-    jq -e '
-        [.keyslots // {} | keys[] | tonumber] as $slots
-        | ([.tokens // {} | .[] | select(.type? == "systemd-tpm2")
-            | .keyslots[]? | tonumber]) as $sealed
-        | [$slots[] | select(. as $s | $sealed | index($s) | not)] == [0]' "$1" \
-        >/dev/null 2>&1
-}
-
-# fin_token_pcrs META_JSON — the standing systemd-tpm2 token's tpm2-pcrs
-# (jq -c form, e.g. "[11]"); empty when no token stands
-fin_token_pcrs() {
-    jq -c 'first(.tokens // {} | to_entries[]
-        | select(.value.type? == "systemd-tpm2")
-        | .value["tpm2-pcrs"] // empty) // empty' "$1" 2>/dev/null
-}
+# fin_ephemeral_slots / fin_recovery_slot_ok / fin_token_pcrs moved to
+# lib/trust-state.sh (ts_ephemeral_slots / ts_recovery_slot_ok / ts_token_pcrs)
+# — the ground-truth derivation is shared with `status`, the OpenRC service
+# and the advisory (item 10b: install-state.json is dead, the LUKS2 metadata
+# IS the state).
 
 # fin_read_recovery_passphrase VAR — the keyslot-0 recovery passphrase into
 # VAR: ALPINE_FDE_RECOVERY_PASSPHRASE seam, else the guided double no-echo
@@ -310,9 +283,10 @@ fin_provisional_unseal() {
 
 # fin_completion_steps AUTHFILE — the §9.1 Stage 2 == Stage 3 completion chain,
 # shared verbatim by the guided command and the first-boot service (ADR-20
-# amended): Secure Boot guard -> audit --init -> token upgrade {PCR 7, PCR 11}
-# per member -> temporary ephemeral keyslot purge per member -> ADR-8 marker
-# clear -> state `finalized` LAST (no banner step, ADR-20 #4).
+# amended): Secure Boot guard -> audit --init -> temporary ephemeral keyslot
+# purge per member -> token upgrade {PCR 7, PCR 11} per member -> ADR-8 marker
+# clear (no banner step, ADR-20 #4; NO state write — the upgraded token IS the
+# finalized fact, lib/trust-state.sh).
 # AUTHFILE is an existing valid volume credential (guided: the verified
 # recovery passfile at keyslot 0; service: the re-unsealed provisional
 # passfile) authorizing the upgrade's luksAddKey and the ephemeral kill.
@@ -387,7 +361,7 @@ fin_completion_steps() {
         _fcs_meta=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-meta.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_meta"
-        _fcs_eph=$(fin_ephemeral_slots "$_fcs_dev" "$_fcs_meta")
+        _fcs_eph=$(ts_ephemeral_slots "$_fcs_meta")
         rm -f "$_fcs_meta"
         case $(printf '%s' "$_fcs_eph" | grep -c .) in
             0)
@@ -407,7 +381,7 @@ fin_completion_steps() {
         _fcs_cur=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-cur.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_cur"
-        _fcs_pcrs=$(fin_token_pcrs "$_fcs_cur")
+        _fcs_pcrs=$(ts_token_pcrs "$_fcs_cur")
         rm -f "$_fcs_cur"
         if [ "$_fcs_pcrs" = "[7,11]" ]; then
             info "finalize: $(basename "$_fcs_dev"): token already {PCR 7, PCR 11} — skipping the upgrade (crash resume, zero TPM operations)"
@@ -416,7 +390,7 @@ fin_completion_steps() {
             # contain them so the member context is what the operator sees
             if ! (seal_upgrade_token "$_fcs_keydir" "$_fcs_dev" "$_fcs_pcrsig" \
                 "$_fcs_stage/token-$(basename "$_fcs_dev").json" "$_fcs_auth"); then
-                die "finalize: token upgrade failed for $(basename "$_fcs_dev") — install state stays unfinalized; the standing seal remains; fix the cause and retry (§9.1 crash idempotency)"
+                die "finalize: token upgrade failed for $(basename "$_fcs_dev") — trust stays unfinalized (ground truth: the provisional seal stands); fix the cause and retry (§9.1 crash idempotency)"
             fi
             printf 'alpine-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \
                 "$(basename "$_fcs_dev")" >&2
@@ -426,7 +400,7 @@ fin_completion_steps() {
         _fcs_meta=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-meta.XXXXXX") ||
             die "finalize: mktemp failed"
         token_dump "$_fcs_dev" "$_fcs_meta"
-        if ! fin_recovery_slot_ok "$_fcs_meta"; then
+        if ! ts_recovery_slot_ok "$_fcs_meta"; then
             rm -f "$_fcs_meta"
             die "finalize: $(basename "$_fcs_dev"): unexpected passphrase slots beyond the sealed token — exactly the recovery keyslot 0 must remain (§7.2/I1); manual intervention required"
         fi
@@ -439,10 +413,11 @@ fin_completion_steps() {
     # nothing is written to /etc/motd or /etc/issue here (install no longer
     # drops a banner either; the operator's own content is never touched).
 
-    # --- the state transition is the LAST mutation (§9.1); the ADR-8 marker ---
-    # is cleared first: a successful completion means NO pending failure
-    istate_attempt_clear
-    istate_write finalized
+    # --- the ADR-8 marker is cleared LAST (§9.1): a successful completion ---
+    # means NO pending failure. There is no state write: completion is the
+    # ground truth itself (token {7,11} standing, ephemeral keyslot purged —
+    # lib/trust-state.sh reads it back as `finalized`).
+    fde_attempt_clear
     return 0
 }
 
@@ -450,29 +425,49 @@ fin_completion_steps() {
 # (ADR-20 amended; the OpenRC oneshot hooks/openrc/alpine-fde-finalize runs
 # this). NEVER prompts. Authorization = re-unsealing the standing provisional
 # token in userspace (fin_provisional_unseal) — NOT stored credentials.
-#   state `finalized`                       -> silent exit 0
-#   state missing / unreadable / garbage    -> degrade: exit 0 (nothing to do)
-#   `installed` | `provisional-booted`      -> the completion chain
-# ANY failure writes the ADR-8 attempt marker (istate_attempt_write) and
+# Ground-truth gate (lib/trust-state.sh; item 10b — no install-state.json):
+#   finalized (token {7,11}, no ephemeral slot, baseline final) -> silent exit 0
+#   nothing derivable (no member, unreadable metadata, no token) -> degrade:
+#                                                exit 0 (nothing to do)
+#   provisional ([11], or a mid-completion crash shape)        -> the chain
+# ANY failure writes the ADR-8 attempt marker (fde_attempt_write) and
 # returns NONZERO — the wrapper maps that to the advisory; boot is NEVER
 # blocked and the next boot retries.
 fin_service_main() {
     strict_mode
-    _fsv_state=$(istate_state 2>/dev/null)
+    _fsv_bl=$(sp_baseline_file)
+    _fsv_meta=''
+    if _fsv_dev=$(ts_first_member); then
+        _fsv_meta=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-svc-meta.XXXXXX") || {
+            fde_attempt_write "service: no staging space in ${ALPINE_FDE_TMPDIR:-/dev/shm}"
+            return 1
+        }
+        if ! ts_read_meta "$_fsv_dev" "$_fsv_meta"; then
+            rm -f "$_fsv_meta"
+            _fsv_meta=''
+        fi
+    fi
+    if [ -z "$_fsv_meta" ]; then
+        # nothing derivable: not our install (or the container is gone) —
+        # degrade-safe silence, exactly the old missing/corrupt-state contract
+        return 0
+    fi
+    _fsv_state=$(ts_state "$_fsv_meta" "$_fsv_bl")
+    rm -f "$_fsv_meta"
     case $_fsv_state in
         finalized) return 0 ;;
-        installed | provisional-booted) : ;;
-        *) return 0 ;;
+        provisional) : ;;
+        *) return 0 ;;                  # unknown: degrade safe (never block boot)
     esac
     _fsv_tmpdir=${ALPINE_FDE_TMPDIR:-/dev/shm}
     _fsv_stage=$(mktemp -d "$_fsv_tmpdir/alpine-fde-svc.XXXXXX") || {
-        istate_attempt_write "service: no staging directory in $_fsv_tmpdir"
+        fde_attempt_write "service: no staging directory in $_fsv_tmpdir"
         return 1
     }
     chmod 700 "$_fsv_stage"
     _fsv_auth="$_fsv_stage/prov-pass.bin"
     _fsv_devs=$(fin_member_devs) || {
-        istate_attempt_write "service: crypttab members unresolvable"
+        fde_attempt_write "service: crypttab members unresolvable"
         rm -rf "$_fsv_stage"
         return 1
     }
@@ -480,14 +475,14 @@ fin_service_main() {
     # service shell, where $'...' is not available)
     _fsv_first=$(printf '%s\n' "$_fsv_devs" | head -n 1)
     if ! fin_provisional_unseal "$_fsv_first" "$_fsv_stage" "$_fsv_auth"; then
-        istate_attempt_write "service: provisional token re-unseal failed (PCR drift / missing UKI .pcrsig / locked release.pem) — will retry next boot"
+        fde_attempt_write "service: provisional token re-unseal failed (PCR drift / missing UKI .pcrsig / locked release.pem) — will retry next boot"
         rm -rf "$_fsv_stage"
         return 1
     fi
     # failure-contained completion: die inside the chain must not escape into
     # an OpenRC failure — this function's nonzero return IS the contract
     if ! (fin_completion_steps "$_fsv_auth"); then
-        istate_attempt_write "service: completion step failed — will retry next boot"
+        fde_attempt_write "service: completion step failed — will retry next boot"
         rm -rf "$_fsv_stage"
         return 1
     fi
@@ -510,22 +505,51 @@ cmd_finalize_main() {
         esac
     done
 
-    # --- state gate (§8.4/G-D11): installed | provisional-booted proceed;
-    # absent/finalized are loud no-ops; anything else fails closed
-    _fm_f=$(istate_file)
-    if [ ! -f "$_fm_f" ]; then
-        warn "finalize: no install state at $_fm_f — nothing to finalize (pre-state-machine install)"
+    # --- ground-truth gate (item 10b; lib/trust-state.sh): the lifecycle is
+    # DERIVED, never read from a document. finalized = a loud no-op;
+    # provisional (or a mid-completion shape) proceeds; a recognizable-but-
+    # wrong shape fails closed 64. A machine with no alpine-fde baseline AND
+    # no reachable container was never provisioned here — loud no-op.
+    _fm_bl=$(sp_baseline_file)
+    _fm_ts=''
+    _fm_dev=''
+    _fm_have_member=0
+    if _fm_dev=$(ts_first_member); then
+        _fm_have_member=1
+    fi
+    if [ ! -f "$_fm_bl" ] && [ "$_fm_have_member" = 0 ]; then
+        warn "finalize: no alpine-fde provisioning found (no baseline at $_fm_bl, no reachable container) — nothing to finalize"
         return 0
     fi
-    _fm_state=$(istate_state)
-    case $_fm_state in
+    if [ "$_fm_have_member" = 1 ]; then
+        _fm_gate_meta=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-fin-gate.XXXXXX") ||
+            die "finalize: mktemp failed"
+        if ts_read_meta "$_fm_dev" "$_fm_gate_meta"; then
+            if [ ! -f "$_fm_bl" ] &&
+                [ "$(ts_token_pcrs "$_fm_gate_meta")" = "[11]" ]; then
+                # a provisional seal WITHOUT a baseline: Stage 1 died before
+                # its step-2 pending baseline — never a silent no-op
+                rm -f "$_fm_gate_meta"
+                die "finalize: no baseline at $_fm_bl — Stage 1 provisioning must write a pending baseline before finalization (§9.1)"
+            fi
+            _fm_ts=$(ts_state "$_fm_gate_meta" "$_fm_bl")
+        fi
+        rm -f "$_fm_gate_meta"
+    fi
+    case $_fm_ts in
         finalized)
-            info "install state is already finalized ($_fm_f) — nothing to do"
+            info "trust state is already finalized (ground truth: token {PCR 7, PCR 11}, no ephemeral keyslot, baseline final) — nothing to do"
             return 0
             ;;
-        installed | provisional-booted) : ;;
-        *)
-            die "finalize: unexpected install state '${_fm_state:-<unreadable>}' in $_fm_f — refusing (want: installed|provisional-booted)"
+        provisional) : ;;
+        unknown | '')
+            if [ -f "$_fm_bl" ]; then
+                # our baseline stands but the container tells nothing
+                # recognizable (no token / exotic pcrs / unreadable metadata)
+                die "finalize: unrecognized ground-truth state (${_fm_ts:-nothing derivable} at $(ts_first_member 2>/dev/null || printf 'no container')) — refusing (want: a provisional {PCR 11} seal, or token {7,11} with the ephemeral keyslot still pending; lib/trust-state.sh)"
+            fi
+            warn "finalize: no alpine-fde provisioning found (no baseline at $_fm_bl) — nothing to finalize"
+            return 0
             ;;
     esac
 
@@ -565,7 +589,7 @@ cmd_finalize_main() {
         fi
         warn "finalize: the recovery passphrase does not verify against keyslot 0 (attempt $_fm_try/3)"
         if [ "$_fm_try" -ge 3 ]; then
-            istate_attempt_write "guided finalize: recovery passphrase rejected after $_fm_try attempts"
+            fde_attempt_write "guided finalize: recovery passphrase rejected after $_fm_try attempts"
             die "finalize: the recovery passphrase does not verify against keyslot 0 (after $_fm_try attempts) — the passphrase set during the Stage-1 credential ceremony is required (§9.1; ADR-8 marker written)"
         fi
     done
@@ -591,8 +615,8 @@ cmd_finalize_main() {
     chmod 0400 "$_fm_keydir/release.pem" 2>/dev/null || :
 
     # --- STEP 3..8: the shared completion chain (§9.1 Stage 2 == Stage 3) ------
-    # SB guard -> audit --init -> token upgrade {PCR 7, PCR 11} per member ->
-    # ephemeral keyslot purge per member -> state finalized.
+    # SB guard -> audit --init -> ephemeral keyslot purge per member ->
+    # token upgrade {PCR 7, PCR 11} per member (the finalized fact itself).
     # The in-process re-sign fallback (§9.4) re-uses the release-key
     # passphrase staged above (same process, no new exposure).
     if [ -n "$_fm_keypass" ] && [ -z "${ALPINE_FDE_KEY_PASSPHRASE:-}" ]; then

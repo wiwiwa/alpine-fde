@@ -41,8 +41,6 @@ source "$REPO/lib/common.sh"
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/install-state.sh
-source "$REPO/lib/install-state.sh"
 # shellcheck source=../../lib/cmd/install.sh
 source "$REPO/lib/cmd/install.sh"
 
@@ -422,7 +420,6 @@ O_CERK=$(first_line_no "$OUT" "host: inst_ceremony_release_key")
 O_ENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
 O_COPY=$(first_line_no "$OUT" "EFI/BOOT/BOOTX64.EFI")
 O_HOOKS=$(first_line_no "$OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
-O_STATE=$(first_line_no "$OUT" "host: inst_state_write installed")
 assert_eq "order: platform keys BEFORE the ceremony (release.pem must exist)" "1" \
     "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERR ? 1 : 0 ))"
 assert_eq "order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
@@ -433,8 +430,6 @@ assert_eq "order (user flow directive): boot-manager guarded file copy BEFORE th
     "$(( O_COPY > 0 && O_COPY < O_CERR ? 1 : 0 ))"
 assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a kernel-build input)" "1" \
     "$(( O_HOOKS > 0 && O_HOOKS < O_CERR ? 1 : 0 ))"
-assert_eq "order (user flow directive): install-state write BEFORE the credential ceremony (mechanical)" "1" \
-    "$(( O_STATE > 0 && O_STATE < O_CERR ? 1 : 0 ))"
 
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
 ROOTFS_UUID=$(grep -oE -- '-U [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
@@ -506,7 +501,7 @@ assert_contains "conf: absent-file default documented" "$(cat "$MNT_ETC/alpine-f
     "Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0"
 
 # =============================================================================
-# §9.1 step 2/8/9: pending baseline + install-state ON TARGET
+# §9.1 step 2: pending baseline ON TARGET (steps 8/9: no banner, no state doc — item 10b)
 # =============================================================================
 TGT_BL=$MNT_ETC/alpine-fde/baseline.json
 assert_file_exists "§9.1 step 2: pending baseline written ON TARGET" "$TGT_BL"
@@ -527,15 +522,16 @@ assert_eq "G-C25: NO /etc/issue written (banner path removed, ADR-20 #4)" "0" \
     "$([ -e "$MNT_ETC/issue" ] && echo 1 || echo 0)"
 assert_eq "G-C25: NO banner helper invoked anywhere in the run" "0" \
     "$(grep -c 'fde_motd_banner' <<<"$OUT")"
-assert_file_exists "§9.1 step 9: install-state written ON TARGET" \
-    "$MNT_ETC/alpine-fde/install-state.json"
-assert_eq "install-state: state=installed" "installed" \
-    "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
-# G-C28 (amended): `installed` is the LAST state write (the banner record it
-# used to follow was removed with the banner path, ADR-20 #4)
-L_STATE=$(printf '%s\n' "$OUT" | grep -Fnm1 "host: inst_state_write installed" | cut -d: -f1)
-assert_eq "G-C28: inst_state_write installed is a host plan record" "1" \
-    "$(( L_STATE > 0 ? 1 : 0 ))"
+# §9.1 step 9 is RETIRED (item 10b: install-state.json is DEAD) — install
+# writes NO lifecycle document; the anchoring facts are the pending baseline
+# (asserted above) and the provisional {PCR 11} seal + ephemeral keyslot 2.
+assert_eq "§9.1 step 9: NO install-state.json on the target (item 10b)" "0" \
+    "$([ -e "$MNT_ETC/alpine-fde/install-state.json" ] && echo 1 || echo 0)"
+# G-C28 is RETIRED with the state write (item 10b): NO lifecycle record is
+# emitted anywhere in the plan — the negative pin above asserts the target
+# carries no install-state.json, and the plan text carries no state record.
+assert_eq "G-C28 (retired): NO inst_state_write record anywhere in the plan" "0" \
+    "$(grep -c 'inst_state_write' <<<"$OUT")"
 # G-C26 (AMENDED by the user's flow directives): the OsIndications firmware
 # trip is BACK — but ONLY on the DEFERRED-enrollment path, as a
 # runtime-conditional TAIL record. The default fixture run is DEFERRED (the
@@ -1489,14 +1485,16 @@ assert_not_contains "deferred-PK tail: NO refused-enrollment final message on th
 
 # =============================================================================
 # L-04a/WR-02: a failed plan step leaves NO temp files behind and the abort
-# trap tears the binds down. The failing step is a LATE host record (the
-# §9.1 step 9 state write, made failing by chmod 555 on the target's
-# alpine-fde config dir — istate_write's atomic mv dies) so the plan's own
-# teardown never runs — the ONLY bind-umount line in the log is the trap's.
+# trap tears the binds down. The failing step is the §9.1 target-metadata
+# host record (inst_resolve_target_metadata -> baseline_set_field, made
+# failing by chmod 555 on the target's alpine-fde config dir) so the plan's
+# own teardown never runs — the ONLY bind-umount line in the log is the
+# trap's. (The old failing step, the §9.1 step 9 state write, is RETIRED with
+# install-state.json — item 10b.)
 # =============================================================================
 run_install
-assert_eq "L-04a fixture: clean run wrote the state" "installed" \
-    "$(istate_get "$MNT_ETC/alpine-fde/install-state.json" state)"
+assert_eq "L-04a fixture: clean run wrote the pending baseline" "pending" \
+    "$(baseline_get "$MNT_ETC/alpine-fde/baseline.json" expected_pcr7)"
 chmod 555 "$MNT_ETC/alpine-fde"
 run_install
 assert_eq "L-04a: failed host step -> fail-closed 64" "64" "$RC"

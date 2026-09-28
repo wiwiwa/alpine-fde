@@ -33,7 +33,7 @@ ALPINE_FDE_INITRAMFS_LOADED=1
 # the crypttab guard and the initrd inventory audit resolve the topology
 # through this reader — a tiny LOCAL targeted parse (esp.sh style: load_config
 # parity without clobbering the caller's environment; esp.sh and
-# install-state.sh are separate modules and are NOT sourced from here).
+# trust-state.sh are separate modules and are NOT sourced from here).
 # Absent/invalid conf ⇒ the documented btrfs default, warned ONCE per process.
 
 # _initramfs_conf_get KEY — print the first KEY= value (surrounding quotes
@@ -180,25 +180,21 @@ initramfs_build() {
 # /dev are up (after nlplug-findfs) and BEFORE the root mount attempt, inject
 # /etc/crypttab (nothing else packs it), and repack.
 #
-# TWO splice points, one idempotent step (markers ALPINE-FDE-SPLICE-v1 and
-# ALPINE-FDE-SPLICE-FLIP-v1):
+# ONE splice point, one idempotent step (marker ALPINE-FDE-SPLICE-v1):
 #   splice A (pre-mount, after the nlplug-findfs invocation): run the hook,
 #             then point KOPT_root at the mapped container — the stock mount
 #             uses "$KOPT_root" and the cmdline names the raw LUKS UUID.
-#   splice B (post-mount, before the mount-move/switch_root tail): flip the
-#             ADR-20 install-state marker on the mounted NEWROOT via the
-#             hook's FDE_STATE_ONLY mode (the hook's own flip needs the state
-#             file on a MOUNTED NEWROOT, which only exists past splice A's
-#             mount).
+#             (The post-mount state-flip splice B is RETIRED with
+#             install-state.json — item 10b: the hook persists nothing, so
+#             there is no post-mount work.)
 #
 # Splice ordering contract (ADR-20): the hook is fail-closed by construction
 # (bounded recovery prompt -> poweroff -f, never a shell); the splice adds no
 # interactive path of its own. The splice point ordering is pinned by
 # tests/unit/initramfs_splice_unseal.sh: nlplug-findfs < splice A < hook
-# invocation < resume_from_disk < root mount < splice B < switch_root.
+# invocation < resume_from_disk < root mount < switch_root.
 
 INITRAMFS_SPLICE_MARKER='ALPINE-FDE-SPLICE-v1'
-INITRAMFS_SPLICE_FLIP_MARKER='ALPINE-FDE-SPLICE-FLIP-v1'
 INITRAMFS_INIT_PATH='init'
 INITRAMFS_HOOK_PATH='usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh'
 
@@ -238,15 +234,6 @@ _initramfs_splice_block() {
             printf '\t\tfi\n'
             printf '\tfi\n'
             printf '\t# <<< alpine-fde unseal splice (%s) <<<\n' "$INITRAMFS_SPLICE_MARKER"
-            ;;
-        B)
-            printf '\t# >>> alpine-fde state-flip splice (real-server blocker #23; %s) >>>\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
-            printf '\t# the root is mounted now: flip the ADR-20 install-state marker\n'
-            printf '\t# (installed -> provisional-booted) via the hook state-only mode\n'
-            printf '\tif [ -x /%s ] && [ -f "$sysroot/etc/alpine-fde/install-state.json" ]; then\n' "$INITRAMFS_HOOK_PATH"
-            printf '\t\tFDE_STATE_ONLY=1 FDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
-            printf '\tfi\n'
-            printf '\t# <<< alpine-fde state-flip splice (%s) <<<\n' "$INITRAMFS_SPLICE_FLIP_MARKER"
             ;;
     esac
 }
@@ -361,19 +348,6 @@ initramfs_splice_unseal() {
         fi
         mv "$_isu_init.new" "$_isu_init"
         rm -f "$_isi_err"
-
-        # splice B: anchor = the mount-move/switch_root tail's first line
-        _initramfs_splice_block B >"$_isu_work/blockB"
-        _isi_err=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-splice-err.XXXXXX")
-        if ! _initramfs_splice_insert "$_isu_init" \
-            "$(printf '\tcat "$ROOT"/proc/mounts 2>/dev/null | while read -r _dev DIR _type _opts ; do')" \
-            "$_isu_work/blockB" before 2>"$_isi_err"; then
-            _isu_reason=$(cat "$_isi_err")
-            rm -rf "$_isu_work" "$_isi_err"
-            die "initramfs splice: $_isu_reason"
-        fi
-        mv "$_isu_init.new" "$_isu_init"
-        rm -f "$_isi_err"
     fi
 
     # repack (same flags as stock sbin/mkinitfs initfs_cpio)
@@ -423,10 +397,11 @@ initramfs_splice_init_content() {
 }
 
 # initramfs_splice_verify INITRD — the splice self-check/audit primitive:
-# both markers appear EXACTLY once, the hook invocation is present, the splice
-# point ordering holds (nlplug-findfs < unseal < resume_from_disk < root mount
-# < state-flip < switch_root), no interactive shell was added, and the spliced
-# init parses. rc 0; rc 1 with $_initrd_splice_reason on any miss.
+# the splice marker appears EXACTLY twice (open+close), the hook invocation is
+# present, the splice point ordering holds (nlplug-findfs < unseal <
+# resume_from_disk < root mount < switch_root), no interactive shell was
+# added, and the spliced init parses. rc 0; rc 1 with $_initrd_splice_reason
+# on any miss.
 initramfs_splice_verify() {
     _msv_img=$1
     _initrd_splice_reason=''
@@ -444,20 +419,18 @@ initramfs_splice_verify() {
         rm -rf "$_msv_work"
         return 1
     }
-    for _msv_mark in "$INITRAMFS_SPLICE_MARKER" "$INITRAMFS_SPLICE_FLIP_MARKER"; do
-        _msv_marks=$(grep -cF "$_msv_mark" "$_msv_init")
-        [ "$_msv_marks" -eq 2 ] || {
-            rm -rf "$_msv_work"
-            _msv_fail "initramfs splice: the '$_msv_mark' marker appears $_msv_marks time(s) in $INITRAMFS_INIT_PATH (expected 2: open+close) — the unseal hook is PACKED BUT NEVER CALLED (blocker #23 class)"
-            return 1
-        }
-    done
+    _msv_marks=$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$_msv_init")
+    [ "$_msv_marks" -eq 2 ] || {
+        rm -rf "$_msv_work"
+        _msv_fail "initramfs splice: the '$INITRAMFS_SPLICE_MARKER' marker appears $_msv_marks time(s) in $INITRAMFS_INIT_PATH (expected 2: open+close) — the unseal hook is PACKED BUT NEVER CALLED (blocker #23 class)"
+        return 1
+    }
     grep -qF "$INITRAMFS_HOOK_PATH" "$_msv_init" || {
         rm -rf "$_msv_work"
         _msv_fail "initramfs splice: the unseal hook invocation is missing from $INITRAMFS_INIT_PATH (blocker #23)"
         return 1
     }
-    # ordering: nlplug anchor < splice A < resume_from_disk < root mount < splice B
+    # ordering: nlplug anchor < splice A < resume_from_disk < root mount < switch_root
     _msv_nlplug=$(grep -nF "$(printf '\t\t"$KOPT_root"')" "$_msv_init" | head -n 1 | cut -d: -f1)
     _msv_spliceA=$(grep -nF "$INITRAMFS_SPLICE_MARKER" "$_msv_init" | head -n 1 | cut -d: -f1)
     _msv_resume=$(grep -nF '	resume_from_disk' "$_msv_init" | head -n 1 | cut -d: -f1)
@@ -465,15 +438,13 @@ initramfs_splice_verify() {
     # the resume_from_disk call inside the root branch
     _msv_mount=$(grep -nF '"${KOPT_root#ZFS=}"' "$_msv_init" |
         { while IFS=: read -r n _; do [ "$n" -gt "$_msv_resume" ] && { echo "$n"; break; }; done; })
-    _msv_flip=$(grep -nF "$INITRAMFS_SPLICE_FLIP_MARKER" "$_msv_init" | head -n 1 | cut -d: -f1)
     _msv_switch=$(grep -nF '	exec switch_root' "$_msv_init" | head -n 1 | cut -d: -f1)
     if [ -z "$_msv_nlplug" ] || [ -z "$_msv_spliceA" ] || [ -z "$_msv_resume" ] ||
-        [ -z "$_msv_mount" ] || [ -z "$_msv_flip" ] || [ -z "$_msv_switch" ] ||
+        [ -z "$_msv_mount" ] || [ -z "$_msv_switch" ] ||
         [ "$_msv_nlplug" -ge "$_msv_spliceA" ] || [ "$_msv_spliceA" -ge "$_msv_resume" ] ||
-        [ "$_msv_resume" -ge "$_msv_mount" ] || [ "$_msv_mount" -ge "$_msv_flip" ] ||
-        [ "$_msv_flip" -ge "$_msv_switch" ]; then
+        [ "$_msv_resume" -ge "$_msv_mount" ] || [ "$_msv_mount" -ge "$_msv_switch" ]; then
         rm -rf "$_msv_work"
-        _msv_fail "initramfs splice: splice-point ordering violated (nlplug=$_msv_nlplug unseal=$_msv_spliceA resume=$_msv_resume mount=$_msv_mount flip=$_msv_flip switch_root=$_msv_switch) — the unseal must run after drivers are up and BEFORE the root mount (blocker #23)"
+        _msv_fail "initramfs splice: splice-point ordering violated (nlplug=$_msv_nlplug unseal=$_msv_spliceA resume=$_msv_resume mount=$_msv_mount switch_root=$_msv_switch) — the unseal must run after drivers are up and BEFORE the root mount (blocker #23)"
         return 1
     fi
     # the splice block adds NO interactive shell (the s90 no-emergency idiom,

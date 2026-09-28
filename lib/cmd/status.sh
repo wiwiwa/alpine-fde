@@ -18,9 +18,9 @@ if [ -z "${ALPINE_FDE_ESP_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../esp.sh"
 fi
-if [ -z "${ALPINE_FDE_INSTALL_STATE_LOADED:-}" ]; then
+if [ -z "${ALPINE_FDE_TRUST_STATE_LOADED:-}" ]; then
     # shellcheck disable=SC1090
-    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../install-state.sh"
+    . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../trust-state.sh"
 fi
 
 status_usage() {
@@ -92,6 +92,80 @@ st_token_pubkey_fp() {
     printf 'sha256:%s\n' "$(printf '%s' "$_stf_b64" | base64 -d 2>/dev/null | sha256sum | cut -d' ' -f1)"
 }
 
+# st_trust_section BL — the §8.1 trust-state headline, derived from GROUND
+# TRUTH (item 10b: install-state.json is dead — lib/trust-state.sh): the
+# standing token's pcrs + the ephemeral keyslot inventory + the baseline's
+# expected_pcr7 pending-vs-digest. SILENT when there is nothing derivable
+# (no baseline AND no reachable container — not an alpine-fde machine), a
+# quiet line when finalized, PROMINENT warnings + the resume hint while the
+# ceremony is unfinished. Report-only: never dies.
+st_trust_section() {
+    _sts_bl=$1
+    _sts_have_bl=0
+    [ -f "$_sts_bl" ] && baseline_validate "$_sts_bl" >/dev/null 2>&1 && _sts_have_bl=1
+    # derive from the first crypttab member when one is reachable; the
+    # baseline's recorded target luks_uuid is the fallback pointer (the same
+    # device the LUKS2 tokens row below reads)
+    _sts_ts=''
+    _sts_pcrs=''
+    _sts_eph=''
+    _sts_dev=''
+    if ! _sts_dev=$(ts_first_member); then
+        _sts_dev=''
+        if [ "$_sts_have_bl" = 1 ]; then
+            _sts_uuid=$(baseline_get_in "$_sts_bl" target luks_uuid 2>/dev/null) || _sts_uuid=''
+            [ -n "$_sts_uuid" ] &&
+                _sts_dev="${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}/$_sts_uuid"
+        fi
+    fi
+    if [ -n "$_sts_dev" ] && [ -e "$_sts_dev" ]; then
+        _sts_meta=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-status-trust.XXXXXX") || return 0
+        if ts_read_meta "$_sts_dev" "$_sts_meta"; then
+            _sts_ts=$(ts_state "$_sts_meta" "$_sts_bl")
+            _sts_pcrs=$(ts_token_pcrs "$_sts_meta")
+            _sts_eph=$(ts_ephemeral_slots "$_sts_meta")
+        fi
+        rm -f "$_sts_meta"
+    fi
+    [ -n "$_sts_ts" ] || [ "$_sts_have_bl" = 1 ] || return 0
+
+    printf '== Trust state (ground truth)\n'
+    if [ "$_sts_have_bl" = 1 ]; then
+        if baseline_is_final "$_sts_bl"; then
+            printf '    baseline anchoring: finalized (expected_pcr7 recorded)\n'
+        else
+            printf '    baseline anchoring: pending (install-time; audit --init captures it)\n'
+        fi
+    else
+        printf '    baseline anchoring: no baseline (%s)\n' "$_sts_bl"
+    fi
+    case $_sts_ts in
+        finalized)
+            printf '    trust state: finalized (token {PCR 7, PCR 11}, no ephemeral keyslot)\n'
+            ;;
+        provisional)
+            printf '    WARNING: PROVISIONAL trust window ACTIVE (token pcrs: %s)\n' \
+                "${_sts_pcrs:-<no token>}"
+            if [ -n "$_sts_eph" ]; then
+                printf '    the temporary ephemeral install keyslot is still present (keyslot %s)\n' \
+                    "$_sts_eph"
+            fi
+            printf '    The alpine-fde-finalize OpenRC service completes finalization\n'
+            printf '    automatically on next boot; to resume manually now:\n'
+            printf '    alpine-fde finalize\n'
+            ;;
+        unknown)
+            printf '    WARNING: unrecognized ground-truth state (token pcrs: %s)\n' \
+                "${_sts_pcrs:-<none>}"
+            ;;
+        '')
+            printf '    trust state: nothing derivable (no reachable container)\n'
+            ;;
+    esac
+    printf '\n'
+    return 0
+}
+
 cmd_status_main() {
     if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
         status_usage
@@ -100,41 +174,9 @@ cmd_status_main() {
     [ $# -eq 0 ] || die -r "$ALPINE_FDE_USAGE" "status: unexpected arguments: $*"
 
     _st_bl=$(sp_baseline_file)
-    # Install-state row (§8.1/§9.1, G-IL12): the lifecycle headline. SILENT for
-    # pre-state-machine installs (no state file), a quiet line when finalized,
-    # PROMINENT warnings + the resume hint while the ceremony is unfinished —
-    # state=installed (Stage 1 done in-chroot; Stage-2 finalization pending)
-    # or state=provisional-booted (ADR-20 as amended: first boot done via the
-    # provisional PCR-11-only token; the recovery passphrase is already set,
-    # the {7,11} token upgrade + ephemeral purge are not). Report-only: rc 0.
-    _st_isf=$(istate_file)
-    if [ -f "$_st_isf" ]; then
-        printf '== Install state\n'
-        _st_is=$(istate_state)
-        case $_st_is in
-            installed)
-                printf '    WARNING: installation is NOT finalized (install state: installed)\n'
-                printf '    The alpine-fde-finalize OpenRC service completes finalization\n'
-                printf '    automatically on next boot; to resume manually now:\n'
-                printf '    alpine-fde finalize\n'
-                ;;
-            provisional-booted)
-                printf '    WARNING: PROVISIONAL trust window ACTIVE (install state: provisional-booted)\n'
-                printf '    First boot unlocked via the ADR-20 provisional token (PCR 11 only);\n'
-                printf '    the recovery passphrase is set, but the {7,11} token upgrade and\n'
-                printf '    ephemeral keyslot purge are pending. The service retries next\n'
-                printf '    boot; to crash-resume manually now:\n'
-                printf '    alpine-fde finalize\n'
-                ;;
-            finalized)
-                printf '    install state: finalized\n'
-                ;;
-            *)
-                printf '    WARNING: unreadable install state in %s\n' "$_st_isf"
-                ;;
-        esac
-        printf '\n'
-    fi
+    # Trust-state row (§8.1/§9.1; item 10b): the lifecycle headline, derived
+    # from the container + baseline (no state document exists any more).
+    st_trust_section "$_st_bl"
 
     printf '== Secure Boot (efivars: %s)\n' "$(fw_efivars_dir)"
     if _st_sb=$(fw_sb_state); then

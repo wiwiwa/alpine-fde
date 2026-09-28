@@ -569,19 +569,11 @@ installer_stage() {
         "UUID=$ROOTFS_UUID /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
         > /newroot/etc/fstab
     echo "alpine-fde-install: fstab (§9.1 subvol=@/@home/@snapshots) written"
-    # §9.1 step 10 / ADR-20 amended: the install-state marker, schema v1 in
-    # the lib/install-state.sh shape (two-space indent, quoted values). The
-    # unseal hook's Stage-2 transition and the first-boot finalization
-    # service both key off this file.
-    mkdir -p /newroot/etc/alpine-fde
-    {
-        printf '{\n'
-        printf '  "schema_version": 1,\n'
-        printf '  "state": "installed",\n'
-        printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
-        printf '}\n'
-    } > /newroot/etc/alpine-fde/install-state.json
-    echo "alpine-fde-install: install-state marked installed (§9.1 step 10)"
+    # §9.1 step 10 RETIRED (item 10b: install-state.json is DEAD): the install
+    # writes NO lifecycle document. The anchoring facts are the pending
+    # baseline (already written above) and — after the in-guest provisional
+    # enrollment — the {PCR 11} token + temporary ephemeral keyslot 2 in the
+    # container itself; lib/trust-state.sh derives the trust state from them.
     # console proof of the on-disk fstab forms (asserted verbatim by S-00)
     while read -r _fl; do
         case "$_fl" in \#*) continue ;; esac
@@ -822,12 +814,9 @@ echo "alpine-fde-harness: staging the unseal hook environment (§8.2)"
 # ambient TCTI — the /usr/bin wrappers pin the /opt loaders, and here we pin
 # the device TCTI the way a production mkinitfs image does.
 export TPM2TOOLS_TCTI=device:/dev/tpmrm0
-# FDE_NEWROOT stays the production default (/sysroot). DEVIATION (documented):
-# the harness mounts the unlocked root only later, in login_stage — the
-# volume is still sealed while the hook runs — so the hook's Stage-2
-# installed->provisional-booted marker flip cannot fire in-guest (it is
-# unit-pinned in tests/unit/hooks_mkinitfs_unseal.sh; no e2e scenario asserts
-# unseal_state_flip).
+# (item 10b: the hook's old FDE_NEWROOT seam and its post-unlock
+# installed->provisional-booted marker flip are RETIRED — the hook persists
+# nothing; the trust state is derived from the container metadata.)
 mkdir -p /sysroot /run/cryptsetup
 if ! LUKS_UUID=$(cryptsetup luksUUID "$DISK" 2>/dev/null) || [ -z "$LUKS_UUID" ]; then
     echo "alpine-fde-harness: cryptsetup luksUUID FAILED — cannot stage crypttab"

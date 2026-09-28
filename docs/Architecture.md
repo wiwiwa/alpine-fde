@@ -314,6 +314,12 @@ The following components are invoked strictly by internal scripts, hooks, or sys
 
 The lifecycle transitions from **provisional** to **finalized**, determined directly from ground-truth storage state (LUKS2 token PCR binding `{7, 11}` vs `{11}`, and `baseline.json`'s `expected_pcr7`). "Unattended" means unattended **until reboot** (ADR-20 amended): Stage 1 ends with an interactive in-chroot credential ceremony, and the first reboot unseals automatically and runs trust finalization in the background before the login prompt, with zero console input between power-on and finalization.
 
+**Ground-truth rules (DECIDED, decision-queue item 10b: the install-state state document is retired — there is NO persisted lifecycle file).** The derivation is normative and owned by `lib/trust-state.sh`; every consumer (`status`, `finalize` gate, the first-boot service, the kernel-build ensure-once gate) reads the SAME facts:
+- the standing LUKS2 `systemd-tpm2` token's `tpm2-pcrs`: `[11]` = provisional; `[7, 11]` = the finalized seal;
+- the keyslot inventory: keyslot 0 = the operator's recovery passphrase, keyslot 1 = the token's sealed slot, keyslot 2 = the temporary ephemeral install key — keyslot 2's PRESENCE marks install-time anchoring (purged at finalization), so `token {7, 11}` **and** no ephemeral keyslot **and** `expected_pcr7` a real digest is the completed shape;
+- `baseline.json` `expected_pcr7`: `"pending"` = install-time anchoring; a digest = finalized anchoring.
+Anything unrecognizable (no token, exotic PCR bindings, contradictory baseline) fails closed; the boot-time unseal hook persists nothing — the unlock itself is its only output. The ADR-8 finalize-attempt marker (`finalize-attempt.txt`) survives as a best-effort DIAGNOSTIC of "finalization was attempted and failed" (a fact no ground-truth read can reconstruct); it is never consulted for trust decisions.
+
 #### Keyslot & Trust Choreography by Lifecycle State
 | State | Keyslot 0 | Keyslot 1 | Token & Baseline | Service & Observability |
 |---|---|---|---|---|

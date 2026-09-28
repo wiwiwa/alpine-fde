@@ -699,23 +699,18 @@ assert_eq "completion: combined .pcrsig pol == policy_digest(boot-2 d7, enter-in
     "$(policy_digest "$D7_BOOT2" "$D11_BOOT2")" \
     "$(jq -r '.sha256[-1].pol' "$RUN/uki-pcrsig-711.json")"
 run_stage pcrsig_disk-711 60 uki_pcrsig_disk "$RUN/uki-pcrsig-711.img" "$RUN/uki-pcrsig-711.json"
-# the CLI state root: pending baseline + `installed` state doc + release.pem
-# + /etc/crypttab (the finalize member walk reads every LUKS member UUID from
-# it — repro 2026-09-24: without the file the completion died rc 64 "no LUKS
-# member UUIDs found", before the recovery-passphrase authorization)
+# the CLI state root: pending baseline + release.pem + /etc/crypttab (the
+# finalize member walk reads every LUKS member UUID from it — repro
+# 2026-09-24: without the file the completion died rc 64 "no LUKS member
+# UUIDs found", before the recovery-passphrase authorization). (item 10b: NO
+# install-state.json — the provisional ground truth is the DISK's standing
+# {PCR 11} token, which the gate now derives.)
 mkdir -p "$RUN/cli-state/etc/alpine-fde/keys"
 mkdir -p "$RUN/cli-state/etc"
 printf 'root UUID=%s none luks,tpm2-device=auto,discard\n' "$DISK_UUID" \
     >"$RUN/cli-state/etc/crypttab"
 cp "$RUN/keys/release.pub" "$RUN/cli-state/etc/alpine-fde/keys/release.pub"
 cp "$RUN/keys/db.key" "$RUN/cli-state/etc/alpine-fde/keys/release.pem"
-cat >"$RUN/cli-state/etc/alpine-fde/install-state.json" <<JSON
-{
-  "schema_version": 1,
-  "state": "installed",
-  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
 cat >"$RUN/cli-state/etc/alpine-fde/baseline.json" <<JSON
 {
   "schema_version": "1",
@@ -797,11 +792,11 @@ grep -q "token upgraded to Mechanism B {PCR 7, PCR 11}" "$RUN/completion.out" \
     || _assert_result not-ok "completion: the provisional token upgraded to Mechanism B" \
         "no upgrade marker in completion.out"
 grep -q "alpine-fde: install finalized" "$RUN/completion.out" \
-    && _assert_result ok "completion: install finalized (state written LAST)" "" \
-    || _assert_result not-ok "completion: install finalized (state written LAST)" \
+    && _assert_result ok "completion: install finalized (the upgraded token IS the fact)" "" \
+    || _assert_result not-ok "completion: install finalized (the upgraded token IS the fact)" \
         "no finalized marker in completion.out"
-assert_contains "completion: the state doc reads finalized" "finalized" \
-    "$(jq -r '.state' "$RUN/cli-state/etc/alpine-fde/install-state.json")"
+assert_contains "completion: ground truth reads finalized (disk token {PCR 7, PCR 11})" "[7,11]" \
+    "$(cryptsetup luksDump --dump-json-metadata "$RUN/disk.img" 2>/dev/null | jq -c 'first(.tokens // {} | to_entries[] | select(.value.type? == "systemd-tpm2") | .value["tpm2-pcrs"] // empty)')"
 assert_eq "completion: the ADR-8 marker is CLEAR" "absent" \
     "$([[ -e "$RUN/cli-state/etc/alpine-fde/finalize-attempt.txt" ]] && echo present || echo absent)"
 # THE WINDOW-EXIT ASSERT OF RECORD: {7,11} on a non-zero keyslot, recovery at

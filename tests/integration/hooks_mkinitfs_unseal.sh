@@ -33,8 +33,9 @@
 #   5. RAID1: one prompt, passphrase cached across members; a PARTIAL token
 #      unlock (one member's token open failed) still routes that member into
 #      the same bounded prompt loop — never a silently incomplete pool
-#   6. writes the provisional-booted install-state marker on the mounted
-#      NEWROOT when the state file says `installed` (atomic tmp+mv)
+#   6. (RETIRED, item 10b: install-state.json is DEAD) writes NOTHING — the
+#      hook is a pure unlock path; the trust state is derived from the
+#      container metadata (lib/trust-state.sh), never persisted by the hook
 #   7. token scan covers the full LUKS2 token-id range 0..31
 #   8. G4 rollback (§9.3): a token whose tpm2-signature covers UKI-A's
 #      ENROLL-time pol + a drive .pcrsig entry for UKI-B (same release key)
@@ -236,10 +237,9 @@ printf '%s\n' \
     "root1 UUID=$UUID1 none luks,tpm2-device=auto,password-cache=yes" \
     "root2 UUID=$UUID2 none luks,tpm2-device=auto,password-cache=yes" >"$TMP/crypttab-raid1"
 
-write_state() { # <state>
-    printf '{\n  "schema_version": 1,\n  "state": "%s",\n  "updated_at": "2026-01-01T00:00:00Z"\n}\n' \
-        "$1" >"$TMP/newroot/etc/alpine-fde/install-state.json"
-}
+# (item 10b: install-state.json is DEAD — there is nothing to stage. The
+# hook must NEVER create the retired document; every leg below asserts its
+# absence via no_state_file.)
 
 # --- stubs (record full argv) ------------------------------------------------------
 for v in tpm2_pcrextend tpm2_startauthsession tpm2_policypcr tpm2_policyauthorize \
@@ -477,7 +477,6 @@ assert_contains "blocker #14b: the install record stages 60-tpm.rules" \
 # 1. SUCCESS — token path, provisional token {PCR 11} (§9.1 Stage 2)
 # =============================================================================
 reset_leg
-write_state installed
 printf 'unused\n' >"$TMP/stdin1"
 rc=$(run_hook "$TMP/stdin1")
 assert_rc "token success: hook rc 0" 0 "$rc"
@@ -504,8 +503,8 @@ assert_eq "token success: opens via the UUID resolved from crypttab" \
     "$(grep '^cryptsetup open' "$LOG")"
 assert_eq "token success: exactly one open (no prompt needed)" "1" "$(argv_count '^cryptsetup open')"
 assert_eq "token success: no poweroff" "0" "$(argv_count '^poweroff')"
-assert_contains "token success: marker moved to provisional-booted" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 assert_eq "token success: no leftover temp state documents" "" \
     "$(find "$TMP/newroot/etc/alpine-fde" -name '.*' -print)"
 assert_eq "token success: success path never runs a shell (recorded argv)" "" \
@@ -521,7 +520,6 @@ assert_eq "token success: NO attempt counter (no prompt at all)" "0" \
 #     unseal, not silently fall through to the passphrase prompt
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_MIN_ID=17)
 assert_rc "high token-id: hook rc 0" 0 "$rc"
 assert_eq "high token-id: scan reaches id 17 and exports the token" "1" \
@@ -529,8 +527,8 @@ assert_eq "high token-id: scan reaches id 17 and exports the token" "1" \
 assert_eq "high token-id: unseal still happens" "1" "$(argv_count '^tpm2_unseal')"
 assert_eq "high token-id: exactly one open (no prompt fallback)" "1" "$(argv_count '^cryptsetup open')"
 assert_eq "high token-id: no poweroff" "0" "$(argv_count '^poweroff')"
-assert_contains "high token-id: marker moved to provisional-booted" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 2. FINALIZED token {PCR 7, 11} — policy PCR selection follows the token;
@@ -540,19 +538,17 @@ mkdir -p "$TMP/extra-7-11"
 cp "$KEYDIR/release.pub" "$TMP/extra-7-11/tpm2-pcr-public-key.pem"
 cp "$TMP/extra/tpm2-pcr-signature-7-11.json" "$TMP/extra-7-11/tpm2-pcr-signature.json"
 reset_leg
-write_state finalized
 rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token-7-11.json" FDE_EXTRA_DIR="$TMP/extra-7-11")
 assert_rc "finalized token: hook rc 0" 0 "$rc"
 assert_contains "finalized token: PolicyPCR over {7,11}" \
     "$(grep '^tpm2_policypcr' "$LOG")" "-l sha256:7,11"
-assert_contains "finalized: state file NOT rewritten" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "finalized"'
+assert_eq "finalized ground truth: STILL nothing persisted (item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 3. TPM absent/refused -> bounded recovery prompt path (§8.2 step 4)
 # =============================================================================
 reset_leg
-write_state installed
 printf 'recovery-pass\n' >"$TMP/stdin-rec"
 rc=$(run_hook "$TMP/stdin-rec" FDE_TPM_FAIL=1)
 assert_rc "tpm absent: unlocked via keyslot-0 recovery passphrase" 0 "$rc"
@@ -561,8 +557,8 @@ assert_eq "tpm absent: exactly one open with the prompted passphrase" "1" "$(arg
 assert_contains "tpm absent: open used the prompted passphrase" \
     "$(cat "$LOG")" "cryptsetup-pass recovery-pass"
 assert_eq "tpm absent: no poweroff on first-correct passphrase" "0" "$(argv_count '^poweroff')"
-assert_contains "tpm absent: marker still written (unlock succeeded)" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 # warn-before-prompt (§8.2 step 5): the TPM-absent branch is a token_missing
 # class leg — the mapped preamble + closing line precede the countered prompt
 assert_contains "tpm absent: token_missing warn preamble printed" \
@@ -587,7 +583,6 @@ assert_eq "tpm absent: exactly ONE preamble+closing emission (no repetition per 
 #     finds, the (genuine) token_missing verdict is taken after the bound.
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-rec" FDE_TEST_TOKEN_MIN_ID=32 FDE_ATTACH_WAIT_SECS=2)
 assert_rc "token missing: recovery passphrase still unlocks" 0 "$rc"
 assert_contains "token missing: the no-token refusal sentinel is printed" \
@@ -615,7 +610,6 @@ assert_eq "token missing: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')
 #     open goes to the nlplug-printed node.
 # =============================================================================
 reset_leg
-write_state installed
 mkdir -p "$TMP/late-uuid"
 rc=$(run_hook "$TMP/stdin1" FDE_DISK_BY_UUID_DIR="$TMP/late-uuid" FDE_ATTACH_WAIT_SECS=10 FDE_TEST_REQUIRE_NODE=1 FDE_TEST_NLPLUG_ATTACH_AFTER=3)
 assert_rc "attach race: hook rc 0 (member appeared during the bounded wait)" 0 "$rc"
@@ -638,8 +632,8 @@ assert_eq "attach race: NO warn-before-prompt preamble on the race path" "0" \
 assert_eq "attach race: NO audit/reseal closing line" "0" \
     "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
 assert_eq "attach race: no poweroff" "0" "$(argv_count '^poweroff')"
-assert_contains "attach race: marker moved to provisional-booted" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 3d. EXHAUSTED attach bound -> GENUINE token_missing (§8.2 step 2): the
@@ -649,7 +643,6 @@ assert_contains "attach race: marker moved to provisional-booted" \
 #     + bounded prompt.
 # =============================================================================
 reset_leg
-write_state installed
 mkdir -p "$TMP/never-uuid"
 rc=$(run_hook "$TMP/stdin-rec" FDE_DISK_BY_UUID_DIR="$TMP/never-uuid" FDE_ATTACH_WAIT_SECS=2 FDE_TEST_REQUIRE_NODE=1 FDE_TEST_NLPLUG_ATTACH_AFTER=9999)
 assert_rc "attach bound exhausted: recovery passphrase still unlocks" 0 "$rc"
@@ -677,7 +670,6 @@ assert_eq "attach bound exhausted: no unseal attempted" "0" "$(argv_count '^tpm2
 #     images keep the FDE_DISK_BY_UUID_DIR seam meaningful).
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1" FDE_NLPLUG_FINDFS="$BIN/nlplug-findfs-absent")
 assert_rc "nlplug absent: hook rc 0 (by-uuid fallback resolves the member)" 0 "$rc"
 assert_eq "nlplug absent: the resolver never invoked nlplug-findfs" "0" \
@@ -691,7 +683,6 @@ assert_eq "nlplug absent: no poweroff" "0" "$(argv_count '^poweroff')"
 # 4. 3-STRIKE -> poweroff -f exactly once, rc != 0 (§8.2 fail-closed)
 # =============================================================================
 reset_leg
-write_state installed
 printf 'wrong1\nwrong2\nwrong3\n' >"$TMP/stdin-3bad"
 rc=$(run_hook "$TMP/stdin-3bad" FDE_TPM_FAIL=1 FDE_OPEN_FAIL=1)
 assert_ne "3-strike: hook rc nonzero" "0" "$rc"
@@ -711,8 +702,8 @@ assert_eq "3-strike: exactly 3 countered prompts (bounded)" "3" \
     "$(grep -cE "$(sentinel_of unseal_attempt_re)" "$TMP/out.log" || true)"
 assert_eq "3-strike: exactly ONE preamble emission (printed once, not per strike)" "1" \
     "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
-assert_eq "3-strike: no state write after failing" "installed" \
-    "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
+assert_eq "3-strike: nothing persisted after failing (item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 5. G4 ROLLBACK (§9.3, THE contract change): standing token sealed at UKI-A
@@ -727,7 +718,6 @@ assert_eq "3-strike: no state write after failing" "installed" \
 #    release authority whose keyName the sealed policy pins.
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token.json" FDE_EXTRA_DIR="$TMP/extra-rollback")
 assert_rc "rollback: hook rc 0 (entry-sig gate admits UKI-B's entry)" 0 "$rc"
 assert_eq "rollback: unseal reached" "1" "$(argv_count '^tpm2_unseal')"
@@ -738,8 +728,8 @@ assert_ne "rollback: admitted pol differs from the token's enroll pol (genuinely
     "$(hex2bin "$POL" | sha256sum | awk '{print $1}')" "$(grep '^policyauthorize-pol' "$LOG" | awk '{print $2}')"
 assert_eq "rollback: exactly one open, zero prompts" "1" "$(argv_count '^cryptsetup open')"
 assert_eq "rollback: no poweroff" "0" "$(argv_count '^poweroff')"
-assert_contains "rollback: marker moved to provisional-booted" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 5a. token tpm2-signature tamper (s13 sig-corrupt class) — INERT under the
@@ -748,7 +738,6 @@ assert_contains "rollback: marker moved to provisional-booted" \
 #     valid entry (release-signed, matching live PCRs) still unlocks.
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_FILE="$TMP/token-tampered.json")
 assert_rc "token-sig tamper: hook rc 0 (inert metadata, unlock proceeds)" 0 "$rc"
 assert_eq "token-sig tamper: unseal reached" "1" "$(argv_count '^tpm2_unseal')"
@@ -768,7 +757,6 @@ assert_eq "sig-corrupt: no poweroff" "0" "$(argv_count '^poweroff')"
 # =============================================================================
 # 5b: token pins {7,11} but .pcrsig carries only [11]
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_TEST_TOKEN_FILE="$TMP/token-7-11.json" FDE_OPEN_FAIL=1)
 assert_ne "selection mismatch {7,11}vs[11]: hook rc nonzero" "0" "$rc"
 assert_eq "selection mismatch {7,11}vs[11]: pol extraction failed -> no verifysignature" "0" \
@@ -784,7 +772,6 @@ assert_precedes "selection mismatch {7,11}vs[11]: preamble precedes the passphra
 
 # 5c (inverse): token pins {11} but .pcrsig carries only [7,11]
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_TEST_TOKEN_FILE="$TMP/token.json" FDE_EXTRA_DIR="$TMP/extra-7-11" FDE_OPEN_FAIL=1)
 assert_ne "selection mismatch {11}vs[7,11]: hook rc nonzero" "0" "$rc"
 assert_eq "selection mismatch {11}vs[7,11]: pol extraction failed -> no verifysignature" "0" \
@@ -804,7 +791,6 @@ assert_eq "selection mismatch {11}vs[7,11]: bounded to 3 prompt attempts then po
 # =============================================================================
 # 5d: forged entry.sig
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-forged-sig" FDE_OPEN_FAIL=1)
 assert_ne "forged entry sig: hook rc nonzero" "0" "$rc"
 assert_eq "forged entry sig: openssl gate refused -> no verifysignature" "0" \
@@ -824,7 +810,6 @@ assert_eq "forged entry sig: NO other class's preamble (seal_refused absent — 
 
 # 5e: swapped /.extra pubkey (valid foreign key)
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-swapped-key" FDE_OPEN_FAIL=1)
 assert_ne "swapped /.extra pubkey: hook rc nonzero" "0" "$rc"
 assert_eq "swapped /.extra pubkey: entry sig refuses under the foreign key -> no verifysignature" "0" \
@@ -835,7 +820,6 @@ assert_eq "swapped /.extra pubkey: bounded to 3 prompt attempts then poweroff on
 
 # 5f: missing entry
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_EXTRA_DIR="$TMP/extra-missing-entry" FDE_OPEN_FAIL=1)
 assert_ne "missing entry: hook rc nonzero" "0" "$rc"
 assert_eq "missing entry: no verifysignature" "0" "$(argv_count '^tpm2_verifysignature')"
@@ -847,7 +831,6 @@ assert_eq "missing entry: bounded to 3 prompt attempts then poweroff once" \
 # 6. /.extra artifacts missing -> fail-closed prompt path (no TPM ops)
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-rec" FDE_EXTRA_DIR="$TMP/no-such-extra")
 assert_rc "missing /.extra: recovery passphrase still unlocks" 0 "$rc"
 assert_eq "missing /.extra: no unseal attempted" "0" "$(argv_count '^tpm2_unseal')"
@@ -857,7 +840,6 @@ assert_eq "missing /.extra: one open" "1" "$(argv_count '^cryptsetup open')"
 # 7. unseal produced EMPTY secret -> fail-closed prompt path
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-rec" FDE_UNSEAL_EMPTY=1)
 assert_rc "empty unseal: recovery passphrase unlocks" 0 "$rc"
 assert_contains "empty unseal: open used the prompted passphrase (not empty)" \
@@ -883,7 +865,6 @@ assert_contains "empty unseal: prompt carries the (attempt 1 of 3) counter" \
 #    prompt, passphrase reused across members
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1" FDE_CRYPTTAB="$TMP/crypttab-raid1")
 assert_rc "raid1 token: hook rc 0" 0 "$rc"
 assert_eq "raid1 token: single unseal" "1" "$(argv_count '^tpm2_unseal')"
@@ -892,7 +873,6 @@ assert_contains "raid1 token: member 1 via by-uuid" "$(grep '^cryptsetup open' "
 assert_contains "raid1 token: member 2 via by-uuid" "$(grep '^cryptsetup open' "$LOG")" "/dev/disk/by-uuid/$UUID2"
 
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-rec" FDE_TPM_FAIL=1 FDE_CRYPTTAB="$TMP/crypttab-raid1")
 assert_rc "raid1 prompt: hook rc 0" 0 "$rc"
 assert_eq "raid1 prompt: exactly one passphrase entry, reused (2 identical passes)" \
@@ -908,7 +888,6 @@ assert_eq "raid1 prompt: no poweroff" "0" "$(argv_count '^poweroff')"
 #     incomplete pool, never an interactive shell
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-rec" FDE_CRYPTTAB="$TMP/crypttab-raid1" FDE_OPEN_FAIL_TOKEN_TARGET=root2)
 assert_rc "raid1 partial token: hook rc 0" 0 "$rc"
 assert_contains "raid1 partial token: member 1 opened via the TPM token" \
@@ -920,8 +899,8 @@ assert_eq "raid1 partial token: member 2 attempted exactly twice (failed token +
 assert_eq "raid1 partial token: 3 opens total (2 token attempts + 1 prompt)" "3" \
     "$(argv_count '^cryptsetup open')"
 assert_eq "raid1 partial token: no poweroff" "0" "$(argv_count '^poweroff')"
-assert_contains "raid1 partial token: marker written (pool complete)" \
-    "$(cat "$TMP/newroot/etc/alpine-fde/install-state.json")" '"state": "provisional-booted"'
+assert_eq "hook persists NOTHING (no install-state.json, item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 # warn-before-prompt scope decision: a partial member-open failure is NOT one
 # of the three refusal classes (the sealed blob verified and unsealed — no
 # class is detectable), so the member falls into the prompt loop UNWARNED
@@ -933,36 +912,34 @@ assert_contains "raid1 partial token: the prompted member still sees the (attemp
 # --- 8c. same partial failure, but the passphrase never works: the bounded
 #     strikes still end in exactly one forced poweroff (fail-closed, §8.2)
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_CRYPTTAB="$TMP/crypttab-raid1" FDE_OPEN_FAIL_TARGET=root2)
 assert_ne "raid1 partial hard-fail: hook rc nonzero" "0" "$rc"
 assert_eq "raid1 partial hard-fail: poweroff -f exactly once" "1" "$(argv_count '^poweroff')"
 assert_contains "raid1 partial hard-fail: poweroff is forced" "$(grep '^poweroff' "$LOG")" "-f"
 assert_eq "raid1 partial hard-fail: opens bounded (1 member token + 1 fail + 3 strikes)" "5" \
     "$(argv_count '^cryptsetup open')"
-assert_eq "raid1 partial hard-fail: no state write after failing" "installed" \
-    "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
+assert_eq "raid1 partial hard-fail: nothing persisted after failing (item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # =============================================================================
 # 9. no crypttab root entry -> fatal fail-closed (poweroff, no prompt loop)
 # =============================================================================
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-3bad" FDE_CRYPTTAB="$TMP/no-such-crypttab")
 assert_ne "no crypttab: hook rc nonzero" "0" "$rc"
 assert_eq "no crypttab: poweroff exactly once" "1" "$(argv_count '^poweroff')"
 
 # =============================================================================
-# 10. state file absent -> no marker written, boot still proceeds
+# 10. RESIDUE (item 10b: install-state.json is DEAD): no boot path — success,
+# failure, or guard refusal — may create or leave the retired document
 # =============================================================================
 reset_leg
-rm -f "$TMP/newroot/etc/alpine-fde/install-state.json"
 rc=$(run_hook "$TMP/stdin1")
-assert_rc "no state file: hook rc 0" 0 "$rc"
+assert_rc "residue: successful unlock creates no install-state.json" 0 "$rc"
 if [ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ]; then
-    _fail "no state file: absent file must not be created"
+    _fail "residue: the retired state document must NEVER be created"
 else
-    _pass "no state file: absent file must not be created"
+    _pass "residue: the retired state document must NEVER be created"
 fi
 
 # =============================================================================
@@ -979,7 +956,6 @@ fi
 
 # --- 10b-1. SecureBoot=0 -> guard block + reboot into firmware setup ---------
 reset_leg
-write_state installed
 printf 'unused\n' >"$TMP/stdin-guard"
 rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-sb-off")
 assert_rc "SB guard: hook exits 0 after the accepted reboot" 0 "$rc"
@@ -1009,12 +985,11 @@ assert_eq "SB guard: NO poweroff (the terminal action is the reboot)" "0" \
     "$(argv_count '^poweroff')"
 assert_eq "SB guard: NO passphrase prompt (the fallback is RETRACTED under SB off)" \
     "0" "$(grep -c 'enter the recovery passphrase' "$TMP/out.log" || true)"
-assert_eq "SB guard: state file NOT rewritten" "installed" \
-    "$(sed -n 's/^  "state": "\(.*\)",\{0,1\}$/\1/p' "$TMP/newroot/etc/alpine-fde/install-state.json")"
+assert_eq "SB guard: nothing persisted under the refused boot (item 10b)" "1" \
+    "$([ -e "$TMP/newroot/etc/alpine-fde/install-state.json" ] && echo 0 || echo 1)"
 
 # --- 10b-2. SecureBoot=1 but SetupMode=1 (keys not in final state) -> block ---
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-setupmode")
 assert_rc "SB guard (setup mode): hook exits 0 after the accepted reboot" 0 "$rc"
 assert_contains "SB guard (setup mode): refusal sentinel" \
@@ -1026,7 +1001,6 @@ assert_eq "SB guard (setup mode): NO unseal work" "0" "$(argv_count '^tpm2_pcrex
 
 # --- 10b-3. unreadable efivarfs (no variables) -> fail CLOSED ----------------
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-empty")
 assert_rc "SB guard (unreadable): hook exits 0 after the accepted reboot" 0 "$rc"
 assert_contains "SB guard (unreadable): refusal sentinel (fail-closed)" \
@@ -1037,7 +1011,6 @@ assert_eq "SB guard (unreadable): NO unseal work" "0" "$(argv_count '^tpm2_pcrex
 
 # --- 10b-4. efivars dir absent entirely -> best-effort mount, still closed ---
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin-guard" FDE_EFIVARS_DIR="$TMP/efivars-absent")
 assert_rc "SB guard (absent dir): hook exits 0 after the accepted reboot" 0 "$rc"
 assert_contains "SB guard (absent dir): the efivarfs mount was attempted (best-effort)" \
@@ -1048,7 +1021,6 @@ assert_eq "SB guard (absent dir): NO unseal work" "0" "$(argv_count '^tpm2_pcrex
 
 # --- 10b-5. SecureBoot=1 + SetupMode=0 -> the guard PASSES and boot proceeds --
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1")
 assert_rc "SB guard pass: hook rc 0 (verified boot confirmed)" 0 "$rc"
 assert_contains "SB guard pass: the pass line is printed" \
@@ -1078,7 +1050,6 @@ assert_eq "SB guard pass: the token path unseals" "1" "$(argv_count '^tpm2_unsea
 
 # --- 11a. hermetic argv pin: the verifying key rides the OWNER hierarchy ----
 reset_leg
-write_state installed
 rc=$(run_hook "$TMP/stdin1")
 assert_rc "owner-hierarchy pin: hook rc 0" 0 "$rc"
 assert_contains "owner-hierarchy pin: loadexternal uses -C o" \
@@ -1152,8 +1123,6 @@ run_live_leg() {
     printf '{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"%s","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-signature":"%s"}' \
         "$BLOBB64" "$SIGB64LIVE" >"$LIVE/token.json"
     printf '%s\n' "root UUID=$UUID1 none luks,tpm2-device=auto" >"$LIVE/crypttab"
-    write_state installed
-    mv "$TMP/newroot/etc/alpine-fde/install-state.json" "$LIVE/newroot/etc/alpine-fde/install-state.json"
 
     # cryptsetup stub (LUKS itself is out of scope; the TPM chain is what is
     # under test) + a poweroff that FAILS the leg if ever reached

@@ -59,7 +59,7 @@ assert_eq "G-C26: the trip record is RUNTIME-CONDITIONAL (else-branch of the liv
     "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 assert_eq "G-C26: the trip record names the firmware-setup boot (OsIndications bit 0)" "1" \
     "$(grep -c 'enters firmware setup (OsIndications bit 0)' <<<"$OUT")"
-I_STATE=$(line_no "$OUT" "inst_state_write installed")
+I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
@@ -70,7 +70,7 @@ I_INSTR=$(line_no "$OUT" "Secure Boot key material is staged under")
 I_CONFIRM=$(line_no "$OUT" "press Enter to reboot into firmware setup")
 I_TRIP=$(line_no "$OUT" "fw_osindications_set")
 I_DIRECT=$(line_no "$OUT" "direct reboot to disk (NVRAM enrollment succeeded")
-assert_eq "order: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
+assert_eq "order: target metadata BEFORE teardown (the §9.1 step-9 state write is RETIRED, item 10b)" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "order: teardown BEFORE the ephemeral-key scrub (I1)" "1" \
     "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
 assert_eq "order: scrub BEFORE the enrollment verdict probe (the tail is post-teardown)" "1" \
@@ -133,13 +133,13 @@ DISK2=$T/disk2.img
 OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISK2" 2>&1)
 assert_eq "raid1 dry-run rc 0" "0" "$?"
 assert_eq "raid1: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
-I_STATE=$(line_no "$OUT" "inst_state_write installed")
+I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
 I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
-assert_eq "raid1: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
+assert_eq "raid1: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "raid1: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
 
 CACHE=$T/cache.img
@@ -147,13 +147,13 @@ CACHE=$T/cache.img
 OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --bcache "$CACHE" 2>&1)
 assert_eq "bcache dry-run rc 0" "0" "$?"
 assert_eq "bcache: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
-I_STATE=$(line_no "$OUT" "inst_state_write installed")
+I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
 I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
-assert_eq "bcache: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
+assert_eq "bcache: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "bcache: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
 
 DISKB=$T/diskb.img
@@ -161,13 +161,13 @@ DISKB=$T/diskb.img
 OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" --disk "$DISKB" --bcache "$CACHE" 2>&1)
 assert_eq "bcache-multi dry-run rc 0" "0" "$?"
 assert_eq "bcache-multi: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
-I_STATE=$(line_no "$OUT" "inst_state_write installed")
+I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
 I_UMOUNT=$(line_no "$OUT" "umount /mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l /mnt/sys/firmware/efi/efivars 2>/dev/null")
 I_SCRUB=$(line_no "$OUT" "rm -f <ephemeral-keyfile>")
-assert_eq "bcache-multi: state write BEFORE teardown" "1" "$(( I_STATE > 0 && I_UMOUNT > I_STATE ? 1 : 0 ))"
+assert_eq "bcache-multi: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "bcache-multi: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
 assert_contains "bcache-multi: teardown closes every member container" "$OUT" \
     "cryptsetup close root1 && cryptsetup close root2"

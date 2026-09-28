@@ -57,7 +57,7 @@ ALPINE_FDE_KEYS_LOADED=1
 # Self-load common.sh (die/info/require helpers) so guest-side one-liners like
 # `. /opt/alpine-fde/lib/keys.sh && keys_encrypt_release <keydir>` (§9.1 step
 # 6, fresh chroot shell — functions do not cross the chroot boundary) work
-# standalone. Pattern: lib/install-state.sh.
+# standalone. Pattern: lib/trust-state.sh.
 _is_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
 if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then

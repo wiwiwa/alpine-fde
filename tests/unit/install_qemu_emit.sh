@@ -246,7 +246,7 @@ assert_eq "host step emitted as comment: tree copy (G-C7: /opt/alpine-fde)" "1" 
     "$(grep -c '^# HOST: .*cp -r .*opt/alpine-fde' "$SCRIPT")"
 assert_eq "host step emitted as comment: pending baseline on target (§9.1 step 2)" "1" \
     "$(grep -c '^# HOST: inst_baseline_pending_write' "$SCRIPT")"
-assert_eq "host step emitted as comment: state write (§9.1 step 9)" "1" \
+assert_eq "host step RETIRED: NO state write emitted (§9.1 step 9, item 10b)" "0" \
     "$(grep -c '^# HOST: inst_state_write installed' "$SCRIPT")"
 assert_eq "host step emitted as comment: ephemeral-key scrub (G-C26, I1)" "1" \
     "$(grep -c '^# HOST: rm -f /dev/shm/alpine-fde-ephkey' "$SCRIPT")"
@@ -388,13 +388,13 @@ assert_not_contains "banner: NO finalize directive emitted" "$(cat "$SCRIPT")" \
     "alpine-fde finalize"
 assert_not_contains "banner: NO pending-recovery-passphrase notice emitted" "$(cat "$SCRIPT")" \
     "set your permanent recovery passphrase"
-S_STATE=$(grep -n 'inst_state_write installed' "$SCRIPT" | cut -d: -f1)
-assert_eq "emitted order: the state write still stands (G-C28 amended, no banner record)" "1" \
-    "$(( S_STATE > 0 ? 1 : 0 ))"
-# user flow directive: the state write (and every other mechanical step) is
-# EMITTED BEFORE the credential-ceremony records
-assert_eq "emitted order (user flow directive): state write BEFORE the credential ceremony (mechanical first)" "1" \
-    "$(( S_STATE > 0 && S_STATE < S_CERR ? 1 : 0 ))"
+S_META=$(grep -n 'inst_resolve_target_metadata' "$SCRIPT" | cut -d: -f1)
+assert_eq "emitted order: the target-metadata record stands (the §9.1 step-9 state write is RETIRED, item 10b)" "1" \
+    "$(( S_META > 0 ? 1 : 0 ))"
+# user flow directive: every mechanical step is EMITTED BEFORE the
+# credential-ceremony records
+assert_eq "emitted order (user flow directive): target metadata BEFORE the credential ceremony (mechanical first)" "1" \
+    "$(( S_META > 0 && S_META < S_CERR ? 1 : 0 ))"
 
 # --- ESP-fallback tail (user directives): verdict probe + deferred ----------
 # instructions as the LAST records (host comments for the harness); under the

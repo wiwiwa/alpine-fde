@@ -434,14 +434,14 @@ The 2026-09-21 Alpine-contract migration (s19/s20 path re-pin + the documented
 — advisory oneshot + contained service failure + fail-closed SB gate; s22
 re-written to the amended T2c provisional-window shape with a real PCR-11
 token) is static-verified (`bash -n`, product-message cross-checks against
-lib/cmd/finalize.sh, seal.sh, token.sh, install-state.sh, hooks/openrc/
+lib/cmd/finalize.sh, seal.sh, token.sh, trust-state.sh, hooks/openrc/
 alpine-fde-finalize, hooks/mkinitfs/alpine-fde-unseal.sh) and PENDING the
 consolidated QEMU re-run. The validation surfaced these kernel/tooling
 realities the scenarios encode (all documented in the scenario headers, none
 silent):
 
 - **§8.4 state gate is real** (both s19/s20): `finalize` without
-  `<root>/etc/alpine-fde/install-state.json` is a LOUD NO-OP (rc 0, "nothing
+  an underivable ground truth (no baseline, no reachable container) is a LOUD NO-OP (rc 0, "nothing
   to finalize") — the scenarios stage the state doc at `installed` in the
   tooling tail; the `finalized` write stays scenario-ephemeral in-guest.
   `sp_etc_dir` resolves `<root>/etc/alpine-fde/` with NO legacy fallback

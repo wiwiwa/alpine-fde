@@ -154,7 +154,8 @@
 #                        flock + atomic mv, the s00b _cache_store
 #                        discipline): disk.img, vars-enrolled.fd,
 #                        tpm/tpm2-00.permall, the on-target alpine-fde
-#                        config tarball, baseline.json, install-state.json,
+#                        config tarball, baseline.json (the ground truth —
+#                        the disk's own token pcrs — is probed on the console),
 #                        FORMAT marker `install-e2e-1`, MANIFEST.sha256,
 #                        PINS.json (mirror.json + ISO sha), CACHE-LAYOUT.txt
 #                        (the consumer boot shape + compat notes). The
@@ -731,8 +732,8 @@ wait_console "$B" "localhost:~#" 300
 
 # in-guest corroboration legs (console-visible arithmetic markers)
 feed_line "$B/serial.sock" \
-    'cat /etc/alpine-fde/install-state.json; cat /proc/cmdline; alpine-fde status; echo P7STATUS-RC=$?'
-wait_console "$B" '"state": "finalized"' 300
+    'alpine-fde status; cat /proc/cmdline; echo P7STATUS-RC=$?'
+wait_console "$B" 'trust state: finalized' 300
 feed_line "$B/serial.sock" \
     'cryptsetup luksDump --dump-json-metadata /dev/vdb > /tmp/luks.json && jq -c "[.keyslots|keys, [.tokens[]|select(.type==\"systemd-tpm2\")|.tpm2-pcrs]]" /tmp/luks.json; echo P7-\$((50+1))-OK'
 wait_console "$B" "P7-51-OK" 300
@@ -814,7 +815,6 @@ golden_base_store() {
     cp "$run/tpm/tpm2-00.permall" "$stage/tpm/tpm2-00.permall"
     # the on-target evidence the export drive carried out of the guest
     cp "$run/baseline.json" "$stage/baseline.json"
-    cp "$run/install-state.json" "$stage/install-state.json"
     mkdir -p "$stage/export"
     mcopy -i "$run/export.img" -s ::/ "$stage/export/" 2>/dev/null || true
     printf 'install-e2e-1\n' >"$stage/FORMAT"
@@ -840,7 +840,7 @@ Consumer boot shape (differs from pristine-s00b by design):
   * login: <user from PINS.json>, password = the recovery passphrase.
 EOF
     (cd "$stage" && sha256sum FORMAT disk.img vars-enrolled.fd tpm/tpm2-00.permall \
-        baseline.json install-state.json PINS.json >MANIFEST.sha256)
+        baseline.json PINS.json >MANIFEST.sha256)
     local lock="$dir.publish.lock"
     ( flock -x 9; rm -rf "$dir"; mv -- "$stage" "$dir" ) 9>"$lock"
     echo "# golden base cached in $dir (FORMAT $(cat "$dir/FORMAT"))"
@@ -852,9 +852,8 @@ run_stage export-pull 300 bash -c "mcopy -i '$RUN/export.img' -s ::/ '$EXPORT_X/
 [[ -f "$EXPORT_X/alpine-fde-etc.tar.gz" ]] || { echo "s23: the export drive came back empty — boot B's evidence legs failed"; exit 1; }
 run_stage export-untar 300 tar -xzf "$EXPORT_X/alpine-fde-etc.tar.gz" -C "$RUN"
 cp "$RUN/etc/alpine-fde/baseline.json" "$RUN/baseline.json"
-cp "$RUN/etc/alpine-fde/install-state.json" "$RUN/install-state.json"
-assert_eq "[golden-base] exported install-state is finalized" "finalized" \
-    "$(jq -r .state "$RUN/install-state.json")"
+assert_eq "[golden-base] exported baseline is FINAL (the finalized anchoring)" "0" \
+    "$(jq -r 'if .expected_pcr7 | test("^[0-9a-f]{64}$") then 0 else 1 end' "$RUN/baseline.json")"
 run_stage golden-base-store 1800 bash -c "$(declare -f golden_base_store); golden_base_store '$CACHE_DIR' '$RUN'"
 if [[ -f "$CACHE_DIR/MANIFEST.sha256" ]] && (cd "$CACHE_DIR" && sha256sum --check --quiet MANIFEST.sha256) >/dev/null 2>&1; then
     _assert_result ok "[golden-base] cache stored + SHA-manifest verifies ($CACHE_DIR)" ""

@@ -121,21 +121,20 @@ assert_eq "splice: the initramfs mounts efivarfs before the unseal hook" "1" \
 # (error -13)" (EACCES) when the packed /init lost +x.
 assert_eq "spliced /init keeps the EXECUTABLE bit (the kernel execs it)" "1" \
     "$([ -x "$INIT" ] && echo 1 || echo 0)"
-assert_eq "flip marker appears exactly twice (open+close)" "2" \
-    "$(grep -cF "$INITRAMFS_SPLICE_FLIP_MARKER" "$INIT")"
+assert_eq "the RETIRED state-flip splice leaves NO marker (item 10b)" "0" \
+    "$(grep -cF 'ALPINE-FDE-SPLICE-FLIP-v1' "$INIT")"
 assert_eq "the unseal hook invocation is present (canonical custom_files path)" "1" \
     "$(grep -cE '^		FDE_NEWROOT=.*alpine-fde-unseal\.sh$' "$INIT")"
-assert_eq "the state-flip hook invocation (blocker #23 splice B) is present" "1" \
+assert_eq "the state-flip hook invocation is RETIRED (exactly ONE hook invocation)" "0" \
     "$(grep -cE '^		FDE_STATE_ONLY=1 FDE_NEWROOT=.*alpine-fde-unseal\.sh$' "$INIT")"
 assert_eq "/etc/crypttab injected into the archive" "1" "$(grep -c 'luks,tpm2-device' "$W/etc/crypttab")"
 NL=$(grep -nF "$(printf '\t\t"$KOPT_root"')" "$INIT" | head -1 | cut -d: -f1)
 SA=$(grep -nF "$INITRAMFS_SPLICE_MARKER" "$INIT" | head -1 | cut -d: -f1)
 RS=$(grep -nF '	resume_from_disk' "$INIT" | head -1 | cut -d: -f1)
 MT=$(grep -nF '"${KOPT_root#ZFS=}"' "$INIT" | awk -F: -v r="$RS" '$1 > r {print $1; exit}')
-FL=$(grep -nF "$INITRAMFS_SPLICE_FLIP_MARKER" "$INIT" | head -1 | cut -d: -f1)
 SW=$(grep -nF '	exec switch_root' "$INIT" | head -1 | cut -d: -f1)
-assert_eq "splice-point ordering: nlplug < unseal < resume < mount < flip < switch_root" "1" \
-    "$(( NL < SA && SA < RS && RS < MT && MT < FL && FL < SW ? 1 : 0 ))"
+assert_eq "splice-point ordering: nlplug < unseal < resume < mount < switch_root (no flip, item 10b)" "1" \
+    "$(( NL < SA && SA < RS && RS < MT && MT < SW ? 1 : 0 ))"
 assert_contains "the splice redirects the root mount to the mapped container" \
     "$(cat "$INIT")" "KOPT_root=/dev/mapper/root"
 sh -n "$INIT" && _pass "the spliced initramfs-init still parses (sh -n)" ||
@@ -152,8 +151,8 @@ gzip -dc "$IMG" | cpio --quiet -idm -D "$W2" 2>/dev/null
 INIT2=$W2/init
 assert_eq "idempotent re-run: marker count UNCHANGED (no double splice)" \
     "$marks_before" "$(grep -cF "$INITRAMFS_SPLICE_MARKER" "$INIT2")"
-assert_eq "idempotent re-run: the hook invocations still exactly 2 (unseal + state-flip)" "2" \
-    "$(grep -cE '^		(FDE_STATE_ONLY=1 )?FDE_NEWROOT=.*alpine-fde-unseal\.sh$' "$INIT2")"
+assert_eq "idempotent re-run: exactly ONE hook invocation (the unseal; no state-flip)" "1" \
+    "$(grep -cE '^		FDE_NEWROOT=.*alpine-fde-unseal\.sh$' "$INIT2")"
 after=$(gzip -dc "$IMG" | cpio --quiet -it 2>/dev/null | sort | sha256sum | cut -d' ' -f1)
 assert_eq "idempotent re-run: archive inventory byte-stable" "$before" "$after"
 

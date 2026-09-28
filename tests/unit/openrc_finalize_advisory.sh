@@ -3,23 +3,27 @@
 # amendments #3+#4): the first-boot OpenRC service hooks/openrc/
 # alpine-fde-finalize is the AUTO-FINALIZER and its SB guard is the SECOND
 # BLOCKING LAYER (the first is the initramfs pre-unseal guard, §8.2 step 1):
-# when the state is provisional (installed/provisional-booted) AND the final
-# Secure Boot state holds (secureboot=1 && setup_mode=0) it INVOKES the
+# when the GROUND-TRUTH trust state is provisional (lib/trust-state.sh — item
+# 10b: no install-state.json; the standing token's pcrs + the keyslot
+# inventory + the baseline expected_pcr7 ARE the state) AND the final Secure
+# Boot state holds (secureboot=1 && setup_mode=0) it INVOKES the
 # non-interactive completion (fin_service_main, lib/cmd/finalize.sh — guard ->
-# audit --init -> token upgrade {PCR 7, PCR 11} -> ephemeral purge -> state
-# finalized; the MOTD banner path is REMOVED). On SB-guard failure the service
-# BLOCKS finalization loudly (no chain invocation, no mutation) and exits 0
-# for OpenRC — boot proceeds, finalization does NOT, retry next boot. On any
-# NON-guard completion failure it prints the ADR-8 advisory warning, exits 0
-# and retries on the next boot. finalized / missing / corrupt state / missing
-# libraries => silent degrade-safe exit 0.
+# audit --init -> ephemeral purge -> token upgrade {PCR 7, PCR 11}; the MOTD
+# banner path is REMOVED). On SB-guard failure the service BLOCKS finalization
+# loudly (no chain invocation, no mutation) and exits 0 for OpenRC — boot
+# proceeds, finalization does NOT, retry next boot. On any NON-guard
+# completion failure it prints the ADR-8 advisory warning, exits 0 and retries
+# on the next boot. finalized / underivable ground truth / missing libraries
+# => silent degrade-safe exit 0.
 #
-# The REAL hook script is exercised (sourced; start() invoked) against the REAL
-# collaborators lib/install-state.sh + lib/firmware.sh. The completion entry
-# point is intercepted with a RECORDING STUB (fin_service_main defined before
-# the hook runs; finalize.sh honors ALPINE_FDE_FINALIZE_LOADED and returns
-# early, so the stub stands in for the whole completion chain). The full
-# REAL-chain service simulation lives in tests/unit/finalize_service_guard.sh.
+# The REAL hook script is exercised (sourced; start() invoked) against the
+# REAL ground-truth reader (lib/trust-state.sh ts_label over a stubbed
+# cryptsetup + a by-uuid fixture + a real pending/final baseline). The
+# completion entry point is intercepted with a RECORDING STUB
+# (fin_service_main defined before the hook runs; finalize.sh honors
+# ALPINE_FDE_FINALIZE_LOADED and returns early, so the stub stands in for the
+# whole completion chain). The full REAL-chain service simulation lives in
+# tests/integration/finalize_service_guard.sh.
 #
 # Pinned invariants (rc 0 ALWAYS — the service never fails the boot itself):
 #   * provisional + SB final          => completion chain INVOKED once, silent
@@ -27,15 +31,22 @@
 #                                       BLOCKS finalization), loud blocking
 #                                       notice, retry-next-boot text, rc 0
 #   * completion failure (stub rc 1)  => rc 0, loud advisory (ADR-8), rc 0
-#   * finalized                        => silent rc 0, chain NOT invoked
-#   * missing / corrupt state          => silent rc 0 (degrade safe), not invoked
-#   * libraries missing                => silent rc 0 (degrade safe)
+#   * finalized ground truth          => silent rc 0, chain NOT invoked
+#   * underivable ground truth        => silent rc 0 (degrade safe), not invoked
+#   * libraries missing               => silent rc 0 (degrade safe)
 
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
+# shellcheck source=../../lib/common.sh
+source "$REPO/lib/common.sh"
+# shellcheck source=../../lib/baseline.sh
+source "$REPO/lib/baseline.sh"
+# the REAL fw_sb_state (the SB guard's read-only read) over the efivars seam
+# shellcheck source=../../lib/firmware.sh
+source "$REPO/lib/firmware.sh"
 
 assert_file_exists() {
     if [ -e "$2" ]; then _pass "$1"; else _fail "$1 (missing: $2)"; fi
@@ -50,20 +61,25 @@ assert_not_contains() {
 HOOK=$REPO/hooks/openrc/alpine-fde-finalize
 T=$(mktemp -d /tmp/alpine-fde-advisory.XXXXXX)
 EFIVARS=$T/efivars
-STATE=$T/etc/install-state.json
 ATTEMPT=$T/etc/finalize-attempt.txt
 CALL_LOG=$T/calls.log
+FAKEBIN=$T/bin
+BYUUID=$T/by-uuid
+UUID=44444444-4444-4444-8444-444444444444
 
 export ALPINE_FDE_ROOT=$T/root
-export ALPINE_FDE_INSTALL_STATE=$STATE
-export ALPINE_FDE_INSTALL_ATTEMPT=$ATTEMPT
+export ALPINE_FDE_ATTEMPT_MARKER=$ATTEMPT
 export ALPINE_FDE_EFIVARS_DIR=$EFIVARS
+export ALPINE_FDE_BY_UUID_DIR=$BYUUID
+export ALPINE_FDE_CRYPTSETUP=$FAKEBIN/cryptsetup
+export PATH="$FAKEBIN:$PATH"
 
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
-mkdir -p "$EFIVARS" "${STATE%/*}" "$T/root"
+mkdir -p "$EFIVARS" "$FAKEBIN" "$BYUUID" "$T/root/etc/alpine-fde"
 
-# --- efivarfs fixture -----------------------------------------------------------
+# --- ground-truth fixtures -------------------------------------------------------
+# efivarfs
 mkvar() { # NAME BYTE — attrs header (NV+BS+RT=7) + payload byte
     printf '\007\000\000\000'"$(printf '\%03o' "$2")" \
         >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"
@@ -80,16 +96,87 @@ sb_state() { # SECUREBOOT SETUPMODE — full key tree
     mkcertvar db db-cert-v1
     mkcertvar dbx dbx-cert-v1
 }
-write_state() { # STATE — the §8.4 install-state document
-    printf '{\n  "schema_version": 1,\n  "state": "%s",\n  "updated_at": "x"\n}\n' \
-        "$1" >"$STATE"
+
+# baselines: pending (install-time anchoring) vs final (expected_pcr7 digest)
+write_bl() { # pending|final
+    if [ "$1" = final ]; then
+        printf '{\n  "schema_version": 1,\n  "expected_pcr7": "%064d",\n  "status": "final"\n}\n' 7 \
+            >"$T/root/etc/alpine-fde/baseline.json"
+    else
+        printf '{\n  "schema_version": 1,\n  "expected_pcr7": "pending",\n  "status": "pending"\n}\n' \
+            >"$T/root/etc/alpine-fde/baseline.json"
+    fi
 }
+
+# LUKS2 metadata fixtures (metadata only — the ground truth IS the metadata)
+MD_PROV=$T/luks-provisional.json
+MD_FIN=$T/luks-finalized.json
+MD_NONE=$T/luks-notoken.json
+cat >"$MD_PROV" <<EOF
+{
+    "keyslots": {
+        "0": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "AAA" } },
+        "1": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "BBB" } },
+        "2": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "CCC" } }
+    },
+    "tokens": {
+        "0": { "type": "systemd-tpm2", "keyslots": ["1"], "tpm2-pcrs": [11],
+               "tpm2-blob": "AAEAC0RhdGE=", "tpm2-pcr-bank": "sha256" }
+    }
+}
+EOF
+cat >"$MD_FIN" <<EOF
+{
+    "keyslots": {
+        "0": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "AAA" } },
+        "1": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "BBB" } }
+    },
+    "tokens": {
+        "0": { "type": "systemd-tpm2", "keyslots": ["1"], "tpm2-pcrs": [7, 11],
+               "tpm2-blob": "AAEAC0RhdGE=", "tpm2-pcr-bank": "sha256" }
+    }
+}
+EOF
+cat >"$MD_NONE" <<EOF
+{
+    "keyslots": {
+        "0": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "AAA" } }
+    },
+    "tokens": {}
+}
+EOF
+
+write_gt() { # provisional|finalized|notoken|absent|unreadable — the ground truth
+    printf 'root UUID=%s none luks,tpm2-device=auto\n' "$UUID" \
+        >"$T/root/etc/crypttab"
+    rm -f "$BYUUID/$UUID"
+    case $1 in
+        provisional) ln -sfn "$MD_PROV" "$BYUUID/$UUID"; write_bl pending ;;
+        finalized) ln -sfn "$MD_FIN" "$BYUUID/$UUID"; write_bl final ;;
+        notoken) ln -sfn "$MD_NONE" "$BYUUID/$UUID"; write_bl pending ;;
+        absent) rm -f "$T/root/etc/crypttab"; write_bl pending ;;
+        unreadable)
+            printf 'not a LUKS2 container\n' >"$T/garbage.img"
+            ln -sfn "$T/garbage.img" "$BYUUID/$UUID"
+            write_bl pending
+            ;;
+    esac
+}
+
+# the cryptsetup stub serves the linked fixture (whatever the by-uuid symlink
+# points at) — ts_read_meta / ts_label consume it verbatim
+cat >"$FAKEBIN/cryptsetup" <<'EOF'
+#!/bin/sh
+[ "$1" = "luksDump" ] && cat "$(readlink -f "$3")"
+exit 0
+EOF
+chmod +x "$FAKEBIN/cryptsetup"
 
 # --- driver: source the REAL hook in a subshell and call start() -----------------
 # SVC_RC / SVC_CALLS: the recording stub's rc and invocation count. The stub is
 # defined BEFORE the hook is sourced; finalize.sh honors
-# ALPINE_FDE_FINALIZE_LOADED (the hook exports it? no — the HOOK sees it already
-# set in its environment and skips sourcing finalize.sh), so the stub survives.
+# ALPINE_FDE_FINALIZE_LOADED (the HOOK sees it already set in its environment
+# and skips sourcing finalize.sh), so the stub survives.
 run_hook() { # SVC_RC — the rc the completion stub returns
     SVC_CALLS=0
     ADV_OUT=$(
@@ -136,14 +223,16 @@ assert_contains "static: invokes the completion chain (fin_service_main)" "$HOOK
     "fin_service_main"
 assert_contains "static: skip-sourcing guard so a stub seam is possible" "$HOOK_TXT" \
     "ALPINE_FDE_FINALIZE_LOADED"
-assert_contains "static: reads the install state (finalized is a no-op)" "$HOOK_TXT" \
-    "istate_state"
+assert_contains "static: derives the GROUND-TRUTH trust state (finalized is a no-op)" "$HOOK_TXT" \
+    "ts_label"
+assert_not_contains "static: NO install-state vocabulary remains (item 10b)" "$HOOK_TXT" \
+    "install-state"
 assert_contains "static: read-only final SB guard before the completion" "$HOOK_TXT" \
     "fw_sb_state"
 assert_contains "static: the guard branch names the initramfs pre-unseal guard (second-layer framing)" \
     "$HOOK_TXT" "pre-unseal"
 assert_contains "static: failure path writes the ADR-8 attempt marker" "$HOOK_TXT" \
-    "istate_attempt_write"
+    "fde_attempt_write"
 assert_contains "static: advisory names the retry contract" "$HOOK_TXT" "next boot"
 assert_not_contains "static: no LUKS vocabulary in the hook itself" "$HOOK_TXT" "cryptsetup"
 assert_not_contains "static: no cryptenroll vocabulary in the hook itself" "$HOOK_TXT" \
@@ -153,10 +242,10 @@ assert_eq "static: systemd unit deleted" "0" \
     "$([ -e "$REPO/hooks/systemd/alpine-fde-finalize.service" ] && echo 1 || echo 0)"
 
 # =================================================================================
-# 1. provisional-booted + final SB state ⇒ the completion chain IS invoked
+# 1. provisional ground truth + final SB state ⇒ the completion chain IS invoked
 # (ADR-20 amended Stage 2 — the inverted contract), success is silent, rc 0.
 sb_state 1 0
-write_state provisional-booted
+write_gt provisional
 run_hook 0
 assert_eq "provisional+SB-final: rc 0 (never blocks boot)" "0" "$ADV_RC"
 assert_eq "provisional+SB-final: completion chain invoked exactly once" "1" "$SVC_CALLS"
@@ -167,7 +256,7 @@ assert_eq "provisional+SB-final: silent on success (no advisory)" "" "$ADV_OUT"
 # the completion chain is NOT invoked, the BLOCKED notice is loud, rc 0 for
 # OpenRC (boot proceeds; finalization does NOT) — §9.1 Stage 2 / §12 S-21.
 sb_state 0 0
-write_state provisional-booted
+write_gt provisional
 run_hook 0
 assert_eq "SB-off: rc 0 (the service never fails the boot itself)" "0" "$ADV_RC"
 assert_eq "SB-off: completion chain NOT invoked (the guard blocks finalization)" "0" \
@@ -176,8 +265,8 @@ assert_contains "SB-off: BLOCKED notice (guard, not a soft advisory)" "$ADV_OUT"
     "BLOCKED"
 assert_contains "SB-off: notice prints the read-only SB state" "$ADV_OUT" \
     "secureboot=0"
-assert_contains "SB-off: notice names the not-finalized state" "$ADV_OUT" \
-    "provisional-booted"
+assert_contains "SB-off: notice names the not-finalized ground truth" "$ADV_OUT" \
+    "provisional"
 assert_contains "SB-off: notice names the initramfs pre-unseal guard (the first layer)" \
     "$ADV_OUT" "pre-unseal"
 assert_contains "SB-off: notice names the retry contract" "$ADV_OUT" "next boot"
@@ -186,7 +275,7 @@ assert_not_contains "SB-off: NO manual-command guidance on the guard branch (SB-
 
 # --- 2b. SetupMode=1 is equally a guard failure (keys not in final state) --------
 sb_state 1 1
-write_state provisional-booted
+write_gt provisional
 run_hook 0
 assert_eq "SetupMode=1: rc 0" "0" "$ADV_RC"
 assert_eq "SetupMode=1: completion chain NOT invoked" "0" "$SVC_CALLS"
@@ -198,40 +287,48 @@ assert_contains "SetupMode=1: BLOCKED notice prints the setup-mode state" "$ADV_
 # boot. The attempt marker itself is fin_service_main's contract (asserted end-
 # to-end in finalize_service_guard.sh); here the loud console message is pinned.
 sb_state 1 0
-write_state provisional-booted
+write_gt provisional
 run_hook 1
 assert_eq "chain-fail: rc 0 (boot is NEVER blocked)" "0" "$ADV_RC"
 assert_eq "chain-fail: completion chain WAS attempted" "1" "$SVC_CALLS"
 assert_contains "chain-fail: loud advisory (ADR-8)" "$ADV_OUT" "WARNING"
-assert_contains "chain-fail: advisory names the not-finalized state" "$ADV_OUT" \
-    "provisional-booted"
+assert_contains "chain-fail: advisory names the not-finalized ground truth" "$ADV_OUT" \
+    "provisional"
 assert_contains "chain-fail: advisory names the retry contract" "$ADV_OUT" "next boot"
 
 # =================================================================================
-# 4. finalized ⇒ silent rc 0, the chain is NOT invoked (idempotent, no nag).
+# 4. finalized ground truth ⇒ silent rc 0, the chain is NOT invoked (idempotent,
+# no nag).
 sb_state 1 0
-write_state finalized
+write_gt finalized
 run_hook 0
 assert_eq "finalized: rc 0" "0" "$ADV_RC"
 assert_eq "finalized: completion chain NOT invoked" "0" "$SVC_CALLS"
 assert_eq "finalized: quiet" "" "$ADV_OUT"
 
 # =================================================================================
-# 5. Robustness: missing / corrupt state file ⇒ silent rc 0 (degrade safe), the
+# 5. Robustness: underivable ground truth ⇒ silent rc 0 (degrade safe), the
 # chain is never invoked, no crash traceback on the console.
-rm -f "$STATE"
+sb_state 1 0
+write_gt absent
 run_hook 0
-assert_eq "absent state: rc 0" "0" "$ADV_RC"
-assert_eq "absent state: completion chain NOT invoked" "0" "$SVC_CALLS"
-assert_eq "absent state: quiet (degrade safe)" "" "$ADV_OUT"
+assert_eq "no crypttab/container: rc 0" "0" "$ADV_RC"
+assert_eq "no crypttab/container: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "no crypttab/container: quiet (degrade safe)" "" "$ADV_OUT"
 
-printf 'not json at all {{\n' >"$STATE"
+write_gt unreadable
 run_hook 0
-assert_eq "corrupt state: rc 0" "0" "$ADV_RC"
-assert_eq "corrupt state: completion chain NOT invoked" "0" "$SVC_CALLS"
-assert_eq "corrupt state: quiet (degrade safe)" "" "$ADV_OUT"
-assert_not_contains "corrupt state: no crash traceback markers" "$ADV_OUT" \
+assert_eq "unreadable metadata: rc 0" "0" "$ADV_RC"
+assert_eq "unreadable metadata: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "unreadable metadata: quiet (degrade safe)" "" "$ADV_OUT"
+assert_not_contains "unreadable metadata: no crash traceback markers" "$ADV_OUT" \
     "syntax error"
+
+write_gt notoken
+run_hook 0
+assert_eq "no standing token: rc 0" "0" "$ADV_RC"
+assert_eq "no standing token: completion chain NOT invoked" "0" "$SVC_CALLS"
+assert_eq "no standing token: quiet (degrade safe)" "" "$ADV_OUT"
 
 # 5b. libraries entirely missing (broken/partial install) — silent degrade, rc 0.
 run_hook_no_libs

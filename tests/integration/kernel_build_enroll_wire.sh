@@ -81,7 +81,6 @@ CS_LOG="$TMP/cs.log"
 MARKER="$ROOT/etc/alpine-fde/build-failed"
 ENROLLED="$ROOT/etc/alpine-fde/enrolled.json"
 KEYDIR="$TMP/keys"
-ISTATE="$ROOT/etc/alpine-fde/install-state.json"
 mkdir -p "$ROOT/boot" "$ROOT/etc/alpine-fde" "$ESP/EFI/Linux" "$FAKEBIN" "$BYUUID" \
     "$KEYDIR" "$TMP/shm" "$TMP/swtpm"
 
@@ -356,38 +355,50 @@ assert_contains "T10: second build took the standing path" "$out2" "already pres
 assert_eq "T10: exactly ONE luksAddKey across both builds" "1" \
     "$(cs_count 'CALL luksAddKey')"
 
-# --- T11 (G-IL7): install state 'installed' → ensure-once SKIPS (§8.1 build row) ---
+# --- T11 (G-IL7): PROVISIONAL ground truth → ensure-once SKIPS (§8.1 build row) ---
 # Stage-1 in-chroot provisioning presents the exact trap: reachable volume,
-# ZERO tokens, SB off. The install-state gate must skip the enrollment BEFORE
-# token inspection: warn + rc 0, zero mutating calls, no enrolled.json, no
-# marker, manifest entries carrying EMPTY keyslot/token_id (bookkeeping
-# deferred to a build under a finalized install state).
+# ZERO tokens, SB off. Ground-truth gate (item 10b: no install-state.json):
+# a standing token that is NOT the finalized {PCR 7, PCR 11} — here the
+# provisional {PCR 11} seal — skips the enrollment BEFORE token mutation:
+# warn + rc 0, zero mutating calls, no enrolled.json, no marker, manifest
+# entries carrying EMPTY keyslot/token_id (bookkeeping deferred to a build
+# under a finalized ground truth).
+mk_member_with_token() { # PCRS_JSON — reset_volume + a metadata-only token import
+    # (the token must reference an EXISTING keyslot: add a stand-in sealed slot 1)
+    reset_volume
+    printf '%s' 'enroll-wire-slot1-passphrase-0123456789abcdef' >"$TMP/slot1.bin"
+    cryptsetup luksAddKey --key-slot 1 --key-file "$TMP/slot0.bin" \
+        "${KDFARGS[@]}" "$LUKS" "$TMP/slot1.bin"
+    printf '%s' "$1" >"$TMP/tok-gate.json"
+    cryptsetup token import "$LUKS" --token-id 0 --json-file "$TMP/tok-gate.json" \
+        --disable-external-tokens
+}
 KVER_D=6.15.0-1-amd64
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_D"
-printf '{\n  "schema_version": "1",\n  "state": "installed"\n}\n' >"$ISTATE"
-reset_volume
+mk_member_with_token '{"type":"systemd-tpm2","keyslots":["1"],"tpm2-pcrs":[11],"tpm2-blob":"AAEAC0RhdGE=","tpm2-pcr-bank":"sha256"}'
 rm -f "$ENROLLED" "$MARKER"
 reset_wire
 out=$(alpine-fde kernel build "$KVER_D" 2>&1)
 rc=$?
-assert_rc "T11: stage-1 build (state=installed, reachable volume, 0 tokens) rc 0" 0 $rc
+assert_rc "T11: stage-1 build (provisional token, final baseline) rc 0" 0 $rc
 assert_eq "T11: ZERO mutating calls (gate fired before token inspection)" "0" \
     "$(( $(cs_count 'CALL luksAddKey') + $(cs_count 'CALL token') ))"
-assert_contains "T11: warn names the unfinalized install state" "$out" "not finalized"
+assert_contains "T11: warn names the unfinalized trust state" "$out" "not finalized"
 assert_file_absent "T11: no enrolled.json (nothing enrolled)" "$ENROLLED"
 assert_file_absent "T11: no ADR-8 marker (skip is loud, not fatal)" "$MARKER"
-assert_eq "T11: NEW kver entry carries EMPTY keyslot (bookkeeping deferred)" "" \
+# the standing PROVISIONAL token is recorded (observed fact, ZERO mutations —
+# unlike the zero-token Stage-1 trap in T12, where bookkeeping stays empty)
+assert_eq "T11: NEW kver entry records the standing provisional keyslot" "1" \
     "$(jq -r --arg kver "$KVER_D" '.digests[] | select(.kernel_version == $kver) | .keyslot' "$M")"
-assert_eq "T11: NEW kver entry carries EMPTY token_id" "" \
+assert_eq "T11: NEW kver entry records the standing provisional token_id" "0" \
     "$(jq -r --arg kver "$KVER_D" '.digests[] | select(.kernel_version == $kver) | .token_id' "$M")"
 
 # --- T12 (G-IL7): pending baseline → the same skip ----------------------------------
-# No install-state file (legacy shape): the BASELINE half of the gate must
-# still fire when expected_pcr7 is pending (§8.1 "install state is not
-# finalized / baseline is pending").
+# The BASELINE half of the ground-truth gate: expected_pcr7 pending skips the
+# enrollment even on a zero-token container (the Stage-1 in-chroot shape).
 KVER_E=6.16.0-1-amd64
 cp "$REPO/fixtures/uki/vmlinuz" "$ROOT/boot/vmlinuz-$KVER_E"
-rm -f "$ISTATE"
+reset_volume
 jq -n '{expected_pcr7: "pending", status: "pending"}' >"$ROOT/etc/alpine-fde/baseline.json"
 reset_volume
 rm -f "$ENROLLED" "$MARKER"
@@ -404,8 +415,9 @@ assert_eq "T12: NEW kver entry carries EMPTY keyslot" "" \
 assert_eq "T12: NEW kver entry carries EMPTY token_id" "" \
     "$(jq -r --arg kver "$KVER_E" '.digests[] | select(.kernel_version == $kver) | .token_id' "$M")"
 
-# --- T13 (G-IL7): state=finalized + 0 tokens ⇒ exactly ONE enrollment ---------------
-printf '{\n  "schema_version": "1",\n  "state": "finalized"\n}\n' >"$ISTATE"
+# --- T13 (G-IL7): finalized ground truth + 0 tokens ⇒ exactly ONE enrollment --------
+# Ground truth (item 10b): the finalized anchoring IS the final baseline; a
+# container with no standing token (the sealed slot was wiped) re-enrolls.
 jq -n '{expected_pcr7: "a5f90c8c5a73ade2323ba70d2c1a8a4a5a1e6e46e08c8ad3f3c5d7c9e2f0a1b3", status: "finalized"}' \
     >"$ROOT/etc/alpine-fde/baseline.json"
 reset_volume
@@ -413,19 +425,21 @@ rm -f "$ENROLLED" "$MARKER"
 reset_wire
 alpine-fde kernel build "$KVER" >/dev/null 2>&1
 rc=$?
-assert_rc "T13: finalized install state build enrolls (rc 0)" 0 $rc
-assert_eq "T13: exactly ONE enrollment under a finalized install state" "1" \
+assert_rc "T13: finalized ground truth build enrolls (rc 0)" 0 $rc
+assert_eq "T13: exactly ONE enrollment under a finalized ground truth" "1" \
     "$(cs_count 'CALL luksAddKey')"
 assert_file_exists "T13: enrolled.json recorded" "$ENROLLED"
 
-# --- T14 (G-IL7): ABSENT install-state file ⇒ legacy behavior unchanged (T1) --------
-rm -f "$ISTATE" "$ENROLLED" "$MARKER"
+# --- T14 (G-IL7): NO baseline (not our install) ⇒ the gate passes (T1 context) ------
+# No anchoring evidence either way ⇒ the ensure-once inspection decides
+# (ground-truth residue pin: there is no state file to consult, item 10b).
+rm -f "$ROOT/etc/alpine-fde/baseline.json" "$ENROLLED" "$MARKER"
 reset_volume
 reset_wire
 alpine-fde kernel build "$KVER" >/dev/null 2>&1
 rc=$?
-assert_rc "T14: absent install-state file ⇒ legacy gate passes (enrolls)" 0 $rc
-assert_eq "T14: exactly ONE enrollment without any install-state file" "1" \
+assert_rc "T14: no baseline ⇒ gate passes (enrolls)" 0 $rc
+assert_eq "T14: exactly ONE enrollment without any baseline" "1" \
     "$(cs_count 'CALL luksAddKey')"
 
 finish

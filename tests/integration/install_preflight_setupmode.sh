@@ -239,10 +239,8 @@ assert_eq "SetupMode=1: NO MOTD banner written (G-C25, ADR-20 #4: banner path re
     "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/motd" ] && echo 1 || echo 0)"
 assert_eq "SetupMode=1: /etc/issue untouched (ADR-20 #4)" "0" \
     "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/issue" ] && echo 1 || echo 0)"
-assert_file_exists "SetupMode=1: install-state written" \
-    "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
-assert_contains "SetupMode=1: state=installed" \
-    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
+assert_eq "SetupMode=1: NO install-state.json written (item 10b)" "0" \
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json" ] && echo 1 || echo 0)"
 assert_eq "SetupMode=1: NO OsIndications write (G-C26)" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" -name 'OsIndications-*' 2>/dev/null | wc -l)"
 assert_not_contains "SetupMode=1: NO interactive disk-passphrase prompt (retired; the ceremony is the only credential seam)" "$OUT" \
@@ -269,10 +267,8 @@ assert_eq "deferred mode: the factory PK variable is UNTOUCHED" "FACTORY-PK" \
     "$(tail -c +5 "$ALPINE_FDE_EFIVARS_DIR/PK-$GUID_GLOBAL")"
 assert_eq "deferred mode: NO db/KEK variable appeared in the efivars seam (zero NVRAM writes)" "0" \
     "$(find "$ALPINE_FDE_EFIVARS_DIR" \( -name 'db-*' -o -name 'KEK-*' \) | wc -l)"
-assert_file_exists "deferred mode: install-state written" \
-    "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json"
-assert_contains "deferred mode: state=installed" \
-    "$(cat "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json")" '"installed"'
+assert_eq "deferred mode: NO install-state.json written (item 10b)" "0" \
+    "$([ -e "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/install-state.json" ] && echo 1 || echo 0)"
 rm -f "$ALPINE_FDE_EFIVARS_DIR"/PK-*
 mkvar SetupMode 1
 

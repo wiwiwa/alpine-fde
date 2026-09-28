@@ -11,7 +11,7 @@ ALPINE_FDE_FIRMWARE_LOADED=1
 
 # Self-load common.sh (info/die) — the §9.1 step-4 guest one-liner
 # `. /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll …` runs in a fresh
-# chroot shell where nothing is preloaded. Pattern: lib/install-state.sh.
+# chroot shell where nothing is preloaded. Pattern: lib/trust-state.sh.
 _is_cmd_dir=${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}
 _is_lib_dir=${_is_cmd_dir%/*}
 if [ -z "${ALPINE_FDE_COMMON_LOADED:-}" ] && [ -r "$_is_lib_dir/common.sh" ]; then

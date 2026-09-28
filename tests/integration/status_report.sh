@@ -16,8 +16,8 @@ source "$REPO/lib/common.sh"
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 # shellcheck source=../../lib/baseline.sh
 source "$REPO/lib/baseline.sh"
-# shellcheck source=../../lib/install-state.sh
-source "$REPO/lib/install-state.sh"
+# shellcheck source=../../lib/trust-state.sh
+source "$REPO/lib/trust-state.sh"
 
 T=$(mktemp -d /tmp/alpine-fde-status.XXXXXX)
 FAKEBIN=$T/bin
@@ -287,93 +287,88 @@ assert_eq "L-5: mktemp failure: status rc stays 0 (report-only contract)" "0" "$
 assert_contains "L-5: loud skip line for the LUKS2 token section" "$ST_OUT" \
     "token section skipped"
 
-# --- 8. G-IL12 (§8.1/§9.1): install-state row — PROMINENT warning while the
-# ceremony is unfinished (state: installed + resume hint at the advisory
-# alpine-fde-finalize OpenRC service), quiet line when finalized, SILENT when the
-# state file is absent (pre-state-machine installs). Report-only: rc stays 0.
-rm -f "$(istate_file)"
+# --- 8. Trust-state row (§8.1/§9.1; item 10b: install-state.json is DEAD) --------
+# The lifecycle headline is DERIVED from ground truth (lib/trust-state.sh):
+# the standing token's pcrs + the ephemeral keyslot inventory + the baseline's
+# expected_pcr7 pending-vs-digest. SILENT when nothing is derivable (no
+# baseline AND no reachable container), quiet when finalized, PROMINENT
+# warning + resume hint while provisional, loud on unrecognized shapes.
+# Report-only: rc stays 0.
 run_status
-assert_eq "install state absent: rc 0" "0" "$ST_RC"
-assert_not_contains "install state absent: no Install state section (silent)" \
-    "$ST_OUT" "== Install state"
+assert_eq "trust state (baseline final + exotic token [7]): rc 0" "0" "$ST_RC"
+assert_contains "trust section present" "$ST_OUT" "== Trust state (ground truth)"
+assert_contains "baseline anchoring: finalized digest recorded" "$ST_OUT" \
+    "baseline anchoring: finalized (expected_pcr7 recorded)"
+assert_contains "exotic token shape -> loud unrecognized warning" "$ST_OUT" \
+    "unrecognized ground-truth state"
 
-istate_write installed
+# nothing derivable (no baseline, no container) -> the section is SILENT
+mv "$(sp_baseline_file)" "$T/bl.bak"
+mv "$T/by-uuid/$UUID" "$T/by-uuid/$UUID.bak"
 run_status
-assert_eq "install state installed: rc stays 0" "0" "$ST_RC"
-assert_contains "installed: prominent warning" "$ST_OUT" \
-    "WARNING: installation is NOT finalized"
-assert_contains "installed: names the state" "$ST_OUT" "install state: installed"
-assert_contains "installed: resume hint at the first-boot service" "$ST_OUT" \
+assert_eq "nothing derivable: rc stays 0" "0" "$ST_RC"
+assert_not_contains "nothing derivable: no Trust state section" "$ST_OUT" \
+    "== Trust state"
+mv "$T/bl.bak" "$(sp_baseline_file)"
+mv "$T/by-uuid/$UUID.bak" "$T/by-uuid/$UUID"
+
+# PROVISIONAL: token [11] + the temporary ephemeral keyslot 2 standing +
+# pending baseline -> the prominent ADR-20 window warning + resume hint
+printf '%s' '{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"}},"tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"],"tpm2-pcrs":[11],"tpm2-public-key":"'"$TOK_B64"'"}}}' >"$LUKS_JSON"
+BL_PCR0=$(printf 'a%.0s' {1..64}) BL_PCR1=$(printf 'b%.0s' {1..64}) \
+    BL_PCR2=$(printf 'c%.0s' {1..64}) BL_PCR3=$(printf 'd%.0s' {1..64}) \
+    BL_PCR7=pending BL_TARGET_LUKS_UUID="$UUID" \
+    baseline_write "$(sp_baseline_file)"
+run_status
+assert_eq "provisional: rc stays 0 (report-only)" "0" "$ST_RC"
+assert_contains "provisional: prominent ADR-20 provisional-window warning" "$ST_OUT" \
+    "PROVISIONAL trust window ACTIVE"
+assert_contains "provisional: names the token pcrs" "$ST_OUT" "token pcrs: [11]"
+assert_contains "provisional: names the surviving ephemeral keyslot (keyslot 2, §7.2)" \
+    "$ST_OUT" "ephemeral install keyslot is still present (keyslot 2)"
+assert_contains "provisional: baseline anchoring pending" "$ST_OUT" \
+    "baseline anchoring: pending (install-time"
+assert_contains "provisional: resume hint at the first-boot service" "$ST_OUT" \
     "alpine-fde-finalize"
-assert_contains "installed: resume hint at the CLI" "$ST_OUT" "alpine-fde finalize"
+assert_contains "provisional: resume hint at the CLI" "$ST_OUT" "alpine-fde finalize"
+assert_eq "provisional: NO install-state.json read or written (item 10b)" "0" \
+    "$([ -e "$(sp_etc_dir)/install-state.json" ] && echo 1 || echo 0)"
 
-istate_write finalized
+# FINALIZED: token {7,11}, ephemeral purged, baseline final -> the quiet line
+printf '%s' '{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}},"tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"],"tpm2-pcrs":[7,11],"tpm2-public-key":"'"$TOK_B64"'"}}}' >"$LUKS_JSON"
+BL_PCR0=$(printf 'a%.0s' {1..64}) BL_PCR1=$(printf 'b%.0s' {1..64}) \
+    BL_PCR2=$(printf 'c%.0s' {1..64}) BL_PCR3=$(printf 'd%.0s' {1..64}) \
+    BL_PCR7=$(printf '7%.0s' {1..64}) BL_TARGET_LUKS_UUID="$UUID" \
+    baseline_write "$(sp_baseline_file)"
 run_status
-assert_eq "install state finalized: rc stays 0" "0" "$ST_RC"
-assert_contains "finalized: quiet line" "$ST_OUT" "install state: finalized"
+assert_eq "finalized: rc stays 0" "0" "$ST_RC"
+assert_contains "finalized: quiet ground-truth line" "$ST_OUT" \
+    "trust state: finalized (token {PCR 7, PCR 11}, no ephemeral keyslot)"
 assert_not_contains "finalized: no warning" "$ST_OUT" "WARNING"
 
-printf '{"schema_version": 1, "state": "garbage", "updated_at": "x"}' >"$(istate_file)"
-run_status
-assert_eq "install state garbage: rc stays 0" "0" "$ST_RC"
-assert_contains "garbage: loud unreadable-state line" "$ST_OUT" "unreadable install state"
-
-rm -f "$(istate_file)"
-run_status
-assert_not_contains "absent again: section gone" "$ST_OUT" "== Install state"
-
-# --- 9. ADR-20 provisional window (§8.4 vocabulary, §10 mid-finalization row):
-# state=provisional-booted is FIRST-CLASS (installed → provisional-booted →
-# finalized) — Stage 2 done (first boot unlocked via the provisional PCR-11-only
-# token), finalize pending. status must flag the active provisional window
-# PROMINENTLY (token provisional PCR-11-only, recovery passphrase not yet set)
-# with the `alpine-fde finalize` resume hint — never fall through to the
-# unreadable-state branch. Exercised through the ALPINE_FDE_INSTALL_STATE seam
-# against the REAL cmd_status_main (same seam install-state.sh documents).
-ISTATE_FIX=$T/install-state-fixture.json
-export ALPINE_FDE_INSTALL_STATE=$ISTATE_FIX
-
-printf '{\n  "schema_version": 1,\n  "state": "provisional-booted",\n  "updated_at": "2026-09-21T00:00:00Z"\n}\n' \
-    >"$ISTATE_FIX"
-run_status
-assert_eq "provisional-booted: rc stays 0 (report-only)" "0" "$ST_RC"
-assert_contains "provisional-booted: prominent ADR-20 provisional-window warning" \
-    "$ST_OUT" "WARNING"
-assert_contains "provisional-booted: names the state" "$ST_OUT" "provisional-booted"
-assert_contains "provisional-booted: token is provisional PCR-11-only" "$ST_OUT" "PCR 11"
-assert_contains "provisional-booted: recovery passphrase not yet set" "$ST_OUT" \
-    "recovery passphrase"
-assert_contains "provisional-booted: resume hint (§10 mid-finalization row)" "$ST_OUT" \
-    "alpine-fde finalize"
-assert_not_contains "provisional-booted: never the unreadable fallthrough" \
-    "$ST_OUT" "unreadable install state"
-
-# genuinely corrupt state file (not the documented schema at all) → the
-# fallthrough unreadable warning must KEEP working for real garbage
-printf 'garbage\x01\x02 not a state document' >"$ISTATE_FIX"
-run_status
-assert_eq "corrupt state file: rc stays 0" "0" "$ST_RC"
-assert_contains "corrupt state file: unreadable fallthrough intact" "$ST_OUT" \
-    "unreadable install state"
-
-# regression through the SAME seam: the other two first-class states unchanged
-printf '{\n  "schema_version": 1,\n  "state": "installed",\n  "updated_at": "x"\n}\n' \
-    >"$ISTATE_FIX"
-run_status
-assert_eq "installed (fixture seam): rc stays 0" "0" "$ST_RC"
-assert_contains "installed (fixture seam): prominent warning unchanged" "$ST_OUT" \
-    "WARNING: installation is NOT finalized"
-assert_contains "installed (fixture seam): resume hint unchanged" "$ST_OUT" \
-    "alpine-fde finalize"
-
-printf '{\n  "schema_version": 1,\n  "state": "finalized",\n  "updated_at": "x"\n}\n' \
-    >"$ISTATE_FIX"
-run_status
-assert_eq "finalized (fixture seam): rc stays 0" "0" "$ST_RC"
-assert_contains "finalized (fixture seam): quiet line unchanged" "$ST_OUT" \
-    "install state: finalized"
-assert_not_contains "finalized (fixture seam): no warning" "$ST_OUT" "WARNING"
-
-unset ALPINE_FDE_INSTALL_STATE
+# restore the display fixture (token pcrs [7], the I3 display shape)
+mv "$T/luks.json.good" "$LUKS_JSON" 2>/dev/null || :
+cat >"$LUKS_JSON" <<EOF
+{
+    "keyslots": {
+        "0": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "AAA" } },
+        "1": { "type": "luks2", "kdf": { "type": "argon2id", "salt": "BBB" } }
+    },
+    "tokens": {
+        "0": {
+            "type": "systemd-tpm2",
+            "keyslots": ["1"],
+            "tpm2-blob": "AAEAC0RhdGE=",
+            "tpm2-pcrs": [7],
+            "tpm2-public-key": "$TOK_B64",
+            "tpm2-public-key-pcrs": [11]
+        }
+    }
+}
+EOF
+BL_PCR0=$(printf 'a%.0s' {1..64}) BL_PCR1=$(printf 'b%.0s' {1..64}) \
+    BL_PCR2=$(printf 'c%.0s' {1..64}) BL_PCR3=$(printf 'd%.0s' {1..64}) \
+    BL_PCR7=$(printf '7%.0s' {1..64}) BL_TARGET_LUKS_UUID="$UUID" \
+    baseline_write "$(sp_baseline_file)"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))
