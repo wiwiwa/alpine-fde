@@ -243,11 +243,12 @@ export PATH="$T/stub:$PATH"
 # --- fixtures ------------------------------------------------------------------
 # hooks/ Alpine layout (G-C16): the templates install's preflight requires
 mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$ALPINE_FDE_HOOKS_DIR/udev" "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_HOOKS_DIR/profile.d"
+    "$ALPINE_FDE_HOOKS_DIR/udev" "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/conf.d" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_HOOKS_DIR/profile.d"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     mkinitfs/features.d/alpine-fde.modules udev/60-tpm.rules \
-    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    apk/triggers/alpine-fde.trigger apk/triggers/alpine-fde-snapshot.trigger \
+    conf.d/alpine-fde-snapshot openrc/alpine-fde-finalize \
     openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
     printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
     chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
@@ -983,6 +984,12 @@ assert_contains "udev blocker: mkinitfs.conf features= carries udev (the initram
 assert_file_exists "target: apk trigger shipped" "$MNT_ETC/apk/triggers/alpine-fde.trigger"
 assert_eq "target: apk trigger executable" "1" \
     "$([ -x "$MNT_ETC/apk/triggers/alpine-fde.trigger" ] && echo 1 || echo 0)"
+assert_file_exists "target: auto-snapshot apk trigger shipped (item 9)" \
+    "$MNT_ETC/apk/triggers/alpine-fde-snapshot.trigger"
+assert_eq "target: auto-snapshot apk trigger executable" "1" \
+    "$([ -x "$MNT_ETC/apk/triggers/alpine-fde-snapshot.trigger" ] && echo 1 || echo 0)"
+assert_file_exists "target: auto-snapshot retention conf shipped (item 9)" \
+    "$MNT_ETC/conf.d/alpine-fde-snapshot"
 assert_file_exists "target: finalize advisory shipped to /etc/init.d" \
     "$MNT_ETC/init.d/alpine-fde-finalize"
 assert_eq "target: finalize advisory executable" "1" \

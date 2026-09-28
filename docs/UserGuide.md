@@ -192,7 +192,7 @@ Everything runs through a single tool with **7 verbs**: `./bin/alpine-fde <comma
 | `doctor` | Checks the environment before an install (missing packages, TPM presence, Secure Boot state), and the trust chain afterwards. | Before installing on a new machine, and as the first sanity check when something looks wrong. |
 | `kernel` | Manages the signed boot images per kernel: `kernel build` / `kernel remove` / `kernel prune`, plus `kernel next` to boot a retained kernel once, on the next reboot only. Build/remove run automatically on kernel upgrades; you run them manually when rebuilding boot images during recovery ([Runbook 1](#runbook-1-broken-cache-ssd--esp-rebuild-hybrid-bcache-setup), [Runbook 2](#runbook-2-failed-drive-replacement-in-btrfs-raid1)) or for custom kernels. `kernel next` — see [Booting Alternative or Retained Kernels](#booting-alternative-or-retained-kernels). | Only in recovery, rollback-testing, or custom-kernel scenarios. |
 
-**Internal (machine tier):** `provision`, `pcrsign`, and `finalize` remain callable for human recovery but are NOT part of the daily operator surface (the internal automation boundary is defined in [Architecture §8.1](Architecture.md#81-alpine-fde-cli--the-user-facing-tool)). There is no `pre-upgrade` verb (see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback)).
+**Internal (machine tier):** `provision`, `pcrsign`, and `finalize` remain callable for human recovery but are NOT part of the daily operator surface (the internal automation boundary is defined in [Architecture §8.1](Architecture.md#81-alpine-fde-cli--the-user-facing-tool)). There is no `pre-upgrade` verb — pre-upgrade snapshots are AUTOMATIC (the apk trigger; see [Btrfs Snapshots & Userspace Rollback](#btrfs-snapshots--userspace-rollback)).
 
 > [!NOTE]
 > **Flags and exit codes:** Global flags (`--disk`, `--bcache`, `--swap`, `--yes`, `--root`, `--esp`, `--fs`) must come **before** the subcommand — e.g. `alpine-fde --root /mnt audit --accept`, as used in the runbooks below. `--version` and `--help` are always available. Exit codes are stable and safe to rely on in scripts: `0` success, `1` drift or check failed, `2` usage error, `3` not implemented, `64` fail-closed error.
@@ -221,14 +221,16 @@ Alpine package upgrades (`apk upgrade`) that install or update a kernel are hand
 3. Next boot: boots into the new kernel **100% passwordless**. No TPM re-enrollment is required.
 
 ### Btrfs Snapshots & Userspace Rollback
-A read-only snapshot of the root taken before major system changes gives you an instant, passwordless rollback path. Take one before experiments or risky upgrades (it is one command; snapshots land under `/.snapshots/<name>` on the `@snapshots` subvolume):
+Automatic pre-upgrade snapshots ship enabled: at **every `apk` transaction** (upgrades AND additions — a package install can touch the boot chain), a read-only snapshot of the root (`@`) is taken into `/.snapshots/alpine-fde-auto-<UTC-timestamp>` by the apk trigger installed at `/etc/apk/triggers/alpine-fde-snapshot.trigger`. The keep-N retention deletes the oldest automatic snapshots beyond **5** (change it in `/etc/conf.d/alpine-fde-snapshot`, or export `ALPINE_FDE_SNAPSHOT_KEEP`); manual snapshots are never pruned.
+
+> [!NOTE]
+> **Snapshot timing:** apk triggers run *after* a transaction commits, so each snapshot captures the just-completed state — which is exactly the rollback point for the **next** transaction. To undo the most recent `apk` transaction, restore the **second-newest** `alpine-fde-auto-*` snapshot (the newest is the broken state itself).
+
+Before experiments or other risky changes, you can still take one yourself (it is one command; manual snapshots land under `/.snapshots/<name>` on the `@snapshots` subvolume and are never pruned automatically):
 
 ```sh
 btrfs subvolume snapshot -r / /.snapshots/pre-upgrade-$(date +%Y%m%d-%H%M%S)
 ```
-
-> [!NOTE]
-> **Automatic pre-upgrade snapshots are a design commitment, not a shipped behavior yet**: the snapshot machinery exists (the `@snapshots` subvolume is created at install; the snapshot flow is specified in [Architecture §4](Architecture.md#4-disk-layout)), but no hook currently takes a snapshot before `apk upgrade`. Until that lands, take the snapshot yourself before major changes.
 
 If an upgrade breaks userspace, restore the snapshot:
 ```sh
@@ -237,13 +239,13 @@ mount -o subvolid=5 /dev/mapper/root-crypt /mnt
 
 # Move broken root subvolume and restore snapshot to @
 mv /mnt/@ /mnt/@broken
-btrfs subvolume snapshot /mnt/@snapshots/<timestamp> /mnt/@
+btrfs subvolume snapshot /mnt/@snapshots/<alpine-fde-auto-...-or-timestamp> /mnt/@
 
 # Unmount and reboot
 umount /mnt
 reboot
 ```
-*(Restoring a snapshot changes only filesystem contents — it requires no re-signing and no re-enrollment, so rollback boots stay passwordless).*
+*(Restoring a snapshot changes only filesystem contents — it requires no re-signing and no re-enrollment, so rollback boots stay passwordless). Automatic snapshots apply to btrfs roots only (the §4 default layout); an ext4 root (`--fs ext4`) simply skips them.*
 
 ### Booting Alternative or Retained Kernels
 Up to 3 kernels are retained on the ESP. To boot a previous kernel one time:

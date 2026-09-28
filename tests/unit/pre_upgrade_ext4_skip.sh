@@ -127,7 +127,10 @@ PU_OUT=$(cmd_pre_upgrade_main --help 2>&1)
 PU_RC=$?
 assert_eq "--help -> rc 0" "0" "$PU_RC"
 assert_contains "help names the snapshot path" "$PU_OUT" "/.snapshots/<"
-assert_contains "help carries the retention note" "$PU_OUT" "never pruned automatically"
+assert_contains "help carries the retention note (manual snapshots never pruned)" "$PU_OUT" "This manual command never
+prunes"
 assert_contains "help points at the delete verb" "$PU_OUT" "btrfs subvolume delete"
+assert_contains "help names the AUTOMATIC door (item 9: the apk trigger keeps alpine-fde-auto-*)" \
+    "$PU_OUT" "alpine-fde-auto-*"
 
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

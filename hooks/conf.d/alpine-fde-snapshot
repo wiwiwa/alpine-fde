@@ -1,0 +1,16 @@
+# /etc/conf.d/alpine-fde-snapshot — retention for the automatic pre-upgrade
+# snapshots (user decision item 9). The apk trigger
+# (/etc/apk/triggers/alpine-fde-snapshot.trigger) keeps the newest N
+# `alpine-fde-auto-*` read-only snapshots of @ under /.snapshots and deletes
+# the older excess at every apk transaction.
+#
+# Precedence: the ALPINE_FDE_SNAPSHOT_KEEP environment variable overrides
+# this file; the built-in default is 5. Manual snapshots (any other name)
+# are never pruned.
+#
+# Note the semantics: apk triggers run AFTER a transaction commits, so each
+# snapshot is the rollback point for the NEXT transaction — undo the most
+# recent transaction by restoring the second-newest alpine-fde-auto-*
+# snapshot (see docs/UserGuide.md §4, Btrfs Snapshots & Userspace Rollback).
+
+ALPINE_FDE_SNAPSHOT_KEEP=5

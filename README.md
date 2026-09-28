@@ -84,7 +84,7 @@ For the full step-by-step walkthrough of install and first boot, see the [User G
 | Boot the machine | Unlocks automatically. No password. |
 | Normal boot / login | Oneshot `alpine-fde-audit` checks firmware baseline during boot; login profile alerts if drift is detected. |
 | `apk upgrade` (new kernel) | The upgrade prompts for your release key passphrase, then rebuilds and re-signs the boot image and updates the TPM policy. Next boot: still automatic. |
-| Before major upgrades / experiments | Take a read-only Btrfs snapshot of `@` into `/.snapshots` for instant rollback — one command, no reinstall (see the [User Guide](docs/UserGuide.md#btrfs-snapshots--userspace-rollback)). |
+| Any `apk` upgrade / add | An automatic read-only Btrfs snapshot of `@` lands in `/.snapshots` (keep 5) — an instant rollback point at every package transaction, no reinstall (see the [User Guide](docs/UserGuide.md#btrfs-snapshots--userspace-rollback)). Before experiments, you can still take one yourself — one command. |
 | Machine won't unlock after a firmware/BIOS update or a Secure Boot key change | You're asked for the **recovery passphrase** — but the console first tells you WHY (one reason line per refusal class: firmware/Secure Boot change, foreign/unsigned boot image, or absent TPM/missing seal) and reminds you: `after boot, run: audit, then reseal to restore passwordless unlock`. That's by design; see the [User Guide, Runbook 3](docs/UserGuide.md#runbook-3-pcr-7-drift-after-firmwarebios-update). |
 | Want to boot the previous kernel | Pick it in the boot menu (`alpine-fde kernel next <entry>`) — still passwordless for the retained kernels. |
 | Suspect the passphrase leaked | `alpine-fde passwd` — new passphrase, no re-encryption. |
