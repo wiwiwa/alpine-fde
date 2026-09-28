@@ -58,6 +58,8 @@
 #   no-j-validation | no-phase-hoist | frag-index-collision | no-vacuous-guard
 #   | timeout-as-fail | no-latefork-reprotect | jobs-field-dropped
 #   | frag-dropped | no-dup-reject | stages-dropped
+#   | no-trap-shutdown (item 20 bug 2: run E's orphan assertion bites)
+#   | slot-log-clobber (item 20 bug 1: run F's per-slot capture asserts bite)
 # Each name must make this file exit nonzero. Empty/unset (default) = the
 # verbatim runner = GREEN.
 
@@ -148,6 +150,19 @@ apply_mutation() {
         # Drop the additive stages key from every fragment: the staged-row
         # assertions must bite (Step timing contract point 6).
         stages-dropped)        sed -i 's/, "stages": %s}//' "$f" ;;
+        # Item 20, bug 2 (RED for run E): revert the INT/TERM traps to the old
+        # shape — final prune fires IMMEDIATELY while the background workers
+        # are still alive; no worker group is ever killed. Run E's orphan
+        # assertion must fail (stub scenarios survive the runner for seconds).
+        no-trap-shutdown)      sed -i "s/^trap '_registry_on_signal INT' INT\$/trap '_registry_final_pass; trap - INT; kill -INT \$\$' INT/" "$f"
+                               sed -i "s/^trap '_registry_on_signal TERM' TERM\$/trap '_registry_final_pass; trap - TERM; kill -TERM \$\$' TERM/" "$f" ;;
+        # Item 20, bug 1 (RED for run F): revert the three id-clobber defenses
+        # at once — per-id capture naming (twin workers interleave in one
+        # file), the CLI duplicate rejection, and the selection-uniqueness
+        # assertion. Run F's per-slot-capture assertions must fail.
+        slot-log-clobber)      sed -i 's|out_log="$RESULTS_DIR/$idx.$id.out"|out_log="$RESULTS_DIR/$id.out"|' "$f"
+                               sed -i 's/^_reject_duplicate_ids$/: # mutation: duplicate-id rejection disabled/' "$f"
+                               sed -i 's/^_assert_unique_selection$/: # mutation: selection-uniqueness disabled/' "$f" ;;
         *) echo "run_e2e_parallel_contract: unknown mutation '$MUT'" >&2; exit 95 ;;
     esac
 }
@@ -235,6 +250,7 @@ rc=0
 case "$kind" in
     pass)     echo "ok 1 - stub $id" ;;
     slowpass) sleep "${PAR_CONTRACT_SLOW:-3}"; echo "ok 1 - stub $id" ;;
+    sleepy)   echo "stub $id instance $$"; sleep "${PAR_CONTRACT_SLOW:-25}"; echo "ok 1 - stub $id" ;;
     staged)   echo "# stage snap: done 1s"; echo "# stage build: done 2s"; echo "ok 1 - stub $id (staged)" ;;
     timeout)  sleep "$(( ${PAR_CONTRACT_SLOW:-3} + 2 ))"; rc=124 ;;
     fail)     echo "not ok 1 - stub $id blew up"; rc=3 ;;
@@ -537,6 +553,105 @@ assert_not_contains "run D: no worker was ever forked for a removed id" "$ORDER_
 assert_contains "run D: the registered id (s90) DID run" "$ORDER_D" "begin s90"
 assert_contains "run D: the stderr names every unknown id" "$(cat "$CTL_D/err" 2>/dev/null)" \
     "unknown scenario id: s03"
+
+# --- part 6 (item 20, bug 2): trap-safe worker shutdown — run E --------------------
+# -j 2 over two SLEEPY scenarios (25 s each): once BOTH workers are mid-run,
+# the registry is SIGINT-ed. GREEN: the INT trap shuts the worker set down
+# (TERM to each worker's process group — set -m made every worker a group
+# leader, so the scenario bash AND its descendants die), waits, prunes, and
+# re-raises — rc 130 — and NO stub scenario process survives the runner.
+# RED (no-trap-shutdown): the old trap shape prunes and dies instantly while
+# the two stub scenarios keep sleeping as orphans for ~25 s — the orphan
+# assertion bites. Hermetic: the stubs live in the sandbox, never touch the
+# real .runs, and the whole run is bounded (~30 s worst case GREEN).
+SBX_E="$SBX_ROOT/e"
+CTL_E="$SBX_E/ctl"
+build_sandbox "$SBX_E"
+export_kinds s19=sleepy s04=sleepy
+# `set -m` here is load-bearing: without job control, a bash BACKGROUND job's
+# SIGINT disposition is SIG_IGN-at-entry, and a signal ignored on entry can be
+# neither trapped nor handled — the runner would sail through the kill -INT
+# below and exit 0. With job control the background registry runs with a
+# trap-able INT, exactly like the real foreground `tests/run-e2e.sh -j ...`
+# invocation a Ctrl-C interrupts.
+set -m
+(
+    cd "$SBX_E" || exit 97
+    export PAR_CONTRACT_DIR="$SBX_E/ctl"
+    export PAR_CONTRACT_STATE="$SBX_E/state"
+    export PAR_CONTRACT_RUNS="$SBX_E/e2e/.runs"
+    export PAR_CONTRACT_SLOW=25
+    export TMPDIR="$SBX_E/tmp"
+    export ALPINE_FDE_E2E_TMP_MIN_FREE_MB=512
+    exec bash ./run-e2e.sh -j 2 s19 s04
+) >"$CTL_E/out" 2>"$CTL_E/err" &
+RP_E=$!
+_e_begins=0
+for _e_i in $(seq 1 60); do
+    _e_begins=$(grep -c '^begin ' "$CTL_E/order.log" 2>/dev/null || true)
+    [[ "${_e_begins:-0}" -ge 2 ]] && break
+    kill -0 "$RP_E" 2>/dev/null || break
+    sleep 1
+done
+unset _e_i
+assert_eq "run E: both sleepy workers began before the signal" "y" \
+    "$([[ "${_e_begins:-0}" -ge 2 ]] && echo y || echo n)"
+kill -INT "$RP_E" 2>/dev/null
+wait "$RP_E" 2>/dev/null
+E_RC=$?
+set +m
+assert_eq "run E: SIGINT-ed registry re-raises (exit 130)" "130" "$E_RC"
+_e_orphans=y
+for _e_i in $(seq 1 12); do
+    sleep 1
+    pgrep -f "bash $SBX_E/e2e/.*\.sh" >/dev/null 2>&1 || { _e_orphans=n; break; }
+done
+unset _e_i
+assert_eq "run E: NO worker scenario outlives the registry (trap-safe shutdown — the INT/TERM prune never orphans a boot)" \
+    "n" "$_e_orphans"
+if (( E_RC == 0 )); then
+    echo "# run E diagnostics: out:"; sed 's/^/#   /' "$CTL_E/out" | head -10
+    echo "# run E diagnostics: err:"; sed 's/^/#   /' "$CTL_E/err" | head -10
+fi
+
+# --- part 7 (item 20, bug 1): per-slot captures + twin-boot refusal — run F ------
+# (a) Distinct ids under -j 2: each worker's captured output and stderr land in
+#     its OWN per-slot file (index-keyed), each carrying exactly ONE instance
+#     marker — a per-id naming scheme would clobber twins AND misname peers.
+# (b) Duplicate ids on the command line: refused at the parse gate (exit 64)
+#     before anything forks — the twin-boot clobber shape is unreachable.
+# RED (slot-log-clobber): (a)'s per-slot files don't exist (per-id naming
+# reverted) and (b) forks twins instead of refusing.
+SBX_F="$SBX_ROOT/f"
+CTL_F="$SBX_F/ctl"
+build_sandbox "$SBX_F"
+export_kinds s20=sleepy s21=vacuous
+PAR_CONTRACT_SLOW=1 run_registry "$SBX_F" "$CTL_F/out" "$CTL_F/err" -j 2 s20 s21
+assert_eq "run F(a) (-j 2, distinct ids, per-slot captures): runner exit 1 (vacuous s21 counted as failure)" "1" "$?"
+assert_contains "run F(a): the worker's captured stderr was replayed (slot capture, then one serial replay)" "$(cat "$CTL_F/err" 2>/dev/null)" \
+    "ZERO assertions"
+F1_SLOTDIR=$(ls -d "$SBX_F/e2e/.runs/"results-*.json.dir 2>/dev/null | head -1)
+assert_file_exists "run F(a): worker 0's per-slot capture (0.s20.out)" "$F1_SLOTDIR/0.s20.out"
+assert_file_exists "run F(a): worker 1's per-slot capture (1.s21.out)" "$F1_SLOTDIR/1.s21.out"
+assert_eq "run F(a): each per-slot capture carries exactly ONE scenario instance (no clobber)" "1" \
+    "$(grep -c 'instance' "$F1_SLOTDIR/0.s20.out" 2>/dev/null | tr -d ' ')"
+_f_nonslot=0
+for _f in "$F1_SLOTDIR"/*; do
+    [[ -e "$_f" ]] || continue
+    case "${_f##*/}" in
+        [0-9]*.*) : ;;          # "<index>.<id>.<ext>" — per-slot shape
+        *) _f_nonslot=$((_f_nonslot + 1)) ;;
+    esac
+done
+unset _f
+assert_eq "run F(a): captures are per-slot named, never bare per-id" "0" "$_f_nonslot"
+ORDER_F_LINES=$(wc -l <"$CTL_F/order.log" 2>/dev/null || echo 0)
+run_registry "$SBX_F" "$CTL_F/out2" "$CTL_F/err2" -j 2 s20 s20
+assert_eq "run F(b): duplicate ids refused at the parse gate (exit 64, nothing forked)" "64" "$?"
+assert_contains "run F(b): the refusal names the duplicate id" "$(cat "$CTL_F/err2" 2>/dev/null)" \
+    "duplicate scenario id"
+assert_eq "run F(b): no twin boots forked (order log unchanged by the refused run)" "$ORDER_F_LINES" \
+    "$(wc -l <"$CTL_F/order.log" 2>/dev/null || echo 0)"
 
 # --- summary -----------------------------------------------------------------------
 TOTAL=$((TESTS_PASS + TESTS_FAIL))

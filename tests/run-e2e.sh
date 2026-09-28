@@ -152,8 +152,50 @@ _registry_tmpdir_teardown() {
 #      top of layer 1 this is the backstop for abnormal exits and legacy
 #      blob-laden dirs.
 _registry_pruned=0
+# Parallel worker bookkeeping is declared BEFORE the signal traps: a SIGINT
+# arriving before the parallel phase must find the maps defined (the
+# trap-safe shutdown reads them) rather than tripping `set -u`.
+declare -A PAR_IDX=() PAR_FRAG=() PAR_ST=()
 _prune_runs_quiet() {
     bash "$TESTS/lib/harness-cleanup.sh" prune-runs 2>/dev/null || true
+}
+# Item 20, trap-safe shutdown (-j4 registry report, bug 2): the old INT/TERM
+# traps ran the final prune IMMEDIATELY while the background workers were
+# still alive — orphaning every worker mid-boot (its qemu/swtpm/bridge set
+# outlives the registry for hours) AND pruning .runs underneath them. The
+# shutdown path now (1) TERMs each worker's PROCESS GROUP (set -m makes every
+# worker fork a group leader, so the scenario bash + its qemu/swtpm/bridge/
+# watchdog descendants die with it — a bare TERM to the subshell would orphan
+# the whole scenario tree), (2) KILLs any survivor after a grace window,
+# (3) WAITs for every worker pid (blocking, exact — child identity, no pid
+# reuse ambiguity), and ONLY THEN lets _registry_final_pass prune. Workers
+# that already finished are skipped by the PAR map draining.
+_par_shutdown_done=0
+_workers_shutdown() {
+    local pid
+    (( ${#PAR_IDX[@]} > 0 )) || return 0
+    ((_par_shutdown_done)) && return 0
+    _par_shutdown_done=1
+    echo "run-e2e: shutting down ${#PAR_IDX[@]} parallel worker(s) before exit" >&2
+    for pid in "${!PAR_IDX[@]}"; do
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 5
+    for pid in "${!PAR_IDX[@]}"; do
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+    for pid in "${!PAR_IDX[@]}"; do
+        rm -f "${PAR_FRAG[$pid]}.done"
+    done
+    PAR_IDX=()
+    PAR_FRAG=()
+}
+_registry_on_signal() {
+    _workers_shutdown
+    _registry_final_pass
+    trap - INT TERM
+    kill -"$1" $$
 }
 _registry_final_pass() {
     # Once-only (EXIT + INT/TERM can both fire): the in-flight guard makes the
@@ -164,8 +206,8 @@ _registry_final_pass() {
     _registry_tmpdir_teardown
 }
 trap '_registry_final_pass' EXIT
-trap '_registry_final_pass; trap - INT; kill -INT $$' INT
-trap '_registry_final_pass; trap - TERM; kill -TERM $$' TERM
+trap '_registry_on_signal INT' INT
+trap '_registry_on_signal TERM' TERM
 _registry_tmpdir_setup() {
     local free cand
     if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
@@ -377,8 +419,10 @@ _protect_add() {   # _protect_add <dir> — append to the colon-separated set
 # newest by mtime — with N workers the N active dirs are the newest.
 _protect_all_runs() {
     local d
+    _protect_add "$RESULTS_DIR"   # item 20: the runner's own capture dir (added explicitly; skipped below as a non-peer)
     for d in "$RUNS"/*/; do
         [[ -d "$d" ]] || continue
+        [[ "${d%/}" == "$RESULTS_DIR" ]] && continue
         _protect_add "${d%/}"
     done
 }
@@ -400,10 +444,37 @@ if ((${#REQUESTED[@]} == 0)); then
     mapfile -t REQUESTED < <(awk -F '\t' '$3 == "ready" && $1 ~ /^s[0-9][0-9][a-z]?$/ {print $1}' <<<"$REGISTRY")
 fi
 
+# Item 20, id-uniqueness assertion at registry start (bug 1): duplicate ids in
+# the SELECTION — not just on the command line (the parse gate rejects those) —
+# would fork twin boots sharing one output capture under -j and double-count
+# rows. The CLI gate covers operator misuse; this covers a corrupted/duplicated
+# registry table or a future selection change: refuse loudly (internal-error
+# class, exit 70) before anything forks.
+_assert_unique_selection() {
+    local -A _sel_seen=()
+    local _sel_id
+    for _sel_id in "${REQUESTED[@]}"; do
+        if [[ -n "${_sel_seen[$_sel_id]:-}" ]]; then
+            echo "run-e2e: duplicate scenario id '$_sel_id' in the selection (registry table or selection bug) — refusing to fork twin boots" >&2
+            exit 70
+        fi
+        _sel_seen[$_sel_id]=1
+    done
+}
+_assert_unique_selection
+
 # --- run --------------------------------------------------------------------------
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 # IN-01: 1-second timestamps collide under concurrent invocations — mktemp suffix
 RESULTS=$(mktemp "$RUNS/results-$TS.XXXXXX.json")
+# Item 20, protect-list hygiene (bug 3): the runner's own capture dir lives
+# UNDER .runs (next to the scenarios' dirs it must never see pruned), so it is
+# added to ALPINE_FDE_PROTECT_DIRS EXPLICITLY here — _protect_all_runs skips
+# it in its glob (it is not a peer rundir) but the explicit entry keeps the
+# dir safe even for code paths that walk the protect set directly.
+RESULTS_DIR="$RESULTS.dir"
+mkdir -p "$RESULTS_DIR"
+_protect_add "$RESULTS_DIR"
 FAILED=0
 RAN=0
 
@@ -497,9 +568,21 @@ _run_one() {
     # registry would then block in anon_pipe_read forever waiting for an EOF
     # that never comes (observed live: registry stuck after s19 2026-09-22).
     # A file has no EOF semantics; we read it after the scenario settles.
-    out_log="$RESULTS.dir/$id.out"
-    mkdir -p "$RESULTS.dir"
-    timeout --kill-after=30 "$SCENARIO_BUDGET" bash "$script" >"$out_log" 2>&1
+    # Item 20 (bug 1): unique PER-SLOT log path — keyed by the requested
+    # INDEX, not the id. A per-id path would silently clobber if the same id
+    # ever ran twice (under -j both workers would interleave in one file — the
+    # twin-boot clobber class; the CLI parse gate + the selection-uniqueness
+    # assertion above make this impossible today, the slot key makes it
+    # impossible forever). The scenario's captured output still lands in
+    # "${frag}.log" (the aggregation path, unchanged).
+    out_log="$RESULTS_DIR/$idx.$id.out"
+    mkdir -p "$RESULTS_DIR"
+    # --foreground (item 20, bug 2): WITHOUT it timeout(1) puts the scenario in
+    # its OWN process group — a trap-safe worker-group shutdown would then kill
+    # the worker + timeout but orphan the scenario bash below it. With it the
+    # whole scenario tree stays in the worker's group, so the shutdown's group
+    # TERM/KILL reaches everyone.
+    timeout --foreground --kill-after=30 "$SCENARIO_BUDGET" bash "$script" >"$out_log" 2>&1
     rc=$?
     out=$(cat "$out_log" 2>/dev/null)
     if (( rc == 124 )); then
@@ -567,9 +650,17 @@ _run_one() {
 # .runs prune. Called on completion order in parallel mode; the final JSON
 # table below is REQUESTED-ordered.
 _print_done() {
-    local frag="${FRAG[$1]}"
+    local frag="${FRAG[$1]}" idx="$1"
     cat "${frag}.log"
     echo "== ${REQUESTED[$1]}: $(_frag_field status "$frag") ($(_frag_field seconds "$frag")s)"
+    # Item 20 (bug 5): the worker's captured stderr (its own slot file, never
+    # interleaved with the peers' while both run) replays here, serially and
+    # in completion order, on the SAME stderr channel the sequential path uses
+    # for diagnostics — the "loud per-scenario diagnostics" contract is
+    # preserved for the parallel path too.
+    if [[ -s "$RESULTS_DIR/$idx.${REQUESTED[$idx]}.err" ]]; then
+        cat "$RESULTS_DIR/$idx.${REQUESTED[$idx]}.err" >&2
+    fi
     _prune_runs_quiet   # in-flight guard in harness-cleanup.sh spares peers
 }
 
@@ -583,21 +674,44 @@ _run_seq() {
     _print_done "$idx"
 }
 
-# Parallel phase bookkeeping (pid -> requested-index / fragment)
-declare -A PAR_IDX=() PAR_FRAG=()
+# Parallel phase bookkeeping (pid -> requested-index / fragment; declared
+# with PAR_ST before the traps, above).
 
-# _par_reap_one — block until SOME worker exits, then print its result
-# (completion order). Non-interactive bash reaps background children as they
-# die, so `kill -0` going stale is the done-signal.
+# Item 20 (bug 4): reap via the worker's DONE-FLAG file, not `kill -0`.
+# `kill -0 $pid` is PID-identity-blind: after a worker exits and bash reaps
+# it, the pid can be RECYCLED by an unrelated process, `kill -0` succeeds
+# forever, and the reap loop stalls with finished scenarios unreported. The
+# worker now touches "<frag>.done" as its last act; the flag's EXISTENCE is
+# the done-signal, and `wait "$pid"` (exact child identity, immune to reuse)
+# does the reaping. A worker that died WITHOUT its flag (killed, ENOSPC) is
+# caught by the fallback: /proc start-time identity (field 22) guards the
+# kill -0 probe — a recycled pid has a different start time and is never
+# mistaken for the worker (the same discipline s20's watchdog uses).
+_par_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 _par_reap_one() {
-    local pid idx frag
+    local pid idx frag st
     while :; do
         for pid in "${!PAR_IDX[@]}"; do
-            if ! kill -0 "$pid" 2>/dev/null; then
+            idx=${PAR_IDX[$pid]}
+            frag=${PAR_FRAG[$pid]}
+            if [[ -e "$frag.done" ]]; then
+                wait "$pid" 2>/dev/null
+                unset "PAR_IDX[$pid]" "PAR_FRAG[$pid]" "PAR_ST[$pid]"
+                rm -f "$frag.done"
+                _print_done "$idx"
+                return 0
+            fi
+        done
+        for pid in "${!PAR_IDX[@]}"; do
+            st=${PAR_ST[$pid]:-}
+            if [[ -z "$st" || "$st" != "$(_par_starttime "$pid")" ]]; then
+                # this pid is no longer the worker we forked (exited + reaped,
+                # or recycled): reap by identity and move on
                 wait "$pid" 2>/dev/null
                 idx=${PAR_IDX[$pid]}
                 frag=${PAR_FRAG[$pid]}
-                unset "PAR_IDX[$pid]" "PAR_FRAG[$pid]"
+                unset "PAR_IDX[$pid]" "PAR_FRAG[$pid]" "PAR_ST[$pid]"
+                rm -f "$frag.done"
                 _print_done "$idx"
                 return 0
             fi
@@ -620,6 +734,11 @@ else
     # from it); every other requested scenario is an independent state
     # consumer (it snapshots its inputs at start) and may run in parallel up
     # to JOBS.
+    # Item 20 (bug 2): `set -m` makes every worker fork its own PROCESS GROUP
+    # (worker pid == pgid) — the trap-safe shutdown (_workers_shutdown) can
+    # then kill the scenario bash TOGETHER WITH its qemu/swtpm/bridge/
+    # watchdog descendants, instead of orphaning the whole tree.
+    set -m
     ORDER_SEQ=()
     ORDER_PAR=()
     for _canon in s00 s00b s01c s15c; do
@@ -649,15 +768,23 @@ else
         _id=${REQUESTED[$_i]}
         _script=$(_script_for "$_id")
         [[ -n "$_script" ]] && echo "== $_id: running ($_script)"
-        ( _run_one "$_i" "$_id" ) &
+        # Item 20 (bug 1+5): the worker's STDERR is captured to its OWN slot
+        # file (never interleaved on the registry's stderr with the other
+        # workers'), and its last act is touching the DONE-FLAG the reaper
+        # waits for. _print_done replays the slot stderr after the scenario
+        # output, so the diagnostics stay on the record in completion order.
+        ( _run_one "$_i" "$_id"; _rc=$?; : >"${FRAG[$_i]}.done"; exit "$_rc" ) \
+            2>"$RESULTS_DIR/$_i.$_id.err" &
         _pid=$!
         PAR_IDX[$_pid]=$_i
         PAR_FRAG[$_pid]="${FRAG[$_i]}"
+        PAR_ST[$_pid]=$(_par_starttime "$_pid")
     done
     unset _i _id _script _pid
     while ((${#PAR_IDX[@]} > 0)); do
         _par_reap_one
     done
+    set +m
 fi
 
 # --- G-T11b artifact scan over what this invocation BUILT -------------------------
@@ -738,7 +865,11 @@ fi
 
 # Fragments + captured scenario output are intermediates: the durable artifacts
 # are the per-scenario console.log in each rundir and the aggregated $RESULTS.
-rm -f "${FRAG[@]}" "${FRAG[@]/%.json/.json.log}"
+# (Item 20: the per-slot .out captures keep their historical on-disk lifetime —
+# same as the pre-slot .out files; the worker .err captures and any unreaped
+# .done reaper flags are runner-internal and go here.)
+rm -f "${FRAG[@]}" "${FRAG[@]/%.json/.json.log}" \
+    "$RESULTS_DIR"/*.err "$RESULTS_DIR"/*.done 2>/dev/null || true
 
 echo "# results: $RESULTS"
 if ((FAILED > 0)); then
