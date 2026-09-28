@@ -602,10 +602,10 @@ assert_eq "reset: the WHOLE reset block precedes partitioning (a re-run can cont
 # emitted ash guest script
 assert_contains "reset: recursive umount is runtime-guarded + no-op-safe (mountpoint probe, warn branch, || : tail; -R primary teardown, item 26d)" "$INS_OUT" \
     "if mountpoint -q /mnt 2>/dev/null; then umount -R /mnt && echo 'alpine-fde: info: reset: recursively unmounted stale target tree /mnt' || echo 'alpine-fde: warn: reset: could not recursively unmount stale target tree /mnt'; fi || :"
-assert_contains "reset: status record guard probes mounts AND mapper nodes AND live bcache sets" "$INS_OUT" \
-    "if mountpoint -q /mnt 2>/dev/null || ls /dev/mapper/root[0-9]* >/dev/null 2>&1 || [ -e /dev/mapper/root-crypt ] || ls /sys/fs/bcache/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected"
-assert_contains "reset: mapper loop globs stale rootN + root-crypt, name-stripped, existence-guarded" "$INS_OUT" \
-    'for m in /dev/mapper/root[0-9]* /dev/mapper/root-crypt; do [ -e "$m" ] || continue; cryptsetup close "${m#/dev/mapper/}"'
+assert_contains "reset: status record guard probes mounts AND mapper nodes (incl. the --swap mapper) AND live bcache sets" "$INS_OUT" \
+    "if mountpoint -q /mnt 2>/dev/null || ls /dev/mapper/root[0-9]* >/dev/null 2>&1 || [ -e /dev/mapper/root-crypt ] || [ -e /dev/mapper/swap ] || ls /sys/fs/bcache/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected"
+assert_contains "reset: mapper loop globs stale rootN + root-crypt + swap, name-stripped, existence-guarded" "$INS_OUT" \
+    'for m in /dev/mapper/root[0-9]* /dev/mapper/root-crypt /dev/mapper/swap; do [ -e "$m" ] || continue; cryptsetup close "${m#/dev/mapper/}"'
 assert_contains "reset: mapper close carries the warn branch + || : no-op tail" "$INS_OUT" \
     "could not close stale mapper"
 # live bcache sets from the failed attempt MUST be stopped in the reset block
@@ -979,6 +979,99 @@ assert_contains "esp: default stays /efi (fstab)" "$INS_OUT" \
 assert_contains "esp: default stays /efi (ESP_PATH)" "$INS_OUT" "ESP_PATH=/efi"
 assert_contains "esp: default stays /efi (enrollment ESP_DIR)" "$INS_OUT" \
     "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
+
+# --- 9d. ADR-7 amended (task 4): `install --swap [SIZE]` — the EPHEMERAL -------
+#         encrypted swap partition. Pins: LAST partition on the primary disk,
+#         default 4G, plan-level records (sfdisk, fstab, conf.d/dmcrypt,
+#         rc-update, cryptsetup-openrc), crypttab NEVER learns the swap (the
+#         initramfs crypttab is spliced from /etc/crypttab), and no-swap
+#         layouts stay byte-for-byte unchanged.
+run_install --disk "$FAKEDISK" --swap
+assert_eq "swap: --swap (bare) dry-run rc 0" "0" "$INS_RC"
+assert_contains "swap: plan info names the default size" "$INS_OUT" "swap=4G"
+SWAP_SFD=$(grep -F 'sfdisk' <<<"$INS_OUT" | grep -F 'name="swap"')
+assert_contains "swap: sfdisk record carries the ephemeral swap partition (LAST)" "$SWAP_SFD" \
+    'type=swap, name="swap", size=+4096M'
+assert_contains "swap: sfdisk record keeps the ESP first, unchanged sizing" "$SWAP_SFD" \
+    'start=2048, size=+512M, type=uefi, name="esp"'
+assert_contains "swap: root partition is sized disk - esp - swap at RUN time (literal arithmetic, wipe-superblocks idiom; stat fallback covers image-file targets)" "$SWAP_SFD" \
+    "\$(( \$(blockdev --getsize64"
+assert_contains "swap: sfdisk comment names the plain dm-crypt ephemeral model (NO LUKS header)" "$SWAP_SFD" \
+    "plain dm-crypt, fresh /dev/urandom key per boot — NO LUKS header persists"
+assert_contains "swap: swap partition device is p3 of the PRIMARY disk" "$INS_OUT" \
+    "source='${FAKEDISK}3'"
+assert_contains "swap: dmcrypt conf record is a guarded append (idempotent)" "$INS_OUT" \
+    "grep -q 'alpine-fde: ephemeral crypt swap' /etc/conf.d/dmcrypt"
+assert_contains "swap: dmcrypt conf pins swap='swap' (dmcrypt orders itself before the boot swap service on ^swap=)" "$INS_OUT" \
+    "swap='swap'"
+assert_contains "swap: dmcrypt conf pins the aes-xts-plain64 512-bit /dev/urandom options" "$INS_OUT" \
+    "options='-c aes-xts-plain64 -s 512 -d /dev/urandom'"
+assert_contains "swap: dmcrypt comment names the ADR-7 guarantees (fresh key per boot, wiped on poweroff, hibernation unsupported)" "$INS_OUT" \
+    "fresh /dev/urandom key per boot, wiped on poweroff; hibernation unsupported"
+assert_contains "swap: fstab swap line activates /dev/mapper/swap" "$INS_OUT" \
+    "/dev/mapper/swap none swap defaults 0 0"
+assert_contains "swap: dmcrypt enabled for the boot runlevel" "$INS_OUT" \
+    "rc-update add dmcrypt boot"
+assert_contains "swap: the boot swap service enabled" "$INS_OUT" \
+    "rc-update add swap boot"
+SWAP_TXN=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")
+assert_contains "swap: apk txn includes cryptsetup-openrc (the dmcrypt service provider)" "$SWAP_TXN" \
+    "cryptsetup-openrc"
+assert_eq "swap: the crypttab write carries NO swap entry (the initramfs crypttab is spliced from /etc/crypttab — the swap mounts late, normal boot)" "0" \
+    "$(sed -n '/PLAN  write  \/etc\/crypttab/,/^PLAN  write/p' <<<"$INS_OUT" | grep -c '^PLAN    | swap ')"
+assert_eq "swap: cryptsetup NEVER touches the swap partition device (plain dm-crypt is created per boot by dmcrypt, not at install)" "0" \
+    "$(grep 'cryptsetup' <<<"$INS_OUT" | grep -c "${FAKEDISK}3")"
+# dmcrypt + enable records AFTER the in-chroot apk txn (failure-#2 discipline:
+# cryptsetup-openrc provides the dmcrypt service)
+I_SWAP_SFD2=$(line_no "$INS_OUT" 'name="swap"')
+I_SWAP_TXN=$(line_no "$INS_OUT" "cryptsetup-openrc")
+I_SWAP_DMC=$(line_no "$INS_OUT" "conf.d/dmcrypt")
+I_SWAP_EN=$(line_no "$INS_OUT" "rc-update add dmcrypt boot")
+assert_eq "swap: order — apk txn (cryptsetup-openrc) BEFORE the dmcrypt conf drop BEFORE the enable" "1" \
+    "$(( I_SWAP_TXN > 0 && I_SWAP_TXN < I_SWAP_DMC && I_SWAP_DMC < I_SWAP_EN ? 1 : 0 ))"
+# explicit size
+run_install --disk "$FAKEDISK" --swap 8G
+assert_eq "swap: --swap 8G dry-run rc 0" "0" "$INS_RC"
+assert_contains "swap: 8G sized partition" "$INS_OUT" 'name="swap", size=+8192M'
+assert_contains "swap: 8G named in the plan info" "$INS_OUT" "swap=8G"
+# garbage size: fail-closed 2 before any record
+run_install --disk "$FAKEDISK" --swap banana
+assert_eq "swap: garbage size -> usage rc 2" "2" "$INS_RC"
+assert_contains "swap: garbage-size error names the required format" "$INS_OUT" "K/M/G/T suffix"
+run_install --disk "$FAKEDISK" --swap '4G; reboot'
+assert_eq "swap: metacharacter size -> usage rc 2 (M-02)" "2" "$INS_RC"
+# no-swap default unchanged
+run_install --disk "$FAKEDISK"
+assert_contains "swap: default plan info says swap=none" "$INS_OUT" "swap=none"
+assert_eq "swap: default layout has NO swap partition" "0" \
+    "$(grep -c 'name="swap"' <<<"$INS_OUT")"
+assert_eq "swap: default plan has NO dmcrypt record" "0" \
+    "$(grep -c 'dmcrypt' <<<"$INS_OUT")"
+assert_eq "swap: default plan has NO fstab swap line" "0" \
+    "$(grep -c 'none swap defaults' <<<"$INS_OUT")"
+assert_eq "swap: default apk txn has NO cryptsetup-openrc" "0" \
+    "$(grep -m1 'apk add --no-cache' <<<"$INS_OUT" | grep -c 'cryptsetup-openrc')"
+# bcache + swap: the backing dev cannot carry a partition — the swap is p3 of
+# the CACHE dev (which plays the primary role in the bcache topologies)
+run_install --disk "$FAKEDISK" --bcache "$CACHEDEV" --swap
+assert_eq "swap (bcache): dry-run rc 0" "0" "$INS_RC"
+BCSWAP_SFD=$(grep -F "sfdisk $CACHEDEV" <<<"$INS_OUT" | grep -F 'name="swap"')
+assert_contains "swap (bcache): swap is p3 of the CACHE dev" "$BCSWAP_SFD" \
+    'type=swap, name="swap", size=+4096M'
+assert_contains "swap (bcache): cache set stays p2, sized disk - esp - swap" "$BCSWAP_SFD" \
+    'name="cache", size='
+assert_contains "swap (bcache): dmcrypt source is the cache-dev p3" "$INS_OUT" \
+    "source='${CACHEDEV}3'"
+assert_not_contains "swap (bcache): the backing dev is NEVER partitioned" "$INS_OUT" \
+    "sfdisk $FAKEDISK"
+# raid1 + swap: p3 of the PRIMARY only; secondaries unchanged
+run_install --disk "$FAKEDISK" --disk "$DISK2" --swap
+assert_eq "swap (raid1): dry-run rc 0" "0" "$INS_RC"
+assert_contains "swap (raid1): swap on the primary p3" "$INS_OUT" "source='${FAKEDISK}3'"
+assert_eq "swap (raid1): exactly ONE swap-partition record" "1" \
+    "$(grep -c 'name="swap"' <<<"$INS_OUT")"
+assert_not_contains "swap (raid1): secondaries keep the single root partition (no swap)" "$INS_OUT" \
+    "sfdisk $DISK2.*swap"
 
 # --- 10. package-list lint (§3.3, topology-conditional) ------------------------
 PKG_LIST=$(install_package_list)

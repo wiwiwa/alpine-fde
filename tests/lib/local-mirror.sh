@@ -176,8 +176,10 @@ mirror_package_list() {
     done
     # topology union (dedup): whatever install_package_list's --fs/--bcache
     # conditionals left out is appended, so one mirror serves every topology
+    # (cryptsetup-openrc = the --swap conditional: the OpenRC dmcrypt service
+    # provider, ADR-7 amended)
     local p
-    for p in btrfs-progs e2fsprogs bcache-tools bcache-tools-udev efitools; do
+    for p in btrfs-progs e2fsprogs bcache-tools bcache-tools-udev efitools cryptsetup-openrc; do
         case " $list " in
             *" $p "*) : ;;
             *) list="$list $p" ;;

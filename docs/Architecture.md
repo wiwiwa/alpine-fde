@@ -86,13 +86,20 @@ The default filesystem for the encrypted root is **Btrfs**, configured with stan
    p1  ESP     FAT32, sized from measured UKI size × retention + headroom (§13), NOT encrypted
    p2  LUKS2   dm-crypt container (Argon2id + TPM 2.0 token)
        └── Btrfs root filesystem (subvolumes: @ -> /, @home -> /home, @snapshots -> /.snapshots)
-   [p3 Swap]   (Optional, only if installed with --swap [size]):
-               Ephemeral encrypted swap partition (Approach A: random key from /dev/urandom via /etc/crypttab; wiped on poweroff)
+   [p3 Swap]   (Optional, only if installed with --swap [size]; the LAST partition):
+               Ephemeral encrypted swap partition (Approach A: PLAIN dm-crypt — no LUKS
+               header ever persists — keyed from /dev/urandom at every boot by the OpenRC
+               dmcrypt service, mkswap'd at each activation; the key lives only in kernel
+               memory, so poweroff leaves undecryptable ciphertext residue. Hibernation
+               unsupported, ADR-7)
 
 2. Accelerated Hybrid Layout (--disk <backing> --bcache <cache_dev>):
    Fast Caching Drive (e.g. NVMe CACHE_DEV, /dev/nvme0n1):
    p1  ESP     FAT32, holds signed systemd-boot & UKIs (firmware accessible)
    p2  Cache   bcache caching set (make-bcache -C)
+   [p3 Swap]   (Optional, only with --swap [size]): the ephemeral swap rides the
+               CACHE dev — the backing drive is WHOLE-disk bcache semantics and
+               cannot carry a partition; the cache set stays p2
    Backing Drive (e.g. HDD --disk, /dev/sda):
    WHOLE DISK  bcache backing device (make-bcache -B /dev/sda — bcache
                semantics: the backing device is the whole disk, never a
@@ -105,6 +112,7 @@ The default filesystem for the encrypted root is **Btrfs**, configured with stan
 
 3. Multi-Disk Btrfs RAID1 Layout (multiple --disk):
    Primary Disk (--disk #1): p1 ESP (FAT32) + p2 LUKS2 (/dev/mapper/root1)
+                             [p3 Swap, only with --swap: the ephemeral swap rides the PRIMARY disk only]
    Secondary Disk(s) (--disk #2..): p1 LUKS2 (/dev/mapper/root2)
    All LUKS2 containers enrolled to TPM 2.0 with identical {PCR 7, PCR 11} policy;
    crypttab uses password-cache=yes so recovery passphrase prompts only once.
@@ -466,7 +474,7 @@ Every row of §10 is an automated scenario on a software TPM (swtpm) under QEMU 
 | ADR-4 | Boot chain: SB(custom keys) → systemd-boot → signed UKI; policy = PCR 7 + PCR 11 combined, release-key-signed | Only option satisfying G3 + G4 simultaneously |
 | ADR-5 | ESP stays unencrypted | Holds only verified artifacts; encrypting it adds complexity and no security (I2) |
 | ADR-6 | PCR 0..3 excluded from seal policy; covered by `audit` | Firmware updates would permanently break sealing; detection beats brittle prevention |
-| ADR-7 | **Hibernation unsupported; ephemeral encrypted swap partition only when requested (`--swap`)** | Plaintext disk swap leaks volume-key state and decrypted memory to disk. Hibernation (suspend-to-disk) dumps decrypted kernel memory and compromises verified boot and TPM state invariants. Swap is omitted by default; when explicitly requested via `install --swap [size]`, a dedicated partition is allocated and encrypted with a fresh ephemeral random key (`/dev/urandom` in `/etc/crypttab`) on every boot (Approach A). On shutdown/poweroff, the ephemeral key is wiped from memory, ensuring zero residual swap ciphertext is ever decryptable |
+| ADR-7 | **Hibernation unsupported; ephemeral encrypted swap partition only when requested (`--swap`)** | Plaintext disk swap leaks volume-key state and decrypted memory to disk. Hibernation (suspend-to-disk) dumps decrypted kernel memory and compromises verified boot and TPM state invariants. Swap is omitted by default; when explicitly requested via `install --swap [size]`, a dedicated partition is allocated (the LAST partition on the primary disk) and encrypted with a fresh ephemeral random key on every boot (Approach A): PLAIN dm-crypt — no LUKS header ever persists — keyed from `/dev/urandom` by the guest's OpenRC dmcrypt service (`/etc/conf.d/dmcrypt` + an fstab `/dev/mapper/swap` line; the swap NEVER enters `/etc/crypttab`, which is spliced into the initramfs for the root containers only). On shutdown/poweroff, the ephemeral key is wiped from memory, ensuring zero residual swap ciphertext is ever decryptable. Nothing swap-related runs at install time (no mkswap/swapon — the volume is reformatted at every activation) |
 | ADR-8 | Missing signing key during kernel update = loud failure | Silent passphrase-prompt degradation would erode the security property |
 | ADR-9 | TPM seals a keyslot passphrase, not the volume key | LUKS2 keyslots wrap passphrases; conventional and validated |
 | ADR-10 | Release-key signature covers the combined policy digest — single PolicyPCR call, selection {7,11}, ascending | Signing only the PCR 11 digest would leave PCR 7 unbindable — the evil-maid gate could silently vanish |

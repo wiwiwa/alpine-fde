@@ -67,6 +67,10 @@ Global flags (must precede the subcommand):
                    repeatable — every value accumulates into ALPINE_FDE_DISKS
                    (newline-separated) for multi-disk RAID1 (§4.1)
    --bcache <dev>  bcache caching device for hybrid acceleration (env: ALPINE_FDE_BCACHE)
+   --swap [size]  optional ephemeral encrypted swap partition (env:
+                   ALPINE_FDE_SWAP; bare --swap takes the 4G default; ADR-7:
+                   fresh /dev/urandom key per boot, wiped on poweroff, NO
+                   hibernation)
    --fs <btrfs|ext4>  root filesystem type (env: ALPINE_FDE_FS)
   --keydir <dir>  Alpine FDE key material directory (env: ALPINE_FDE_KEYDIR)
   --version       print version and exit
@@ -161,6 +165,21 @@ $2"
             ALPINE_FDE_BCACHE=$2
             export ALPINE_FDE_BCACHE
             shift
+            ;;
+        --swap)
+            # ADR-7 amended (task 4): OPTIONAL value — bare --swap exports '1'
+            # (the install resolves its default size); --swap SIZE exports the
+            # size. The next word is consumed ONLY when it is SIZE-shaped
+            # (digits + optional K/M/G/T suffix) — never a subcommand or flag.
+            # Format validation lives in the install boundary (M-02) so both
+            # entry paths fail identically.
+            if [ $# -ge 2 ]; then
+                case $2 in
+                    [0-9]*[KkMmGgTt] | [0-9]*) ALPINE_FDE_SWAP=$2; shift ;;
+                esac
+            fi
+            ALPINE_FDE_SWAP=${ALPINE_FDE_SWAP:-1}
+            export ALPINE_FDE_SWAP
             ;;
         --fs)
             [ $# -ge 2 ] || die_usage "option $1 requires an argument"

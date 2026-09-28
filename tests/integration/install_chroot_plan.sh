@@ -1589,4 +1589,73 @@ assert_file_exists "item 26b: target /etc/hosts seeded from the live env" "$MNT_
 assert_contains "item 26b: the seeded hosts table carries the live entries" \
     "$(cat "$MNT_ETC/hosts")" "desktop-0"
 
+# =============================================================================
+# ADR-7 amended (task 4): `install --swap` executed-records leg. The swap is
+# EPHEMERAL per boot: install creates the partition + writes the boot-time
+# config, and NEVER mkswap/swapon/luksFormat's it. Executed-level contract:
+# fstab swap line ON TARGET (a host write), the dmcrypt guarded-append record
+# EXECUTED in-guest (asserted via the argv log; the record's real file effects
+# are proven by replaying the exact recorded line against a fixture), dmcrypt
+# + swap services enabled AFTER the in-chroot txn (failure-#2 discipline),
+# cryptsetup-openrc in the txn, and the crypttab stays swap-free (it is
+# spliced into the initramfs for the ROOT containers only).
+# =============================================================================
+PATH="$T/stub:$PATH" run_install --swap </dev/null
+assert_eq "swap: chroot install rc 0" "0" "$RC"
+LOG3=$(cat "$ALPINE_FDE_TEST_LOG")
+assert_contains "swap: plan record sizes the swap as the LAST partition (8 MiB slack arithmetic, literal in the runner echo)" "$OUT" \
+    'type=swap, name="swap", size=+4096M'
+assert_contains "swap: the dmcrypt record sources the swap partition p3 of the primary disk" "$OUT" \
+    "source='$DISK"3"'"
+assert_contains "swap: the dmcrypt record pins the ephemeral cipher options (aes-xts-plain64, 512-bit, /dev/urandom key)" "$OUT" \
+    "options='-c aes-xts-plain64 -s 512 -d /dev/urandom'"
+assert_contains "swap: fstab swap line ON TARGET" "$(cat "$MNT_ETC/fstab")" \
+    "/dev/mapper/swap none swap defaults 0 0"
+assert_contains "swap: dmcrypt append record EXECUTED in-guest (chroot argv log)" "$LOG3" \
+    "grep -q 'alpine-fde: ephemeral crypt swap' /etc/conf.d/dmcrypt"
+assert_contains "swap: the executed append carries the ADR-7 marker comment" "$LOG3" \
+    "fresh /dev/urandom key per boot, wiped on poweroff; hibernation unsupported"
+assert_contains "swap: the executed append pins swap='swap' (dmcrypt orders itself before the boot swap service on ^swap=)" "$LOG3" \
+    "swap='swap'"
+LUKS_UUID3=$(grep -oE -- '--uuid [0-9a-f-]{36}' <<<"$LOG3" | head -1 | awk '{print $2}')
+assert_eq "swap: crypttab ON TARGET stays swap-free (never spliced into the initramfs)" "0" \
+    "$(grep -c '^swap' "$MNT_ETC/crypttab")"
+assert_contains "swap: crypttab root entry verbatim (unchanged — the swap rides dmcrypt, never crypttab)" "$(cat "$MNT_ETC/crypttab")" \
+    "root UUID=$LUKS_UUID3 none luks,tpm2-device=auto,discard"
+assert_contains "swap: dmcrypt enabled in-guest" "$LOG3" "rc-update add dmcrypt boot"
+assert_contains "swap: the boot swap service enabled in-guest" "$LOG3" "rc-update add swap boot"
+SWAP_TXN_LOG=$(grep -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG")
+assert_contains "swap: executed txn includes cryptsetup-openrc" "$SWAP_TXN_LOG" "cryptsetup-openrc"
+L3_TXN=$(grep -n -m1 'apk add --no-cache' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+L3_DMC=$(grep -n -m1 'conf.d/dmcrypt' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+L3_EN=$(grep -n -m1 'rc-update add dmcrypt boot' "$ALPINE_FDE_TEST_LOG" | cut -d: -f1)
+assert_eq "swap: order — txn (cryptsetup-openrc) BEFORE the dmcrypt drop BEFORE the enable (failure-#2 discipline)" "1" \
+    "$(( L3_TXN > 0 && L3_TXN < L3_DMC && L3_DMC < L3_EN ? 1 : 0 ))"
+assert_eq "swap: NO install-time swap activation (mkswap/swapon are per-boot, dmcrypt-owned)" "0" \
+    "$(grep -Ec '^(mkswap|swapon|cryptsetup .* create swap|cryptsetup .* luksFormat .*swap)' <<<"$LOG3")"
+assert_eq "swap: cryptsetup NEVER touches the swap partition device at install (plain dm-crypt is per-boot)" "0" \
+    "$(grep 'cryptsetup' <<<"$LOG3" | grep -c "${DISK}3")"
+# the recorded dmcrypt append is a GUARDED IDEMPOTENT drop: replay the EXACT
+# emitted record (the helper's real text) against a fixture package-default
+# conf — double run appends exactly one marked block, and the result parses.
+ETCFIX=$T/etc-fixture
+mkdir -p "$ETCFIX"
+printf '# default dmcrypt conf from cryptsetup-openrc\n' >"$ETCFIX/dmcrypt"
+DMC_REC=$(ALPINE_FDE_CMD_DIR="$REPO/lib/cmd" sh -c ". '$REPO/lib/common.sh' && . '$REPO/lib/cmd/install.sh' && inst_dmcrypt_conf_cmd /etc/conf.d/dmcrypt '$DISK"3"'")
+DMC_REC=${DMC_REC%% # ADR-7*}
+sed "s|/etc/conf.d/dmcrypt|$ETCFIX/dmcrypt|g" <<<"$DMC_REC" >"$ETCFIX/rec.sh"
+sh "$ETCFIX/rec.sh"
+sh "$ETCFIX/rec.sh"
+assert_eq "swap: dmcrypt append is idempotent (double run -> exactly one marked block)" "1" \
+    "$(grep -c 'alpine-fde: ephemeral crypt swap' "$ETCFIX/dmcrypt")"
+assert_contains "swap: idempotent append preserved the package-default conf header" "$(cat "$ETCFIX/dmcrypt")" \
+    "default dmcrypt conf from cryptsetup-openrc"
+assert_contains "swap: appended conf carries the pinned ephemeral swap section" "$(cat "$ETCFIX/dmcrypt")" \
+    "options='-c aes-xts-plain64 -s 512 -d /dev/urandom'"
+assert_contains "swap: appended conf parses as shell (swap= assignment evaluable)" "ok" \
+    "$(sh -c ". $ETCFIX/dmcrypt && printf ok" 2>&1)"
+# the reset block covers a stale swap mapper too
+assert_contains "swap: reset mapper loop covers a stale /dev/mapper/swap" "$OUT" \
+    'for m in /dev/mapper/root[0-9]* /dev/mapper/root-crypt /dev/mapper/swap; do'
+
 exit $(( TESTS_FAIL > 0 ? 1 : 0 ))

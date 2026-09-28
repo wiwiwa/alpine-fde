@@ -98,12 +98,13 @@ Multiple backing drives (e.g. one fast NVMe caching two large HDDs): the decrypt
 
 ### Optional Ephemeral Swap Partition (`--swap [size]`)
 
-Disk swap is **omitted by default**. If paging / virtual memory is needed, provide `--swap` (e.g., `--swap 4G` or `--swap 8G`):
+Disk swap is **omitted by default**. If paging / virtual memory is needed, provide `--swap` (bare — the 4G default — or sized, e.g. `--swap 4G` or `--swap 8G`; sizes take a K/M/G/T suffix and are validated fail-closed):
 
-- **Partitioning:** Allocates an additional swap partition on the target drive.
-- **Ephemeral Encryption (Approach A):** Configured via `/etc/crypttab` to initialize with a fresh random key from `/dev/urandom` on every boot (`swap,cipher=aes-xts-plain64,size=512`).
+- **Partitioning:** Allocates an additional **ephemeral swap partition as the LAST partition on the primary disk** (p3 of the first `--disk`; with `--bcache`, p3 of the cache device, since the backing drive is whole-disk by bcache semantics; with RAID1, p3 of the primary disk only).
+- **Ephemeral Encryption (Approach A):** Each boot the guest's OpenRC `dmcrypt` service creates a **plain dm-crypt mapping** over the partition with a fresh random key from `/dev/urandom` (aes-xts-plain64, 512-bit key) and `mkswap`s it; the boot `swap` service then activates `/dev/mapper/swap`. **No LUKS header ever persists** — the partition carries only undecryptable ciphertext residue. The swap never enters `/etc/crypttab` (that file is spliced into the initramfs for the root containers; the swap mounts late, in normal boot).
 - **Zero Key Residuals:** When the system powers off, the random key vanishes from RAM. Residual swap ciphertext on disk cannot be decrypted by any party.
 - **Hibernation Non-Goal:** Hibernation (suspend-to-disk) remains strictly unsupported (ADR-7); ephemeral keys cannot resume memory state across power cycles.
+- **Install-time:** nothing swap-related runs during the install (no `mkswap`/`swapon` — the volume is formatted at every boot activation); the installer only creates the partition and writes the boot-time config (`/etc/conf.d/dmcrypt`, fstab, `rc-update add dmcrypt boot`).
 
 Example with swap:
 

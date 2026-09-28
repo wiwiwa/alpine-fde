@@ -204,6 +204,66 @@ inst_esp_size() {
   _ies_m=$(inst_uki_size_probe)
   inst_esp_size_compute "$_ies_m" "$INST_ESP_RETENTION" "$INST_ESP_HEADROOM_BYTES"
 }
+
+# --- ephemeral crypt swap (ADR-7 amended, task 4: install --swap [SIZE]) -----
+# Opt-in EPHEMERAL encrypted swap: a dedicated partition (the LAST partition on
+# the primary disk) encrypted with a FRESH /dev/urandom key at every boot —
+# plain dm-crypt, NO LUKS header ever persists, and the key exists only in
+# kernel memory, so poweroff leaves nothing decryptable on disk. Hibernation
+# stays UNSUPPORTED (ADR-7: a hibernate image is unencrypted volume-key state
+# on disk). Nothing swap-related runs at INSTALL time (no mkswap/swapon — the
+# volume is reformatted at every activation); install only creates the
+# partition and writes the boot-time config. The guest-side activation
+# mechanism is Alpine's OpenRC dmcrypt service (cryptsetup-openrc),
+# NOT /etc/crypttab: on this OpenRC target nothing consumes a crypttab swap
+# entry (the initramfs crypttab is spliced from /etc/crypttab for the ROOT
+# containers only and must never carry the swap — it mounts late, normal boot).
+INST_SWAP=${INST_SWAP:-0}
+INST_SWAP_SIZE=${INST_SWAP_SIZE:-}
+INST_SWAP_DEFAULT=4G
+
+inst_swap_enabled() { printf '%s\n' "${INST_SWAP:-0}"; }
+inst_swap_size() { printf '%s\n' "${INST_SWAP_SIZE:-$INST_SWAP_DEFAULT}"; }
+
+# inst_swap_size_check VALUE — fail-closed (usage rc 2) format validation of
+# the --swap size BEFORE any plan record exists (M-02 boundary discipline):
+# digits with a MANDATORY single K/M/G/T suffix (either case, e.g. 4G, 512m).
+# A bare sector count is rejected so the MiB arithmetic below can never
+# misread the unit; the strict charset scan runs FIRST so shell metacharacters
+# ('4G; reboot') can never ride a glob '*' into a plan record.
+inst_swap_size_check() {
+  case $1 in
+  *[!0-9KkMmGgTt]*)
+    die -r "$ALPINE_FDE_USAGE" "install: --swap size must be a number with a K/M/G/T suffix (e.g. 4G) — got: '$1'"
+    ;;
+  esac
+  case $1 in
+  [0-9]*[KkMmGgTt]) : ;;
+  *)
+    die -r "$ALPINE_FDE_USAGE" "install: --swap size must be a number with a K/M/G/T suffix (e.g. 4G) — got: '$1'"
+    ;;
+  esac
+  case ${1%[KkMmGgTt]} in
+  '' | *[!0-9]*)
+    die -r "$ALPINE_FDE_USAGE" "install: --swap size must be a number with a K/M/G/T suffix (e.g. 4G) — got: '$1'"
+    ;;
+  esac
+  return 0
+}
+
+# inst_size_mib SIZE — normalize a suffixed size (4G / 512M / 2T / 2048K) to
+# whole MiB (integer math; K rounds down). Consumed by the swap-partition
+# sfdisk arithmetic (the root/cache partition is sized "disk minus esp minus
+# swap" at RUN time).
+inst_size_mib() {
+  case $1 in
+  *[Tt]) _ism_n=${1%[Tt]}; printf '%s\n' $((_ism_n * 1048576)) ;;
+  *[Gg]) _ism_n=${1%[Gg]}; printf '%s\n' $((_ism_n * 1024)) ;;
+  *[Mm]) _ism_n=${1%[Mm]}; printf '%s\n' "$_ism_n" ;;
+  *[Kk]) _ism_n=${1%[Kk]}; printf '%s\n' $((_ism_n / 1024)) ;;
+  *) return 1 ;;
+  esac
+}
 inst_user() { printf '%s\n' "${ALPINE_FDE_INSTALL_USER:-admin}"; }
 # ADR-18/§8.1 provision row: the offline-ceremony artifact set `install
 # --keydir` consumes from the signing medium — exactly what `provision
@@ -539,7 +599,8 @@ EOF
 install_usage() {
   cat >&2 <<'EOF'
 Usage: alpine-fde install --disk DEVICE [--disk DEVICE2 ...] [--fs btrfs|ext4]
-                          [--bcache CACHE_DEV] [--no-reboot] [--yes]
+                          [--bcache CACHE_DEV] [--swap [SIZE]] [--no-reboot]
+                          [--yes]
 
 Unattended-until-reboot Stage-1 install (§9.1/ADR-20 amended; unattended
 except for the §9.1 step 4 credential-ceremony prompts): firmware SetupMode
@@ -592,6 +653,15 @@ MULTIPLE --disk: shared cache set, one independent LUKS2 container per
 /dev/bcacheN, Btrfs RAID1 pool across the members, ESP only on the cache dev.
 --fs ext4 is single-disk only.
 
+--swap [SIZE] (ADR-7 amended, default SIZE 4G): add an EPHEMERAL encrypted
+swap partition as the LAST partition on the primary disk (p3 of the first
+--disk; in the --bcache topologies p3 of the CACHE dev, which plays the
+primary role). Each boot the OpenRC dmcrypt service creates a PLAIN dm-crypt
+mapping over it with a FRESH /dev/urandom key and mkswaps it; poweroff wipes
+the key from memory, leaving undecryptable ciphertext residue — NO LUKS
+header ever persists. mkswap/swapon never run at install time. Hibernation
+(suspend-to-disk) stays UNSUPPORTED (ADR-7).
+
 Runner: chroot executes (default; root, live ISO, --yes required; the three
 credential ceremony prompts are asked in the execution path). ALPINE_FDE_INSTALL_RUNNER
 is a test/CI seam, not a user setting: dry-run prints the plan only (no
@@ -599,7 +669,8 @@ prompt, no secret); qemu emits a guest script (CI artifact job).
 Env: ALPINE_FDE_ESP_SIZE (default 512M), ALPINE_FDE_MIRROR,
 ALPINE_FDE_INSTALL_MNT, ALPINE_FDE_INSTALL_USER, ALPINE_FDE_DISKS
 (dispatcher-provided disk list), ALPINE_FDE_TMPDIR (ephemeral-key staging
-seam, default /dev/shm).
+seam, default /dev/shm), ALPINE_FDE_SWAP (dispatcher-provided global --swap:
+'1' = default size, otherwise the swap partition size).
 EOF
 }
 
@@ -622,6 +693,20 @@ inst_part() {
 # chained so a failed wipe aborts the plan instead of reaching make-bcache.
 inst_wipe_superblocks_line() {
   printf '%s\n' "dd if=/dev/zero of=$1 bs=1M count=1 && dd if=/dev/zero of=$1 bs=1M count=1 seek=\$(( \$(blockdev --getsize64 $1) / 1048576 - 1 )) # wipe stale superblocks (head+tail): bcache refuses devices with leftover signatures"
+}
+
+# inst_sfdisk_swap_line DEV MID_NAME ESP_MIB SWAP_MIB — the --swap primary-disk
+# partitioning record (ADR-7 amended, task 4): ESP p1 unchanged, the MIDDLE
+# partition (MID_NAME = root on the single/raid1 primary, cache in the bcache
+# topologies) sized "disk - esp - swap" at RUN time, and the EPHEMERAL SWAP as
+# the LAST partition at its fixed size. The runtime arithmetic mirrors the
+# wipe-superblocks record idiom above: the command substitution stays literal
+# in dry-run/qemu plan output and resolves at execution; the 8 MiB slack
+# absorbs the GPT overhead (33 backup sectors) + 1MiB alignment so the
+# fixed-size swap partition always fits. A disk too small for its layout dies
+# in sfdisk — fail-closed, never a silently truncated swap.
+inst_sfdisk_swap_line() {
+  printf '%s\n' "printf 'label: gpt\nstart=2048, size=+${3}M, type=uefi, name=\"esp\"\ntype=linux, name=\"${2}\", size=%sM\ntype=swap, name=\"swap\", size=+${4}M\n' \"\$(( \$(blockdev --getsize64 $1 2>/dev/null || stat -c %s $1) / 1048576 - ${3} - ${4} - 8 ))M\" | sfdisk $1 # ADR-7 (--swap): ephemeral swap is the LAST partition (plain dm-crypt, fresh /dev/urandom key per boot — NO LUKS header persists)"
 }
 
 # --- reset records (a previous FAILED attempt) -------------------------------
@@ -658,11 +743,13 @@ inst_reset_umount_rec_line() {
 }
 
 # inst_reset_mapper_line MAPPER_DIR — guarded cryptsetup close of the stale
-# rootN mappings (glob — the bcache-multi/raid1 naming) AND root-crypt (the
-# single/bcache primary); the mapper NAME is stripped from the node path
-# before close. Unmatched glob entries fail the [ -e ] guard (no-op).
+# rootN mappings (glob — the bcache-multi/raid1 naming), root-crypt (the
+# single/bcache primary) AND swap (the --swap ephemeral crypt mapping a
+# previous --swap install may have left open); the mapper NAME is stripped
+# from the node path before close. Unmatched glob entries fail the [ -e ]
+# guard (no-op).
 inst_reset_mapper_line() {
-  printf '%s\n' "for m in $1/root[0-9]* $1/root-crypt; do [ -e \"\$m\" ] || continue; cryptsetup close \"\${m#$1/}\" && echo \"alpine-fde: info: reset: closed stale mapper \$m\" || echo \"alpine-fde: warn: reset: could not close stale mapper \$m\"; done || :"
+  printf '%s\n' "for m in $1/root[0-9]* $1/root-crypt $1/swap; do [ -e \"\$m\" ] || continue; cryptsetup close \"\${m#$1/}\" && echo \"alpine-fde: info: reset: closed stale mapper \$m\" || echo \"alpine-fde: warn: reset: could not close stale mapper \$m\"; done || :"
 }
 
 # inst_reset_bcache_line SYSFS_BCACHE — guarded stop of every LIVE bcache
@@ -757,6 +844,22 @@ inst_inittab_getty_cmd() {
 # OVERRIDDEN to REQUIRED by the same R640 headless blocker.
 inst_sshd_config_cmd() {
   printf '%s\n' "grep -q 'alpine-fde: headless access' $1 2>/dev/null || printf '%s\\n' '' '# alpine-fde: headless access (real-server blocker, Dell PowerEdge R640 2026-09-28) — root SSH stays disabled; the ceremony account is the login path' 'PermitRootLogin no' 'PasswordAuthentication yes' >>$1 # blocker: sshd headless access (idempotent guarded append)"
+}
+
+# inst_dmcrypt_conf_cmd CONF_FILE SWAP_PART_DEV — the guarded, IDEMPOTENT
+# guest record enabling the --swap ephemeral crypt volume in the TARGET's
+# /etc/conf.d/dmcrypt (the OpenRC dmcrypt service's config — Alpine's OpenRC
+# world has NO crypttab consumer outside the initramfs, and the swap must
+# never enter the initramfs crypttab, see the ADR-7 block above). Each boot
+# the dmcrypt service creates a PLAIN dm-crypt mapping (no LUKS header is
+# ever written) keyed from /dev/urandom, mkswaps it (dmcrypt's default
+# pre_mount for swap sections) and the boot `swap` service then swapon's
+# /dev/mapper/swap (fstab line emitted separately). Poweroff drops the key
+# from kernel memory — the on-disk ciphertext is undecryptable residue
+# (Approach A, ADR-7 amended). Appends a marked block ONLY when the marker is
+# absent (crash-resume / re-run safe; the package default conf coexists).
+inst_dmcrypt_conf_cmd() {
+  printf '%s\n' "grep -q 'alpine-fde: ephemeral crypt swap' $1 2>/dev/null || printf '%s\\n' '# alpine-fde: ephemeral crypt swap (ADR-7 amended, --swap: fresh /dev/urandom key per boot, wiped on poweroff; hibernation unsupported)' \"swap='swap'\" \"source='$2'\" \"options='-c aes-xts-plain64 -s 512 -d /dev/urandom'\" >>$1 # ADR-7: ephemeral swap (idempotent guarded append; dmcrypt default pre_mount='mkswap')"
 }
 
 # inst_execute_plan — run accumulated records (non-dry-run runners)
@@ -918,6 +1021,13 @@ install_package_list() {
     # NOTE: any future 'required rules file' must check the -udev subpackage,
     # not just the base package.
     _ipl="$_ipl bcache-tools bcache-tools-udev"
+  fi
+  if [ "$(inst_swap_enabled)" = "1" ]; then
+    # ADR-7 amended (--swap): cryptsetup-openrc ships the OpenRC `dmcrypt`
+    # service the ephemeral swap activation rides on — pinned explicitly so
+    # the rc-update enable AFTER this txn can never hit the real-server
+    # failure #2 class ("service dmcrypt does not exist").
+    _ipl="$_ipl cryptsetup-openrc"
   fi
   printf '%s\n' "$_ipl"
 }
@@ -1484,6 +1594,19 @@ cmd_install_main() {
       _im_bcache=$2
       shift
       ;;
+    --swap)
+      # ADR-7 amended (task 4): OPTIONAL value — `--swap` alone takes the
+      # default size; the next word is consumed as SIZE only when it does not
+      # start with '-' (i.e. `--swap 4G` vs `--swap --disk X`). Garbage values
+      # die at the M-02 validation below, before any record exists.
+      if [ $# -ge 2 ]; then
+        case $2 in
+        -*) : ;;
+        *) INST_SWAP_SIZE=$2; shift ;;
+        esac
+      fi
+      INST_SWAP=1
+      ;;
     --esp)
       [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "install: --esp requires an argument"
       INST_ESP_MNT=$2
@@ -1538,6 +1661,18 @@ cmd_install_main() {
   if [ -n "$_im_bcache" ]; then
     INST_BCACHE=1
   fi
+  # ADR-7 amended: the dispatcher-provided global `--swap` (env ALPINE_FDE_SWAP)
+  # is CONSUMED here — '1' = flag without a size (default 4G); any other value
+  # is the size. The subcommand-level --swap flag above wins by having already
+  # set INST_SWAP/INST_SWAP_SIZE; a global size only fills an unset one.
+  case ${ALPINE_FDE_SWAP:-} in
+  '') : ;;
+  1) INST_SWAP=1 ;;
+  *)
+    INST_SWAP=1
+    [ -n "${INST_SWAP_SIZE:-}" ] || INST_SWAP_SIZE=$ALPINE_FDE_SWAP
+    ;;
+  esac
 
   # --- M-02: validate operator inputs at the boundary ------------------------
   # everything below is interpolated into plan records (eval / sh -c) and
@@ -1569,6 +1704,12 @@ cmd_install_main() {
     inst_shell_safe '--disk' "$_im_d"
     _im_n=$((_im_n + 1))
   done
+  # ADR-7 amended (--swap): fail-closed size format validation BEFORE any plan
+  # record exists — garbage dies as a usage error (rc 2), never mid-plan.
+  if [ "$(inst_swap_enabled)" = "1" ]; then
+    inst_shell_safe '--swap size' "$(inst_swap_size)"
+    inst_swap_size_check "$(inst_swap_size)"
+  fi
   if [ "$INST_ROOT_FS" = "ext4" ] && [ "$_im_n" -gt 1 ]; then
     die -r "$ALPINE_FDE_USAGE" "install: --fs ext4 is single-disk only — multi-disk root requires Btrfs RAID1"
   fi
@@ -1706,7 +1847,27 @@ cmd_install_main() {
     _im_containers="$_im_containers $_im_c"
   done
 
-  info "install plan: topology=$_im_topology fs=$(inst_root_fs) disks=$_im_disks esp=$_im_esp luks=$_im_luks mnt=$_im_mnt runner=$(inst_runner)"
+  # ADR-7 amended (task 4, --swap): the ephemeral swap partition is the LAST
+  # partition on the PRIMARY disk — p3 of the first --disk (single, raid1), or
+  # p3 of the CACHE dev in the bcache topologies (the backing dev is WHOLE-disk
+  # bcache semantics and cannot carry a partition). The ESP + root layout keeps
+  # its roles; the middle partition's size becomes "disk - esp - swap",
+  # computed at RUN time inside the sfdisk record (the wipe-superblocks record
+  # idiom: command substitution stays literal in dry-run/qemu output). No
+  # --swap: the layout is byte-for-byte what it was before.
+  _im_swap_dev=''
+  if [ "$(inst_swap_enabled)" = "1" ]; then
+    case $_im_topology in
+    bcache | bcache-multi) _im_swap_dev=$(inst_part "$_im_bcache" 3) ;;
+    *) _im_swap_dev=$(inst_part "$_im_disk" 3) ;;
+    esac
+    _im_esp_mib=$(inst_size_mib "$(inst_esp_size)") ||
+      die "install: cannot normalize the ESP size to MiB: $(inst_esp_size)"
+    _im_swap_mib=$(inst_size_mib "$(inst_swap_size)") ||
+      die "install: cannot normalize the swap size to MiB: $(inst_swap_size)"
+  fi
+
+  info "install plan: topology=$_im_topology fs=$(inst_root_fs) disks=$_im_disks esp=$_im_esp luks=$_im_luks swap=$( [ "$(inst_swap_enabled)" = "1" ] && printf '%s' "$(inst_swap_size)" || printf 'none' ) mnt=$_im_mnt runner=$(inst_runner)"
 
   # --- 0. G-C23/ADR-20: ephemeral install key staged BEFORE any destructive
   #     step. Unattended: NO operator prompt, NO passphrase env consumption
@@ -1756,7 +1917,7 @@ cmd_install_main() {
   #     released device — 7619960).
   _im_mdir=$(inst_mapper_dir)
   _im_bsys=$(inst_bcache_sysfs)
-  inst_plan_run host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
+  inst_plan_run host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || [ -e $_im_mdir/swap ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
   # item 26d: ONE recursive umount replaces the fixed per-mount list — it
   # covers the subvols, the ESP and any stale chroot binds in a single record
   inst_plan_run host "$(inst_reset_umount_rec_line $_im_mnt)"
@@ -1779,12 +1940,23 @@ cmd_install_main() {
   inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: settle /dev before partitioning"
   case $_im_topology in
   single)
-    inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+    if [ "$(inst_swap_enabled)" = "1" ]; then
+      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
+    else
+      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+    fi
     ;;
   bcache)
     # ADR-17: ESP p1 + cache p2 on the FAST dev; the backing device is the
     # WHOLE --disk (bcache semantics — the backing dev is NOT partitioned).
-    inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    if [ "$(inst_swap_enabled)" = "1" ]; then
+      # --swap (ADR-7 amended): the backing dev cannot carry a partition, so
+      # the swap is the LAST partition (p3) on the CACHE dev; the cache set
+      # keeps p2, sized disk - esp - swap.
+      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
+    else
+      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    fi
     # coldplug AFTER sfdisk (defect 2): the cache p1/p2 device nodes only
     # appear once the partition table is re-read and coldplug settles.
     inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
@@ -1802,7 +1974,14 @@ cmd_install_main() {
     # backing dev is NOT partitioned); every backing device registered
     # (/dev/bcache0, /dev/bcache1, ...) and attached to the shared cset UUID,
     # writethrough pinned.
-    inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    if [ "$(inst_swap_enabled)" = "1" ]; then
+      # --swap (ADR-7 amended): the backing disks cannot carry partitions, so
+      # the swap is the LAST partition (p3) on the shared CACHE dev; the cache
+      # set keeps p2, sized disk - esp - swap.
+      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
+    else
+      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+    fi
     # coldplug AFTER sfdisk (defect 2), then stale-superblock wipes
     # BEFORE make-bcache (defect 3) — cache p2 + every whole backing disk.
     inst_plan_run host "if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: partition device nodes must exist before make-bcache"
@@ -1828,7 +2007,14 @@ cmd_install_main() {
     inst_plan_run host "CSET_UUID=\$(bcache-super-show $_im_cache | awk '/cset.uuid/ {print \$2}')$_im_att # writethrough pinned (ADR-17: crash-safe, ciphertext-only cache)"
     ;;
   raid1)
-    inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+    if [ "$(inst_swap_enabled)" = "1" ]; then
+      # --swap (ADR-7 amended): the swap rides the PRIMARY disk only (p3);
+      # secondaries keep the single whole-disk root partition — btrfs raid1
+      # tolerates member size differences (the smallest member bounds the pool)
+      inst_plan_run host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
+    else
+      inst_plan_run host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+    fi
     # secondaries: LUKS2 container p1 ONLY (no ESP on member disks)
     _im_i=1
     for _im_d in $_im_disks; do
@@ -1923,23 +2109,38 @@ cmd_install_main() {
     inst_plan_write /etc/crypttab \
       "root UUID=$_im_uuid none luks,tpm2-device=auto,discard"
   fi
+  # ADR-7 amended (--swap): the boot `swap` service activates /dev/mapper/swap
+  # (created per boot by dmcrypt BEFORE `swap` — its depend() orders it so when
+  # the conf carries ^swap=); the mapper device path is the ONLY fstab-visible
+  # handle (an ephemeral volume has no persistent UUID to pin — its signature
+  # is rewritten at every boot).
+  if [ "$(inst_swap_enabled)" = "1" ]; then
+    _im_fstab_swap='/dev/mapper/swap none swap defaults 0 0'
+  else
+    _im_fstab_swap=''
+  fi
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     inst_plan_write /etc/fstab \
       "UUID=$_im_rootfs_uuid / btrfs subvol=@,defaults 0 1" \
       "UUID=$_im_rootfs_uuid /home btrfs subvol=@home,defaults 0 2" \
       "UUID=$_im_rootfs_uuid /.snapshots btrfs subvol=@snapshots,defaults 0 2" \
-      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2"
+      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2" \
+      ${_im_fstab_swap:+"$_im_fstab_swap"}
   else
     inst_plan_write /etc/fstab \
       "UUID=$_im_rootfs_uuid / ext4 defaults 0 1" \
-      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2"
+      "PARTUUID=<esp-partuuid> $_im_esp_mnt vfat umask=0077 0 2" \
+      ${_im_fstab_swap:+"$_im_fstab_swap"}
   fi
   # NO zram-init (item 26a, ADR-7 AMENDED): zram is removed from the design —
   # no conf.d drop, no rc-update enable (the old enable ran BEFORE the in-chroot
   # txn that installed the package and died: "service zram-init does not
-  # exist", real-server failure #2). NO disk swap line exists in fstab above
-  # (hibernation unsupported, §2.2/ADR-7 — a hibernate image is unencrypted
-  # volume-key state on disk); the optional --swap partition is queued task 4.
+  # exist", real-server failure #2). The opt-in disk swap story is the
+  # --swap ephemeral partition (task 4, ADR-7 amended): the fstab line above is
+  # emitted only with --swap, and the boot-time activation records ride BELOW
+  # (after the in-chroot txn — the same failure-#2 discipline). Hibernation
+  # stays unsupported (ADR-7 — a hibernate image is unencrypted volume-key
+  # state on disk).
   # §9.1 step 1: OpenRC networking (Alpine default: ifupdown-ng + udhcpc)
   inst_plan_write /etc/network/interfaces \
     'auto lo' \
@@ -2077,6 +2278,20 @@ cmd_install_main() {
   inst_plan_run guest "$(inst_inittab_getty_cmd /etc/inittab)"
   inst_plan_run guest "$(inst_sshd_config_cmd /etc/ssh/sshd_config)"
   inst_plan_run guest 'rc-update add sshd default'
+  # ADR-7 amended (--swap): ephemeral swap activation — ONLY with --swap, ONLY
+  # after the in-chroot txn that installed cryptsetup-openrc (the `dmcrypt`
+  # service provider; failure-#2 discipline). dmcrypt creates the plain
+  # dm-crypt swap mapping from /dev/urandom and mkswaps it (default
+  # pre_mount) each boot; the boot `swap` service then swapon's the mapper
+  # (fstab line above). These stay OUT of the crypttab entirely: the target
+  # /etc/crypttab is spliced into the initramfs for the ROOT containers, and
+  # the swap must never be resolved by the initramfs (it mounts late, normal
+  # boot). Idempotent guarded append (crash-resume safe).
+  if [ "$(inst_swap_enabled)" = "1" ]; then
+    inst_plan_run guest "$(inst_dmcrypt_conf_cmd /etc/conf.d/dmcrypt "$_im_swap_dev")"
+    inst_plan_run guest 'rc-update add dmcrypt boot'
+    inst_plan_run guest 'rc-update add swap boot'
+  fi
   # step 2: pending baseline written ON-TARGET via the baseline writer
   inst_plan_run host "inst_baseline_pending_write $_im_mnt"
   # step 3: platform-key ceremony — with --keydir the operator-supplied

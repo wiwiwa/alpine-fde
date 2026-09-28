@@ -208,8 +208,8 @@ assert_eq "emitted: 1 guarded RECURSIVE stale-tree umount record (item 26d)" "1"
     "$(grep -c '^# HOST: if mountpoint -q .*; then umount -R ' "$SCRIPT")"
 assert_eq "emitted: zero FIXED-list stale-mount umount records remain (item 26d)" "0" \
     "$(grep -c 'unmounted stale mount' "$SCRIPT")"
-assert_eq "emitted: guarded stale-mapper close record (rootN glob + root-crypt, name-stripped)" "1" \
-    "$(grep -c '^# HOST: for m in /dev/mapper/root\[0-9\]\* /dev/mapper/root-crypt; do \[ -e "\$m" \] || continue; cryptsetup close "\${m#/dev/mapper/}"' "$SCRIPT")"
+assert_eq "emitted: guarded stale-mapper close record (rootN glob + root-crypt + swap, name-stripped)" "1" \
+    "$(grep -c '^# HOST: for m in /dev/mapper/root\[0-9\]\* /dev/mapper/root-crypt /dev/mapper/swap; do \[ -e "\$m" \] || continue; cryptsetup close "\${m#/dev/mapper/}"' "$SCRIPT")"
 assert_eq "emitted: guarded live-bcache STOP record (set dirs only, register file skipped)" "1" \
     "$(grep -c '^# HOST: for d in /sys/fs/bcache/\*/; do \[ -f "\${d}stop" \] || continue; u="\${d%/}"; echo "\${u##\*/}" > "\$u/stop"' "$SCRIPT")"
 S_RESET=$(grep -n 'previous failed install detected' "$SCRIPT" | cut -d: -f1)
