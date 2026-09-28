@@ -130,8 +130,8 @@ assert_eq "repositories drop verbatim (G-C1: replaces apt sources)" \
 # script carries NO dracut config residue
 assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
     "$(grep -c 'dracut' "$SCRIPT")"
-assert_contains "cmdline drop emitted with btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
-    "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+assert_contains "cmdline drop emitted with dual console + btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
+    "rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
 # item 26a (ADR-7 AMENDED — zram removed from the design): zero zram residue in
 # the emitted guest script (no package entry, no conf.d drop, no rc-update)
 assert_eq "emitted: ZERO zram mentions anywhere (item 26a: zram removed from the install path)" "0" \

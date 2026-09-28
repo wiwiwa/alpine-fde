@@ -483,8 +483,8 @@ assert_not_contains "apk txn has NO zram-init (item 26a, ADR-7 amended)" "$CHROO
 # residue may land on the target in ANY topology
 assert_eq "target: NO dracut.conf.d directory (ADR-13)" "0" \
     "$([ -e "$MNT_ETC/dracut.conf.d" ] && echo 1 || echo 0)"
-assert_eq "cmdline.txt verbatim: rootflags + §8.2 fail-closed pins" \
-    "root=UUID=$LUKS_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff" \
+assert_eq "cmdline.txt verbatim: dual console + rootflags + §8.2 fail-closed pins" \
+    "root=UUID=$LUKS_UUID rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 # §4: topology recorded in the target conf (absent file = btrfs default, doc'd)
 assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ROOT_FS=btrfs"
@@ -1136,8 +1136,8 @@ assert_eq "raid1: baseline target.luks_uuid = PRIMARY member" "$MEM1_UUID" \
     "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target luks_uuid)"
 assert_eq "raid1: baseline target.member_uuids (additive schema)" "$MEM1_UUID $MEM2_UUID" \
     "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target member_uuids)"
-assert_contains "raid1: cmdline rootflags pins verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
-    "rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff"
+assert_contains "raid1: cmdline dual console + rootflags pins verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
+    "rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
 # G-C24: the provisional seal loop covers BOTH member CONTAINERS in raid1
 # (item 27: primary p2 + secondary p1 — the luksFormat targets)
 SEAL_LINE2=$(grep -m1 'seal_provisional' <<<"$LOG2")
@@ -1461,8 +1461,11 @@ assert_eq "cmdline extra: override rejected BEFORE any mutation (zero commands)"
     "0" "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 ALPINE_FDE_CMDLINE_EXTRA='console=ttyS0,115200  quiet' run_install
 LUX_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
+# The extra appends AFTER the default dual-console words — a user-provided
+# console= word becomes the LAST console= and wins /dev/console (acceptable:
+# their explicit choice). The default words still print to both consoles.
 assert_eq "cmdline extra: appended at PLAN time, whitespace-normalized (PCR-11 seam)" \
-    "root=UUID=$LUX_UUID rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff console=ttyS0,115200 quiet" \
+    "root=UUID=$LUX_UUID rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff console=ttyS0,115200 quiet" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 unset ALPINE_FDE_CMDLINE_EXTRA
 

@@ -728,8 +728,9 @@ inst_plan_run() {
 }
 
 # inst_inittab_getty_cmd INITTAB — the guarded, IDEMPOTENT guest record that
-# ensures a busybox getty on ttyS0 (serial console, `console=ttyS0,115200` in
-# ALPINE_FDE_CMDLINE_EXTRA): appends the respawn line ONLY when no ttyS0 line
+# ensures a busybox getty on ttyS0 (serial console — `console=ttyS0,115200` is
+# now emitted BY DEFAULT in the dual-console cmdline, no EXTRA needed):
+# appends the respawn line ONLY when no ttyS0 line
 # exists yet (crash-resume / re-run safe; an operator's own ttyS0 line wins).
 # REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 2026-09-28): the guest
 # shipped no serial getty, so on a headless server the operator had NO way
@@ -1931,12 +1932,23 @@ cmd_install_main() {
   # H-G1 fail-closed contract enforced by the cmdline-pins guard (§8.2) on
   # every kernel build — not a dracut module knob.
   _im_cmdline_extra=$(inst_cmdline_extra)
+  # DUAL CONSOLE BY DEFAULT (real-server, Dell PowerEdge R640 2026-09-28): the
+  # pre-dual-console emission carried NO console= words, so a headless boot was
+  # invisible on serial — the kernel logged to the (absent) video console only
+  # and the initrd unseal hook's /dev/console went nowhere. We now emit
+  # console=tty0 console=ttyS0,115200 BEFORE the rd.* pins: kernel messages
+  # print to BOTH consoles, and the LAST console= word wins for /dev/console,
+  # so the initrd unseal hook (and later /dev/console writers) land on serial.
+  # ALPINE_FDE_CMDLINE_EXTRA still appends AFTER ours; a user-provided extra
+  # containing console= words becomes the last console= and thus wins
+  # /dev/console — acceptable (their explicit choice), NOT a pin violation
+  # (the guard checks only the §8.2 H-G1 rd.* pins).
   if [ "$(inst_root_fs)" = "btrfs" ]; then
     inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid rootflags=subvol=@ ro rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
+      "root=UUID=$_im_uuid rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
   else
     inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid ro rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
+      "root=UUID=$_im_uuid ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
   fi
   # CR-01 + §4.1: persist the resolved topology + ESP mount for the build
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
