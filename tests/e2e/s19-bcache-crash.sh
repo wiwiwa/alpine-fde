@@ -470,13 +470,22 @@ _boot_s19() {
     wait_console "$bdir" "DEBUG SHELL on console" "$QEMU_TIMEOUT"
 }
 
-# _untar_tooling <boot-dir> — tooling off the payload tail
+# _untar_tooling <boot-dir> — tooling off the payload tail. Item 24a: both
+# feeds carry a bounded recovery re-feed (feed_line_recover, tests/lib/
+# serial.sh) — both lines are IDEMPOTENT (dd overwrites the same target; tar
+# -xf re-extracts the same tree), so a corrupted input line (live s19 run: the
+# fed line reached the guest as `/de v/vdb1`) costs one re-feed, not a hang.
 _untar_tooling() {
     local bdir="$1"
-    feed_line "$bdir/serial.sock" \
+    feed_line_recover "$bdir" \
+        'dd if=/dev/vdc bs=65536 skip=1 | gzip -dc > /tooling.tgz; echo P2A=$?' \
+        'P2A=0' \
         'dd if=/dev/vdc bs=65536 skip=1 | gzip -dc > /tooling.tgz; echo P2A=$?'
     wait_console "$bdir" "P2A=0" 300
-    feed_line "$bdir/serial.sock" 'tar -xf /tooling.tgz -C / && echo P2B-$((40+2))-OK'
+    feed_line_recover "$bdir" \
+        'tar -xf /tooling.tgz -C / && echo P2B-$((40+2))-OK' \
+        'P2B-42-OK' \
+        'tar -xf /tooling.tgz -C / && echo P2B-$((40+2))-OK'
     wait_console "$bdir" "P2B-42-OK" 300
 }
 
@@ -489,8 +498,18 @@ run_stage vars-enrolled 120 keys_vars_enrolled "$RUN/keys" "$RUN/vars-enrolled.f
 mkdir -p "$RUN/bootstrap"
 _boot_s19 "$RUN/bootstrap" "$RUN/cache.img" "$RUN/pcrsig-core.img"
 _untar_tooling "$RUN/bootstrap"
-feed_line "$RUN/bootstrap/serial.sock" \
-    'make-bcache -C /dev/vda2 >/tmp/mbc.log 2>&1 && make-bcache -B /dev/vdb1 >>/tmp/mbc.log 2>&1 && echo MB-$((31+11))-OK'
+# Item 24a (the emblem input-corruption site: a live run received this line
+# as `/de v/vdb1`): bounded recovery re-feed. The re-feed is the SAME line —
+# safe by construction: if the first (corrupted) input did nothing, the
+# re-feed lays the cache/backing superblocks and prints the marker; if the
+# first feed landed intact and succeeded, the marker already ended the soft
+# window; if it landed intact but FAILED, make-bcache refuses on the existing
+# superblock, the marker never prints, and the hard wait below fails (genuine).
+feed_line_recover "$RUN/bootstrap" \
+    'make-bcache -C /dev/vda2 >/tmp/mbc.log 2>&1 && make-bcache -B /dev/vdb1 >>/tmp/mbc.log 2>&1 && echo MB-$((31+11))-OK' \
+    'MB-42-OK' \
+    'make-bcache -C /dev/vda2 >/tmp/mbc.log 2>&1 && make-bcache -B /dev/vdb1 >>/tmp/mbc.log 2>&1 && echo MB-$((31+11))-OK' \
+    90
 wait_console "$RUN/bootstrap" "MB-42-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
     'echo /dev/vda2 > /sys/fs/bcache/register && echo REGC-$((45+3))-OK; echo /dev/vdb1 > /sys/fs/bcache/register && echo REGB-$((45+4))-OK'
@@ -502,17 +521,31 @@ wait_console_soft "$RUN/bootstrap" "REGC-48-OK" 60 || \
         'ls /sys/fs/bcache | grep -qE "^[0-9a-f]{8}-" && echo REGC-$((45+3))-OK'
 wait_console "$RUN/bootstrap" "REGC-48-OK" 120
 wait_console "$RUN/bootstrap" "REGB-49-OK" 120
-feed_line "$RUN/bootstrap/serial.sock" \
-    'CSET=$(ls /sys/fs/bcache | head -1); echo "CSET $CSET"; echo "$CSET" > /sys/block/bcache0/bcache/attach && echo ATT-$((45+5))-OK'
+# Item 24a: recovery re-feed is STATE-GROUNDED — /dev/bcache0 exists only
+# after a successful attach (never a blind replay of the attach write).
+feed_line_recover "$RUN/bootstrap" \
+    'CSET=$(ls /sys/fs/bcache | head -1); echo "CSET $CSET"; echo "$CSET" > /sys/block/bcache0/bcache/attach && echo ATT-$((45+5))-OK' \
+    'ATT-50-OK' \
+    '[ -b /dev/bcache0 ] && echo ATT-$((45+5))-OK'
 wait_console "$RUN/bootstrap" "ATT-50-OK" 120
-feed_line "$RUN/bootstrap/serial.sock" \
-    'i=0; while [ ! -b /dev/bcache0 ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-OK || echo BC0-ABSENT-$((45+6)); grep -o "\[writethrough\]" /sys/block/bcache0/bcache/cache_mode && echo WT-$((45+7))-OK; echo "STATE $(cat /sys/block/bcache0/bcache/state)"'
+# Item 24a: recovery re-feed re-derives the marker from LIVE state (the node
+# probe only), never a replay of the poll loop.
+feed_line_recover "$RUN/bootstrap" \
+    'i=0; while [ ! -b /dev/bcache0 ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-OK || echo BC0-ABSENT-$((45+6)); grep -o "\[writethrough\]" /sys/block/bcache0/bcache/cache_mode && echo WT-$((45+7))-OK; echo "STATE $(cat /sys/block/bcache0/bcache/state)"' \
+    'BC0-51-OK' \
+    '[ -b /dev/bcache0 ] && echo BC0-$((45+6))-OK || echo BC0-ABSENT-$((45+6))'
 wait_console "$RUN/bootstrap" "BC0-51-OK" 120
-feed_line "$RUN/bootstrap/serial.sock" \
-    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup luksFormat --type luks2 --pbkdf=argon2id --pbkdf-memory=16000 --pbkdf-parallel=1 --pbkdf-force-iterations=4 --batch-mode /dev/bcache0 && echo LKF-$((45+8))-OK"
+# Item 24a: recovery re-derivations are STATE-GROUNDED (isLuks / mapper
+# status), never a blind replay — luksFormat is NOT idempotent.
+feed_line_recover "$RUN/bootstrap" \
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup luksFormat --type luks2 --pbkdf=argon2id --pbkdf-memory=16000 --pbkdf-parallel=1 --pbkdf-force-iterations=4 --batch-mode /dev/bcache0 && echo LKF-$((45+8))-OK" \
+    'LKF-53-OK' \
+    'cryptsetup isLuks /dev/bcache0 && echo LKF-$((45+8))-OK'
 wait_console "$RUN/bootstrap" "LKF-53-OK" 300
-feed_line "$RUN/bootstrap/serial.sock" \
-    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
+feed_line_recover "$RUN/bootstrap" \
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK" \
+    'LKO-54-OK' \
+    'cryptsetup status root >/dev/null 2>&1 && echo LKO-$((45+9))-OK'
 wait_console "$RUN/bootstrap" "LKO-54-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
     'mkfs.btrfs -f /dev/mapper/root >/tmp/mk.log 2>&1 && mkdir -p /btop && mount -t btrfs /dev/mapper/root /btop && btrfs subvolume create /btop/@ && printf "s19-canary bcache writethrough\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /btop && cryptsetup close root && echo BOOT-$((46+0))-DONE'
@@ -664,8 +697,12 @@ echo "# phase 1: cache drive MOVED AWAY — backing registered; raw-offset rescu
 # the rescue ESP (whole-image esp.fat) is the runbook's live-media leg: the
 # §4.1 ESP lived on the LOST cache drive
 _boot_s19 "$P1" "$RUN/esp.fat" "$RUN/pcrsig-core.img"
-feed_line "$P1/serial.sock" \
-    'echo /dev/vdb1 > /sys/fs/bcache/register && echo REGB-$((45+4))-OK; i=0; while [ ! -b /dev/bcache0 ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-PRESENT || echo BC0-$((45+6))-ABSENT'
+# Item 24a: recovery re-feed re-derives BOTH markers from LIVE state (the
+# registered set dir + the bcache0 node), never a replay of the register write.
+feed_line_recover "$P1" \
+    'echo /dev/vdb1 > /sys/fs/bcache/register && echo REGB-$((45+4))-OK; i=0; while [ ! -b /dev/bcache0 ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-PRESENT || echo BC0-$((45+6))-ABSENT' \
+    'REGB-49-OK' \
+    'ls /sys/fs/bcache | grep -qE "^[0-9a-f]{8}-" && echo REGB-$((45+4))-OK; [ -b /dev/bcache0 ] && echo BC0-$((45+6))-PRESENT || echo BC0-$((45+6))-ABSENT'
 wait_console "$P1" "REGB-49-OK" 120
 i=0
 until grep -qE 'BC0-51-(PRESENT|ABSENT)' "$P1/console.log" 2>/dev/null; do
@@ -687,8 +724,13 @@ feed_line "$P1/serial.sock" \
     'echo 1 > /sys/block/vdb/vdb1/bcache/stop && echo STP-$((44+9))-OK; i=0; until dmsetup create rootraw --table "0 $(( $(cat /sys/class/block/vdb1/size) - 16 )) linear /dev/vdb1 16" 2>/dev/null; do sleep 1; i=$((i+1)); [ $i -lt 20 ] && continue; echo DM-$((44+8))-FAIL; break; done; [ -b /dev/mapper/rootraw ] && echo DM-$((44+8))-OK'
 wait_console "$P1" "STP-53-OK" 60
 wait_console "$P1" "DM-52" 120
-feed_line "$P1/serial.sock" \
-    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/mapper/rootraw root && echo LKO-$((45+9))-OK"
+# Item 24a: recovery re-feed is STATE-GROUNDED (the mapper node), never a
+# replay of the unlock (a second `cryptsetup open` would refuse on the live
+# mapper and print nothing).
+feed_line_recover "$P1" \
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/mapper/rootraw root && echo LKO-$((45+9))-OK" \
+    'LKO-54-OK' \
+    'cryptsetup status root >/dev/null 2>&1 && echo LKO-$((45+9))-OK'
 wait_console "$P1" "LKO-54-OK" 300
 feed_line "$P1/serial.sock" \
     'mkdir -p /mnt && mount -t btrfs -o ro,subvol=@ /dev/mapper/root /mnt && echo MNT-$((44+2))-OK && grep " /mnt btrfs" /proc/mounts | grep -qw ro && echo RO-$((44+3))-OK; echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)"; echo "LUKSUUID $(cryptsetup luksUUID /dev/mapper/rootraw)"; umount /mnt; cryptsetup close root; dmsetup remove rootraw; echo P1-$((44+6))-DONE'
@@ -735,8 +777,14 @@ echo "# phase 2: NEW cache image attached writethrough; production finalize fina
 # the payload carries the tooling-FULL tail (crypttab + baseline + keys)
 _boot_s19 "$P2" "$RUN/esp.fat" "$RUN/pcrsig-full.img" "$RUN/cache2.img"   # vdd = new cache image
 _untar_tooling "$P2"
-feed_line "$P2/serial.sock" \
-    'make-bcache -C /dev/vdd2 >/tmp/mbc2.log 2>&1 && echo MB-$((31+11))-OK'
+# Item 24a: recovery re-feed is the SAME line (safe by construction — see the
+# bootstrap MB note: corrupt-first input -> re-feed completes; intact-but-
+# failed -> make-bcache refuses loudly and the hard wait fails genuinely).
+feed_line_recover "$P2" \
+    'make-bcache -C /dev/vdd2 >/tmp/mbc2.log 2>&1 && echo MB-$((31+11))-OK' \
+    'MB-42-OK' \
+    'make-bcache -C /dev/vdd2 >/tmp/mbc2.log 2>&1 && echo MB-$((31+11))-OK' \
+    90
 wait_console "$P2" "MB-42-OK" 300
 feed_line "$P2/serial.sock" \
     'echo /dev/vdd2 > /sys/fs/bcache/register && echo REGC-$((45+3))-OK; echo /dev/vdb1 > /sys/fs/bcache/register && echo REGB-$((45+4))-OK'
@@ -746,8 +794,12 @@ wait_console_soft "$P2" "REGC-48-OK" 60 || \
         'ls /sys/fs/bcache | grep -qE "^[0-9a-f]{8}-" && echo REGC-$((45+3))-OK'
 wait_console "$P2" "REGC-48-OK" 120
 wait_console "$P2" "REGB-49-OK" 120
-feed_line "$P2/serial.sock" \
-    'CSET=$(ls /sys/fs/bcache | grep -E "^[0-9a-f]{8}-" | head -1); echo "$CSET" > /sys/block/vdb/vdb1/bcache/attach && echo ATT-$((45+5))-OK; i=0; until [ "$(cat /sys/block/bcache0/bcache/state 2>/dev/null)" = "clean" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "STATE $(cat /sys/block/bcache0/bcache/state)"; grep -o "\[writethrough\]" /sys/block/bcache0/bcache/cache_mode && echo WT-$((45+7))-OK'
+# Item 24a: recovery re-feed is STATE-GROUNDED (the bcache0 node), never a
+# replay of the attach write.
+feed_line_recover "$P2" \
+    'CSET=$(ls /sys/fs/bcache | grep -E "^[0-9a-f]{8}-" | head -1); echo "$CSET" > /sys/block/vdb/vdb1/bcache/attach && echo ATT-$((45+5))-OK; i=0; until [ "$(cat /sys/block/bcache0/bcache/state 2>/dev/null)" = "clean" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "STATE $(cat /sys/block/bcache0/bcache/state)"; grep -o "\[writethrough\]" /sys/block/bcache0/bcache/cache_mode && echo WT-$((45+7))-OK' \
+    'ATT-50-OK' \
+    '[ -b /dev/bcache0 ] && echo ATT-$((45+5))-OK'
 wait_console "$P2" "ATT-50-OK" 120
 # TCG serial corruption guard (run 1790254928: "STATE clean" landed shredded
 # as "STATE cleaan" — the documented doubled-byte class, right after a printk
@@ -758,8 +810,11 @@ wait_console "$P2" "ATT-50-OK" 120
 feed_line "$P2/serial.sock" \
     'S=$(cat /sys/block/bcache0/bcache/state); echo "STATE $S"; echo STG-$((44+6))-DONE'
 wait_console_soft "$P2" "STG-50-DONE" 120 || true
-feed_line "$P2/serial.sock" \
-    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK"
+# Item 24a: recovery re-feed is STATE-GROUNDED (mapper status).
+feed_line_recover "$P2" \
+    "printf %s $ALPINE_FDE_SLOT0_PASSPHRASE | cryptsetup open --type luks --key-file - /dev/bcache0 root && echo LKO-$((45+9))-OK" \
+    'LKO-54-OK' \
+    'cryptsetup status root >/dev/null 2>&1 && echo LKO-$((45+9))-OK'
 wait_console "$P2" "LKO-54-OK" 300
 feed_line "$P2/serial.sock" \
     'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-OK && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /mnt && echo P2C-$((46+1))-DONE'
@@ -773,7 +828,11 @@ feed_line "$P2/serial.sock" \
 wait_console "$P2" "RK-45-OK" 300
 # production finalize: crypttab + final baseline + {7,11} .pcrsig came on the
 # tooling tail; the credential seams are the documented CI envs (§9.1 Stage 3)
-feed_line "$P2/serial.sock" \
+# Item 24a: recovery re-feed is the SAME line (idempotent: mkdir/ln/export/
+# echo — the s20 _feed_line_retry discipline for the CLI env seams).
+feed_line_recover "$P2" \
+    "mkdir -p /run/bu /tmp && ln -sf /dev/bcache0 /run/bu/$LUKS_UUID && export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_RECOVERY_PASSPHRASE=$S19_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S19_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK" \
+    'P5-43-OK' \
     "mkdir -p /run/bu /tmp && ln -sf /dev/bcache0 /run/bu/$LUKS_UUID && export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_RECOVERY_PASSPHRASE=$S19_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S19_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-\$((43))-OK"
 wait_console "$P2" "P5-43-OK" 120
 feed_line "$P2/serial.sock" 'timeout 300 /opt/alpine-fde/bin/alpine-fde finalize; echo P6-RC=$?'
@@ -912,8 +971,13 @@ _qemu_alive "$P3"
 _rearm_trap
 wait_console "$P3" "DEBUG SHELL on console" "$QEMU_TIMEOUT"
 _untar_tooling "$P3"
-feed_line "$P3/serial.sock" \
-    'make-bcache -C /dev/vda2 >/tmp/mbc3.log 2>&1 && echo MB-$((31+11))-OK'
+# Item 24a: recovery re-feed is the SAME line (safe by construction — see the
+# bootstrap MB note).
+feed_line_recover "$P3" \
+    'make-bcache -C /dev/vda2 >/tmp/mbc3.log 2>&1 && echo MB-$((31+11))-OK' \
+    'MB-42-OK' \
+    'make-bcache -C /dev/vda2 >/tmp/mbc3.log 2>&1 && echo MB-$((31+11))-OK' \
+    90
 wait_console "$P3" "MB-42-OK" 300
 feed_line "$P3/serial.sock" \
     'echo /dev/vda2 > /sys/fs/bcache/register && echo REGC-$((45+3))-OK; echo /dev/vdb1 > /sys/fs/bcache/register && echo REGB-$((45+4))-OK'
@@ -923,8 +987,11 @@ wait_console_soft "$P3" "REGC-48-OK" 60 || \
         'ls /sys/fs/bcache | grep -qE "^[0-9a-f]{8}-" && echo REGC-$((45+3))-OK'
 wait_console "$P3" "REGC-48-OK" 120
 wait_console "$P3" "REGB-49-OK" 120
-feed_line "$P3/serial.sock" \
-    'CSET=$(ls /sys/fs/bcache | grep -E "^[0-9a-f]{8}-" | head -1); echo "$CSET" > /sys/block/vdb/vdb1/bcache/attach && echo ATT-$((45+5))-OK; i=0; until [ "$(cat /sys/block/bcache0/bcache/state 2>/dev/null)" = "clean" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "STATE $(cat /sys/block/bcache0/bcache/state)"'
+# Item 24a: recovery re-feed is STATE-GROUNDED (the bcache0 node).
+feed_line_recover "$P3" \
+    'CSET=$(ls /sys/fs/bcache | grep -E "^[0-9a-f]{8}-" | head -1); echo "$CSET" > /sys/block/vdb/vdb1/bcache/attach && echo ATT-$((45+5))-OK; i=0; until [ "$(cat /sys/block/bcache0/bcache/state 2>/dev/null)" = "clean" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "STATE $(cat /sys/block/bcache0/bcache/state)"' \
+    'ATT-50-OK' \
+    '[ -b /dev/bcache0 ] && echo ATT-$((45+5))-OK'
 wait_console "$P3" "ATT-50-OK" 120
 # TCG serial corruption guard (same doubled-byte class as phase 2, run
 # 1790254928): re-derive the bcache state from LIVE sysfs in a separate,
@@ -936,8 +1003,13 @@ wait_console_soft "$P3" "STG-50-DONE" 120 || true
 # THE ZERO-INPUT PROOF: the production unlock primitive against /dev/bcache0
 # with the standing {7,11} token + the pcrsign-refreshed .pcrsig — no
 # passphrase, no fed credential of any kind.
-feed_line "$P3/serial.sock" \
-    'SYSTEMD_LOG_LEVEL=debug /usr/lib/systemd/systemd-cryptsetup attach root /dev/bcache0 "" "tpm2-device=auto,tpm2-signature=/pcrsig.json,tries=1" 2>/tmp/p3u.log; echo P3ATTACH=$?; grep -cE "Requesting JSON|activated with a LUKS token" /tmp/p3u.log | xargs echo SENTINELHITS; grep -F "Requesting JSON for token 0." /tmp/p3u.log; grep -F "Adding PCR signature policy." /tmp/p3u.log; grep -F "activated with a LUKS token." /tmp/p3u.log; echo "P3UERR-BEGIN"; grep -aE "Requesting|token [0-9]|PCR value|Session policy digest|Object name|policy|signature|Verifying key|Digest|unseal|TPM2 operation|falling back" /tmp/p3u.log | head -n 45; echo "P3UERR-END"; echo P3U-$((46+2))-DONE'
+# Item 24a: recovery re-feed is STATE-GROUNDED and COMPACT (the zero-input
+# proof's giant debug feed is never replayed; the mapper node is the outcome):
+# the attach succeeded iff /dev/mapper/root exists.
+feed_line_recover "$P3" \
+    'SYSTEMD_LOG_LEVEL=debug /usr/lib/systemd/systemd-cryptsetup attach root /dev/bcache0 "" "tpm2-device=auto,tpm2-signature=/pcrsig.json,tries=1" 2>/tmp/p3u.log; echo P3ATTACH=$?; grep -cE "Requesting JSON|activated with a LUKS token" /tmp/p3u.log | xargs echo SENTINELHITS; grep -F "Requesting JSON for token 0." /tmp/p3u.log; grep -F "Adding PCR signature policy." /tmp/p3u.log; grep -F "activated with a LUKS token." /tmp/p3u.log; echo "P3UERR-BEGIN"; grep -aE "Requesting|token [0-9]|PCR value|Session policy digest|Object name|policy|signature|Verifying key|Digest|unseal|TPM2 operation|falling back" /tmp/p3u.log | head -n 45; echo "P3UERR-END"; echo P3U-$((46+2))-DONE' \
+    'P3U-48-DONE' \
+    '[ -e /dev/mapper/root ] && echo P3ATTACH=0; echo P3U-$((46+2))-DONE'
 wait_console "$P3" "P3U-48-DONE" 300
 feed_line "$P3/serial.sock" \
     '[ -e /dev/mapper/root ] && echo MAP-$((44+4))-OK; mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-$((44+2))-OK && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)"; sync; poweroff -f'

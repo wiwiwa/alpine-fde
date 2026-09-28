@@ -49,6 +49,21 @@
 # Test seams (the real boot path uses the defaults): FDE_CRYPTTAB,
 # FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
 # FDE_NLPLUG_FINDFS. (FDE_NEWROOT retired with the state flip, item 10b.)
+#   FDE_SERIAL_ECHO (default 0; the e2e initrd splice turns it ON — decision
+#   queue item 24a): every console line is emitted TWICE — the live line, then
+#   an "[serial-echo]" copy a breath later — so one lost/corrupted 16550 burst
+#   under parallel (-j) load no longer false-fails an assertion that reads a
+#   single-emission marker (live evidence: "one lost serial marker" on s00; a
+#   doubled-byte "B2-42-OPEEN" in run 1789845714; "CANARY-SHAA" in
+#   1790321112). The pinned TEXT is still required verbatim from at least one
+#   emission — nothing is weakened. The recovery-passphrase PROMPT is echoed
+#   in a COMPACT texture (counter + target only; sentinel
+#   unseal_prompt_echo_re) instead of repeating the pinned prompt sentence, so
+#   the sentence stays countable-exact for the bounded-loop pins ("exactly N
+#   prompt events") while each prompt EVENT is corroborated from either
+#   emission (candidate-set unique attempt counting in the scenarios). OFF in
+#   production: an operator's console is not a capture pipe; single emission
+#   is the shipped UX.
 #
 # Busybox mkinitfs environment only: no bashisms, no GNU tools beyond busybox
 # (sha256sum/od/dd/sed/awk/tr/mktemp/date), openssl + cryptsetup + tpm2-tools
@@ -79,6 +94,9 @@ FDE_ATTACH_WAIT_SECS=${FDE_ATTACH_WAIT_SECS:-30}
 # ever be the fallback for udev-equipped images). When the binary is absent
 # the resolver goes straight to the by-uuid path.
 FDE_NLPLUG_FINDFS=${FDE_NLPLUG_FINDFS:-nlplug-findfs}
+# Item 24a corroboration seam (see the header comment): 0 = single emission
+# (production default), 1 = dual emission (live line + "[serial-echo]" copy).
+FDE_SERIAL_ECHO=${FDE_SERIAL_ECHO:-0}
 
 # Warn-before-prompt REASON preambles (user decision queue item 8, §8.2 step
 # 5): ONE canonical sentence per refusal class, printed verbatim by the branch
@@ -95,7 +113,16 @@ FDE_WARN_SIG_REFUSED='the booted kernel image failed signature/PCR policy — li
 FDE_WARN_TOKEN_MISSING='the TPM seal is absent — the TPM may have been cleared'
 FDE_WARN_CLOSING='after boot, run: audit, then reseal to restore passwordless unlock'
 
-_msg() { printf 'alpine-fde-unseal: %s\n' "$1" >&2; }
+# _msg LINE — the console emission. With FDE_SERIAL_ECHO=1 (item 24a) the line
+# is immediately re-emitted as an "[serial-echo]" copy: a SECOND, independent
+# UART burst a breath after the first, so one lost/corrupted burst under
+# parallel load leaves the other intact. Both copies carry the pinned sentence
+# VERBATIM — asserts that require the text are corroborated, never weakened.
+_msg() {
+    printf 'alpine-fde-unseal: %s\n' "$1" >&2
+    [ "$FDE_SERIAL_ECHO" = 1 ] || return 0
+    printf 'alpine-fde-unseal: [serial-echo] %s\n' "$1" >&2
+}
 _err() { _msg "error: $1"; }
 
 # _fdh_warn REASON — the warn-before-prompt preamble: the refusal class's
@@ -288,7 +315,19 @@ _fdh_resolve_dev() {
 # unseal_prompt_re still matches the "enter the recovery passphrase …(keyslot
 # 0):" suffix).
 _fdh_prompt_pass() {
-    _msg "(attempt $2 of $FDE_MAX_ATTEMPTS) enter the recovery passphrase for $1 (keyslot 0): "
+    # Item 24a: the prompt's LIVE emission is byte-identical to the pinned
+    # shape (sentinel unseal_prompt_re) and stays SINGLE — the bounded-loop
+    # pins count prompt events via this exact sentence ("exactly N prompts").
+    # Its ECHO copy is the COMPACT texture (counter + target, sentinel
+    # unseal_prompt_echo_re): a second independent burst corroborating the
+    # prompt EVENT (a lost live prompt line no longer starves a feed that is
+    # prompt-synchronized) WITHOUT duplicating the countable sentence.
+    printf 'alpine-fde-unseal: %s\n' \
+        "(attempt $2 of $FDE_MAX_ATTEMPTS) enter the recovery passphrase for $1 (keyslot 0): " >&2
+    if [ "$FDE_SERIAL_ECHO" = 1 ]; then
+        printf 'alpine-fde-unseal: [serial-echo] (attempt %s of %s) recovery-passphrase prompt opened for %s (keyslot 0)\n' \
+            "$2" "$FDE_MAX_ATTEMPTS" "$1" >&2
+    fi
     _fdh_echo_off=0
     if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
         stty -echo 2>/dev/null && _fdh_echo_off=1

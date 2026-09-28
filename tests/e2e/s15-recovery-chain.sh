@@ -455,7 +455,10 @@ _assert_refused() {
     else
         _assert_result not-ok "[$label] hook refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
     fi
-    nprompts=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$log" || true)
+    # Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+    # BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); one
+    # lost/corrupted prompt emission no longer undercounts the bounded loop.
+    nprompts=$(unseal_prompt_events <<<"$log")
     assert_eq "[$label] exactly 3 recovery-passphrase prompts (bounded loop, 3 WRONG answers fed)" \
         "3" "$nprompts"
     assert_contains "[$label] 3-strike give-up (§8.2 fail-closed)" "$log" "$(sentinel_of unseal_3strike)"

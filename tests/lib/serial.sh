@@ -372,3 +372,31 @@ if dbg:
           f"(conn+send {(t_send - t0) * 1000:.1f} ms)", file=sys.stderr)
 PYEOF
 }
+
+# feed_line_recover <dir> <line> <marker-fixed> <verify-line> [soft-secs]
+#
+# Item 24a corroboration, INPUT-side class (decision queue item 24a; live
+# evidence: s19 run with the fed line arriving as `/de v/vdb1` — one corrupted
+# input byte-stream, the guest executed garbage, the marker never appeared,
+# the scenario hung to its budget). feed_line itself is lossless through the
+# bridge, but the GUEST's UART can still swallow/mangle a line under kernel
+# printk load. This wrapper feeds the line, gives the marker a soft window,
+# and — ONLY on a miss — feeds a SECOND, caller-supplied line that
+# RE-DERIVES the marker from live guest state (the s19/s20 TCG-guard
+# discipline: state-grounded, never a blind replay of the original command,
+# which is NOT idempotent in general — a second luksFormat would fail). The
+# caller keeps its own hard `wait_console <dir> <marker>` afterwards: this
+# helper only decides WHETHER a recovery feed is needed.
+# <dir> is the boot dir holding console.log (same shape as wait_console).
+feed_line_recover() {
+    local dir=$1 line=$2 pat=$3 verify=$4 soft=${5:-60} i=0
+    feed_line "$dir/serial.sock" "$line"
+    while ((i < soft)); do
+        grep -qF -- "$pat" "$dir/console.log" 2>/dev/null && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    printf '# serial corroboration (item 24a): marker "%s" not seen in %ss — re-deriving from live guest state\n' \
+        "$pat" "$soft"
+    feed_line "$dir/serial.sock" "$verify"
+}

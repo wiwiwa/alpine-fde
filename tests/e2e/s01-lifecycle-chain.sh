@@ -590,7 +590,10 @@ _assert_polluted() {
     assert_not_contains "[$label] never unlocked via the TPM token" "$log" \
         "$(sentinel_of unseal_unlocked)"
     assert_not_contains "[$label] no emergency shell" "$log" "$(sentinel_of emergency_forbidden)"
-    nprompts=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$log" || true)
+    # Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+    # BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); one
+    # lost/corrupted prompt emission no longer undercounts the bounded loop.
+    nprompts=$(unseal_prompt_events <<<"$log")
     assert_eq "[$label] exactly $nfeeds recovery-passphrase prompt(s) (bounded loop, fed on attempt 1)" \
         "$nfeeds" "$nprompts"
 }

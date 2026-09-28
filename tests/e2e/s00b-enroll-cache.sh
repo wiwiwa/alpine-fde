@@ -981,7 +981,12 @@ _run_bootb() {
 # passphrase (the hook's `read` — no harness-side shortcut) -> the DEBUG
 # SHELL seam takes over.
 wait_console "$RUN" "unlock mechanism: hook" "$QEMU_TIMEOUT"
-wait_console_re "$RUN" "$(sentinel_of unseal_prompt_re)" "$QEMU_TIMEOUT"
+# Item 24a corroboration: wait for the prompt EVENT from EITHER hook texture
+# (uki_wait_hook_prompt unions the pinned live sentence with the hook's
+# compact "[serial-echo]" copy) — a lost live prompt line no longer starves
+# the feed: the guest's `read` is armed whether or not its echo survived the
+# UART, and the fed slot-0 passphrase is the correct answer.
+uki_wait_hook_prompt 1 "$QEMU_TIMEOUT" "$RUN"
 feed_line "$RUN/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
 wait_console "$RUN" "DEBUG SHELL on console" 300
 # 1) untar the tooling payload off the payload drive's tail
@@ -1164,7 +1169,10 @@ if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line ))
 else
     _assert_result not-ok "[boot B] dead-token refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
 fi
-PROMPTS_B=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); one
+# lost/corrupted prompt emission no longer undercounts the bounded loop.
+PROMPTS_B=$(unseal_prompt_events <<<"$LOG")
 assert_eq "[boot B] exactly ONE recovery-passphrase prompt (fed slot-0 unlocked on attempt 1)" "1" "$PROMPTS_B"
 assert_contains "[boot B] fed slot-0 passphrase unsealed the volume (hook recovery path)" "$LOG" \
     "$(sentinel_of unseal_pass_unlocked)"

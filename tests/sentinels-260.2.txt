@@ -75,6 +75,19 @@ unseal_warn_sig_refused	the booted kernel image failed signature/PCR policy — 
 unseal_warn_token_missing	the TPM seal is absent — the TPM may have been cleared
 unseal_warn_reclose	after boot, run: audit, then reseal to restore passwordless unlock
 unseal_attempt_re	\(attempt [0-9]+ of 3\) enter the recovery passphrase
+# Item 24a corroboration textures (hooks/mkinitfs/alpine-fde-unseal.sh,
+# FDE_SERIAL_ECHO seam — ON in every harness boot via the uki-build splice):
+#   unseal_prompt_echo_re: the COMPACT echo copy of a recovery-passphrase
+#     prompt (counter + target; the pinned prompt sentence is deliberately NOT
+#     repeated so `grep -cE unseal_prompt_re` stays countable-exact for the
+#     bounded-loop pins). Candidate-set consumers (uki_wait_hook_prompt, the
+#     scenarios' unique-attempt counters) accept the prompt EVENT from either
+#     texture.
+#   unseal_attempt_any_re: the bare attempt counter shared by BOTH textures —
+#     `grep -oE | sort -u | wc -l` over this counts prompt EVENTS, immune to
+#     one lost emission AND to duplicates.
+unseal_prompt_echo_re	\[serial-echo\] \(attempt [0-9]+ of [0-9]+\) recovery-passphrase prompt opened for
+unseal_attempt_any_re	\(attempt [0-9]+ of [0-9]+\)
 #
 # ===========================================================================
 # Section 2 — systemd-boot 260.2 console anchors (ADR-1: Alpine ≥ 3.24 ships

@@ -34,3 +34,17 @@ sentinel_of() {
     fi
     printf '%s\n' "$v"
 }
+
+# unseal_prompt_events — STDIN: console text -> the number of DISTINCT
+# recovery-passphrase prompt EVENTS the unseal hook opened (decision queue
+# item 24a). Candidate-set counting over the bare attempt counter
+# (unseal_attempt_any_re), which BOTH prompt textures carry — the pinned live
+# sentence (unseal_prompt_re) and the hook's compact "[serial-echo]" copy
+# (unseal_prompt_echo_re, FDE_SERIAL_ECHO seam). sort -u collapses the two
+# emissions of one event, so the count is immune to ONE lost/corrupted
+# emission while still pinning the bounded-loop semantics exactly: a 4th
+# prompt would surface as "(attempt 4 of 3)" — a new distinct token — and
+# fail the "no 4th" pins.
+unseal_prompt_events() {
+    grep -oE "$(sentinel_of unseal_attempt_any_re)" | sort -u | tr -d ' ' | wc -l
+}

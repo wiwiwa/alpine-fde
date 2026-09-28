@@ -844,6 +844,14 @@ else
 fi
 export FDE_EXTRA_DIR
 echo "alpine-fde-harness: invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh"
+# Item 24a corroboration: the harness turns the hook's FDE_SERIAL_ECHO seam
+# ON — every hook console line is emitted twice (live + "[serial-echo]" copy;
+# the recovery prompt echoes in its compact counter texture), so one
+# lost/corrupted 16550 burst under -j load cannot false-fail a single-emission
+# console assert. The production splice (lib/initramfs.sh) leaves the seam
+# OFF — an operator's console is not a capture pipe.
+FDE_SERIAL_ECHO=1
+export FDE_SERIAL_ECHO
 sh /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
 hook_rc=$?
 if [ -e /dev/mapper/root ]; then
@@ -1394,16 +1402,26 @@ uki_release_key_floor() {
 # timeout, so serial feeding must be prompt-synchronized). Counts occurrences
 # of the pinned unseal_prompt_re shape instead of digit matching (kernel
 # printk can split console lines mid-print).
+# Item 24a corroboration: the count is the CANDIDATE SET over BOTH prompt
+# textures — the pinned live sentence (unseal_prompt_re) AND the hook's
+# compact "[serial-echo]" prompt copies (unseal_prompt_echo_re, emitted a
+# breath after each live prompt when the harness's FDE_SERIAL_ECHO seam is
+# on). An echo never precedes its live prompt, so "either texture seen N
+# times" is equivalent to "n prompts opened" while tolerating the loss of any
+# ONE emission (live: the s00 lost-marker class under -j load).
 # QEMU-LIVENESS (s02/s04 registry stalls, 2026-09-22): every iteration checks
 # the boot's qemu pid — if qemu died the prompt can NEVER appear, so the loop
 # fails LOUDLY and immediately (QEMU-DIED + console tail) instead of silently
 # burning the full budget. rc contract unchanged (1 = prompt not seen).
 uki_wait_hook_prompt() {
-    local n=$1 tmo=$2 dir=$3 i=0 c re qpid
+    local n=$1 tmo=$2 dir=$3 i=0 c c_echo re re_echo qpid
     re=$(sentinel_of unseal_prompt_re)
+    re_echo=$(sentinel_of unseal_prompt_echo_re)
     while ((i < tmo)); do
         c=$(grep -cE "$re" "$dir/console.log" 2>/dev/null || true)
-        [[ -n "$c" ]] && ((c >= n)) && return 0
+        c_echo=$(grep -cE "$re_echo" "$dir/console.log" 2>/dev/null || true)
+        c=$(( ${c:-0} + ${c_echo:-0} ))
+        ((c >= n)) && return 0
         qpid=$(cat "$dir/qemu.pid" 2>/dev/null || true)
         if [[ -z "$qpid" ]] || ! kill -0 "$qpid" 2>/dev/null; then
             echo "QEMU-DIED: qemu (pid ${qpid:-<none>}) is gone before prompt $n/$n" >&2

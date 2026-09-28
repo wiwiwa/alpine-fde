@@ -265,7 +265,10 @@ if [[ -n "${_ref_line:-}" && -n "${_p1_line:-}" ]] && (( _ref_line < _p1_line ))
 else
     _assert_result not-ok "hook refusal FIRST" "ref=$_ref_line prompt1=$_p1_line"
 fi
-PROMPTS=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); one
+# lost/corrupted prompt emission no longer undercounts the bounded loop.
+PROMPTS=$(unseal_prompt_events <<<"$LOG")
 assert_eq "exactly 3 recovery-passphrase prompts (bounded loop, no 4th)" "3" "$PROMPTS"
 assert_contains "3-strike give-up (§8.2 fail-closed)" "$LOG" "$(sentinel_of unseal_3strike)"
 assert_contains "fail-closed poweroff (no shell is offered)" "$LOG" \

@@ -254,7 +254,10 @@ assert_not_contains "token path never ran (no signature gate)" "$LOG" \
     "$(sentinel_of unseal_sig_refused)"
 assert_not_contains "token path never ran (no seal refusal)" "$LOG" \
     "$(sentinel_of unseal_seal_refused)"
-PROMPTS=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); one
+# lost/corrupted prompt emission no longer undercounts the bounded loop.
+PROMPTS=$(unseal_prompt_events <<<"$LOG")
 assert_eq "exactly 3 recovery-passphrase prompts (bounded loop, no 4th)" "3" "$PROMPTS"
 assert_contains "3-strike give-up (§8.2 fail-closed)" "$LOG" "$(sentinel_of unseal_3strike)"
 assert_contains "fail-closed poweroff (no shell is offered)" "$LOG" \

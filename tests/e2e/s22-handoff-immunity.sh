@@ -498,8 +498,13 @@ for n in 2 3; do
     _i=0
     while (( _i < 45 )); do
         grep -q "alpine-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
-        grep -cE "$(sentinel_of unseal_prompt_re)" "$RUN/boot1/console.log" 2>/dev/null \
-            | grep -q "^$n$" && break
+        # Item 24a: prompt-EVENT count from EITHER hook texture (the pinned
+        # live sentence OR the compact "[serial-echo]" copy — candidate set,
+        # same union uki_wait_hook_prompt counts); one lost emission no
+        # longer starves the feed.
+        _pc=$(grep -cE "$(sentinel_of unseal_prompt_re)" "$RUN/boot1/console.log" 2>/dev/null || true)
+        _pc=$(( ${_pc:-0} + $(grep -cE "$(sentinel_of unseal_prompt_echo_re)" "$RUN/boot1/console.log" 2>/dev/null || echo 0) ))
+        [[ "$_pc" -eq "$n" ]] && break
         _qpid=$(cat "$RUN/boot1/qemu.pid" 2>/dev/null || true)
         [[ -z "$_qpid" ]] || ! kill -0 "$_qpid" 2>/dev/null && break 2
         sleep 1
@@ -649,8 +654,10 @@ assert_contains "[boot 2] hook discovered the provisional token" "$LOG_B2" \
 assert_contains "[boot 2] the standing signed UKI auto-unsealed via the TPM token" "$LOG_B2" \
     "$(sentinel_of unseal_unlocked)"
 assert_contains "[boot 2] UNSEALED with ZERO console input" "$LOG_B2" "alpine-fde: UNSEALED"
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures); the zero pins the same zero-input invariant.
 assert_eq "[boot 2] the recovery loop NEVER armed (zero-input invariant)" "0" \
-    "$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_B2" || true)"
+    "$(unseal_prompt_events <<<"$LOG_B2")"
 assert_not_contains "[boot 2] the tampered-word UKI is not what booted" "$LOG_B2" \
     "alpine-fde-tampered"
 assert_not_contains "[boot 2] no interactive prompt ever appeared" "$LOG_B2" \
@@ -857,8 +864,10 @@ assert_contains "[boot 3] hook discovered the standing token" "$LOG_B3" \
     "$(sentinel_of unseal_token_info)7,11]"
 assert_contains "[boot 3] the TPM refused the sealed blob under the tampered PCR state" "$LOG_B3" \
     "$(sentinel_of unseal_seal_refused)"
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures); a lost emission no longer undercounts.
 assert_eq "[boot 3] exactly 3 recovery-passphrase prompts (bounded loop)" "3" \
-    "$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG_B3" || true)"
+    "$(unseal_prompt_events <<<"$LOG_B3")"
 assert_contains "[boot 3] 3-strike give-up (§8.2 fail-closed)" "$LOG_B3" \
     "$(sentinel_of unseal_3strike)"
 assert_contains "[boot 3] fail-closed poweroff (no shell is offered)" "$LOG_B3" \

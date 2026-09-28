@@ -1216,4 +1216,35 @@ assert_contains "OsIndications-ok: boot-to-firmware-setup requested" "$OUT_B" \
 assert_contains "OsIndications-ok: Enter prompt present (spec-compliant firmware)" "$OUT_B" \
     "Press Enter to reboot into the firmware setup"
 
+# =============================================================================
+# FDE_SERIAL_ECHO=1 — item 24a dual-emission seam (the e2e initrd splice turns
+# it ON; default OFF, pinned by every leg above which asserts on the SINGLE-
+# emission counts). On the token-missing 3-strike path: every _msg line is
+# emitted TWICE (live + "[serial-echo]" copy), while the recovery-passphrase
+# PROMPT echoes in its COMPACT texture — the pinned prompt sentence stays
+# countable-exact (3 live prompts for 3 attempts, unchanged from the default
+# seam-off legs) and the prompt EVENT is corroborated by the echo copies.
+# =============================================================================
+reset_leg
+rc=$(run_hook "$TMP/stdin-3bad" FDE_SERIAL_ECHO=1 FDE_TEST_TOKEN_MIN_ID=32 FDE_ATTACH_WAIT_SECS=2 FDE_OPEN_FAIL=1)
+assert_ne "serial echo: hook rc nonzero (3-strike fail-closed unchanged)" "0" "$rc"
+assert_eq "serial echo: the token_missing warn sentence appears TWICE (live + echo)" "2" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
+assert_eq "serial echo: the audit/reseal closing line appears TWICE (live + echo)" "2" \
+    "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
+assert_eq "serial echo: the token_missing refusal sentinel appears TWICE (live + echo)" "2" \
+    "$(grep -cF "$(sentinel_of unseal_token_missing)" "$TMP/out.log" || true)"
+assert_eq "serial echo: the pinned prompt sentence stays countable-exact (3 live prompts, echo is compact)" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/out.log" || true)"
+assert_eq "serial echo: the compact prompt echo appears 3 times (one per prompt event)" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_echo_re)" "$TMP/out.log" || true)"
+assert_eq "serial echo: candidate-set unique attempt events == 3 (both textures counted once each)" "3" \
+    "$(grep -oE "$(sentinel_of unseal_attempt_any_re)" "$TMP/out.log" | sort -u | wc -l | tr -d ' ')"
+assert_eq "serial echo: bounded to 3 opens then poweroff once (semantics unchanged)" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# (The seam's OFF default is pinned by every earlier leg: they set no
+# FDE_SERIAL_ECHO and assert the exact single-emission counts, e.g.
+# "3-strike: prompts carry (attempt 1..3 of 3) counters == 1 1 1".)
+
 finish

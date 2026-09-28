@@ -298,7 +298,9 @@ _guard_enter_and_kill() {
 _assert_refusal_tail() {
     local label="$1" log prompts
     log=$(cat "$RUN/console-$label.log" 2>/dev/null || true)
-    prompts=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$log" || true)
+    # Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+    # BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events).
+    prompts=$(unseal_prompt_events <<<"$log")
     assert_eq "[$label] exactly 3 recovery-passphrase prompts (bounded loop, no 4th)" "3" "$prompts"
     assert_contains "[$label] 3-strike give-up (§8.2 fail-closed)" "$log" \
         "$(sentinel_of unseal_3strike)"

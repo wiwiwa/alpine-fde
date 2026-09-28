@@ -373,7 +373,11 @@ assert_contains "pre-unseal SB guard refused (secureboot=0 setup_mode=1, ADR-20)
     "$(sentinel_of unseal_sb_guard)"
 assert_contains "guard refusal retracts BOTH unlock paths (no token path, no recovery passphrase)" "$LOG" \
     "the container will NOT be unlocked: no token path, no recovery passphrase"
-PROMPTS=$(grep -cE "$(sentinel_of unseal_prompt_re)" <<<"$LOG" || true)
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures — lib/sentinels.sh unseal_prompt_events); a lost
+# emission can no longer skew the count, and the zero here pins the same
+# "the recovery loop NEVER armed" invariant as before.
+PROMPTS=$(unseal_prompt_events <<<"$LOG")
 assert_eq "the recovery-passphrase loop NEVER armed (0 prompts under SB off)" "0" "$PROMPTS"
 assert_not_contains "the token path never ran (the tampered token is never even read)" "$LOG" \
     "$(sentinel_of unseal_token_info)"
