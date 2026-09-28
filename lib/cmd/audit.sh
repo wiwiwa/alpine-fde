@@ -304,6 +304,9 @@ cmd_audit_main() {
             fi
         fi
         baseline_finalize_from_live
+        # FR-6 acknowledge path: the re-baseline retires any standing
+        # boot-audit alert (drift marker + issue/motd banners)
+        aud_clear_runtime_alert
         aud_write_last_audit "$(sp_last_audit_file)" "$_am_bl" ok yes
         printf 'alpine-fde: baseline re-baselined from live values (accepted); %s updated\n' "$_am_bl" >&2
         return 0
@@ -314,6 +317,190 @@ cmd_audit_main() {
     if [ "$AUD_DRIFT" -eq 1 ]; then
         return "$ALPINE_FDE_DRIFT"
     fi
+    # FR-6 acknowledge path: an operator-run `alpine-fde audit` that finds NO
+    # drift retires any standing boot-audit alert (drift marker + issue/motd
+    # banners) — the same helper the --accept re-baseline uses below.
+    aud_clear_runtime_alert
     printf 'alpine-fde: all checked values match the baseline\n' >&2
+    return 0
+}
+
+# =============================================================================
+# FR-6: the BOOT-TIME audit entry (docs/Architecture.md §8.1 internal-
+# automation row; docs/UserGuide.md §4 "Automated Boot & Login Auditing").
+#
+# The OpenRC oneshot hooks/openrc/alpine-fde-audit (default runlevel, `after *`
+# — run LAST before the login prompt) SOURCES this module and calls
+# aud_service_main — the §8.1 machine/lib entrance rule: machine scripts NEVER
+# exec the `alpine-fde` CLI. The comparison itself is the SAME logic the CLI
+# path runs (aud_pcr_report / aud_sb_report / aud_fw_report /
+# aud_eventlog_report / aud_sbverify_report) — one implementation, two doors.
+#
+# artifacts (all under ${ALPINE_FDE_ROOT}):
+#   <root>/run/alpine-fde/audit-drift   the drift MARKER — its content IS the
+#                                       login banner; hooks/profile.d/
+#                                       alpine-fde.sh cats it at interactive
+#                                       login (ALPINE_FDE_DRIFT_MARKER seam)
+#   <root>/etc/issue + <root>/etc/motd  the boxed pre-login alert
+# ----------------------------------------------------------------------------
+
+AUD_ALERT_BEGIN='#--- alpine-fde-audit: drift alert BEGIN ---#'
+AUD_ALERT_END='#--- alpine-fde-audit: drift alert END ---#'
+
+# aud_drift_marker / aud_issue_file / aud_motd_file — the runtime artifact
+# paths (ALPINE_FDE_ROOT seam; empty root = the guest absolute paths the
+# shipped profile.d hook and docs name)
+aud_drift_marker() {
+    printf '%s/run/alpine-fde/audit-drift\n' "${ALPINE_FDE_ROOT:-}"
+}
+
+aud_issue_file() { printf '%s/etc/issue\n' "${ALPINE_FDE_ROOT:-}"; }
+aud_motd_file() { printf '%s/etc/motd\n' "${ALPINE_FDE_ROOT:-}"; }
+
+# aud_log — syslog only (busybox logger); a logging failure is never fatal
+aud_log() { logger -t alpine-fde-audit "$*" 2>/dev/null || :; }
+
+# aud_alert_block — the /etc/issue + /etc/motd notice (docs/UserGuide.md §5.3)
+aud_alert_block() {
+    cat <<EOF
+$AUD_ALERT_BEGIN
+*******************************************************************************
+* WARNING: Alpine FDE detected firmware/platform drift on this machine!       *
+* Measurements differ from /etc/alpine-fde/baseline.json                      *
+* Run 'alpine-fde audit' to inspect, or 'alpine-fde audit --accept' if valid. *
+*******************************************************************************
+$AUD_ALERT_END
+EOF
+}
+
+# aud_login_alert REPORT — the detailed interactive-login banner staged at the
+# drift marker (docs/UserGuide.md §5.4); the DRIFT lines are the drifted
+# checks exactly as the comparison reported them
+aud_login_alert() {
+    _ala_lines=$(printf '%s\n' "$1" | grep 'DRIFT' | awk '{printf "  - %s DRIFT\n", $1}')
+    cat <<EOF
+================================================================================
+[SECURITY ALERT] Alpine FDE Firmware Drift Detected!
+================================================================================
+Platform measurements have drifted from the trusted baseline:
+${_ala_lines:-  - platform measurements DRIFT}
+
+If you recently updated firmware or BIOS settings, verify and accept via:
+  alpine-fde audit --accept && alpine-fde reseal
+Otherwise, investigate potential unauthorized firmware modification!
+================================================================================
+EOF
+}
+
+# aud_apply_alert FILE BLOCK — strip any PREVIOUS alert block, then prepend
+# the fresh BLOCK above the operator's own content. The block is
+# self-delimiting (AUD_ALERT_BEGIN/END), so the operator's issue/motd text is
+# preserved across drift boots WITHOUT keeping a backup copy, and the prepend
+# can never grow the file unboundedly. Staged to a temp file next to the
+# target and moved into place (the aud_write_last_audit / M-3 atomic pattern).
+aud_apply_alert() {
+    _aaf_f=$1 _aaf_blk=$2
+    [ -f "$_aaf_f" ] || { mkdir -p "${_aaf_f%/*}" 2>/dev/null || :; : >"$_aaf_f" || return 1; }
+    _aaf_tmp=$(mktemp "${_aaf_f%/*}/.alpine-fde-audit.XXXXXX") || return 1
+    if ! { printf '%s\n' "$_aaf_blk"; sed "/^$AUD_ALERT_BEGIN\$/,/^$AUD_ALERT_END\$/d" "$_aaf_f"; } >"$_aaf_tmp" ||
+        ! mv -f "$_aaf_tmp" "$_aaf_f"; then
+        rm -f "$_aaf_tmp" 2>/dev/null || :
+        return 1
+    fi
+    return 0
+}
+
+# aud_strip_alert FILE — remove a previously written alert block (the match /
+# acknowledge recovery path); rewrites the file only when a block is present
+aud_strip_alert() {
+    _asf_f=$1
+    [ -f "$_asf_f" ] || return 0
+    grep -q "^$AUD_ALERT_BEGIN\$" "$_asf_f" || return 0
+    _asf_tmp=$(mktemp "${_asf_f%/*}/.alpine-fde-audit.XXXXXX") || return 1
+    if ! sed "/^$AUD_ALERT_BEGIN\$/,/^$AUD_ALERT_END\$/d" "$_asf_f" >"$_asf_tmp" ||
+        ! mv -f "$_asf_tmp" "$_asf_f"; then
+        rm -f "$_asf_tmp" 2>/dev/null || :
+        return 1
+    fi
+    return 0
+}
+
+# aud_clear_runtime_alert — retire a standing boot-audit alert: the drift
+# marker + the issue/motd banners. Shared by the oneshot match path and the
+# CLI acknowledge path (`alpine-fde audit` on a matching machine, and
+# `--accept` after the re-baseline).
+aud_clear_runtime_alert() {
+    rm -f "$(aud_drift_marker)" 2>/dev/null || :
+    aud_strip_alert "$(aud_issue_file)" || :
+    aud_strip_alert "$(aud_motd_file)" || :
+    return 0
+}
+
+# aud_service_main — the oneshot behavior contract (rc 0 on EVERY path — drift
+# is a RESULT, never a boot failure):
+#   baseline missing            -> syslog skip line, quiet, exit 0
+#   baseline invalid            -> syslog skip line, quiet, exit 0
+#   comparison error (TPM/ESP)  -> console WARN + syslog, exit 0; any EXISTING
+#                                  drift state is left untouched (a failed
+#                                  check never silently clears an alert)
+#   match                       -> marker + banners REMOVED (idempotent
+#                                  recovery), one syslog line, exit 0
+#   drift                       -> boxed alert prepended to /etc/issue and
+#                                  /etc/motd, the login banner staged at the
+#                                  drift marker, every drifted check logged to
+#                                  syslog, the console [WARN] block, exit 0
+aud_service_main() {
+    strict_mode
+    _aum_bl=$(sp_baseline_file)
+    if [ ! -f "$_aum_bl" ]; then
+        aud_log "no baseline at $_aum_bl — boot audit skipped (provision the machine first)"
+        return 0
+    fi
+    if ! baseline_validate "$_aum_bl"; then
+        aud_log "baseline invalid: $_aum_bl — boot audit skipped"
+        return 0
+    fi
+    # quiet-by-construction comparison: the report text is captured (stderr
+    # included — die/warn stay out of the boot console on the success paths);
+    # the subshell contains a die (TPM read failure maps to rc 64) and
+    # propagates only its rc
+    _aum_rc=0
+    _aum_report=$(
+        {
+            aud_pcr_report "$_aum_bl"
+            aud_sb_report "$_aum_bl"
+            aud_fw_report "$_aum_bl"
+            aud_eventlog_report "$_aum_bl"
+            aud_sbverify_report
+        } 2>&1
+    ) || _aum_rc=$?
+    if [ "$_aum_rc" -ne 0 ]; then
+        warn "alpine-fde-audit: boot audit failed (rc $_aum_rc) — the check is skipped, boot is NOT blocked, existing alerts stay (details in syslog)"
+        aud_log "boot audit failed (rc $_aum_rc): $(printf '%s\n' "$_aum_report" | head -n 1)"
+        return 0
+    fi
+    if ! printf '%s\n' "$_aum_report" | grep -q 'DRIFT'; then
+        aud_clear_runtime_alert
+        aud_log "all checked values match the baseline"
+        return 0
+    fi
+    _aum_marker=$(aud_drift_marker)
+    mkdir -p "${_aum_marker%/*}" 2>/dev/null || :
+    _aum_login=$(aud_login_alert "$_aum_report")
+    _aum_tmp=$(mktemp "${_aum_marker%/*}/.alpine-fde-audit.XXXXXX") &&
+        printf '%s\n' "$_aum_login" >"$_aum_tmp" &&
+        mv -f "$_aum_tmp" "$_aum_marker" 2>/dev/null || :
+    aud_apply_alert "$(aud_issue_file)" "$(aud_alert_block)" || aud_log "cannot write the /etc/issue alert"
+    aud_apply_alert "$(aud_motd_file)" "$(aud_alert_block)" || aud_log "cannot write the /etc/motd alert"
+    printf '%s\n' "$_aum_report" | grep 'DRIFT' | while IFS= read -r _aum_line; do
+        aud_log "DRIFT: $_aum_line"
+    done
+    aud_log "firmware/platform drift detected — alerts written to /etc/issue and /etc/motd; the login banner is staged (alpine-fde audit to inspect, --accept to re-baseline)"
+    # docs/UserGuide.md §5.3 — the boot-console warning block
+    cat >&2 <<'EOF'
+[WARN] Alpine FDE: Platform firmware drift detected during boot!
+[WARN] One or more PCR measurements do not match the trusted baseline.
+[WARN] Details logged to /var/log/messages; review with 'alpine-fde audit'.
+EOF
     return 0
 }

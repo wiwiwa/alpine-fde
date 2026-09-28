@@ -254,10 +254,12 @@ The system reboots into the previous kernel **without requiring a password**, be
 In addition to manual `alpine-fde audit` execution, platform firmware integrity is monitored automatically at two key points without any background daemons:
 
 1. **On Every Boot (`alpine-fde-audit` oneshot service):**
-   Runs in the OpenRC `default` runlevel scheduled with `after *` to execute **last immediately before the login prompt**. This guarantees that its warning notice is not scrolled off-screen by startup logs from other services (networking, sshd, chrony, etc.). It compares current PCR 0..3, PCR 7, and the TCG event log against `/etc/alpine-fde/baseline.json`. If any measurement drifts, it logs an explicit warning to syslog/dmesg and writes a security notice to `/etc/issue` and `/etc/motd`. The service then terminates immediately (0 MB resident memory, 0 CPU overhead).
+   Runs in the OpenRC `default` runlevel scheduled with `after *` to execute **last immediately before the login prompt**. This guarantees that its warning notice is not scrolled off-screen by startup logs from other services (networking, sshd, chrony, etc.). It compares current PCR 0..3, PCR 7, and the TCG event log against `/etc/alpine-fde/baseline.json` using the same comparison logic as `alpine-fde audit` (the init script sources the audit library directly — it never execs the CLI). If any measurement drifts, it logs an explicit warning to syslog and writes a security notice to `/etc/issue` and `/etc/motd` (the machine's own banner text is preserved — the alert is a self-delimiting block prepended above it), and stages the detailed login banner at `/run/alpine-fde/audit-drift`. When a later boot audit **matches** the baseline, the standing alert (marker + banners) is retired automatically. A missing baseline (pre-provisioning) skips quietly with a syslog line; a failed check (TPM unreachable) is logged and skipped without ever clearing an existing alert or blocking the boot — drift is a result, not a boot failure. The service then terminates immediately (0 MB resident memory, 0 CPU overhead). The first-boot finalizer (`alpine-fde-finalize`) never touches this service — each oneshot manages only itself.
 
 2. **On Every Login (`/etc/profile.d/alpine-fde.sh`):**
-   When an operator logs into an interactive shell, the profile hook checks whether firmware drift was detected. If drifted, it displays a high-visibility security alert banner right at the terminal, instructing the user on how to verify and accept or investigate.
+   When an operator logs into an **interactive** shell (non-interactive sessions such as `scp` or CI runners stay silent), the profile hook checks for the staged drift marker (`/run/alpine-fde/audit-drift`). If present, it displays the high-visibility security alert banner right at the terminal, instructing the user on how to verify and accept or investigate.
+
+3. **Acknowledging an alert:** after verifying the drift is benign (firmware/BIOS update?), run `alpine-fde audit --accept` to re-baseline (then `alpine-fde reseal` to restore passwordless unlock) — or, on a machine that matches again, a plain `alpine-fde audit` retires the alert. Both clear the login marker and strip the `/etc/issue` + `/etc/motd` notice.
 
 ---
 
@@ -334,34 +336,37 @@ When the oneshot `alpine-fde-audit` service runs during system boot and detects 
  [ !! ]
 ```
 
-It also updates the pre-login console banner (`/etc/issue`) and `/etc/motd`:
+It also updates the pre-login console banner (`/etc/issue`) and `/etc/motd` (the `BEGIN`/`END` rule lines delimit the alert so a later matching audit can strip exactly this block and leave the machine's own banner text untouched):
 
 ```text
+#--- alpine-fde-audit: drift alert BEGIN ---#
 *******************************************************************************
 * WARNING: Alpine FDE detected firmware/platform drift on this machine!       *
 * Measurements differ from /etc/alpine-fde/baseline.json                      *
 * Run 'alpine-fde audit' to inspect, or 'alpine-fde audit --accept' if valid. *
 *******************************************************************************
+#--- alpine-fde-audit: drift alert END ---#
 ```
 
 #### 4. Interactive Login Security Alert (`/etc/profile.d/alpine-fde.sh`)
 
-When an operator logs into an interactive shell, if firmware drift is detected, an alert banner is displayed immediately at the top of the terminal session:
+When an operator logs into an interactive shell and the boot-time audit has staged the drift marker (`/run/alpine-fde/audit-drift`), the alert banner is displayed immediately at the top of the terminal session — one line per drifted check, exactly as the comparison reported it:
 
 ```text
 ================================================================================
 [SECURITY ALERT] Alpine FDE Firmware Drift Detected!
 ================================================================================
 Platform measurements have drifted from the trusted baseline:
-  - PCR 0 (Firmware):    DRIFT
-  - PCR 7 (Secure Boot): DRIFT
-  - TCG Event Log:       DRIFT
+  - pcr7 DRIFT
+  - eventlog DRIFT
 
 If you recently updated firmware or BIOS settings, verify and accept via:
   alpine-fde audit --accept && alpine-fde reseal
 Otherwise, investigate potential unauthorized firmware modification!
 ================================================================================
 ```
+
+The banner disappears once the drift is resolved and acknowledged: the next matching boot audit, a plain `alpine-fde audit`, or `alpine-fde audit --accept` all retire it.
 
 #### 5. First-Boot Finalization Failure (`alpine-fde-finalize`)
 

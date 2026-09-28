@@ -1,0 +1,80 @@
+#!/sbin/openrc-run
+# alpine-fde-audit — boot-time firmware/platform audit oneshot (FR-6;
+# docs/Architecture.md §8.1 "Internal Automation" row, §9.5; user decision
+# queue item 10; docs/UserGuide.md §4 "Automated Boot & Login Auditing").
+#
+# Every boot, AFTER the rest of the default runlevel has started (`after *` —
+# run LAST, immediately before the login prompt, so the drift notice is not
+# scrolled off-screen by other services' startup logs), this service compares
+# the live measurements (PCR 0..3, PCR 7, Secure Boot state + key
+# fingerprints, TCG event log v1, ESP boot binaries) against
+# /etc/alpine-fde/baseline.json using the SAME comparison logic as
+# `alpine-fde audit` (aud_pcr_report / aud_sb_report / aud_fw_report /
+# aud_eventlog_report / aud_sbverify_report in lib/cmd/audit.sh — one
+# implementation, two doors).
+#
+#   MATCH   -> any standing alert (the drift marker + the /etc/issue and
+#              /etc/motd banners) is retired; one syslog line; exit 0.
+#   DRIFT   -> the boxed alert is prepended to /etc/issue and /etc/motd (the
+#              operator's own content is preserved — the block is
+#              self-delimiting and a previous alert is stripped first), the
+#              detailed login banner is staged at
+#              /run/alpine-fde/audit-drift, every drifted check is logged to
+#              syslog, the [WARN] block is printed, exit 0. The staged banner
+#              is what /etc/profile.d/alpine-fde.sh prints at the next
+#              interactive login (FR-6's login leg).
+#   SKIP    -> no baseline (pre-provisioning) or an invalid baseline: a quiet
+#              syslog line, exit 0.
+#   ERROR   -> the comparison itself failed (TPM unreachable, ...): logged to
+#              syslog + a console WARN, exit 0; EXISTING alerts are left
+#              untouched (a failed check never silently clears an alert).
+#
+# DRIFT IS A RESULT, NOT A BOOT FAILURE: start() returns 0 on every path —
+# this service never fails the boot.
+#
+# §8.1 machine/lib entrance rule: this init script NEVER execs the
+# `alpine-fde` CLI — it sources the lib/cmd/audit.sh module directly and calls
+# its lib-level entry (aud_service_main), the same pattern the finalize
+# oneshot (hooks/openrc/alpine-fde-finalize -> fin_service_main) and the apk
+# trigger (hooks/apk/triggers/alpine-fde.trigger) use. The runtime degrades
+# safe: a missing module is a syslog line, not a boot failure.
+#
+# Acknowledge: after verifying the drift is benign, `alpine-fde audit` (match)
+# or `alpine-fde audit --accept` (re-baseline) retires the standing alert.
+#
+# Install: copied to /etc/init.d/ and enabled via
+# `rc-update add alpine-fde-audit default` (Stage 1 step 7; docs/Architecture.md
+# §9.1 in-chroot step 8). finalize NEVER touches this service — each oneshot
+# manages only itself.
+
+description="Alpine FDE boot-time firmware/platform audit (FR-6)"
+
+depend() {
+    need localmount
+    # §8.1: run LAST in the runlevel, immediately before the login prompt
+    # (also orders us after alpine-fde-finalize, whose audit --init finalizes
+    # the pending baseline on the first boot)
+    after *
+}
+
+start() {
+    _afa_dir=${ALPINE_FDE_CMD_DIR:-/opt/alpine-fde/lib/cmd}
+    if [ ! -r "$_afa_dir/audit.sh" ]; then
+        logger -t alpine-fde-audit \
+            "audit runtime missing at $_afa_dir/audit.sh — boot audit skipped" \
+            2>/dev/null || :
+        return 0
+    fi
+    ALPINE_FDE_CMD_DIR=$_afa_dir
+    # shellcheck disable=SC1090  # resolved via the runtime lib dir
+    . "$_afa_dir/audit.sh"
+    if command -v aud_service_main >/dev/null 2>&1; then
+        aud_service_main
+    else
+        logger -t alpine-fde-audit \
+            "aud_service_main missing after sourcing $_afa_dir/audit.sh — boot audit skipped" \
+            2>/dev/null || :
+    fi
+    # Drift is a RESULT, not a boot failure: always 0 for OpenRC.
+    return 0
+}

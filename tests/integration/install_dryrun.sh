@@ -229,6 +229,17 @@ assert_contains "plan: sshd policy pins PasswordAuthentication yes (ceremony-acc
     "PasswordAuthentication yes"
 assert_contains "plan: sshd enabled for the default runlevel (headless access)" "$INS_OUT" \
     "rc-update add sshd default"
+# FR-6 (user decision queue item 10): the boot-time audit oneshot + login
+# alert hook ship with the §9.1 step 7/8 staging, and the oneshot is enabled
+# for the default runlevel
+assert_contains "plan: FR-6 audit oneshot staged to /etc/init.d/alpine-fde-audit" "$INS_OUT" \
+    "init.d/alpine-fde-audit"
+assert_contains "plan: FR-6 login alert hook staged to /etc/profile.d/alpine-fde.sh" "$INS_OUT" \
+    "profile.d/alpine-fde.sh"
+assert_contains "plan: FR-6 audit oneshot enabled for the default runlevel" "$INS_OUT" \
+    "rc-update add alpine-fde-audit default"
+assert_not_contains "plan: NO systemd audit unit anywhere" "$INS_OUT" \
+    "alpine-fde-audit.service"
 assert_contains "plan: network interfaces drop" "$INS_OUT" "etc/network/interfaces"
 assert_not_contains "plan: systemd-networkd drop retired" "$INS_OUT" "20-alpine-fde.network"
 # G-ST4/§8.2: single-disk crypttab is ONE root entry, NO password-cache
@@ -515,6 +526,19 @@ I_GETTY=$(line_no "$INS_OUT" "ttyS0::respawn:/sbin/getty")
 I_SSHD_ENABLE=$(line_no "$INS_OUT" "rc-update add sshd default")
 assert_eq "order: headless-access records AFTER the in-chroot apk txn (openssh provides sshd_config; failure #2 discipline)" "1" \
     "$(( I_TXN > 0 && I_TXN < I_GETTY && I_GETTY < I_SSHD_ENABLE ? 1 : 0 ))"
+# FR-6 ordering: the audit oneshot enable runs AFTER the in-chroot apk txn
+# (busybox logger ships in alpine-base; the init script is staged by the same
+# plan) and after the finalize enable — the plan's service-enable records stay
+# in staging order (§9.1 step 7, then the FR-6 companion record)
+I_AUD_ENABLE=$(line_no "$INS_OUT" "rc-update add alpine-fde-audit default")
+I_FIN_ENABLE=$(line_no "$INS_OUT" "rc-update add alpine-fde-finalize default")
+assert_eq "FR-6 order: audit enable AFTER the in-chroot apk txn (failure #2 discipline)" "1" \
+    "$(( I_TXN > 0 && I_TXN < I_AUD_ENABLE ? 1 : 0 ))"
+assert_eq "FR-6 order: audit enable follows the finalize enable (one staging block)" "1" \
+    "$(( I_FIN_ENABLE > 0 && I_FIN_ENABLE < I_AUD_ENABLE ? 1 : 0 ))"
+I_PROF=$(line_no "$INS_OUT" "profile.d/alpine-fde.sh")
+assert_eq "FR-6 order: profile.d hook staged with the hooks block (before the enable record)" "1" \
+    "$(( I_PROF > 0 && I_PROF < I_AUD_ENABLE ? 1 : 0 ))"
 
 # --- 2b-item26b. target DNS seed (real-install failure #3): the in-chroot apk
 #         transaction resolves the mirror via the TARGET's /etc/resolv.conf —

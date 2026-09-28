@@ -1007,15 +1007,17 @@ inst_preflight() {
   # hooks/ ships the Alpine layout (ADR-13/ADR-19, G-C16): kernel-hooks.d
   # build/remove hooks → /etc/kernel-hooks.d/, the mkinitfs unseal hook +
   # features.d entry → /etc/mkinitfs/, the apk trigger → /etc/apk/triggers/,
-  # and the first-boot AUTO-FINALIZER oneshot → /etc/init.d/ (ADR-20 amended
+  # the first-boot AUTO-FINALIZER oneshot → /etc/init.d/ (ADR-20 amended
   # Stage 2: the service runs the non-interactive completion when
   # provisional-booted under Secure Boot; `alpine-fde finalize` remains the
-  # guided/crash-resume entry point, Stage 3)
+  # guided/crash-resume entry point, Stage 3), and the FR-6 boot-time audit
+  # oneshot → /etc/init.d/ + its login alert hook → /etc/profile.d/
   for _if_h in kernel-hooks.d/alpine-fde-build.hook \
     kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     mkinitfs/features.d/alpine-fde.modules \
-    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
     [ -f "$(inst_hooks_dir)/$_if_h" ] || die "install: hook template missing: $(inst_hooks_dir)/$_if_h"
   done
   # §13 host tool set — topology-conditional. apk populates the rootfs;
@@ -2132,7 +2134,12 @@ cmd_install_main() {
   # /etc/init.d/ and is enabled for the default runlevel. ADR-20 amended
   # Stage 2: it runs the NON-INTERACTIVE completion when provisional-booted
   # under Secure Boot; `alpine-fde finalize` is the guided/crash-resume
-  # entry point, Stage 3.)
+  # entry point, Stage 3.) The FR-6 boot-time audit rides the SAME staging:
+  # hooks/openrc/alpine-fde-audit → /etc/init.d/alpine-fde-audit (the oneshot
+  # that compares PCR 0..3+7 + the event log against the baseline every boot,
+  # last before the login prompt) and hooks/profile.d/alpine-fde.sh →
+  # /etc/profile.d/alpine-fde.sh (the interactive login drift alert).
+  # §9.1 step 8 / docs/Architecture.md §9.1 item 8.
   # §8.2/ADR-13 staging contract (ONE pinned path): the unseal hook ships to
   # EXACTLY the absolute path pinned in the mkinitfs.conf `custom_files`
   # registration (step 1b) — /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh.
@@ -2144,8 +2151,15 @@ cmd_install_main() {
   # path unresolved and the hook silently omitted. The repo-wide convention
   # (hooks_mkinitfs_unseal + initrd_audit inventories) pins the
   # /usr/share/alpine-fde spelling.
-  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/usr/lib/udev/rules.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/mkinitfs/features.d/alpine-fde.modules $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules && cp $_im_hooks/udev/60-tpm.rules $_im_mnt/usr/lib/udev/rules.d/60-tpm.rules && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt/lib/modules/[^/]*/:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature files pack every found tpm/btrfs/bcache module, blocker #12/#14)\"; :"
+  inst_plan_run host "mkdir -p $_im_mnt/etc/kernel-hooks.d $_im_mnt/etc/mkinitfs/features.d $_im_mnt/usr/share/alpine-fde/mkinitfs $_im_mnt/usr/lib/udev/rules.d $_im_mnt/etc/apk/triggers $_im_mnt/etc/init.d $_im_mnt/etc/profile.d && cp $_im_hooks/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook && cp $_im_hooks/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook && cp $_im_hooks/mkinitfs/alpine-fde-unseal.sh $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh && cp $_im_hooks/mkinitfs/features.d/alpine-fde.files $_im_mnt/etc/mkinitfs/features.d/alpine-fde.files && cp $_im_hooks/mkinitfs/features.d/alpine-fde.modules $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules && cp $_im_hooks/udev/60-tpm.rules $_im_mnt/usr/lib/udev/rules.d/60-tpm.rules && cp $_im_hooks/apk/triggers/alpine-fde.trigger $_im_mnt/etc/apk/triggers/alpine-fde.trigger && cp $_im_hooks/openrc/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-finalize && cp $_im_hooks/openrc/alpine-fde-audit $_im_mnt/etc/init.d/alpine-fde-audit && cp $_im_hooks/profile.d/alpine-fde.sh $_im_mnt/etc/profile.d/alpine-fde.sh && chmod +x $_im_mnt/etc/kernel-hooks.d/alpine-fde-build.hook $_im_mnt/etc/kernel-hooks.d/alpine-fde-remove.hook $_im_mnt/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh $_im_mnt/etc/apk/triggers/alpine-fde.trigger $_im_mnt/etc/init.d/alpine-fde-finalize $_im_mnt/etc/init.d/alpine-fde-audit && find $_im_mnt/lib/modules/*/kernel -type f \( -name 'tpm.ko*' -o -name 'tpm_tis.ko*' -o -name 'tpm_crb.ko*' -o -name 'btrfs.ko*' -o -name 'bcache.ko*' \) 2>/dev/null | sed s:$_im_mnt/lib/modules/[^/]*/:: >> $_im_mnt/etc/mkinitfs/features.d/alpine-fde.modules; td=\$(basename \"\$(readlink -f /sys/class/tpm/tpm0/device/driver 2>/dev/null)\" 2>/dev/null); [ -n \"\$td\" ] && info \"install: detected TPM interface driver: \$td (the staged feature files pack every found tpm/btrfs/bcache module, blocker #12/#14)\"; :"
   inst_plan_run guest 'rc-update add alpine-fde-finalize default'
+  # FR-6 (user decision queue item 10): the boot-time audit oneshot is enabled
+  # for the default runlevel (runs LAST before the login prompt via `after *`)
+  # — placed AFTER the package transaction per the real-server failure-#2
+  # discipline (an rc-update record for a service the txn has not installed
+  # kills the plan), and the record is idempotent (rc-update add on an enabled
+  # service is a no-op; crash resume re-runs it safely).
+  inst_plan_run guest 'rc-update add alpine-fde-audit default'
   # §8.4 (MOVED BEFORE the ceremony — no ceremony secret): resolve the ESP
   # PARTUUID into fstab + target metadata on the
   # on-target pending baseline (luks_uuid = primary; member_uuids additive)

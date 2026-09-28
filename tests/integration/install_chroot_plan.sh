@@ -245,11 +245,12 @@ export PATH="$T/stub:$PATH"
 # --- fixtures ------------------------------------------------------------------
 # hooks/ Alpine layout (G-C16): the templates install's preflight requires
 mkdir -p "$ALPINE_FDE_HOOKS_DIR/kernel-hooks.d" "$ALPINE_FDE_HOOKS_DIR/mkinitfs/features.d" \
-    "$ALPINE_FDE_HOOKS_DIR/udev" "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc"
+    "$ALPINE_FDE_HOOKS_DIR/udev" "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_HOOKS_DIR/profile.d"
 for h in kernel-hooks.d/alpine-fde-build.hook kernel-hooks.d/alpine-fde-remove.hook \
     mkinitfs/alpine-fde-unseal.sh mkinitfs/features.d/alpine-fde.files \
     mkinitfs/features.d/alpine-fde.modules udev/60-tpm.rules \
-    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize; do
+    apk/triggers/alpine-fde.trigger openrc/alpine-fde-finalize \
+    openrc/alpine-fde-audit profile.d/alpine-fde.sh; do
     printf '#!/bin/sh\nexit 0\n' >"$ALPINE_FDE_HOOKS_DIR/$h"
     chmod +x "$ALPINE_FDE_HOOKS_DIR/$h"
 done
@@ -999,6 +1000,30 @@ assert_eq "target: NO systemd finalize unit shipped (ADR-20 Stage 3)" "0" \
     "$([ -e "$MNT_ETC/systemd/system/alpine-fde-finalize.service" ] && echo 1 || echo 0)"
 assert_eq "target: NO multi-user.target.wants enable record" "0" \
     "$(grep -c 'multi-user.target.wants' <<<"$LOG")"
+
+# =============================================================================
+# FR-6 (user decision queue item 10): the boot-time audit oneshot ships to
+# /etc/init.d/ (byte-for-byte), is enabled for the DEFAULT runlevel, and the
+# login alert hook ships to /etc/profile.d/ (§9.1 in-chroot step 8).
+# =============================================================================
+assert_file_exists "FR-6: audit oneshot shipped to /etc/init.d" \
+    "$MNT_ETC/init.d/alpine-fde-audit"
+assert_eq "FR-6: audit oneshot executable" "1" \
+    "$([ -x "$MNT_ETC/init.d/alpine-fde-audit" ] && echo 1 || echo 0)"
+assert_eq "FR-6: audit oneshot is the shipped hook, byte-for-byte" \
+    "$(cat "$ALPINE_FDE_HOOKS_DIR/openrc/alpine-fde-audit")" \
+    "$(cat "$MNT_ETC/init.d/alpine-fde-audit")"
+assert_file_exists "FR-6: login alert hook shipped to /etc/profile.d" \
+    "$MNT_ETC/profile.d/alpine-fde.sh"
+assert_eq "FR-6: profile.d hook is the shipped file, byte-for-byte" \
+    "$(cat "$ALPINE_FDE_HOOKS_DIR/profile.d/alpine-fde.sh")" \
+    "$(cat "$MNT_ETC/profile.d/alpine-fde.sh")"
+assert_contains "FR-6: audit oneshot enabled for the default runlevel" "$LOG" \
+    "rc-update add alpine-fde-audit default"
+assert_eq "FR-6: audit enable record runs AFTER the package transaction (failure-#2 discipline)" "1" \
+    "$(awk '/apk add --no-cache/ {txn=NR} /rc-update add alpine-fde-audit default/ {print (txn && NR > txn) ? 1 : 0; exit}' "$ALPINE_FDE_TEST_LOG")"
+assert_eq "FR-6: NO systemd audit unit shipped" "0" \
+    "$([ -e "$MNT_ETC/systemd/system/alpine-fde-audit.service" ] && echo 1 || echo 0)"
 
 # =============================================================================
 # H-02: binds (incl. the §9.1 efivars bind) run BEFORE guest steps and are
