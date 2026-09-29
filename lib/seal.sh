@@ -338,7 +338,7 @@ seal_unseal() {
     _su_keydir=$1 _su_sig=$2 _su_mode=$3 _su_tok=$4 _su_out=$5
     case $_su_mode in
         provisional) _su_sel=11 ;;
-        finalized) _su_sel=7,11 ;;
+        finalized) _su_sel=11 ;;
         *) die "seal_unseal: unknown mode '$_su_mode' (provisional|finalized)" ;;
     esac
     seal_require_env
@@ -425,7 +425,7 @@ seal_enroll() {
     _se_expect=${7:-}
     case $_se_mode in
         provisional) _se_sel=11 ;;
-        finalized) _se_sel=7,11 ;;
+        finalized) _se_sel=11 ;;
         *) die "seal_enroll: unknown mode '$_se_mode' (provisional|finalized)" ;;
     esac
     seal_keydir_check "$_se_keydir"

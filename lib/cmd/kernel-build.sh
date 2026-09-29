@@ -615,9 +615,8 @@ _uk_body() {
             objcopy --dump-section .pcrsig="$_ukbv_orig" "$_ukbv_out" "$_ukbv_out.dump"
             if policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
                 "$_uk_keydir/release.pub" "$_ukbv_pcrsig" &&
-                jq -s '(.[1].sha256[0] | {pcrs: .pcrs, pkfp: .pkfp, pol: .pol, sig: .sig}) as $o |
-                    {"sha256": ([$o] + .[0].sha256)}' \
-                    "$_ukbv_pcrsig" "$_ukbv_orig" >"$_ukbv_pcrsig.m" 2>/dev/null; then
+                jq -c '.sha256[0] | {pcrs: [11], pkfp: .pkfp, pol: .pol, sig: .sig}' \
+                    "$_ukbv_pcrsig" >"$_ukbv_pcrsig.m" 2>/dev/null; then
                 if objcopy --update-section .pcrsig="$_ukbv_pcrsig.m" \
                     "$_ukbv_out" "$_ukbv_out.new" 2>/dev/null; then
                     mv "$_ukbv_out.new" "$_ukbv_out"
