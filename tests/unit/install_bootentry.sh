@@ -1,25 +1,35 @@
 #!/usr/bin/env bash
-# tests/unit/install_bootentry.sh — task #27: `alpine-fde install` creates the
-# UEFI boot entry (efibootmgr) as an in-guest step — Boot0005 "Alpine FDE" on
-# the real Dell PowerEdge was typed BY HAND after the fresh install, and after
-# a re-partition the hand-made entry kept the OLD partition GUID and died
-# "Boot Failed". Pins:
+# tests/unit/install_bootentry.sh — task #27 + the TWO-UKI BOOT DESIGN
+# (Samuel, 2026-09-29): the lane creates a PAIR of firmware (NVRAM) boot
+# entries per kernel version, and the firmware loads the UKIs DIRECTLY
+# (systemd-boot stays only the removable-media fallback — never the default
+# boot path). On the real Dell PowerEdge the entry was typed BY HAND after the
+# fresh install, and after a re-partition the hand-made entry kept the OLD
+# partition GUID and died "Boot Failed". Pins:
 #   * the plan carries exactly ONE in-guest boot-entry record, AFTER the
-#     provisional seal (the loader is staged by then) and BEFORE the teardown,
-#     with the require_pkgs efibootmgr:efibootmgr probe;
+#     provisional seal (the UKI pair is staged by then) and BEFORE the
+#     teardown, with the require_pkgs efibootmgr:efibootmgr probe and the
+#     in-guest kver derivation (blocker #11 shape);
 #   * the efibootmgr binary is delivered by the §3.3 target package set;
-#   * inst_bootentry_ensure: creates the entry against the ESP's CURRENT
-#     partition GUID (from the §8.4 target metadata) + \EFI\BOOT\BOOTX64.EFI,
-#     REUSES a same-label entry already pointing there (no duplicate),
-#     DELETES + recreates same-label entries at dead/old GUIDs, places the
-#     entry FIRST in BootOrder preserving the rest, and SKIPS with the exact
-#     manual efibootmgr command when efivarfs is absent (no EFI vars support).
+#   * inst_bootentry_ensure: creates the PAIR —
+#       "Alpine FDE - <kver> (<date>)"        -> \EFI\Linux\alpine-fde-<kver>.efi
+#       "Alpine FDE - <kver> serial (<date>)" -> \EFI\Linux\alpine-fde-<kver>-serial.efi
+#     against the ESP's CURRENT partition GUID, DEFAULT FIRST + SERIAL second
+#     in BootOrder, REUSES family entries already pointing there (no
+#     duplicate), DELETES + recreates family entries at dead/old GUIDs and
+#     stale loaders (a rebuild re-stamps the date in the label), deletes the
+#     pre-two-UKI LEGACY entries, and SKIPS with the exact manual efibootmgr
+#     commands when efivarfs is absent (no EFI vars support);
+#   * inst_bootentry_prune: boot entries of kernels OUTSIDE the keep set (and
+#     LEGACY entries) are deleted, BootOrder rewritten over the survivors with
+#     the relative order preserved — at most 3 version-pairs (6 entries).
 #
 # Hermetic: a fake efibootmgr (ALPINE_FDE_EFIBOOTMGR seam, the repo's
 # fake-binary seam pattern) keeps its NVRAM in a state file and logs every
 # invocation; the baseline seam (ALPINE_FDE_ROOT) carries the canned ESP
-# PARTUUID. The EFI entry format the fake emits mirrors real `efibootmgr -v`
-# output (Boot<4hex>* <label><TAB>HD(1,GPT,<guid>,…)/File(\EFI\BOOT\…)) — the
+# PARTUUID; ALPINE_FDE_BOOTENTRY_DATE pins the label date. The EFI entry
+# format the fake emits mirrors real `efibootmgr -v` output
+# (Boot<4hex>* <label><TAB>HD(1,GPT,<guid>,…)/File(\EFI\Linux\…)) — the
 # approximation is the fake's state machine, not the parsed format.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -43,14 +53,24 @@ export ALPINE_FDE_ROOT=$T/root          # baseline seam: <root>/etc/alpine-fde/b
 export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 export ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr
 export ALPINE_FDE_HOOKS_DIR=$T/hooks    # the emission lane must not require the real hooks tree
+export ALPINE_FDE_BOOTENTRY_DATE=2026-09-29
+export ALPINE_FDE_BOOTENTRY_RETRY_SLEEP=0 # keep the retry legs instant outside the lag/never fakes
+
+KVER=6.12.8-1-amd64
+LBL_DEF="Alpine FDE - $KVER (2026-09-29)"
+LBL_SER="Alpine FDE - $KVER serial (2026-09-29)"
+LDR_DEF='\EFI\Linux\alpine-fde-6.12.8-1-amd64.efi'
+LDR_SER='\EFI\Linux\alpine-fde-6.12.8-1-amd64-serial.efi'
+export KVER LBL_DEF LBL_SER LDR_DEF LDR_SER
 
 GUID=11111111-2222-3333-4444-555555555555   # the CURRENT ESP partition GUID
 OLD=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee    # a dead/old partition GUID
 export GUID
-ESPDIR=$T/esp                               # the staged ESP (loader present)
+ESPDIR=$T/esp                               # the staged ESP (the UKI pair)
 
-mkdir -p "$T/root/etc/alpine-fde" "$T/stub" "$ESPDIR/EFI/BOOT" "$T/nvram" "$T/efivars"
-: >"$ESPDIR/EFI/BOOT/BOOTX64.EFI"
+mkdir -p "$T/root/etc/alpine-fde" "$T/stub" "$ESPDIR/EFI/Linux" "$T/nvram" "$T/efivars"
+printf 'default-uki' >"$ESPDIR/EFI/Linux/alpine-fde-$KVER.efi"
+printf 'serial-uki' >"$ESPDIR/EFI/Linux/alpine-fde-$KVER-serial.efi"
 printf '{\n  "schema_version": 1,\n  "target": {\n    "esp_partuuid": "%s"\n  }\n}\n' "$GUID" \
     >"$T/root/etc/alpine-fde/baseline.json"
 
@@ -132,69 +152,82 @@ reset_nvram() { # [entry lines...] [order CSV]
 line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 
 # =============================================================================
-# 1. fresh NVRAM: the entry is created against the CURRENT partition GUID,
-#    loader \EFI\BOOT\BOOTX64.EFI, and lands FIRST in BootOrder
+# 1. fresh NVRAM: the PAIR is created against the CURRENT partition GUID —
+#    default -> the UKI, serial -> the -serial UKI, default FIRST + serial
+#    second in BootOrder (the firmware menu's boot priority)
 # =============================================================================
 reset_nvram '' '0002,0003'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
 printf '0003|66666666-7777-8888-9999-000000000000|UEFI Shell|\\EFI\\shell.efi\n' >>"$NVRAM/entries"
-assert_rc "fresh NVRAM: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
-assert_contains "fresh: the entry is created" "$ASSERT_RC_OUTPUT" "created boot entry"
-CREATE=$(grep -F 'efibootmgr -c ARGS' "$NVRAM/log")
+assert_rc "fresh NVRAM: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+assert_contains "fresh: the pair is created (default named)" "$ASSERT_RC_OUTPUT" "created boot entry"
+assert_eq "fresh: TWO entries created" "2" "$(grep -cF 'efibootmgr -c ARGS' "$NVRAM/log")"
+CREATE=$(grep -F 'efibootmgr -c ARGS' "$NVRAM/log" | head -1)
 assert_contains "fresh: -c targets disk + partition (/dev/sda -p 1)" "$CREATE" "d=/dev/sda p=1"
-assert_contains "fresh: -c carries the capitalized label" "$CREATE" "L=Alpine FDE"
-assert_contains "fresh: -c carries the loader path" "$CREATE" "l=\EFI\BOOT\BOOTX64.EFI"
-assert_contains "fresh: the entry pins the ESP's CURRENT partition GUID" "$ASSERT_RC_OUTPUT" "$GUID"
-assert_eq "fresh: FIRST in BootOrder (Windows + shell preserved behind)" \
-    "0001,0002,0003" "$(cat "$NVRAM/order")"
+assert_contains "fresh: the default label carries kver + date" "$(cat "$NVRAM/entries")" "$LBL_DEF"
+assert_contains "fresh: the serial label carries kver + serial + date" "$(cat "$NVRAM/entries")" "$LBL_SER"
+assert_contains "fresh: the default entry points at the DEFAULT UKI (firmware-direct)" \
+    "$(cat "$NVRAM/entries")" "$LDR_DEF"
+assert_contains "fresh: the serial entry points at the SERIAL UKI" \
+    "$(cat "$NVRAM/entries")" "$LDR_SER"
+assert_eq "fresh: BootOrder = default FIRST, serial SECOND, others preserved" \
+    "0001,0004,0002,0003" "$(cat "$NVRAM/order")"
 
 # =============================================================================
-# 2. idempotent reuse: an existing same-label entry at the CURRENT GUID +
-#    loader is reused — NO duplicate created
+# 2. idempotent reuse: existing same-kver/same-variant entries at the CURRENT
+#    GUID + loader are reused — NO duplicates created
 # =============================================================================
-reset_nvram "0005|$GUID|Alpine FDE|\EFI\BOOT\BOOTX64.EFI" '0005,0002'
+reset_nvram "0005|$GUID|$LBL_DEF|$LDR_DEF
+0006|$GUID|$LBL_SER|$LDR_SER" '0005,0006,0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "reuse: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
+assert_rc "reuse: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_eq "reuse: NO -c (no duplicate)" "0" "$(grep -cF 'efibootmgr -c ARGS' "$NVRAM/log")"
-assert_contains "reuse: info names the reused entry" "$ASSERT_RC_OUTPUT" "reusing boot entry Boot0005"
-assert_contains "reuse: no duplicate created" "$ASSERT_RC_OUTPUT" "no duplicate created"
-assert_eq "reuse: entries unchanged (still exactly one Alpine FDE)" "1" "$(grep -c 'Alpine FDE' "$NVRAM/entries")"
-assert_eq "reuse: BootOrder rewritten with the entry FIRST" "0005,0002" "$(cat "$NVRAM/order")"
+assert_contains "reuse: info names the reused default entry" "$ASSERT_RC_OUTPUT" "reusing boot entry Boot0005"
+assert_contains "reuse: info names the reused serial entry" "$ASSERT_RC_OUTPUT" "reusing boot entry Boot0006"
+assert_eq "reuse: entries unchanged (exactly the pair)" "2" "$(grep -c "Alpine FDE - " "$NVRAM/entries")"
+assert_eq "reuse: BootOrder rewritten with the pair in front" "0005,0006,0002" "$(cat "$NVRAM/order")"
 
 # =============================================================================
-# 3. stale-GUID replacement: a same-label entry at an OLD partition GUID is
-#    deleted + recreated (the real-server "Boot Failed" shape); unrelated
-#    entries and their BootOrder positions survive
+# 3. stale-GUID replacement: a family entry at an OLD partition GUID is
+#    deleted + recreated (the real-server "Boot Failed" shape); the sibling
+#    and unrelated entries survive
 # =============================================================================
-reset_nvram "0005|$OLD|Alpine FDE|\EFI\BOOT\BOOTX64.EFI" '0002,0005'
-printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "stale: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
+reset_nvram "0005|$OLD|$LBL_DEF|$LDR_DEF
+0006|$GUID|$LBL_SER|$LDR_SER" '0002,0005,0006'
+assert_rc "stale: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_contains "stale: the delete ran (log -b 0005 -B)" "$(cat "$NVRAM/log")" "efibootmgr -b 0005 -B"
 assert_contains "stale: die-free recreate names the new entry" "$ASSERT_RC_OUTPUT" "created boot entry"
-assert_eq "stale: the old entry is GONE" "0" "$(grep -c "^0005|" "$NVRAM/entries")"
-assert_eq "stale: the replacement carries the CURRENT GUID" "1" "$(grep -c "$GUID" "$NVRAM/entries")"
+assert_eq "stale: the old-GUID entry is GONE" "0" "$(grep -c "^0005|" "$NVRAM/entries")"
+assert_eq "stale: the replacement carries the CURRENT GUID" "2" "$(grep -c "$GUID" "$NVRAM/entries")"
 assert_contains "stale: the delete explains the Boot Failed shape" "$ASSERT_RC_OUTPUT" "old partition GUID"
-assert_eq "stale: the replacement is FIRST, the unrelated entry kept" "0001,0002" "$(cat "$NVRAM/order")"
 
 # =============================================================================
-# 4. duplicate pile-up: two same-label entries at the current GUID+loader
-#    collapse to ONE (re-run hygiene)
+# 4. stale-loader replacement + legacy cleanup: a rebuild re-stamps the label
+#    date (family entry at the right GUID, stale loader -> replaced) and the
+#    pre-two-UKI "Alpine FDE" entries (the boot-manager path) are deleted
 # =============================================================================
-reset_nvram "0007|$GUID|Alpine FDE|\EFI\BOOT\BOOTX64.EFI" '0007,0008'
-printf '0008|%s|Alpine FDE|\\EFI\\BOOT\\BOOTX64.EFI\n' "$GUID" >>"$NVRAM/entries"
-assert_rc "dup: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
-assert_contains "dup: the second duplicate was deleted" "$(cat "$NVRAM/log")" "efibootmgr -b 0008 -B"
-assert_eq "dup: exactly one same-label entry survives" "1" "$(grep -c 'Alpine FDE' "$NVRAM/entries")"
+reset_nvram "0005|$GUID|Alpine FDE - $KVER (2026-01-01)|$LDR_DEF
+0006|$GUID|Alpine FDE|\EFI\BOOT\BOOTX64.EFI" '0005,0006'
+assert_rc "stale-loader/legacy: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+assert_contains "stale-loader: the old-date family entry was replaced" "$(cat "$NVRAM/log")" "efibootmgr -b 0005 -B"
+assert_contains "legacy: the pre-two-UKI 'Alpine FDE' entry was deleted" "$(cat "$NVRAM/log")" "efibootmgr -b 0006 -B"
+assert_contains "legacy: the deletion says why (retired boot-manager path)" "$ASSERT_RC_OUTPUT" \
+    "legacy boot entry Boot0006"
+assert_eq "legacy: the BOOTX64 entry is gone" "0" "$(grep -c 'BOOTX64' "$NVRAM/entries")"
+assert_eq "stale-loader: exactly the current pair remains" "2" "$(grep -c "Alpine FDE - " "$NVRAM/entries")"
 
 # =============================================================================
-# 5. NO EFI variable support: skip gracefully, print the EXACT manual command
+# 5. NO EFI variable support: skip gracefully, print the EXACT manual commands
+#    for BOTH entries
 # =============================================================================
 reset_nvram '' ''
 mv "$T/efivars" "$T/efivars.gone"
-assert_rc "no-EFI: rc 0 (skip, never fail the install)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
+assert_rc "no-EFI: rc 0 (skip, never fail the install)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_eq "no-EFI: nothing created" "0" "$(grep -c . "$NVRAM/entries")"
-assert_contains "no-EFI: the skip names the manual efibootmgr command" "$ASSERT_RC_OUTPUT" \
-    "efibootmgr -c -d /dev/sda -p 1 -L 'Alpine FDE' -l '\EFI\BOOT\BOOTX64.EFI'"
+assert_contains "no-EFI: the skip names the manual command for the DEFAULT entry" "$ASSERT_RC_OUTPUT" \
+    "efibootmgr -c -d /dev/sda -p 1 -L '$LBL_DEF' -l '$LDR_DEF'"
+assert_contains "no-EFI: the skip names the manual command for the SERIAL entry" "$ASSERT_RC_OUTPUT" \
+    "efibootmgr -c -d /dev/sda -p 1 -L '$LBL_SER' -l '$LDR_SER'"
 assert_contains "no-EFI: the manual command tells how to go FIRST in BootOrder" "$ASSERT_RC_OUTPUT" "efibootmgr -o"
 assert_contains "no-EFI: the manual command names the partition GUID to pin" "$ASSERT_RC_OUTPUT" "$GUID"
 mv "$T/efivars.gone" "$T/efivars"
@@ -210,25 +243,26 @@ EOF
 chmod +x "$T/stub/efibootmgr-unsupported"
 SAVED_EB=$ALPINE_FDE_EFIBOOTMGR
 ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr-unsupported
-assert_rc "no-support: rc 0 (skip)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
+assert_rc "no-support: rc 0 (skip)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 ALPINE_FDE_EFIBOOTMGR=$SAVED_EB
 assert_contains "no-support: skip names the manual command" "$ASSERT_RC_OUTPUT" \
     "efibootmgr -c -d /dev/sda -p 1"
 
 # =============================================================================
-# 6. fail-closed guards: missing staged loader dies; missing baseline dies
-# (die exits — run each in a command substitution so only the subshell dies)
+# 6. fail-closed guards: an UNSTAGED UKI of the pair dies; a missing baseline
+# dies (die exits — run each in a command substitution so only the subshell
+# dies)
 # =============================================================================
 reset_nvram '' ''
-mv "$ESPDIR/EFI/BOOT/BOOTX64.EFI" "$T/loader.gone"
-OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" 2>&1)
+mv "$ESPDIR/EFI/Linux/alpine-fde-$KVER-serial.efi" "$T/uki.gone"
+OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER" 2>&1)
 GUARD_RC=$?
-assert_eq "guard: missing staged loader -> die (fail-closed 64)" "64" "$GUARD_RC"
-assert_contains "guard: the die names the unstaged loader" "$OUT" "BOOTX64.EFI is missing"
-mv "$T/loader.gone" "$ESPDIR/EFI/BOOT/BOOTX64.EFI"
+assert_eq "guard: unstaged SERIAL UKI -> die (fail-closed 64)" "64" "$GUARD_RC"
+assert_contains "guard: the die names the unstaged serial UKI" "$OUT" "-serial.efi is missing"
+mv "$T/uki.gone" "$ESPDIR/EFI/Linux/alpine-fde-$KVER-serial.efi"
 
 mv "$T/root/etc/alpine-fde/baseline.json" "$T/baseline.gone"
-OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" 2>&1)
+OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER" 2>&1)
 GUARD_RC=$?
 assert_eq "guard: missing baseline -> die (fail-closed 64)" "64" "$GUARD_RC"
 assert_contains "guard: the die names the baseline" "$OUT" "baseline.json"
@@ -243,21 +277,19 @@ mv "$T/baseline.gone" "$T/root/etc/alpine-fde/baseline.json"
 # raised to 10 attempts / ALPINE_FDE_BOOTENTRY_RETRY_SLEEP apart (default 5s,
 # ~50s total). Pins:
 #   (a) a fake efibootmgr whose listing LAGS N reads behind the create (each
-#       of the first N listings after -c omits our entry) must PASS via the
-#       bounded backoff, re-verifying the SAME label + GUID + loader match:
-#       (a1) a lag of 7 reads — BEYOND the retired 5-attempt bound (the old
-#            code fails this leg; the R640-shaped regression guard) — and
-#       (a2) a lag of 2 reads — comfortably within the new bound;
-#   (b) a fake that NEVER shows the entry still fails fail-closed 64, with the
-#       die naming the NEW bound (10 attempts, ~50s) and firmware NVRAM write
-#       latency (Dell) as the likely cause.
+#       of the first N listings after -c omits our pair) must PASS via the
+#       bounded backoff: (a1) a lag of 7 — beyond the retired 5-attempt bound —
+#       and (a2) a lag of 2 — comfortably within the new bound;
+#   (b) a fake that NEVER shows the entries still fails fail-closed 64, with
+#       the die naming the NEW bound (10 attempts, ~50s) and firmware NVRAM
+#       write latency (Dell) as the likely cause.
 # The wrapper delegates to the base fake (state-file NVRAM) and filters its
 # -v output — the approximation is the lag, not the parsed format.
 # =============================================================================
 cat >"$T/stub/efibootmgr-lagging" <<'EOF'
 #!/bin/sh
 # lagging fake: the first $NVRAM/lag-count -v reads after each -c omit our
-# entry (a stale NVRAM view that outlives the retired 5-attempt bound)
+# entries (a stale NVRAM view that outlives the retired 5-attempt bound)
 BASE=${ALPINE_FDE_EFIBOOTMGR_BASE}
 case " $* " in
     *" -c "*)
@@ -268,7 +300,7 @@ case " $* " in
             n=$(cat "$NVRAM/lag")
             n=$((n - 1))
             if [ "$n" -gt 0 ]; then printf '%s\n' "$n" >"$NVRAM/lag"; else rm -f "$NVRAM/lag"; fi
-            "$BASE" -v | grep -v 'Alpine FDE'
+            "$BASE" -v | grep -v 'Alpine FDE - '
             exit 0
         fi
         exec "$BASE" "$@" ;;
@@ -279,11 +311,11 @@ EOF
 chmod +x "$T/stub/efibootmgr-lagging"
 cat >"$T/stub/efibootmgr-never" <<'EOF'
 #!/bin/sh
-# never-shows fake: our entry NEVER appears in the -v listing
+# never-shows fake: our entries NEVER appear in the -v listing
 BASE=${ALPINE_FDE_EFIBOOTMGR_BASE}
 case " $* " in
     *" -v "*)
-        "$BASE" "$@" | grep -v 'Alpine FDE'
+        "$BASE" "$@" | grep -v 'Alpine FDE - '
         exit 0 ;;
     *)
         exec "$BASE" "$@" ;;
@@ -301,53 +333,87 @@ ALPINE_FDE_BOOTENTRY_RETRY_SLEEP=0
 FAKE_LAG_COUNT=7
 reset_nvram '' '0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "lag7 (beyond the retired 5-attempt bound): rc 0 via the raised retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
-assert_contains "lag7: the entry is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
+assert_rc "lag7 (beyond the retired 5-attempt bound): rc 0 via the raised retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+assert_contains "lag7: the pair is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
 assert_contains "lag7: the retry warned about NVRAM latency while waiting" "$ASSERT_RC_OUTPUT" "NVRAM write latency"
 assert_contains "lag7: the warn names the raised attempt bound" "$ASSERT_RC_OUTPUT" "attempt 1/10"
-assert_eq "lag7: the recovered entry pins the CURRENT GUID + is FIRST" "0001,0002" "$(cat "$NVRAM/order")"
-assert_eq "lag7: the recovered entry carries the ESP's GUID" "1" "$(grep -c "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]|$GUID|Alpine FDE" "$NVRAM/entries")"
+assert_eq "lag7: the pair is at the front in order (default first, serial second)" \
+    "0001,0003,0002" "$(cat "$NVRAM/order")"
+assert_eq "lag7: the recovered entries pin the CURRENT GUID" "2" "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
 
 # (a2) lag of 2 listings: lands WITHIN the new bound (the common shape)
 FAKE_LAG_COUNT=2
 reset_nvram '' '0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "lag2 (within the new bound): rc 0 via the retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR"
-assert_contains "lag2: the entry is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
-assert_eq "lag2: the recovered entry is FIRST" "0001,0002" "$(cat "$NVRAM/order")"
+assert_rc "lag2 (within the new bound): rc 0 via the retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+assert_contains "lag2: the pair is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
+assert_eq "lag2: the pair is at the front" "0001,0003,0002" "$(cat "$NVRAM/order")"
 FAKE_LAG_COUNT=
 
 # (b) never-visible listing: fail-closed 64 with the latency clause
 ALPINE_FDE_EFIBOOTMGR=$T/stub/efibootmgr-never
 reset_nvram '' '0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" 2>&1)
+OUT=$(inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER" 2>&1)
 NEVER_RC=$?
 assert_eq "never: rc 64 (still fail-closed, no entry-number guessing)" "64" "$NEVER_RC"
 assert_contains "never: the die keeps the refuse-to-guess clause" "$OUT" "refusing to guess the entry number"
 assert_contains "never: the die names NVRAM write latency (Dell) as the likely cause" "$OUT" "NVRAM write latency"
 assert_contains "never: the die reports the RAISED bounded attempts" "$OUT" "after 10 attempts (~50s)"
-assert_eq "never: the entry WAS created in the fake NVRAM (the write, not the read, succeeded)" "1" \
-    "$(grep -c "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]|$GUID|Alpine FDE" "$NVRAM/entries")"
+assert_eq "never: the DEFAULT entry WAS created in the fake NVRAM (the write, not the read, succeeded); the serial leg never ran" "1" \
+    "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
 assert_eq "never: BootOrder untouched (no guessing)" "0002" "$(cat "$NVRAM/order")"
 
 ALPINE_FDE_EFIBOOTMGR=$SAVED_EB
 ALPINE_FDE_BOOTENTRY_RETRY_SLEEP=
 
 # =============================================================================
-# 7. inst_bootentry_parse: label matching is EXACT (a longer label sharing the
-#    prefix is not ours); GUID + loader extracted lowercased from -v output
+# 7. inst_bootentry_parse: the label family grammar — kver+variant extracted
+#    from "Alpine FDE - <kver>[ serial] (<date>)"; prefix-sharing and foreign
+#    labels are NOT ours; the pre-two-UKI labels parse as LEGACY; the loader
+#    path comes lowercased from the -v device path
 # =============================================================================
-LIST=$(printf 'Boot0009* Alpine FDE\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\nBoot000A* Alpine FDE2\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\nBoot000B* Ubuntu\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\shimx64.EFI)\n' "$GUID" "$GUID" "$GUID")
-PARSED=$(printf '%s\n' "$LIST" | inst_bootentry_parse "Alpine FDE")
-assert_eq "parse: ours=1 for the exact label" "0009 $GUID 1 1" "$(printf '%s\n' "$PARSED" | grep '^0009')"
-assert_eq "parse: prefix-sharing label NOT ours" "1" "$(printf '%s\n' "$PARSED" | grep -c '^000a.* 0$')"
-assert_eq "parse: foreign entry not ours, loader flag 0" "000b $GUID 0 0" "$(printf '%s\n' "$PARSED" | grep '^000b')"
-assert_eq "parse: inst_bootentry_find picks OURS" "0009" "$(inst_bootentry_find "$PARSED" "$GUID")"
+LIST=$(printf 'Boot0009* %s\tHD(1,GPT,%s,0x800,0x100000)/File(%s)\nBoot000A* %s\tHD(1,GPT,%s,0x800,0x100000)/File(%s)\nBoot000B* Alpine FDE2 (2026-09-29)\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\shimx64.EFI)\nBoot000C* Alpine FDE\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\nBoot000D* Ubuntu\tHD(1,GPT,%s,0x800,0x100000)/File(\\EFI\\shimx64.EFI)\n' \
+    "$LBL_DEF" "$GUID" "$LDR_DEF" "$LBL_SER" "$GUID" "$LDR_SER" "$GUID" "$GUID" "$GUID")
+PARSED=$(printf '%s\n' "$LIST" | inst_bootentry_parse)
+assert_eq "parse: the default label family parses (kver + variant + loader + label)" \
+    "0009 $(printf '%s' "$GUID" | tr A-Z a-z) $(printf '%s' "$LDR_DEF" | tr A-Z a-z) $KVER default $(printf '%s' "$LBL_DEF" | tr A-Z a-z)" \
+    "$(printf '%s\n' "$PARSED" | grep '^0009')"
+assert_eq "parse: the serial label family parses" \
+    "000a $(printf '%s' "$GUID" | tr A-Z a-z) $(printf '%s' "$LDR_SER" | tr A-Z a-z) $KVER serial $(printf '%s' "$LBL_SER" | tr A-Z a-z)" \
+    "$(printf '%s\n' "$PARSED" | grep '^000a')"
+assert_eq "parse: a prefix-sharing label is NOT ours" "1" "$(printf '%s\n' "$PARSED" | grep -c '^000b .* - - ')"
+assert_eq "parse: the pre-two-UKI 'Alpine FDE' label parses as LEGACY" \
+    "1" "$(printf '%s\n' "$PARSED" | grep -c '^000c .* LEGACY default')"
+assert_eq "parse: a foreign entry is not ours" "1" "$(printf '%s\n' "$PARSED" | grep -c '^000d .* - - ')"
+assert_eq "parse: inst_bootentry_find picks OUR default entry" "0009" \
+    "$(inst_bootentry_find "$PARSED" "$(printf '%s' "$GUID" | tr A-Z a-z)" \
+        "$(printf '%s' "$LDR_DEF" | tr A-Z a-z)" "$KVER" default)"
 
 # =============================================================================
-# 8. the PLAN: exactly one in-guest boot-entry record, after the provisional
-#    seal, before the teardown; efibootmgr pinned in the target package set.
+# 8. inst_bootentry_prune: entries of kernels OUTSIDE the keep set (BOTH
+#    variants) are deleted, LEGACY entries are deleted, foreign entries and
+#    kept-kver entries survive; BootOrder is rewritten over the survivors with
+#    the relative order preserved
+# =============================================================================
+reset_nvram "0001|$GUID|Alpine FDE - 6.12.10-1-amd64 (2026-09-29)|\EFI\Linux\alpine-fde-6.12.10-1-amd64.efi
+0002|$GUID|Alpine FDE - 6.12.10-1-amd64 serial (2026-09-29)|\EFI\Linux\alpine-fde-6.12.10-1-amd64-serial.efi
+0003|$GUID|Alpine FDE - 6.1.0-1-amd64 (2026-08-01)|\EFI\Linux\alpine-fde-6.1.0-1-amd64.efi
+0004|$GUID|Alpine FDE - 6.1.0-1-amd64 serial (2026-08-01)|\EFI\Linux\alpine-fde-6.1.0-1-amd64-serial.efi
+0005|$GUID|Alpine FDE|\EFI\BOOT\BOOTX64.EFI
+0006|$GUID|Windows Boot Manager|\EFI\Microsoft\bootmgfw.efi" '0001,0002,0003,0004,0005,0006'
+assert_rc "prune: rc 0" 0 inst_bootentry_prune 6.12.10-1-amd64 6.12.9-1-amd64
+assert_eq "prune: the 6.1.0 pair is GONE" "0" "$(grep -c '6.1.0-1-amd64' "$NVRAM/entries")"
+assert_eq "prune: the LEGACY entry is GONE" "0" "$(grep -c 'BOOTX64' "$NVRAM/entries")"
+assert_eq "prune: the kept pair survives" "2" "$(grep -c '6.12.10-1-amd64' "$NVRAM/entries")"
+assert_eq "prune: foreign entries survive" "1" "$(grep -c 'Windows Boot Manager' "$NVRAM/entries")"
+assert_eq "prune: BootOrder over the survivors, relative order preserved" \
+    "0001,0002,0006" "$(cat "$NVRAM/order")"
+
+# =============================================================================
+# 9. the PLAN: exactly one in-guest boot-entry record (with the in-guest kver
+#    derivation), after the provisional seal, before the teardown; efibootmgr
+#    pinned in the target package set.
 #    (Item 17d: the dry-run plan printer is RETIRED — the record-level pins
 #    moved to the qemu EMISSION shape, the inspectable lane that remains; the
 #    preflight now runs in this lane, so the collaborators are stubbed.)
@@ -360,7 +426,7 @@ export ALPINE_FDE_TMPDIR=$T
 export ALPINE_FDE_INSTALL_SCRIPT=$T/guest.sh
 export ALPINE_FDE_EFIVARS_DIR=$T/efivars
 mkdir -p "$T/stub" "$T/efivars" "$ALPINE_FDE_HOOKS_DIR"/kernel-hooks.d "$ALPINE_FDE_HOOKS_DIR"/mkinitfs/features.d \
-    "$ALPINE_FDE_HOOKS_DIR/apk/triggers" "$ALPINE_FDE_HOOKS_DIR/conf.d" "$ALPINE_FDE_HOOKS_DIR/openrc" "$ALPINE_FDE_HOOKS_DIR/profile.d"
+    "$ALPINE_FDE_HOOKS_DIR"/apk/triggers "$ALPINE_FDE_HOOKS_DIR"/conf.d "$ALPINE_FDE_HOOKS_DIR"/openrc "$ALPINE_FDE_HOOKS_DIR"/profile.d
 make_stub() {
     printf '#!/bin/sh\nexit 0\n' >"$T/stub/$1"
     chmod +x "$T/stub/$1"
@@ -394,12 +460,15 @@ assert_eq "qemu emit rc 0" "0" "$PLAN_RC"
 assert_eq "plan: exactly ONE boot-entry record" "1" "$(grep -c 'inst_bootentry_ensure' <<<"$OUT")"
 assert_eq "plan: the record is a GUEST step (in-chroot, task #27)" "1" \
     "$(grep -cE '^export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; .*inst_bootentry_ensure' <<<"$OUT")"
+LINE=$(grep -m1 'inst_bootentry_ensure' <<<"$OUT")
+assert_contains "plan: the record carries the in-guest /lib/modules kver derivation" "$LINE" \
+    'cd /lib/modules'
 assert_contains "plan: the record probes require_pkgs efibootmgr:efibootmgr" "$OUT" \
     "require_pkgs efibootmgr:efibootmgr"
 I_SEAL=$(line_no "$OUT" "seal_provisional")
 I_ENTRY=$(line_no "$OUT" "inst_bootentry_ensure")
 I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
-assert_eq "order: boot entry AFTER the provisional seal (loader staged)" "1" \
+assert_eq "order: boot entry AFTER the provisional seal (UKI pair staged)" "1" \
     "$(( I_SEAL > 0 && I_ENTRY > I_SEAL ? 1 : 0 ))"
 assert_eq "order: boot entry BEFORE the teardown (chroot still sees the ESP)" "1" \
     "$(( I_UMOUNT > 0 && I_ENTRY < I_UMOUNT ? 1 : 0 ))"

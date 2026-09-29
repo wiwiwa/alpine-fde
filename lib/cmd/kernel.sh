@@ -62,6 +62,10 @@ cmd_kernel_prune_main() {
         # shellcheck disable=SC1090  # sibling libraries next to this command
         . "${ALPINE_FDE_CMD_DIR:?}/../$_kpk_lib"
     done
+    # the NVRAM boot-entry sweep lives in the install lane (one efibootmgr
+    # implementation serves install/build/prune)
+    # shellcheck disable=SC1091  # sibling in the same command directory
+    . "$ALPINE_FDE_CMD_DIR/install.sh"
     load_config
     _kpk_etc="${ALPINE_FDE_ROOT:-}/etc/alpine-fde"
     _kpk_manifest="$_kpk_etc/digests.json"
@@ -85,6 +89,12 @@ cmd_kernel_prune_main() {
             die "kernel prune: invalid retention '$_kpk_retention' (expected a non-negative integer)"
             ;;
     esac
+    # two-UKI design bound: at most THREE kernel versions (current + 2) — the
+    # same clamp the build applies (a higher RETENTION is clamped, loudly)
+    if [ "$_kpk_retention" -gt 2 ]; then
+        warn "kernel prune: RETENTION=$_kpk_retention exceeds the three-version bound (current + 2 previous) — clamping to 2"
+        _kpk_retention=2
+    fi
     # shellcheck disable=SC2086  # word split intended: one kver per line
     _kpk_keep=$(esp_compute_keep "$_kpk_kver" "$_kpk_retention")
     # shellcheck disable=SC2086  # word split intended: one kver per line
@@ -95,7 +105,12 @@ cmd_kernel_prune_main() {
         err "kernel prune: ESP prune failed — ESP and manifest would diverge (§9.2)"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     fi
-    info "kernel prune: keep set ($_kpk_keep); ESP + manifest pruned"
+    # the NVRAM boot entries ride the same keep-set decision (at most six
+    # entries, version-pairs, oldest pruned first; best-effort skip without
+    # efivarfs)
+    # shellcheck disable=SC2086  # word split intended: one kver per line
+    inst_bootentry_prune $_kpk_keep
+    info "kernel prune: keep set ($_kpk_keep); ESP + manifest + NVRAM entries pruned"
     return 0
 }
 

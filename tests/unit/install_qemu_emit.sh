@@ -132,8 +132,15 @@ assert_eq "repositories drop verbatim (G-C1: replaces apt sources)" \
 # script carries NO dracut config residue
 assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
     "$(grep -c 'dracut' "$SCRIPT")"
-assert_contains "cmdline drop emitted with dual console + btrfs rootflags + fail-closed pins" "$(cat "$SCRIPT")" \
-    "rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
+# TWO-UKI CONSOLE VARIANTS (Samuel, 2026-09-29): BOTH cmdline build inputs are
+# emitted — the DEFAULT (tty0 LAST: the virtual console becomes /dev/console
+# for initrd userspace; serial still receives kernel output) and the
+# SERIAL/RECOVERY variant (ttyS0,115200 LAST — the remote/passphrase lane, the
+# -serial UKI's cmdline).
+assert_contains "cmdline drop emitted: DEFAULT variant — ttyS0 first, tty0 LAST, pins after" "$(cat "$SCRIPT")" \
+    "rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
+assert_contains "cmdline drop emitted: SERIAL variant — tty0 first, ttyS0,115200 LAST" "$(cat "$SCRIPT")" \
+    "ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline-serial.txt"
 # item 26a (ADR-7 AMENDED — zram removed from the design): zero zram residue in
 # the emitted guest script (no package entry, no conf.d drop, no rc-update)
 assert_eq "emitted: ZERO zram mentions anywhere (item 26a: zram removed from the install path)" "0" \
@@ -464,7 +471,10 @@ normalize_script() {
 }
 assert_file_exists "byte-identity: golden fixture present" "$GOLDEN"
 normalize_script "$SCRIPT" >"$T/script-normalized.sh"
-if cmp -s "$T/script-normalized.sh" "$GOLDEN"; then
+if [ -n "${REGEN_GOLDEN:-}" ]; then
+    cp "$T/script-normalized.sh" "$GOLDEN"
+    assert_eq "byte-identity: golden REGENERATED (REGEN_GOLDEN=1)" "1" "1"
+elif cmp -s "$T/script-normalized.sh" "$GOLDEN"; then
     assert_eq "byte-identity: emitted guest script IDENTICAL to the pre-refactor accumulator emission (item 17d guard)" "1" "1"
 else
     diff "$GOLDEN" "$T/script-normalized.sh" >"$T/golden.diff" || true

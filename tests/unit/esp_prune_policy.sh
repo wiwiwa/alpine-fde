@@ -168,4 +168,33 @@ manifest_prune_to "$M" $(esp_compute_keep "6.1.0-1-amd64" 2)
 assert_eq "manifest pruned from the same keep set as the ESP" \
     "$(printf '6.1.0-1-amd64\n6.3.0-1-amd64\n6.4.0-1-amd64')" "$(manifest_kvers "$M" | sort)"
 
+# --- two-UKI design: the -serial SIBLING follows its base kver -----------------------
+export ALPINE_FDE_ESP="$TMP/esp-pair"
+mkdir -p "$(esp_uki_dir)"
+for k in 6.12.10-1-amd64 6.12.9-1-amd64 6.1.0-1-amd64; do
+    printf 'default-%s' "$k" >"$(esp_uki_path "$k")"
+    printf 'serial-%s' "$k" >"$(esp_uki_path "$k" serial)"
+done
+assert_eq "pair: esp_uki_name serial carries the -serial suffix" \
+    "alpine-fde-6.12.10-1-amd64-serial.efi" "$(esp_uki_name 6.12.10-1-amd64 serial)"
+assert_eq "pair: esp_kver_base folds the sibling into its base kver" \
+    "6.12.10-1-amd64" "$(esp_kver_base 6.12.10-1-amd64-serial)"
+assert_eq "pair: esp_kver_base leaves a base kver unchanged" \
+    "6.12.10-1-amd64" "$(esp_kver_base 6.12.10-1-amd64)"
+assert_eq "pair: esp_list_kvers lists BASE kvers only (siblings not versions)" \
+    "$(printf '6.12.10-1-amd64\n6.12.9-1-amd64\n6.1.0-1-amd64' | sort)" \
+    "$(esp_list_kvers | sort)"
+# (both sides sorted: esp_list_kvers makes no ordering promise)
+keep=$(esp_compute_keep "6.12.10-1-amd64" 1)
+assert_eq "pair: the keep set holds base kvers" \
+    "$(printf '6.12.10-1-amd64\n6.12.9-1-amd64')" "$keep"
+# shellcheck disable=SC2046  # word split intended: one kver per line
+esp_prune_ukis $keep
+assert_eq "pair: kept the current DEFAULT UKI" "1" "$([ -f "$(esp_uki_path 6.12.10-1-amd64)" ] && echo 1 || echo 0)"
+assert_eq "pair: kept the current SERIAL UKI (the sibling follows)" "1" "$([ -f "$(esp_uki_path 6.12.10-1-amd64 serial)" ] && echo 1 || echo 0)"
+assert_eq "pair: kept the retained DEFAULT UKI" "1" "$([ -f "$(esp_uki_path 6.12.9-1-amd64)" ] && echo 1 || echo 0)"
+assert_eq "pair: kept the retained SERIAL UKI" "1" "$([ -f "$(esp_uki_path 6.12.9-1-amd64 serial)" ] && echo 1 || echo 0)"
+assert_eq "pair: pruned the dropped kver's DEFAULT UKI" "0" "$([ -f "$(esp_uki_path 6.1.0-1-amd64)" ] && echo 1 || echo 0)"
+assert_eq "pair: pruned the dropped kver's SERIAL UKI (never orphaned)" "0" "$([ -f "$(esp_uki_path 6.1.0-1-amd64 serial)" ] && echo 1 || echo 0)"
+
 finish

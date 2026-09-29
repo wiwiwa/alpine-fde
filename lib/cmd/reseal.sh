@@ -64,11 +64,15 @@ if [ -z "${ALPINE_FDE_SEAL_LOADED:-}" ]; then
 fi
 
 # Seams (test injection points):
-#   ALPINE_FDE_CRYPTSETUP    cryptsetup binary override (LUKS2 choreography)
-#   ALPINE_FDE_BY_UUID_DIR   /dev/disk/by-uuid override
-#   ALPINE_FDE_ENROLL_LOCK   ensure-once lockfile override (tests; default below)
-#   ALPINE_FDE_PCRSIG        .pcrsig JSON source for the ensure-once path
-#   ALPINE_FDE_LUKS_KEYFILE  existing-passphrase key file authorizing luksAddKey
+#   ALPINE_FDE_CRYPTSETUP      cryptsetup binary override (LUKS2 choreography)
+#   ALPINE_FDE_BY_UUID_DIR     /dev/disk/by-uuid override
+#   ALPINE_FDE_ENROLL_LOCK     ensure-once lockfile override (tests; default below)
+#   ALPINE_FDE_PCRSIG          .pcrsig JSON source (default variant) for the
+#                              ensure-once path
+#   ALPINE_FDE_PCRSIG_SERIAL   .pcrsig JSON source (serial variant) — the
+#                              two-UKI serial token pins its DISTINCT policy
+#                              digest when supplied
+#   ALPINE_FDE_LUKS_KEYFILE    existing-passphrase key file authorizing luksAddKey
 reseal_cryptsetup() { "${ALPINE_FDE_CRYPTSETUP:-cryptsetup}" "$@"; }
 reseal_by_uuid_dir() { printf '%s\n' "${ALPINE_FDE_BY_UUID_DIR:-/dev/disk/by-uuid}"; }
 
@@ -145,9 +149,9 @@ reseal_policy_mode() {
 enroll_usage() {
     cat >&2 <<'EOF'
 Usage: alpine-fde reseal [--uuid LUKS-UUID|BLOCK-DEV] [--pcrsig FILE]
-                             [--reseat]
+                             [--pcrsig-serial FILE] [--reseat]
 
-Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 token;
+Enroll the TPM seal (Mechanism B: tpm2-tools seal + systemd-tpm2 tokens;
 ADR-19). Preconditions: finalized baseline, Secure Boot on + SetupMode=0,
 PCR 7 digest-anchor (the .pcrsig entry's d7 == baseline.expected_pcr7 — a
 pure data check; legacy anchor-less .pcrsig keeps the live-PCR-7 read),
@@ -156,11 +160,20 @@ resolvable (--uuid takes a LUKS uuid or a /dev/... block-device path). A
 standing enrollment is retired in the SAME run the fresh one is standing
 (--reseat forces it).
 
+TWO-UKI TOKEN PAIR (one policy per console variant): the run stands TWO
+tokens — the DEFAULT console variant's first, the SERIAL/RECOVERY variant's
+second (distinct keyslots + token ids; the unseal hook scans ids 0..31 and
+uses the booting UKI's own .pcrsig either way). --pcrsig-serial supplies the
+serial UKI's .pcrsig so the serial token pins the DISTINCT serial policy
+digest; without it the serial token falls back to the live/default policy
+(warned).
+
 Signed-policy source: --pcrsig FILE (the release-key-signed .pcrsig JSON,
 verified against the fresh live-PCR digest before anything is embedded); when
 absent, the policy is re-signed in-process from the keydir's release.pem over
 the CURRENT PCR 7/11 (the §9.4 re-enroll path; ADR-18 passphrase seam
-applies). ALPINE_FDE_PCRSIG / ALPINE_FDE_LUKS_KEYFILE are the env seams.
+applies). ALPINE_FDE_PCRSIG / ALPINE_FDE_PCRSIG_SERIAL /
+ALPINE_FDE_LUKS_KEYFILE are the env seams.
 
 Policy mechanism (ADR-19/ADR-20, ladder resolved):
   b              Mechanism B — the normative Alpine pipeline: seal the random
@@ -260,12 +273,16 @@ reseal_preconditions() {
     return 0
 }
 
-# reseal_record FILE(UUID) MODE WIPE KEYSLOT PUBKEY — write enrolled.json.
-# Built with jq -n (field values can never mangle the JSON) and installed
-# atomically (temp in the same directory + chmod 600 BEFORE the rename — no
-# default-umask window, no partial document; review LO-02). rc 1 on failure.
+# reseal_record FILE(UUID) MODE WIPE KEYSLOT PUBKEY [KEYSLOT_SERIAL] [TOKEN_ID_SERIAL]
+# — write enrolled.json. Built with jq -n (field values can never mangle the
+# JSON) and installed atomically (temp in the same directory + chmod 600 BEFORE
+# the rename — no default-umask window, no partial document; review LO-02).
+# two-UKI design: the serial variant's token bookkeeping rides the SAME record
+# as additive token_keyslot_serial / token_id_serial fields (empty until a
+# serial token stands). rc 1 on failure.
 reseal_record() {
     _er_uuid=$1 _er_mode=$2 _er_wipe=$3 _er_slot=$4 _er_pub=$5
+    _er_slot_serial=${6:-} _er_tok_serial=${7:-}
     _er_f=$(sp_enrolled_file)
     _er_dir=${_er_f%/*}
     mkdir -p "$_er_dir"
@@ -276,9 +293,11 @@ reseal_record() {
     if ! jq -n \
         --arg uuid "$_er_uuid" --arg mode "$_er_mode" --arg wipe "$_er_wipe" \
         --arg slot "$_er_slot" --arg pub "$_er_pub" \
+        --arg slot_serial "$_er_slot_serial" --arg tok_serial "$_er_tok_serial" \
         --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{schema_version: 1, enrolled_at: $now, luks_uuid: $uuid,
           policy_mode: $mode, wipe_slot: $wipe, token_keyslot: $slot,
+          token_keyslot_serial: $slot_serial, token_id_serial: $tok_serial,
           pubkey: $pub, pcr_bank: "sha256"}' >"$_er_tmp"; then
         rm -f "$_er_tmp"
         err "reseal: serializing enrolled.json failed"
@@ -303,12 +322,15 @@ reseal_json_token_id() {
         --arg t "$2" "$1" 2>/dev/null || :
 }
 
-# reseal_sign_pcrsig <staging_dir> <keydir> — the in-process re-sign fallback
-# (§9.4): sign the {7,11} policy over the CURRENT live PCR 7/11 with the
-# keydir's release.pem (keys_unlock handles the ADR-18 encrypted form; the
-# decrypted copy is scrubbed HERE, before this function returns).
+# reseal_sign_pcrsig <staging_dir> <keydir> [out_file] — the in-process
+# re-sign fallback (§9.4): sign the {7,11} policy over the CURRENT live PCR
+# 7/11 with the keydir's release.pem (keys_unlock handles the ADR-18 encrypted
+# form; the decrypted copy is scrubbed HERE, before this function returns).
+# OUT_FILE defaults to <staging_dir>/pcrsig.json (the two-UKI serial token
+# signs into its own file so the two variants never share a staged .pcrsig).
 reseal_sign_pcrsig() {
     _esp_stage=$1 _esp_keydir=$2
+    _esp_out=${3:-$_esp_stage/pcrsig.json}
     seal_require_env
     _esp_d7=$(seal_pcrread 7)
     _esp_d11=$(seal_pcrread 11)
@@ -322,38 +344,53 @@ reseal_sign_pcrsig() {
     fi
     # subshell: a die inside policy_sign_json must not strand the decrypted key
     if ! (policy_sign_json "$_esp_d7" "$_esp_d11" "$_esp_priv" \
-        "$_esp_keydir/release.pub" "$_esp_stage/pcrsig.json"); then
+        "$_esp_keydir/release.pub" "$_esp_out"); then
         [ -n "${_esp_priv}" ] && [ "$_esp_priv" != "$_esp_keydir/release.pem" ] &&
             keys_scrub "$_esp_priv"
         die "reseal: in-process policy re-sign failed (keydir: $_esp_keydir)"
     fi
     [ "$_esp_priv" != "$_esp_keydir/release.pem" ] && keys_scrub "$_esp_priv"
-    printf '%s\n' "$_esp_stage/pcrsig.json"
+    printf '%s\n' "$_esp_out"
 }
 
-# reseal_run MODE PUBKEY DEVSPEC FORCE-WIPE(0|1) [PCRSIG] — the single-enrollment
-# core shared by `reseal` and the `kernel build` ensure-once step (G-R3):
+# reseal_run MODE PUBKEY DEVSPEC FORCE-WIPE(0|1) [PCRSIG] [PCRSIG_SERIAL] —
+# the enrollment core shared by `reseal` and the `kernel build` ensure-once
+# step (G-R3). two-UKI design: ONE run stands the WHOLE TOKEN PAIR (one token
+# policy per console variant — the DEFAULT token first, the SERIAL token
+# second; distinct seals under the same release-key PolicyAuthorize, and with
+# per-variant .pcrsigs supplied the embedded policy digests differ too):
 #   * pre-dump LUKS2 metadata; >1 existing systemd-tpm2 tokens → loud refusal
-#   * a standing enrollment is retired in the SAME run the fresh one stands
-#     (add new keyslot + token, import token, THEN remove old token + kill old
-#     slot); FORCE-WIPE forces that (--reseat semantics)
-#   * post-assertions: exactly one systemd-tpm2 token, pubkey == the keydir
-#     release key, pcrs [7,11], referenced keyslot != 0, recovery keyslot 0
-#     byte-identical to the pre-state
+#     (a full reseat runs only on a clean or single-standing state)
+#   * a standing enrollment is retired in the SAME run the fresh pair stands
+#     (add the new keyslots + tokens, import the tokens, THEN remove the old
+#     token + kill the old slot); FORCE-WIPE forces that (--reseat semantics)
+#   * PCRSIG (default variant) / PCRSIG_SERIAL: per-variant .pcrsig sources;
+#     a missing source falls back to the in-process re-sign over the CURRENT
+#     live PCRs (the serial token then carries the default's policy digest —
+#     the signature is inert at unseal; a later build with both UKIs re-runs
+#     reseal to stamp the distinct serial policy — loud warn below)
+#   * post-assertions: exactly TWO systemd-tpm2 tokens (the pair), pubkey ==
+#     the keydir release key, pcrs [7,11], keyslots = the two fresh slots
+#     (never 0, never shared), recovery keyslot 0 byte-identical
 #   * the whole seal+choreography runs in a SUBSHELL (the seal functions die
 #     fail-closed; this function translates that to rc 1 — the CALLER owns
 #     fatal handling) with ALL staging under one directory scrubbed on every
 #     exit path (I1: the random volume passphrase never survives on disk)
-# On success: rc 0 with RESEAL_SLOT / RESEAL_TOKEN_ID / RESEAL_WIPE set. Any failure:
+# On success: rc 0 with RESEAL_SLOT / RESEAL_TOKEN_ID (default variant),
+# RESEAL_SLOT_SERIAL / RESEAL_TOKEN_ID_SERIAL, RESEAL_WIPE set. Any failure:
 # rc 1 with the reason on stderr.
 reseal_run() {
-    _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4 _er_sig_arg=${5:-${ALPINE_FDE_PCRSIG:-}}
+    _er_mode=$1 _er_pub=$2 _er_dev=$3 _er_force=$4
+    _er_sig_arg=${5:-${ALPINE_FDE_PCRSIG:-}}
+    _er_sig_serial_arg=${6:-${ALPINE_FDE_PCRSIG_SERIAL:-}}
     # ADR-16: same release-key floor as reseal_preconditions — this shared core
     # is also the `kernel build` ensure-once entry, which never passes through
     # the CLI precondition gate
     keys_rsa3072_guard "${_er_pub%/*}"
     RESEAL_SLOT=''
     RESEAL_TOKEN_ID=''
+    RESEAL_SLOT_SERIAL=''
+    RESEAL_TOKEN_ID_SERIAL=''
     RESEAL_WIPE=no
     # I1: every enroll-owned scratch/staging root is TMPFS — the enrollment
     # stage holds the RANDOM VOLUME PASSPHRASE, so the default is /dev/shm
@@ -368,12 +405,12 @@ reseal_run() {
     _er_tok_pre=$(luks_json_count_type "$_er_pre" systemd-tpm2)
     if [ "$_er_tok_pre" -gt 1 ]; then
         rm -f "$_er_pre"
-        err "reseal: $_er_tok_pre systemd-tpm2 tokens found (expected <= 1) — manual intervention required"
+        err "reseal: $_er_tok_pre systemd-tpm2 tokens found (expected <= 1 before a fresh pair) — manual intervention required"
         return 1
     fi
     if [ "$_er_tok_pre" -gt 0 ]; then
         if [ "$_er_force" != "1" ]; then
-            info "existing TPM enrollment found — retiring it in the same run the fresh seal stands"
+            info "existing TPM enrollment found — retiring it in the same run the fresh token pair stands"
         fi
         RESEAL_WIPE=yes
     fi
@@ -384,10 +421,11 @@ reseal_run() {
     _er_old_slot=$(luks_json_token_keyslot "$_er_pre" systemd-tpm2 2>/dev/null || true)
     _er_slot0_pre=$(luks_json_slot_blob "$_er_pre" 0)
 
-    # staging: ONE directory holding the .pcrsig, the sealed blob halves, the
-    # random volume passphrase and the token JSON — scrubbed on every exit (I1).
-    # The stage root is TMPFS by construction (${ALPINE_FDE_TMPDIR:-/dev/shm};
-    # cf. seal_stage_dir) — the /tmp default is BANNED for this directory.
+    # staging: ONE directory holding the two .pcrsigs, the sealed blob halves,
+    # the random volume passphrases and the token JSON — scrubbed on every exit
+    # (I1). The stage root is TMPFS by construction
+    # (${ALPINE_FDE_TMPDIR:-/dev/shm}; cf. seal_stage_dir) — the /tmp default
+    # is BANNED for this directory.
     _er_stage=$(mktemp -d "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enroll.XXXXXX") || {
         rm -f "$_er_pre"
         return 1
@@ -400,6 +438,13 @@ reseal_run() {
             return 1
         fi
     fi
+    if [ -n "$_er_sig_serial_arg" ]; then
+        if ! cp "$_er_sig_serial_arg" "$_er_stage/pcrsig-serial.json" 2>/dev/null; then
+            rm -rf "$_er_stage" "$_er_pre"
+            err "reseal: cannot read the serial .pcrsig source: $_er_sig_serial_arg"
+            return 1
+        fi
+    fi
 
     # the seal + LUKS2 choreography: subshell so a fail-closed die inside the
     # seal/token libs becomes rc 1 HERE (caller-owned fatal handling), with the
@@ -408,21 +453,48 @@ reseal_run() {
     _er_rc=0
     (
         export ALPINE_FDE_SEAL_STAGE="$_er_stage"
+        # --- DEFAULT-variant token (the boot-priority first slot) ------------
         if [ ! -f "$_er_stage/pcrsig.json" ]; then
             reseal_sign_pcrsig "$_er_stage" "$_er_keydir" || exit 1
         fi
         seal_finalized "$_er_keydir" "$_er_dev" "$_er_stage/pcrsig.json" \
-            "$_er_stage/token.json" || exit 1
-        token_add_keyslot "$_er_dev" "$SEAL_PASS_FILE" "$SEAL_SLOT" \
+            "$_er_stage/token-default.json" || exit 1
+        _er_slot_d=$SEAL_SLOT
+        _er_pass_d=$SEAL_PASS_FILE
+        token_add_keyslot "$_er_dev" "$SEAL_PASS_FILE" "$_er_slot_d" \
             "${ALPINE_FDE_LUKS_KEYFILE:-}" || exit 1
-        _er_tid=$(token_next_id "$_er_dev") || exit 1
-        token_import "$_er_dev" "$_er_stage/token.json" "$_er_tid" || exit 1
+        _er_tid_d=$(token_next_id "$_er_dev") || exit 1
+        token_import "$_er_dev" "$_er_stage/token-default.json" "$_er_tid_d" || exit 1
+        # --- SERIAL-variant token (the recovery lane's second slot) ----------
+        # With the serial .pcrsig supplied, the token pins the SERIAL policy
+        # digest (the serial cmdline measures to a different PCR 11 — the
+        # expected digest is read from the serial .pcrsig itself and handed to
+        # seal_finalized explicitly, since no anchor/live recomputation can
+        # produce the OTHER variant's prediction). Without one, the in-process
+        # re-sign covers the live PCRs — the same pol as the default token
+        # (documented fallback; the signature is inert at unseal).
+        if [ ! -f "$_er_stage/pcrsig-serial.json" ]; then
+            reseal_sign_pcrsig "$_er_stage" "$_er_keydir" \
+                "$_er_stage/pcrsig-serial.json" || exit 1
+            warn "reseal: no serial .pcrsig supplied — the serial token carries the live/default policy digest (re-run reseal with both UKIs' .pcrsigs to pin the distinct serial policy)"
+        fi
+        _er_pol_s=$(seal_pcrsig_field "$_er_stage/pcrsig-serial.json" "7,11" pol)
+        seal_finalized "$_er_keydir" "$_er_dev" "$_er_stage/pcrsig-serial.json" \
+            "$_er_stage/token-serial.json" "$_er_pol_s" || exit 1
+        _er_slot_s=$SEAL_SLOT
+        token_add_keyslot "$_er_dev" "$SEAL_PASS_FILE" "$_er_slot_s" \
+            "$_er_pass_d" || exit 1
+        _er_tid_s=$(token_next_id "$_er_dev") || exit 1
+        token_import "$_er_dev" "$_er_stage/token-serial.json" "$_er_tid_s" || exit 1
+        # --- retire the standing single enrollment (same-run swap) -----------
         if [ "$RESEAL_WIPE" = "yes" ] && [ -n "$_er_old_tok" ]; then
             token_remove "$_er_dev" "$_er_old_tok" || exit 1
-            token_kill_slot "$_er_dev" "$_er_old_slot" "$SEAL_PASS_FILE" || exit 1
+            token_kill_slot "$_er_dev" "$_er_old_slot" "$_er_pass_d" || exit 1
         fi
-        printf '%s\n' "RESEAL_SLOT=$SEAL_SLOT" "RESEAL_TOKEN_ID=$_er_tid" \
-            "RESEAL_PASS=$SEAL_PASS_FILE" >"$_er_stage/env"
+        printf '%s\n' \
+            "RESEAL_SLOT=$_er_slot_d" "RESEAL_TOKEN_ID=$_er_tid_d" \
+            "RESEAL_SLOT_SERIAL=$_er_slot_s" "RESEAL_TOKEN_ID_SERIAL=$_er_tid_s" \
+            "RESEAL_PASS=$_er_pass_d" >"$_er_stage/env"
     ) 2>>"$_er_stage/sub.err" || _er_rc=1
     if [ -s "$_er_stage/sub.err" ]; then
         cat "$_er_stage/sub.err" >&2
@@ -433,14 +505,14 @@ reseal_run() {
         keys_scrub "$RESEAL_PASS"
     fi
     if [ "$_er_rc" -ne 0 ]; then
-        # I1 invariant (c): the staged passphrase is ZEROIZED, not merely
+        # I1 invariant (c): the staged passphrases are ZEROIZED, not merely
         # unlinked, on the failure path too
         for _er_p in "$_er_stage"/alpine-fde-seal-pass.*; do
             [ -f "$_er_p" ] && keys_scrub "$_er_p" || :
         done
         rm -rf "$_er_stage"
         rm -f "$_er_pre"
-        err "reseal: the Mechanism B enrollment failed — LUKS2 state may hold a fresh keyslot without its token (re-run enrollment; §8.3)"
+        err "reseal: the Mechanism B enrollment failed — LUKS2 state may hold fresh keyslots without their tokens (re-run enrollment; §8.3)"
         return 1
     fi
 
@@ -456,17 +528,123 @@ reseal_run() {
         return 1
     fi
     _er_pub_b64=$(openssl pkey -pubin -in "$_er_pub" -outform DER 2>/dev/null | openssl base64 -A)
-    if ! token_post_assert "$_er_pre" "$_er_post" "$_er_pub_b64" '[7,11]' "$RESEAL_SLOT"; then
+    if ! token_post_assert_multi "$_er_pre" "$_er_post" "$_er_pub_b64" '[7,11]' \
+        "$RESEAL_SLOT" "$RESEAL_SLOT_SERIAL"; then
         rm -rf "$_er_stage"
         rm -f "$_er_pre" "$_er_post"
         err "reseal: post-assertions failed — enrollment NOT recorded"
         return 1
     fi
-    # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
-    RESEAL_TOKEN_ID=$(reseal_json_token_id "$_er_post" systemd-tpm2)
     rm -rf "$_er_stage"
     rm -f "$_er_pre" "$_er_post"
     return 0
+}
+
+# reseal_enroll_serial DEVSPEC PUBKEY [PCRSIG_SERIAL] — the PARTIAL-state
+# completion (two-UKI design): exactly ONE systemd-tpm2 token stands (the
+# default variant's — a crash between the two seals of an older tool version,
+# or a legacy enrollment). Adds ONLY the serial token: fresh keyslot + token id,
+# never touching the standing enrollment. On success: rc 0 with
+# RESEAL_SLOT_SERIAL / RESEAL_TOKEN_ID_SERIAL set. rc 1 on any failure (the
+# standing default token is untouched — completion is non-destructive).
+reseal_enroll_serial() {
+    _ers_dev=$1 _ers_pub=$2
+    _ers_sig_serial_arg=${3:-${ALPINE_FDE_PCRSIG_SERIAL:-}}
+    keys_rsa3072_guard "${_ers_pub%/*}"
+    RESEAL_SLOT_SERIAL=''
+    RESEAL_TOKEN_ID_SERIAL=''
+    _ers_pre=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspre.XXXXXX") || return 1
+    if ! reseal_cryptsetup luksDump --dump-json-metadata "$_ers_dev" >"$_ers_pre" 2>/dev/null; then
+        rm -f "$_ers_pre"
+        err "reseal: cannot read LUKS2 metadata of $_ers_dev"
+        return 1
+    fi
+    _ers_tok=$(luks_json_count_type "$_ers_pre" systemd-tpm2)
+    if [ "$_ers_tok" -ne 1 ]; then
+        rm -f "$_ers_pre"
+        err "reseal: serial completion needs exactly ONE standing token, found $_ers_tok on $_ers_dev"
+        return 1
+    fi
+    _ers_standing_slot=$(luks_json_token_keyslot "$_ers_pre" systemd-tpm2 2>/dev/null || true)
+    _ers_slot0_pre=$(luks_json_slot_blob "$_ers_pre" 0)
+    _ers_stage=$(mktemp -d "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-enroll.XXXXXX") || {
+        rm -f "$_ers_pre"
+        return 1
+    }
+    chmod 700 "$_ers_stage"
+    if [ -n "$_ers_sig_serial_arg" ]; then
+        if ! cp "$_ers_sig_serial_arg" "$_ers_stage/pcrsig-serial.json" 2>/dev/null; then
+            rm -rf "$_ers_stage" "$_ers_pre"
+            err "reseal: cannot read the serial .pcrsig source: $_ers_sig_serial_arg"
+            return 1
+        fi
+    fi
+    _ers_keydir=${_ers_pub%/*}
+    _ers_rc=0
+    (
+        export ALPINE_FDE_SEAL_STAGE="$_ers_stage"
+        if [ ! -f "$_ers_stage/pcrsig-serial.json" ]; then
+            reseal_sign_pcrsig "$_ers_stage" "$_ers_keydir" \
+                "$_ers_stage/pcrsig-serial.json" || exit 1
+            warn "reseal: no serial .pcrsig supplied — the serial token carries the live/default policy digest (re-run reseal with both UKIs' .pcrsigs to pin the distinct serial policy)"
+        fi
+        _ers_pol_s=$(seal_pcrsig_field "$_ers_stage/pcrsig-serial.json" "7,11" pol)
+        seal_finalized "$_ers_keydir" "$_ers_dev" "$_ers_stage/pcrsig-serial.json" \
+            "$_ers_stage/token-serial.json" "$_ers_pol_s" || exit 1
+        token_add_keyslot "$_ers_dev" "$SEAL_PASS_FILE" "$SEAL_SLOT" \
+            "${ALPINE_FDE_LUKS_KEYFILE:-}" || exit 1
+        _ers_tid=$(token_next_id "$_ers_dev") || exit 1
+        token_import "$_ers_dev" "$_ers_stage/token-serial.json" "$_ers_tid" || exit 1
+        printf '%s\n' "RESEAL_SLOT_SERIAL=$SEAL_SLOT" \
+            "RESEAL_TOKEN_ID_SERIAL=$_ers_tid" \
+            "RESEAL_PASS=$SEAL_PASS_FILE" >"$_ers_stage/env"
+    ) 2>>"$_ers_stage/sub.err" || _ers_rc=1
+    if [ -s "$_ers_stage/sub.err" ]; then
+        cat "$_ers_stage/sub.err" >&2
+    fi
+    if [ "$_ers_rc" -eq 0 ] && [ -f "$_ers_stage/env" ]; then
+        # shellcheck disable=SC1090
+        . "$_ers_stage/env"
+        keys_scrub "$RESEAL_PASS"
+    fi
+    if [ "$_ers_rc" -ne 0 ]; then
+        for _ers_p in "$_ers_stage"/alpine-fde-seal-pass.*; do
+            [ -f "$_ers_p" ] && keys_scrub "$_ers_p" || :
+        done
+        rm -rf "$_ers_stage"
+        rm -f "$_ers_pre"
+        err "reseal: the serial-token completion failed — the standing default token is untouched (re-run; §8.3)"
+        return 1
+    fi
+    _ers_post=$(mktemp "${ALPINE_FDE_TMPDIR:-/dev/shm}/alpine-fde-lukspost.XXXXXX") || {
+        rm -rf "$_ers_stage" "$_ers_pre"
+        return 1
+    }
+    if ! reseal_cryptsetup luksDump --dump-json-metadata "$_ers_dev" >"$_ers_post" 2>/dev/null; then
+        rm -rf "$_ers_stage"
+        rm -f "$_ers_pre" "$_ers_post"
+        err "reseal: cannot re-read LUKS2 metadata after the serial completion"
+        return 1
+    fi
+    _ers_pub_b64=$(openssl pkey -pubin -in "$_ers_pub" -outform DER 2>/dev/null | openssl base64 -A)
+    if ! token_post_assert_multi "$_ers_pre" "$_ers_post" "$_ers_pub_b64" '[7,11]' \
+        "$_ers_standing_slot" "$RESEAL_SLOT_SERIAL"; then
+        rm -rf "$_ers_stage"
+        rm -f "$_ers_pre" "$_ers_post"
+        err "reseal: post-assertions failed — the serial completion is NOT recorded"
+        return 1
+    fi
+    rm -rf "$_ers_stage"
+    rm -f "$_ers_pre" "$_ers_post"
+    return 0
+}
+
+# reseal_pair_bookkeeping META_JSON — print the standing token pair's
+# keyslot/token-id bookkeeping as ONE line "SLOT_D TOK_D SLOT_S TOK_S"
+# (lower token id = the DEFAULT variant — the pair is enrolled in that order;
+# fields are '-' when fewer than two tokens stand).
+reseal_pair_bookkeeping() {
+    token_pair_bookkeeping "$@"
 }
 
 # reseal_ensure_gate_skip — G-IL7 (§8.1 kernel-build row): the build's ensure-once
@@ -501,7 +679,8 @@ reseal_ensure_gate_skip() {
     return 1
 }
 
-# reseal_ensure_once DEVSPEC PUBKEY — the `kernel build` ensure-once step (G-U1):
+# reseal_ensure_once DEVSPEC PUBKEY [PCRSIG_SERIAL] — the `kernel build`
+# ensure-once step (G-U1), two-UKI aware (the standing state is the TOKEN PAIR):
 #   * volume unreachable → warn + rc 0 (a build context may not have the target
 #     volume attached; under the pinned pubkey+signed-policy construction
 #     kernel updates are TPM-free either way, s14)
@@ -509,17 +688,24 @@ reseal_ensure_gate_skip() {
 #     standing token) → warn + rc 0
 #     (Stage-1 builds must never enroll; RESEAL_SKIPPED=1 signals the skip)
 #   * inspect + enroll run UNDER the enrollment lock (§8.3: concurrent builds /
-#     postinst passes must serialize on the one-enrollment decision, HW-3)
-#   * exactly 1 systemd-tpm2 token → info line, ZERO TPM operations (s14)
-#   * 0 tokens → exactly ONE enrollment via reseal_run (RESEAL_ENROLLED=1)
-#   * >1 tokens → LOUD refusal rc 1 citing manual intervention (never silently
+#     postinst passes must serialize on the enrollment decision, HW-3)
+#   * exactly the 2-token PAIR standing → info line, ZERO TPM operations (s14)
+#   * 0 tokens → exactly ONE pair enrollment via reseal_run (RESEAL_ENROLLED=1)
+#   * 1 token (a PARTIAL state: a crash between the pair's two seals, or a
+#     legacy enrollment) → the serial-token completion via reseal_enroll_serial
+#     (RESEAL_ENROLLED=1; the standing default token is untouched)
+#   * >2 tokens → LOUD refusal rc 1 citing manual intervention (never silently
 #     "stands" — the dead-slot accumulation the invariant exists to prevent)
+# PCRSIG_SERIAL: the SERIAL variant's .pcrsig (the -serial UKI's own section) —
+# when supplied, the serial token pins the DISTINCT serial policy digest;
+# without it the serial token falls back to the live/default policy (warned).
 # Globals on return: RESEAL_ENROLLED (1 = enrolled here), RESEAL_SKIPPED (1 = a
 # documented precondition escape fired: unreachable volume or unfinalized
 # install), RESEAL_FAIL_REASON. rc 1 only on enrollment failure (caller: marker
 # + fail-closed pipeline).
 reseal_ensure_once() {
     _ee_dev=$1 _ee_pub=$2
+    RESEAL_PCRSIG_SERIAL_ARG=${3:-}
     RESEAL_ENROLLED=0
     # shellcheck disable=SC2034  # consumed by the caller (kernel build, §8.4)
     RESEAL_SKIPPED=0
@@ -556,22 +742,36 @@ reseal_ensure_once_locked() {
         return 1
     fi
     _ee_tok=$(luks_json_count_type "$_ee_pre" systemd-tpm2)
-    rm -f "$_ee_pre"
-    if [ "$_ee_tok" -eq 1 ]; then
-        info "enroll: systemd-tpm2 token already present on $_ee_dev — enrollment stands, no TPM operations (s14)"
+    if [ "$_ee_tok" -eq 2 ]; then
+        info "enroll: the systemd-tpm2 token PAIR already stands on $_ee_dev — enrollment stands, no TPM operations (s14)"
+        rm -f "$_ee_pre"
         return 0
     fi
-    if [ "$_ee_tok" -gt 1 ]; then
+    if [ "$_ee_tok" -gt 2 ]; then
         # §7.2 fact check: LUKS2 provides 32 keyslots (0..31); this tool's
         # enrollment allocates from 1..31 (token_free_slot; slot 0 is recovery)
-        RESEAL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 1) — manual intervention required (§8.3 one-enrollment invariant; LUKS2 provides 32 keyslots, this tool enrolls into 1..31)"
+        RESEAL_FAIL_REASON="$_ee_tok systemd-tpm2 tokens found on $_ee_dev (expected <= 2: the two-UKI token pair) — manual intervention required (§8.3; LUKS2 provides 32 keyslots, this tool enrolls into 1..31)"
         err "enroll: $RESEAL_FAIL_REASON — clean up the surplus tokens/slots before any further enrollment"
+        rm -f "$_ee_pre"
         return 1
     fi
-    info "enroll: no TPM token on $_ee_dev — enrolling once (Mechanism B)"
-    if ! reseal_run b "$_ee_pub" "$_ee_dev" 0; then
+    if [ "$_ee_tok" -eq 1 ]; then
+        info "enroll: PARTIAL enrollment on $_ee_dev (one of the two-UKI token pair) — completing with the serial token"
+        if ! reseal_enroll_serial "$_ee_dev" "$_ee_pub" "$RESEAL_PCRSIG_SERIAL_ARG"; then
+            rm -f "$_ee_pre"
+            return 1
+        fi
+        rm -f "$_ee_pre"
+        # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
+        RESEAL_ENROLLED=1
+        return 0
+    fi
+    info "enroll: no TPM token on $_ee_dev — enrolling the token pair once (Mechanism B, one policy per UKI variant)"
+    if ! reseal_run b "$_ee_pub" "$_ee_dev" 0 '' "$RESEAL_PCRSIG_SERIAL_ARG"; then
+        rm -f "$_ee_pre"
         return 1
     fi
+    rm -f "$_ee_pre"
     # shellcheck disable=SC2034  # caller-facing seam (unit suites assert it)
     RESEAL_ENROLLED=1
     return 0
@@ -597,6 +797,7 @@ cmd_reseal_main() {
     strict_mode
 
     _em_uuid='' _em_reseat=0 _em_pcrsig=${ALPINE_FDE_PCRSIG:-}
+    _em_pcrsig_serial=${ALPINE_FDE_PCRSIG_SERIAL:-}
     while [ $# -gt 0 ]; do
         case $1 in
             --uuid)
@@ -607,6 +808,11 @@ cmd_reseal_main() {
             --pcrsig)
                 [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "reseal: --pcrsig requires an argument"
                 _em_pcrsig=$2
+                shift
+                ;;
+            --pcrsig-serial)
+                [ $# -ge 2 ] || die -r "$ALPINE_FDE_USAGE" "reseal: --pcrsig-serial requires an argument"
+                _em_pcrsig_serial=$2
                 shift
                 ;;
             --reseat) _em_reseat=1 ;;
@@ -630,22 +836,25 @@ cmd_reseal_main() {
     _em_pub=$RESEAL_PRE_PUB
     _em_dev=$RESEAL_PRE_DEV
 
-    # The single Mechanism B enrollment (shared core, G-R3) under the
-    # enrollment lock (§8.3 serialization, HW-3); failures die fail-closed 64
+    # The Mechanism B TOKEN-PAIR enrollment (shared core, G-R3; two-UKI design:
+    # one policy per console variant) under the enrollment lock (§8.3
+    # serialization, HW-3); failures die fail-closed 64
     if ! reseal_lock_acquire; then
         die "reseal: cannot take the enrollment lock — refusing an unserialized enrollment"
     fi
     _em_rc=0
-    reseal_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" || _em_rc=1
+    reseal_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" \
+        "$_em_pcrsig_serial" || _em_rc=1
     reseal_lock_release
     if [ "$_em_rc" -ne 0 ]; then
         die "reseal: enrollment failed — enrolled.json NOT written"
     fi
 
-    if ! reseal_record "$_em_uuid" "$_em_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" "$_em_pub"; then
+    if ! reseal_record "$_em_uuid" "$_em_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" "$_em_pub" \
+        "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
         die "reseal: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
     fi
-    printf 'alpine-fde: enrolled (policy_mode=%s, token keyslot %s, wipe=%s); record: %s\n' \
-        "$_em_mode" "$RESEAL_SLOT" "$RESEAL_WIPE" "$(sp_enrolled_file)" >&2
+    printf 'alpine-fde: enrolled (policy_mode=%s, token pair: default keyslot %s + serial keyslot %s, wipe=%s); record: %s\n' \
+        "$_em_mode" "$RESEAL_SLOT" "${RESEAL_SLOT_SERIAL:-<none>}" "$RESEAL_WIPE" "$(sp_enrolled_file)" >&2
     return 0
 }

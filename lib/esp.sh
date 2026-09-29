@@ -1,7 +1,10 @@
 #!/bin/sh
 # esp.sh — ESP file operations for Alpine FDE UKIs (docs/Architecture.md §8.4, §9.2,
-# gap B-G5). Layout convention: ESP:/EFI/Linux/alpine-fde-<kernel-version>.efi
-# (one UKI per kernel).
+# gap B-G5). Layout convention (two-UKI boot design): ESP:/EFI/Linux/
+# alpine-fde-<kernel-version>.efi (DEFAULT console variant, tty0 = /dev/console)
+# + alpine-fde-<kernel-version>-serial.efi (SERIAL/RECOVERY variant,
+# /dev/console = ttyS0) — a PAIR per kernel, always installed, pruned and
+# removed together.
 #
 # Ordering contract (ADR-8, B-G5): a UKI is installed atomically (temp + fsync +
 # rename) and PRUNING happens only after a successful install + manifest update —
@@ -81,20 +84,52 @@ esp_validate_kver() {
     return 0
 }
 
-# esp_uki_path <kver> — canonical UKI path for a kernel version
+# esp_uki_name <kver> [VARIANT] — the ESP file name for a kernel version.
+# VARIANT (default|serial) selects the two-UKI console variant: the DEFAULT
+# console UKI is alpine-fde-<kver>.efi, the SERIAL/RECOVERY UKI is
+# alpine-fde-<kver>-serial.efi (two-UKI boot design: one UKI pair per kernel,
+# systemd-boot auto-lists EFI/Linux/*.efi and the firmware NVRAM entries point
+# at the two files directly).
+esp_uki_name() {
+    case ${2:-default} in
+        serial) printf '%s\n' "alpine-fde-$1-serial.efi" ;;
+        default) printf '%s\n' "alpine-fde-$1.efi" ;;
+        *) die "esp: unknown UKI variant '${2:-}' (expected: default|serial)" ;;
+    esac
+}
+
+# esp_kver_base NAME — the kernel version of an ESP UKI name (or a listed
+# "kver"): "<kver>-serial" -> "<kver>"; anything else unchanged. The -serial
+# sibling is never an independent kernel version: keep-set decisions, prune and
+# the manifest all operate on the BASE kver, and the sibling always follows it
+# (both variants of a kver are removed together).
+esp_kver_base() {
+    case $1 in
+        *-serial) printf '%s\n' "${1%-serial}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# esp_uki_path <kver> [VARIANT] — canonical UKI path for a kernel version
 esp_uki_path() {
-    printf '%s/alpine-fde-%s.efi\n' "$(esp_uki_dir)" "$1"
+    printf '%s/%s\n' "$(esp_uki_dir)" "$(esp_uki_name "$1" "${2:-default}")"
 }
 
 # esp_list_kvers — kernel versions of the UKIs currently on the ESP,
-# one per line, unsorted. Empty output when none.
+# one per line, unsorted. The -serial siblings are NOT listed (they are not
+# kernel versions; esp_compute_keep + manifest prune decide on base kvers and
+# the sibling follows). Empty output when none.
 esp_list_kvers() {
     _esp_d=$(esp_uki_dir)
     [ -d "$_esp_d" ] || return 0
     for _esp_f in "$_esp_d"/alpine-fde-*.efi; do
         [ -f "$_esp_f" ] || continue
         _esp_b=$(basename "$_esp_f")
-        printf '%s\n' "${_esp_b#alpine-fde-}" | sed 's/\.efi$//'
+        _esp_k=$(printf '%s\n' "${_esp_b#alpine-fde-}" | sed 's/\.efi$//')
+        case $_esp_k in
+            *-serial) continue ;; # the serial sibling of an already-listed kver
+        esac
+        printf '%s\n' "$_esp_k"
     done
 }
 
@@ -136,10 +171,11 @@ esp_compute_keep() {
     esp_list_kvers | esp_version_sort -r | grep -Fxv -- "$_esp_cur" | head -n "$_esp_ret"
 }
 
-# esp_install_uki <src-file> <kver> — atomically install a UKI:
+# esp_install_uki <src-file> <kver> [VARIANT] — atomically install a UKI:
 # copy to "<dst>.new" in the same directory, fsync the data, rename over the
 # destination, best-effort fsync of the directory. The rename is atomic within
 # the filesystem, so the ESP never holds a partial UKI under the final name.
+# VARIANT selects the file (default|serial — see esp_uki_name).
 esp_install_uki() {
     _esp_src=$1
     _esp_kver=$2
@@ -148,7 +184,7 @@ esp_install_uki() {
     if ! mkdir -p "$_esp_d"; then
         die "esp: cannot create UKI directory $_esp_d"
     fi
-    _esp_dst="$_esp_d/alpine-fde-$_esp_kver.efi"
+    _esp_dst="$_esp_d/$(esp_uki_name "$_esp_kver" "${3:-default}")"
     _esp_tmp="$_esp_dst.new.$$"
     if ! cat "$_esp_src" >"$_esp_tmp"; then
         rm -f "$_esp_tmp"
@@ -163,10 +199,12 @@ esp_install_uki() {
     info "esp: installed UKI $_esp_dst ($(wc -c <"$_esp_dst" | tr -d '[:space:]') bytes)"
 }
 
-# esp_prune_ukis <kver>... — remove every alpine-fde-*.efi whose kernel version is
-# NOT in the keep-set arguments. Callers MUST pass the set computed by
-# esp_compute_keep after a successful install (prune is never run on a failed
-# build; the caller owns the ordering).
+# esp_prune_ukis <kver>... — remove every alpine-fde-*.efi whose kernel version
+# (the -serial sibling folded into its BASE kver) is NOT in the keep-set
+# arguments. Callers MUST pass the set computed by esp_compute_keep after a
+# successful install (prune is never run on a failed build; the caller owns the
+# ordering). A kver's TWO variants are removed together: keeping "<kver>" keeps
+# both files, dropping it removes both.
 esp_prune_ukis() {
     _esp_d=$(esp_uki_dir)
     [ -d "$_esp_d" ] || return 0
@@ -175,6 +213,7 @@ esp_prune_ukis() {
         _esp_b=$(basename "$_esp_f")
         _esp_k=${_esp_b#alpine-fde-}
         _esp_k=${_esp_k%.efi}
+        _esp_k=$(esp_kver_base "$_esp_k")
         _esp_keep=0
         for _esp_want in "$@"; do
             if [ "$_esp_k" = "$_esp_want" ]; then

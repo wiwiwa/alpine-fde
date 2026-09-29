@@ -50,19 +50,25 @@
 # FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
 # FDE_NLPLUG_FINDFS, FDE_DEV_DIR, FDE_PROC_CONSOLES. (FDE_NEWROOT retired
 # with the state flip, item 10b.)
-#   DUAL-CONSOLE FAN-OUT (REAL-SERVER R640, 2026-09-29): the target cmdline
-#   ends with console=ttyS0,115200 and LAST-CONSOLE-WINS makes /dev/console
-#   SERIAL-ONLY — kernel printk fans out to every console= device, but the
-#   hook's userspace writes (stderr) reached the serial port ALONE: on the
-#   R640 the operator's SCREEN froze at the kernel disk-attach line while the
-#   hook sat invisible at the recovery prompt. Every user-visible emission
-#   (_msg, _err, _fdh_warn, the prompt text + attempt counter) therefore fans
-#   out via _fdh_console_emit: /dev/console (stderr, ALWAYS — the read side;
-#   the PASSPHRASE READ itself stays on /dev/console, only the text fans out)
-#   PLUS the video console (/dev/tty0, falling back to /dev/tty1) and
-#   /dev/ttyS0, each probed present+openable ONCE at hook start (FDE_DEV_DIR
-#   is the device dir, default /dev) — a device that is absent or unwritable
-#   is dropped from the fan-out and can never fail a message or the hook.
+#   DUAL-CONSOLE FAN-OUT (REAL-SERVER R640, 2026-09-29): with the two-UKI
+#   console variants the DEFAULT UKI's cmdline ends with console=tty0 (video
+#   LAST — /dev/console is the virtual console) and the SERIAL/RECOVERY
+#   variant's ends with console=ttyS0,115200 (serial LAST, the remote lane) —
+#   in EITHER case kernel printk fans out to every console= device, but the
+#   hook's userspace writes (stderr) reach ONLY the last-console /dev/console:
+#   on the R640 (the pre-two-UKI serial-last cmdline) the operator's SCREEN
+#   froze at the kernel disk-attach line while the hook sat invisible at the
+#   recovery prompt. Every user-visible emission (_msg, _err, _fdh_warn, the
+#   prompt text + attempt counter) therefore fans out via _fdh_console_emit:
+#   /dev/console (stderr, ALWAYS — the read side; the PASSPHRASE READ itself
+#   stays on /dev/console, only the text fans out) PLUS the video console
+#   (/dev/tty0, falling back to /dev/tty1) and /dev/ttyS0, each probed
+#   present+openable ONCE at hook start (FDE_DEV_DIR is the device dir,
+#   default /dev) — a device that is absent or unwritable is dropped from the
+#   fan-out and can never fail a message or the hook. Under the DEFAULT
+#   variant (/dev/console = tty0) the explicit /dev/ttyS0 member is what
+#   carries the hook output to serial; under the SERIAL variant it is
+#   suppressed by the CON_CONSDEV check below (already the preferred console).
 #   /dev/ttyS0 joins the fan-out only when the kernel's preferred console
 #   (/dev/console, CON_CONSDEV in FDE_PROC_CONSOLES, default /proc/consoles)
 #   is NOT already ttyS0 — the stderr write already reaches that UART, and an

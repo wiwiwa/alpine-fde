@@ -10,10 +10,18 @@
 #   "current_kernel": "<kver>", "updated_at": "<iso8601z>",
 #   "pubkey_fp": "<sha256 of DER SPKI>",
 #   "digests": [ { "kernel_version", "pcr11_digest", "policy_digest", "signature",
-#                  "keyslot", "token_id" } ]
+#                  "keyslot", "token_id",
+#                  "pcr11_digest_serial", "policy_digest_serial",
+#                  "signature_serial", "keyslot_serial", "token_id_serial" } ]
 # }
-#  * upsert by kernel_version — rebuilding a kernel REPLACES its entry
-#  * keyslot/token_id (§8.4, G-U2): the single A'' enrollment's bookkeeping.
+#  * upsert by kernel_version — rebuilding a kernel REPLACES its entry (one
+#    entry per kver; BOTH console variants of the two-UKI design ride the ONE
+#    entry: the base fields are the DEFAULT variant, the additive *_serial
+#    fields the SERIAL/RECOVERY variant — the two cmdline orderings measure to
+#    DISTINCT pcr11/policy digests)
+#  * keyslot/token_id (§8.4, G-U2): the enrollment's bookkeeping — keyslot/
+#    token_id are the DEFAULT variant's token, keyslot_serial/token_id_serial
+#    the SERIAL variant's (one token policy per variant).
 #    OPTIONAL on read (legacy v1 documents without them stay valid — fail-open
 #    on read), always WRITTEN by this library (write-always; "" until enrolled).
 #    Under A'' every entry repeats the standing enrollment's values (consumed
@@ -124,21 +132,58 @@ manifest_upsert() {
         --arg slot "${6:-}" --arg tok "${7:-}" --arg now "$(manifest_now)"
 }
 
-# manifest_set_enrollment <file> <keyslot> <token_id> — record the single A''
-# enrollment's bookkeeping onto EVERY digests[] entry (§8.4: under A'' there is
-# one enrollment; the values repeat per entry for status/audit/recovery).
-# Atomically re-serializes; bumps updated_at. No-op (rc 0) without a manifest.
+# manifest_set_enrollment <file> <keyslot> <token_id> [keyslot_serial] [token_id_serial]
+# — record the enrollment's keyslot/token_id bookkeeping onto EVERY digests[]
+# entry (§8.4: the values repeat per entry for status/audit/recovery).
+# two-UKI design: one TOKEN POLICY PER VARIANT — the base keyslot/token_id are
+# the DEFAULT console variant's token, keyslot_serial/token_id_serial the
+# SERIAL variant's (each a distinct seal under the same release-key PolicyAuthorize).
+# Omitted serial values leave prior serial bookkeeping intact. Atomically
+# re-serializes; bumps updated_at. No-op (rc 0) without a manifest.
 manifest_set_enrollment() {
     _man_file=$1
     manifest_load "$_man_file" >/dev/null 2>&1 || return 0
     manifest_transform "$_man_file" '
         .updated_at = $now
-        | .digests = (.digests | map(. + {keyslot: $slot, token_id: $tok}))' \
-        --arg slot "$2" --arg tok "$3" --arg now "$(manifest_now)"
+        | .digests = (.digests | map((. + {keyslot: $slot, token_id: $tok})
+            + (if $slot_serial != "" or $tok_serial != ""
+               then {keyslot_serial: (if $slot_serial != "" then $slot_serial else (.keyslot_serial // "") end),
+                     token_id_serial: (if $tok_serial != "" then $tok_serial else (.token_id_serial // "") end)}
+               else {} end)))' \
+        --arg slot "$2" --arg tok "$3" --arg now "$(manifest_now)" \
+        --arg slot_serial "${4:-}" --arg tok_serial "${5:-}"
 }
 
-# manifest_set_meta <file> <current_kernel> <pubkey_fp> — record the build-time
-# header fields (current_kernel, pubkey_fp, updated_at)
+# manifest_set_variant <file> <kver> <variant> <pcr11hex> <policy_digest> <signature>
+# — stamp ONE variant's prediction fields onto the kver's entry. VARIANT
+# default|serial: serial writes the additive pcr11_digest_serial /
+# policy_digest_serial / signature_serial fields (the base fields stay the
+# DEFAULT variant — schema v1 consumers keep reading them). The entry must
+# exist (manifest_upsert runs first in the build); a missing entry is a silent
+# no-op rc 1. Atomically re-serializes; bumps updated_at.
+manifest_set_variant() {
+    _man_file=$1
+    _man_variant=$3
+    case $_man_variant in
+        default) _man_suf='' ;;
+        serial) _man_suf='_serial' ;;
+        *) die "manifest: unknown variant '$_man_variant' (expected: default|serial)" ;;
+    esac
+    manifest_load "$_man_file" >/dev/null 2>&1 || return 0
+    if ! manifest_get "$_man_file" "$2" >/dev/null 2>&1; then
+        return 1
+    fi
+    manifest_transform "$_man_file" '
+        (.digests[] | select(.kernel_version == $kver)) |=
+            (. + {("pcr11_digest" + $suf): $p11,
+                  ("policy_digest" + $suf): $pd,
+                  ("signature" + $suf): $sig})
+        | .updated_at = $now' \
+        --arg kver "$2" --arg suf "$_man_suf" --arg p11 "$4" --arg pd "$5" \
+        --arg sig "$6" --arg now "$(manifest_now)"
+}
+
+# manifest_set_meta <file> <current_kernel> <pubkey_fp> — record the build-time# header fields (current_kernel, pubkey_fp, updated_at)
 manifest_set_meta() {
     _man_file=$1
     manifest_load "$_man_file" >/dev/null 2>&1 || {

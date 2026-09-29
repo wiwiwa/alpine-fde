@@ -406,15 +406,23 @@ seal_unseal() {
     return "$_su_rc"
 }
 
-# seal_enroll <keydir> <luks_dev> <pcrsig.json> <out_token.json> <mode> — the
-# shared Mechanism B enrollment core. Order is fail-closed first: keydir,
-# .pcrsig presence, environment, signature verification (G-B6) — and only then
-# LUKS metadata reads and TPM operations.
+# seal_enroll <keydir> <luks_dev> <pcrsig.json> <out_token.json> <mode> [uki] \
+#             [expected_pol] — the shared Mechanism B enrollment core. Order is
+# fail-closed first: keydir, .pcrsig presence, environment, signature
+# verification (G-B6) — and only then LUKS metadata reads and TPM operations.
+# EXPECTED_POL (two-UKI design, optional): an explicit approved-policy digest
+# the caller already owns (e.g. the SERIAL variant token's pol, extracted from
+# the serial UKI's own .pcrsig — its d11 differs from the booting default's and
+# no live/anchor recomputation can produce it). When set and a valid hex
+# digest, it REPLACES the anchor/live recomputation as the G-B6 expected side;
+# the signature gate below is unchanged (the .pcrsig must still verify over
+# exactly that pol against the release pubkey).
 seal_enroll() {
-    [ $# -ge 5 ] && [ $# -le 6 ] ||
-        die "seal_enroll: usage: <keydir> <luks_dev> <pcrsig> <out_token> <mode> [uki]"
+    [ $# -ge 5 ] && [ $# -le 7 ] ||
+        die "seal_enroll: usage: <keydir> <luks_dev> <pcrsig> <out_token> <mode> [uki] [expected_pol]"
     _se_keydir=$1 _se_dev=$2 _se_sig=$3 _se_out=$4 _se_mode=$5
     _se_uki=${6:-}
+    _se_expect=${7:-}
     case $_se_mode in
         provisional) _se_sel=11 ;;
         finalized) _se_sel=7,11 ;;
@@ -445,7 +453,17 @@ seal_enroll() {
     # " is a misleading failure mode on top of the functional one). Only a
     # genuine mismatch of two VALID hex digests is stale/tampered.
     _se_fresh=''
-    if [ "$_se_mode" = finalized ]; then
+    if [ -n "$_se_expect" ]; then
+        # two-UKI design: the caller supplied the approved policy digest
+        # explicitly (the serial variant's pol from its own UKI .pcrsig —
+        # DISTINCT from the booting default's, since the serial cmdline
+        # measures to a different PCR 11). Pure data: the signature gate below
+        # still proves the .pcrsig verifies over exactly this digest.
+        policy_check_digest "$_se_expect" ||
+            die "seal: the explicit expected policy digest is not a sha256 hex digest: '$_se_expect'"
+        _se_fresh=$_se_expect
+        info "seal: G-B6 over the caller-supplied expected policy digest (no anchor/live recomputation)"
+    elif [ "$_se_mode" = finalized ]; then
         _se_ad7=$(seal_pcrsig_field "$_se_sig" "$_se_sel" d7)
         _se_ad11=$(seal_pcrsig_field "$_se_sig" "$_se_sel" d11)
         if [ -n "$_se_ad7" ] && [ -n "$_se_ad11" ]; then
@@ -548,12 +566,13 @@ seal_provisional() {
     seal_enroll "${1:-}" "${2:-}" "${3:-}" "${4:-}" provisional "${5:-}"
 }
 
-# seal_finalized <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> — the
-# finalized {PCR 7, PCR 11} construction; the static d7 comes from the entry's
-# recorded anchor components (digest-anchored G-B6, Option A) — no live TPM
-# PCR read at seal time.
+# seal_finalized <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> \
+#                [expected_pol] — the finalized {PCR 7, PCR 11} construction;
+# the static d7 comes from the entry's recorded anchor components
+# (digest-anchored G-B6, Option A) — no live TPM PCR read at seal time.
+# EXPECTED_POL: the two-UKI serial-variant seam (see seal_enroll).
 seal_finalized() {
-    seal_enroll "${1:-}" "${2:-}" "${3:-}" "${4:-}" finalized
+    seal_enroll "${1:-}" "${2:-}" "${3:-}" "${4:-}" finalized '' "${5:-}"
 }
 
 # seal_upgrade_token <keydir> <luks_dev> <uki_pcrsig_json> <out.token.json> \
@@ -576,8 +595,15 @@ seal_finalized() {
 # disk. The choreography result (the new slot) crosses to the post-asserts via
 # a scratch env file, also under the tmpfs root and also scrubbed.
 seal_upgrade_token() {
-    [ $# -ge 4 ] || die "seal_upgrade_token: usage: <keydir> <luks_dev> <pcrsig> <out_token> [auth_key_file]"
+    [ $# -ge 4 ] && [ $# -le 6 ] ||
+        die "seal_upgrade_token: usage: <keydir> <luks_dev> <pcrsig> <out_token> [auth_key_file] [pcrsig_serial]"
     _sut_keydir=$1 _sut_dev=$2 _sut_sig=$3 _sut_out=$4 _sut_auth=${5:-}
+    # two-UKI design: the SERIAL variant's .pcrsig (the -serial UKI's own
+    # section). When supplied, the upgrade stands the WHOLE PAIR (a second
+    # fresh seal + keyslot + token after the default one); when absent, a
+    # single finalized token stands and the next kernel build completes the
+    # pair (reseal_ensure_once's PARTIAL path).
+    _sut_sig_serial=${6:-}
     [ -e "$_sut_dev" ] || die "seal: LUKS device not resolvable: $_sut_dev"
     _sut_stage=$(mktemp -d "$(seal_stage_dir)/alpine-fde-seal-upg.XXXXXX") ||
         die "seal: mktemp failed"
@@ -604,7 +630,9 @@ seal_upgrade_token() {
         "$_sut_pre" 2>/dev/null)
 
     # 1+2+3+4: seal fresh under {7,11}, add the new keyslot + token, retire the
-    # old enrollment — in a subshell with the seal_scrub EXIT net (I1)
+    # old enrollment — in a subshell with the seal_scrub EXIT net (I1). The
+    # two-UKI SERIAL token (when its .pcrsig was supplied) stands right behind
+    # the default one: a second fresh seal + its OWN keyslot + token id.
     _sut_rc=0
     (
         trap 'seal_scrub' EXIT # zeroize the passphrase, remove the work dir
@@ -617,13 +645,28 @@ seal_upgrade_token() {
         token_add_keyslot "$_sut_dev" "$SEAL_PASS_FILE" "$SEAL_SLOT" "$_sut_auth" || exit 1
         _sut_tid=$(token_next_id "$_sut_dev") || exit 1
         token_import "$_sut_dev" "$_sut_out" "$_sut_tid" || exit 1
+        _sut_slot_d=$SEAL_SLOT
+        _sut_pass_d=$SEAL_PASS_FILE
+        if [ -n "$_sut_sig_serial" ]; then
+            _sut_pol_s=$(seal_pcrsig_field "$_sut_sig_serial" "7,11" pol)
+            seal_finalized "$_sut_keydir" "$_sut_dev" "$_sut_sig_serial" \
+                "$_sut_out.serial" "$_sut_pol_s" || exit 1
+            if [ "$SEAL_SLOT" = "$_sut_slot_d" ]; then
+                err "seal_upgrade_token: the serial keyslot collides with the default slot $_sut_slot_d — refusing"
+                exit 1
+            fi
+            token_add_keyslot "$_sut_dev" "$SEAL_PASS_FILE" "$SEAL_SLOT" \
+                "$_sut_pass_d" || exit 1
+            _sut_tid_s=$(token_next_id "$_sut_dev") || exit 1
+            token_import "$_sut_dev" "$_sut_out.serial" "$_sut_tid_s" || exit 1
+        fi
         # 4: swap — retire the old enrollment under the NEW passphrase (it is a
         # valid volume credential the moment the new keyslot exists)
         if [ -n "$_sut_old_tok" ]; then
             token_remove "$_sut_dev" "$_sut_old_tok" || exit 1
-            token_kill_slot "$_sut_dev" "$_sut_old_slot" "$SEAL_PASS_FILE" || exit 1
+            token_kill_slot "$_sut_dev" "$_sut_old_slot" "$_sut_pass_d" || exit 1
         fi
-        printf 'SUT_SLOT=%s\n' "$SEAL_SLOT" >"$_sut_env"
+        printf 'SUT_SLOT=%s\n' "$_sut_slot_d" >"$_sut_env"
     ) 2>"$_sut_stage/sub.err" || _sut_rc=1
     if [ -s "$_sut_stage/sub.err" ]; then
         cat "$_sut_stage/sub.err" >&2
@@ -646,7 +689,24 @@ seal_upgrade_token() {
     _sut_new_slot=$(sed -n 's/^SUT_SLOT=//p' "$_sut_env" 2>/dev/null)
     rm -f "$_sut_env"
     if [ "$_sut_rc" -eq 0 ]; then
-        token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' "$_sut_new_slot" || _sut_rc=1
+        # two-UKI: when the serial .pcrsig was supplied, the PAIR stands (the
+        # serial token's slot is read back from the fresh metadata — the second
+        # token by ascending token id); otherwise the single finalized token.
+        if [ -n "$_sut_sig_serial" ]; then
+            _sut_pair=$(token_pair_bookkeeping "$_sut_post")
+            # shellcheck disable=SC2086  # four '-'-padded fields
+            set -- $_sut_pair
+            _sut_slot_s=$3
+            if [ -z "$_sut_slot_s" ] || [ "$_sut_slot_s" = "-" ]; then
+                err "seal_upgrade_token: the serial token did not stand — post-assert refused"
+                _sut_rc=1
+            else
+                token_post_assert_multi "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' \
+                    "$_sut_new_slot" "$_sut_slot_s" || _sut_rc=1
+            fi
+        else
+            token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' "$_sut_new_slot" || _sut_rc=1
+        fi
         if [ "$_sut_rc" -ne 0 ]; then
             err "seal_upgrade_token: post-assertions failed — the finalized token is NOT standing as expected; manual intervention required (§8.3)"
         fi

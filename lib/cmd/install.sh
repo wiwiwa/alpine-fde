@@ -93,6 +93,17 @@ if [ -z "${ALPINE_FDE_FIRMWARE_LOADED:-}" ]; then
   # shellcheck disable=SC1090
   . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../firmware.sh"
 fi
+# cmdline seam (cmdline_compose / cmdline_variants — the TWO-UKI console
+# variants; the composition owns the /etc/alpine-fde/cmdline{,-serial}.txt pair)
+if [ -z "${ALPINE_FDE_CMDLINE_LIB_LOADED:-}" ]; then
+  # shellcheck disable=SC1090
+  . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../cmdline.sh"
+fi
+# esp seam (esp_uki_name — the boot entries point at the per-variant UKI paths)
+if [ -z "${ALPINE_FDE_ESP_LOADED:-}" ]; then
+  # shellcheck disable=SC1090
+  . "${ALPINE_FDE_CMD_DIR:-/usr/share/alpine-fde/lib/cmd}/../esp.sh"
+fi
 
 SPC_INSTALL_RUNNERS='chroot qemu'
 
@@ -366,30 +377,62 @@ inst_bootmgr_copy_line() {
   printf '%s\n' "ldr=''; for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do [ -f \"\$p\" ] && { ldr=\"\$p\"; break; }; done; [ -n \"\$ldr\" ] || { echo 'alpine-fde: ERROR: no systemd-boot loader EFI binary found in-chroot (probed /usr/share/systemd/bootctl/systemd-bootx64.efi, /usr/lib/systemd/boot/efi/systemd-bootx64.efi) — the systemd-boot package is missing or incomplete; the boot manager cannot be installed; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; mkdir -p $_bcl_esp/EFI/systemd $_bcl_esp/EFI/BOOT && sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt \"\$ldr\" --output $_bcl_esp/EFI/BOOT/BOOTX64.EFI && cp $_bcl_esp/EFI/BOOT/BOOTX64.EFI $_bcl_esp/EFI/systemd/systemd-bootx64.efi && echo \"alpine-fde: info: boot manager RELEASE-SIGNED (blocker #26 addendum: the firmware verifies the FIRST loaded image — an unsigned BOOTX64.EFI dies before the UKI is ever reached) -> $_bcl_esp/EFI/BOOT/BOOTX64.EFI + $_bcl_esp/EFI/systemd/systemd-bootx64.efi (removable-media fallback path, no NVRAM dependency; §8.3)\" # boot manager via guarded file copy of the systemd-boot loader binary (fail-closed probe; real-server blocker #7)"
 }
 
-# --- UEFI boot entry (NVRAM; task #27, real-server follow-up) -----------------
-# The install ends with the firmware pointing at the staged ESP: an NVRAM boot
-# entry labeled "Alpine FDE" (capitalized, user decision after the real Dell
-# PowerEdge install — Boot0005) targeting HD(1,GPT,<esp-part-guid>) ->
-# \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder. Before this existed, the operator
-# ran efibootmgr BY HAND after every fresh install, and after a RE-partition
-# the hand-made entry kept the OLD partition GUID and died "Boot Failed" — so
-# the ensure below is IDEMPOTENT: same-label entries pointing at the CURRENT
-# ESP partition GUID + loader are reused (never duplicated), same-label
-# entries pointing anywhere else are deleted and recreated.
+# --- UEFI boot entries (NVRAM; task #27 + the two-UKI boot design) ------------
+# The install/build lane ends with the firmware loading the UKIs DIRECTLY: a
+# PAIR of NVRAM boot entries per kernel version (Samuel, 2026-09-29) —
+#   "Alpine FDE - <kver> (<YYYY-MM-DD>)"        -> \EFI\Linux\alpine-fde-<kver>.efi
+#   "Alpine FDE - <kver> serial (<YYYY-MM-DD>)" -> \EFI\Linux\alpine-fde-<kver>-serial.efi
+# each pinned to HD(1,GPT,<esp-part-guid>). The firmware loads each UKI
+# directly — systemd-boot stays ONLY as the removable-media fallback
+# (\EFI\BOOT\BOOTX64.EFI) and is NOT in the default boot path anymore (which
+# also eliminates the boot-manager menu-wait failure mode). Before this
+# existed, the operator ran efibootmgr BY HAND after every fresh install, and
+# after a RE-partition the hand-made entry kept the OLD partition GUID and died
+# "Boot Failed" — so the ensure below is IDEMPOTENT: a same-kver/same-variant
+# entry pointing at the CURRENT ESP partition GUID + loader is reused (never
+# duplicated); family entries (same kver+variant, anything else — old GUID,
+# old loader, a rebuild's re-stamped date in the label, or a pre-two-UKI
+# legacy "Alpine FDE" entry) are deleted and recreated. RETENTION bounds the
+# whole system at THREE kernel versions (current + 2 previous; the build lane
+# clamps a higher RETENTION with a loud warn), i.e. AT MOST SIX NVRAM entries,
+# always in version-pairs, oldest pruned first (inst_bootentry_prune, called
+# from the build's prune step, `kernel prune` and `kernel remove`).
 #
 # The record runs IN-GUEST (chroot runner): the ESP is mounted at the §8.1
 # --esp path and the live NVRAM is reachable through the §9.1 efivars bind —
 # exactly how the step-4 fw_auth_enroll NVRAM writes work. When efibootmgr
 # reports NO EFI variable support (non-EFI host / test container), the step
-# SKIPS with the exact manual command instead of failing the install.
+# SKIPS with the exact manual commands instead of failing the install.
 
-# inst_bootentry_label — the NVRAM boot-entry label (capitalized, user decision)
-inst_bootentry_label() { printf '%s\n' 'Alpine FDE'; }
+# inst_bootentry_date — the build date carried in the NVRAM labels (UTC
+# YYYY-MM-DD; ALPINE_FDE_BOOTENTRY_DATE is the test seam)
+inst_bootentry_date() { printf '%s\n' "${ALPINE_FDE_BOOTENTRY_DATE:-$(date -u +%Y-%m-%d)}"; }
 
-# inst_bootentry_loader — the loader path the entry points at (the §8.3
-# removable-media fallback home; the SAME binary the firmware loads with no
-# NVRAM dependency, so the entry only ADDS an explicit boot-manager pick)
-inst_bootentry_loader() { printf '%s\n' '\EFI\BOOT\BOOTX64.EFI'; }
+# inst_bootentry_label <kver> <variant> — the NVRAM boot-entry label
+# (capitalized, user decision after the real Dell PowerEdge install): the
+# kernel version + build date travel IN the label so the firmware menu shows
+# which pair boots what, and so inst_bootentry_parse can family-match per
+# kver+variant across rebuilds (a rebuild on a later day re-labels the pair —
+# the stale entries are deleted and recreated, never duplicated).
+inst_bootentry_label() {
+  _ibel_d=$(inst_bootentry_date)
+  case $2 in
+  serial) printf '%s\n' "Alpine FDE - $1 serial ($_ibel_d)" ;;
+  default) printf '%s\n' "Alpine FDE - $1 ($_ibel_d)" ;;
+  *) die "install: unknown boot-entry variant '$2' (expected: default|serial)" ;;
+  esac
+}
+
+# inst_bootentry_loader <kver> <variant> — the loader path the entry points at:
+# the UKI ITSELF on the ESP (firmware-direct load; the systemd-stub brings the
+# initrd + cmdline up without any boot manager)
+inst_bootentry_loader() {
+  case $2 in
+  serial) printf '%s\n' "\\EFI\\Linux\\alpine-fde-$1-serial.efi" ;;
+  default) printf '%s\n' "\\EFI\\Linux\\alpine-fde-$1.efi" ;;
+  *) die "install: unknown boot-entry variant '$2' (expected: default|serial)" ;;
+  esac
+}
 
 # inst_efibootmgr — the efibootmgr binary (test seam, ALPINE_FDE_EFIBOOTMGR;
 # a real run resolves the PATH binary delivered by the §3.3 package set +
@@ -414,24 +457,52 @@ inst_part_split() {
   esac
 }
 
-# inst_bootentry_parse LABEL — stdin: `efibootmgr -v` output; stdout: ONE line
-# per boot entry "NUM GUID LOADER OURS" (num + guid lowercased; guid "-" when
-# the device path carries no HD(…,GPT,…); OURS=1 iff the entry's label is
-# exactly LABEL). efibootmgr -v entry lines: "Boot<4hex><*|space> <label>
-# <device path>" — the label starts at column 11; the -v device path is what
-# carries HD(1,GPT,<guid>,…)/File(\EFI\BOOT\BOOTX64.EFI) (plain efibootmgr
-# prints no paths — the parse MUST consume -v output).
+# inst_bootentry_parse — stdin: `efibootmgr -v` output; stdout: ONE line per
+# boot entry "NUM GUID LOADER KVER VARIANT" (num lowercased; guid lowercased,
+# "-" when the device path carries no HD(…,GPT,…); LOADER the lowercased
+# File(...) path text ('' when the device path carries none); KVER+VARIANT the
+# parsed label family — "Alpine FDE - <kver>[ serial] (<date>)" per
+# inst_bootentry_label, the literals LEGACY/LEGACY for the pre-two-UKI entries
+# ("Alpine FDE", "Alpine FDE (serial)"), or -/- for foreign entries.
+# efibootmgr -v entry lines: "Boot<4hex><*|space> <label> <device path>" — the
+# label starts at column 11; the -v device path is what carries
+# HD(1,GPT,<guid>,…)/File(\EFI\Linux\…) (plain efibootmgr prints no paths —
+# the parse MUST consume -v output).
 inst_bootentry_parse() {
-  awk -v lbl="$1" '
+  awk '
         tolower($0) ~ /^boot[0-9a-f][0-9a-f][0-9a-f][0-9a-f][* ]/ {
             num = tolower(substr($0, 5, 4))
             lc = tolower($0)
             rest = substr($0, 11)
             sub(/^[ \t]+/, "", rest)
-            ours = 0
-            if (index(rest, lbl) == 1) {
-                after = substr(rest, length(lbl) + 1, 1)
-                if (after == "" || after == " " || after == "\t") ours = 1
+            rl = tolower(rest)
+            # the label ENDS at the first TAB (efibootmgr -v separates the
+            # device path with one) — the family grammar below anchors the
+            # date stamp at the END of the LABEL, not of the whole line
+            _tab = index(rl, "\t")
+            if (_tab > 1) rl = substr(rl, 1, _tab - 1)
+            kver = "-"
+            variant = "-"
+            if (index(rl, "alpine fde - ") == 1) {
+                body = substr(rl, 14)
+                # the trailing " (<date>)" is the family stamp; without it the
+                # label is not one of ours (a foreign label that merely shares
+                # the prefix must never match)
+                if (match(body, /\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)[ \t]*$/)) {
+                    body = substr(body, 1, RSTART - 1)
+                    sub(/[ \t]+$/, "", body)
+                    variant = "default"
+                    if (length(body) > 7 && substr(body, length(body) - 6) == " serial") {
+                        variant = "serial"
+                        body = substr(body, 1, length(body) - 7)
+                    }
+                    kver = body
+                }
+            } else if (rl == "alpine fde" || rl == "alpine fde (serial)") {
+                # pre-two-UKI entries (the single-UKI scheme pointing at
+                # \EFI\BOOT\BOOTX64.EFI) — always stale under the pair model
+                kver = "LEGACY"
+                variant = (rl == "alpine fde (serial)") ? "serial" : "default"
             }
             guid = "-"
             if (match(lc, /hd\([0-9]+,gpt,[0-9a-f][0-9a-f-]*,/)) {
@@ -440,19 +511,31 @@ inst_bootentry_parse() {
                 sub(/,$/, "", piece)
                 guid = piece
             }
-            loader = (lc ~ /file\(\\efi\\boot\\bootx64\.efi\)/) ? 1 : 0
-            printf "%s %s %d %d\n", num, guid, loader, ours
+            loader = ""
+            if (match(lc, /file\([^)]*\)/)) {
+                loader = substr(lc, RSTART + 5, RLENGTH - 6)
+            }
+            printf "%s %s %s %s %s %s\n", num, guid, loader, kver, variant, rl
         }
     '
 }
 
-# inst_bootentry_find LIST LC_GUID — the first (of LIST, inst_bootentry_parse
-# form) entry labeled for us that already points at LC_GUID + our loader (the
-# reuse case); empty when none does.
+# inst_bootentry_find LIST GUID LOADER KVER VARIANT [LABEL] — the first (of
+# LIST, inst_bootentry_parse form) entry of the kver+variant family that
+# already points at GUID + LOADER (the reuse case); with LABEL given, the
+# LABEL must match too (a same-shape entry with a STALE label — a rebuild
+# re-stamped the date — is not reusable; the label is what the firmware menu
+# shows). Empty when none does.
 inst_bootentry_find() {
   _ibf_lcguid=$2
-  printf '%s\n' "$1" | while IFS=' ' read -r _ibf_n _ibf_g _ibf_l _ibf_o; do
-    if [ "$_ibf_o" = "1" ] && [ "$_ibf_g" = "$_ibf_lcguid" ] && [ "$_ibf_l" = "1" ]; then
+  _ibf_lcldr=$3
+  _ibf_lckver=$4
+  _ibf_lcvar=$5
+  _ibf_lclbl=${6:-}
+  printf '%s\n' "$1" | while IFS=' ' read -r _ibf_n _ibf_g _ibf_l _ibf_k _ibf_v _ibf_lbl; do
+    if [ "$_ibf_k" = "$_ibf_lckver" ] && [ "$_ibf_v" = "$_ibf_lcvar" ] &&
+      [ "$_ibf_g" = "$_ibf_lcguid" ] && [ "$_ibf_l" = "$_ibf_lcldr" ] &&
+      { [ -z "$_ibf_lclbl" ] || [ "${_ibf_lbl:-}" = "$_ibf_lclbl" ]; }; then
       printf '%s\n' "$_ibf_n"
       break
     fi
@@ -460,29 +543,68 @@ inst_bootentry_find() {
   return 0
 }
 
-# inst_bootentry_ensure ESPDEV ESP_MNT — the in-guest executor (idempotent,
-# crash-resume safe; re-runs converge). ESPDEV is the ESP partition device
-# (§4.1 layout, e.g. /dev/sda1 — visible in-guest through the /dev bind),
-# ESP_MNT the §8.1 ESP mount under the target root (/). The partition GUID the
-# entry pins comes from the §8.4 target metadata (target.esp_partuuid in the
-# on-target baseline — the SAME GUID fstab pins), NOT a fresh probe: the
-# in-guest closure carries no lsblk (util-linux is live-side only).
+# inst_bootentry_efivars_ok — rc 0 when NVRAM writes are possible (efivarfs
+# mounted AND efibootmgr answers); rc 1 otherwise. The caller decides
+# skip-vs-fail per lane (the install SKIPS with manual commands; the build
+# lane's prune warns).
+inst_bootentry_efivars_ok() {
+  [ -d "$(fw_efivars_dir)" ] || return 1
+  _ibeo_eb=$(inst_efibootmgr)
+  _ibeo_out=$("$_ibeo_eb" -v 2>&1) || {
+    case $_ibeo_out in
+    *"not supported"*) return 1 ;;
+    *) return 1 ;;
+    esac
+  }
+  return 0
+}
+
+# inst_bootentry_resolve_kver [KVER] — the boot-entry kernel version: the
+# argument when given; otherwise (in-guest) the newest module tree under
+# /lib/modules (the SAME derivation the build record pins, blocker #11) —
+# rc 1 when unresolvable.
+inst_bootentry_resolve_kver() {
+  if [ -n "${1:-}" ]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
+  _ibr_kv=$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1)
+  [ -n "$_ibr_kv" ] || return 1
+  printf '%s\n' "$_ibr_kv"
+}
+
+# inst_bootentry_ensure ESPDEV ESP_MNT [KVER] — the in-guest executor
+# (idempotent, crash-resume safe; re-runs converge). Ensures the WHOLE PAIR
+# for KVER (derived in-guest when omitted), in NVRAM order: the DEFAULT
+# variant FIRST, the SERIAL variant SECOND, everything else preserved behind.
+# ESPDEV is the ESP partition device (§4.1 layout, e.g. /dev/sda1 — visible
+# in-guest through the /dev bind), ESP_MNT the §8.1 ESP mount under the target
+# root (/). The partition GUID the entries pin comes from the §8.4 target
+# metadata (target.esp_partuuid in the on-target baseline — the SAME GUID
+# fstab pins), NOT a fresh probe: the in-guest closure carries no lsblk
+# (util-linux is live-side only). Fail-closed guards: BOTH staged UKIs must
+# exist (the firmware loads the pair DIRECTLY — an entry at an unstaged UKI is
+# a "Boot Failed" brick) and the baseline must resolve the ESP partition.
 inst_bootentry_ensure() {
   _ibe_esp=$1
   _ibe_espdir=$2
+  _ibe_kver=$(inst_bootentry_resolve_kver "${3:-}") ||
+    die "install: no kernel version for the boot entries (pass the kver or install the kernel under /lib/modules)"
   _ibe_eb=$(inst_efibootmgr)
-  _ibe_lbl=$(inst_bootentry_label)
-  _ibe_ldr=$(inst_bootentry_loader)
-  # fail-closed: the loader the entry points at must already be staged (§8.3
-  # boot-manager copy + the kernel build's re-sign run BEFORE this record)
-  [ -f "$_ibe_espdir/EFI/BOOT/BOOTX64.EFI" ] ||
-    die "install: $_ibe_espdir/EFI/BOOT/BOOTX64.EFI is missing — refusing to create the '$_ibe_lbl' boot entry before the ESP is staged (the §8.3 boot-manager copy and the kernel build must run first)"
+  # fail-closed: BOTH staged UKIs must exist BEFORE any NVRAM write (the
+  # firmware loads these files DIRECTLY — an entry at an unstaged UKI is a
+  # "Boot Failed" brick)
+  for _ibe_v in default serial; do
+    _ibe_uki="$_ibe_espdir/EFI/Linux/$(esp_uki_name "$_ibe_kver" "$_ibe_v")"
+    [ -f "$_ibe_uki" ] ||
+      die "install: $_ibe_uki is missing — refusing to create the $_ibe_v boot entry for $_ibe_kver before the UKI pair is staged (the kernel build must run first)"
+  done
   _ibe_bl=$(sp_baseline_file)
   [ -f "$_ibe_bl" ] ||
-    die "install: no baseline at $_ibe_bl — cannot resolve the ESP partition the '$_ibe_lbl' boot entry must point at"
+    die "install: no baseline at $_ibe_bl — cannot resolve the ESP partition the boot entries must point at"
   _ibe_pu=$(baseline_get_in "$_ibe_bl" target esp_partuuid)
   [ -n "$_ibe_pu" ] ||
-    die "install: no target.esp_partuuid in $_ibe_bl — cannot resolve the ESP partition the '$_ibe_lbl' boot entry must point at (the §8.4 target-metadata step must run first)"
+    die "install: no target.esp_partuuid in $_ibe_bl — cannot resolve the ESP partition the boot entries must point at (the §8.4 target-metadata step must run first)"
   _ibe_lcpu=$(printf '%s' "$_ibe_pu" | tr '[:upper:]' '[:lower:]')
   _ibe_split=$(inst_part_split "$_ibe_esp") ||
     die "install: cannot split the ESP device into disk + partition number: $_ibe_esp"
@@ -491,7 +613,7 @@ inst_bootentry_ensure() {
   _ibe_disk=$1
   _ibe_pn=$2
   # NO EFI variable support (non-EFI host / test container): SKIP with the
-  # exact manual command — the removable-media loader path still boots, and a
+  # exact manual commands — the removable-media loader path still boots, and a
   # hard failure here would strand the whole install after it completed
   _ibe_vars=$(fw_efivars_dir)
   _ibe_skip=0
@@ -505,90 +627,275 @@ inst_bootentry_ensure() {
     esac
   fi
   if [ "$_ibe_skip" = "1" ]; then
-    warn "install: no EFI variable support ($_ibe_vars) — SKIPPING the NVRAM boot entry (the removable-media path $_ibe_ldr still boots); create the entry manually:"
-    warn "install:   efibootmgr -c -d $_ibe_disk -p $_ibe_pn -L '$_ibe_lbl' -l '$_ibe_ldr'   (then 'efibootmgr -o <NUM>,...' with the new number FIRST, pointing at the ESP partition GUID $_ibe_pu)"
+    warn "install: no EFI variable support ($_ibe_vars) — SKIPPING the NVRAM boot entries (the removable-media path still boots); create them manually:"
+    for _ibe_v in default serial; do
+      warn "install:   efibootmgr -c -d $_ibe_disk -p $_ibe_pn -L '$(inst_bootentry_label "$_ibe_kver" "$_ibe_v")' -l '$(inst_bootentry_loader "$_ibe_kver" "$_ibe_v")'   (then 'efibootmgr -o <NUM>,...' with the new number FIRST, pointing at the ESP partition GUID $_ibe_pu)"
+    done
     return 0
   fi
-  # stale same-label entries FIRST (a re-partitioned ESP leaves the OLD
-  # partition GUID in NVRAM — the real server booted them into "Boot
-  # Failed"), and extra DUPLICATES of an already-matching entry (a re-run
-  # pile-up) — then reuse-or-create against the CURRENT ESP partition
-  _ibe_stale=''
-  _ibe_keep=''
-  while IFS=' ' read -r _ibe_n _ibe_g _ibe_l _ibe_o; do
-    [ -n "${_ibe_n:-}" ] || continue
-    [ "$_ibe_o" = "1" ] || continue
-    if [ "$_ibe_g" = "$_ibe_lcpu" ] && [ "$_ibe_l" = "1" ]; then
-      if [ -z "$_ibe_keep" ]; then
-        _ibe_keep=$_ibe_n
+  # stale family entries FIRST: same kver+variant at ANY other GUID (a
+  # re-partitioned ESP leaves the OLD partition GUID in NVRAM — the real
+  # server booted them into "Boot Failed"), plus the pre-two-UKI LEGACY
+  # entries (they point the default boot path at the boot manager, which the
+  # two-UKI design retires). A same-family entry at a stale LOADER (a rebuild
+  # re-stamps the date in the label; the label no longer matches) is handled
+  # inside ensure_one's reuse check — a non-reusable family entry at the right
+  # GUID is deleted there before the create. Same-kver/same-variant entries at
+  # the current GUID that merely DUPLICATE each other collapse on the next
+  # ensure via inst_bootentry_find's first-match reuse (re-run hygiene).
+  inst_bootentry_family_cleanup "$_ibe_lcpu"
+  # reuse-or-create BOTH variants (default first — boot priority)
+  _ibe_def_entry=$(inst_bootentry_ensure_one "$_ibe_eb" "$_ibe_disk" "$_ibe_pn" \
+    "$(inst_bootentry_label "$_ibe_kver" default)" \
+    "$(inst_bootentry_loader "$_ibe_kver" default)" \
+    "$_ibe_kver" default "$_ibe_lcpu") || return $?
+  _ibe_ser_entry=$(inst_bootentry_ensure_one "$_ibe_eb" "$_ibe_disk" "$_ibe_pn" \
+    "$(inst_bootentry_label "$_ibe_kver" serial)" \
+    "$(inst_bootentry_loader "$_ibe_kver" serial)" \
+    "$_ibe_kver" serial "$_ibe_lcpu") || return $?
+  # BootOrder: default FIRST, serial SECOND, the retained older versions
+  # behind (oldest last — prune order)
+  _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse)
+  _ibe_reorder_pair "$_ibe_eb" "$_ibe_def_entry" "$_ibe_ser_entry" "$_ibe_fresh"
+  info "install: boot entries standing for $_ibe_kver (default Boot$_ibe_def_entry FIRST, serial Boot$_ibe_ser_entry second; the firmware loads the UKIs directly)"
+  return 0
+}
+
+# inst_bootentry_ensure_one EB DISK PARTNUM LABEL LOADER KVER VARIANT GUID —
+# reuse-or-create ONE NVRAM entry; prints the entry number. Reuses a family
+# entry already at GUID+LOADER; otherwise deletes any OTHER family entry at
+# the current GUID (a stale loader — the label changed under a rebuild), then
+# creates (with the bounded NVRAM-latency retry). Dies fail-closed when the
+# create never becomes visible.
+inst_bootentry_ensure_one() {
+  _ibeo_eb=$1
+  _ibeo_disk=$2
+  _ibeo_pn=$3
+  _ibeo_lbl=$4
+  _ibeo_ldr=$5
+  _ibeo_kver=$6
+  _ibeo_var=$7
+  _ibeo_guid=$8
+  _ibeo_lcldr=$(printf '%s' "$_ibeo_ldr" | tr '[:upper:]' '[:lower:]')
+  _ibeo_lclbl=$(printf '%s' "$_ibeo_lbl" | tr '[:upper:]' '[:lower:]')
+  _ibeo_fresh=$("$_ibeo_eb" -v 2>/dev/null | inst_bootentry_parse)
+  _ibeo_mine=$(inst_bootentry_find "$_ibeo_fresh" "$_ibeo_guid" "$_ibeo_lcldr" \
+    "$_ibeo_kver" "$_ibeo_var" "$_ibeo_lclbl")
+  if [ -n "$_ibeo_mine" ]; then
+    info "install: reusing boot entry Boot$_ibeo_mine '$_ibeo_lbl' (already points at HD(1,GPT,$_ibeo_guid) $_ibeo_ldr) — no duplicate created"
+    printf '%s\n' "$_ibeo_mine"
+    return 0
+  fi
+  # a same-family entry at the CURRENT GUID with a stale loader would duplicate
+  # on create — retire it first (idempotent convergence beats NVRAM pile-up)
+  for _ibeo_n in $(printf '%s\n' "$_ibeo_fresh" | awk -v k="$_ibeo_kver" -v v="$_ibeo_var" -v g="$_ibeo_guid" \
+    '$4 == k && $5 == v && $2 == g { print $1 }'); do
+    "$_ibeo_eb" -b "$_ibeo_n" -B >/dev/null ||
+      die "install: cannot replace the stale boot entry Boot$_ibeo_n (family '$_ibeo_kver $_ibeo_var' at the current GUID, stale loader)"
+    info "install: replaced boot entry Boot$_ibeo_n (family '$_ibeo_kver $_ibeo_var', stale loader) — re-created against the current UKI path"
+  done
+  "$_ibeo_eb" -c -d "$_ibeo_disk" -p "$_ibeo_pn" -L "$_ibeo_lbl" -l "$_ibeo_ldr" >/dev/null ||
+    die "install: efibootmgr -c failed — the '$_ibeo_lbl' boot entry ($_ibeo_disk -p $_ibeo_pn -> $_ibeo_ldr) could not be created"
+  # Real-server evidence (Dell PowerEdge R640, 2026-09-28): the create's
+  # BootOrder update persisted, but the new Boot variable was NOT yet visible
+  # in the immediate post-create listing — some firmware commits the variable
+  # late (NVRAM write latency; it was still absent after the FIRST bounded
+  # verify — 5 attempts, 2s apart, ~10s — and present + correct when run by
+  # hand minutes later; the boot then worked). The old immediate verify
+  # refused fail-closed and killed an otherwise-complete install, and the
+  # first retry bound was still too tight for that firmware. Bounded backoff
+  # (raised, same R640 evidence): re-read the listing up to 10 attempts,
+  # ALPINE_FDE_BOOTENTRY_RETRY_SLEEP apart (default 5s, ~50s total — the
+  # test seam for the interval), each re-verifying the SAME label + GUID +
+  # loader match (inst_bootentry_find), before declaring failure.
+  _ibeo_try=0
+  while :; do
+    _ibeo_fresh=$("$_ibeo_eb" -v 2>/dev/null | inst_bootentry_parse)
+    _ibeo_mine=$(inst_bootentry_find "$_ibeo_fresh" "$_ibeo_guid" "$_ibeo_lcldr" \
+      "$_ibeo_kver" "$_ibeo_var" "$_ibeo_lclbl")
+    [ -n "$_ibeo_mine" ] && break
+    _ibeo_try=$((_ibeo_try + 1))
+    [ "$_ibeo_try" -ge 10 ] && break
+    warn "install: the '$_ibeo_lbl' entry is not in the efibootmgr listing yet (attempt $_ibeo_try/10) — likely firmware NVRAM write latency (Dell); retrying"
+    sleep "${ALPINE_FDE_BOOTENTRY_RETRY_SLEEP:-5}"
+  done
+  [ -n "$_ibeo_mine" ] ||
+    die "install: the '$_ibeo_lbl' boot entry was created but is not in the efibootmgr listing after 10 attempts (~50s) — refusing to guess the entry number (likely cause: firmware NVRAM write latency — some firmware, notably Dell, commits the new boot variable late; re-running the install converges idempotently, or create the entry manually)"
+  info "install: created boot entry Boot$_ibeo_mine '$_ibeo_lbl' -> HD(1,GPT,$_ibeo_guid) $_ibeo_ldr"
+  printf '%s\n' "$_ibeo_mine"
+  return 0
+}
+
+# inst_bootentry_family_cleanup GUID — delete every stale family entry:
+# kver+variant entries NOT at GUID (dead/old partition GUID — boots "Boot
+# Failed") and the LEGACY pre-two-UKI entries. Runs in the CALLER'S shell
+# (here-doc, not a pipe) so the fail-closed die is real.
+inst_bootentry_family_cleanup() {
+  _ibfc_guid=$1
+  _ibfc_eb=$(inst_efibootmgr)
+  _ibfc_list=$("$_ibfc_eb" -v 2>/dev/null | inst_bootentry_parse)
+  while IFS=' ' read -r _ibfc_n _ibfc_g _ibfc_l _ibfc_k _ibfc_v; do
+    [ -n "${_ibfc_n:-}" ] || continue
+    case $_ibfc_k in
+    -) continue ;; # foreign entry — never touched
+    LEGACY)
+      if "$_ibfc_eb" -b "$_ibfc_n" -B >/dev/null 2>&1; then
+        info "install: deleted legacy boot entry Boot$_ibfc_n (pre-two-UKI 'Alpine FDE' entry; the firmware now loads the UKIs directly)"
       else
-        _ibe_stale="$_ibe_stale $_ibe_n"
+        warn "install: cannot delete the legacy boot entry Boot$_ibfc_n ('Alpine FDE') — it still boots the retired boot-manager path (re-run converges)"
       fi
       continue
+      ;;
+    esac
+    if [ "$_ibfc_g" != "$_ibfc_guid" ]; then
+      "$_ibfc_eb" -b "$_ibfc_n" -B >/dev/null ||
+        die "install: cannot delete the stale boot entry Boot$_ibfc_n (label family '$_ibfc_k $_ibfc_v', partition GUID differs from the ESP's $_ibfc_guid — a stale GUID boots \"Boot Failed\")"
+      info "install: deleted stale boot entry Boot$_ibfc_n (family '$_ibfc_k $_ibfc_v', old partition GUID) — the entry now resolves against the current ESP ($_ibfc_guid)"
     fi
-    _ibe_stale="$_ibe_stale $_ibe_n"
   done <<EOF
-$(printf '%s\n' "$_ibe_list" | inst_bootentry_parse "$_ibe_lbl")
+$_ibfc_list
 EOF
-  for _ibe_n in $_ibe_stale; do
-    "$_ibe_eb" -b "$_ibe_n" -B >/dev/null ||
-      die "install: cannot delete the stale boot entry Boot$_ibe_n (label '$_ibe_lbl', partition GUID differs from the ESP's $_ibe_pu — a stale GUID boots \"Boot Failed\")"
-    info "install: deleted stale boot entry Boot$_ibe_n (label '$_ibe_lbl', old partition GUID or duplicate) — the entry now resolves against the current ESP ($_ibe_pu)"
+  return 0
+}
+
+# _ibe_reorder_pair EB FIRST SECOND FRESH — place FIRST then SECOND at the
+# FRONT of BootOrder (the default+serial pair of the ensured kver; the
+# retained older versions keep their relative order behind, entries the
+# listing has but BootOrder never mentioned appended defensively)
+_ibe_reorder_pair() {
+  _ibr_eb=$1
+  _ibr_first=$2
+  _ibr_second=$3
+  _ibr_fresh=$4
+  _ibr_all=$(printf '%s\n' "$_ibr_fresh" | awk 'NF { print $1 }' | tr '\n' ' ')
+  _ibr_obo=$("$_ibr_eb" -v 2>/dev/null | awk '/^BootOrder:/ { sub(/^BootOrder:[ \t]*/, ""); print tolower($0) }' | tr ',' ' ')
+  # an empty SECOND (a survivor set of one) keeps the single-front shape
+  _ibr_new=" $_ibr_first ${_ibr_second:+$_ibr_second} "
+  for _ibr_n in $_ibr_obo $_ibr_all; do
+    if [ "$_ibr_n" = "$_ibr_first" ] || [ "$_ibr_n" = "$_ibr_second" ]; then continue; fi
+    case " $_ibr_new " in
+    *" $_ibr_n "*) continue ;;
+    esac
+    case " $_ibr_all " in
+    *" $_ibr_n "*) _ibr_new="$_ibr_new$_ibr_n " ;;
+    esac
   done
-  _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
-  _ibe_mine=$_ibe_keep
-  if [ -n "$_ibe_mine" ]; then
-    info "install: reusing boot entry Boot$_ibe_mine '$_ibe_lbl' (already points at HD(1,GPT,$_ibe_pu) $_ibe_ldr) — no duplicate created"
-  else
-    "$_ibe_eb" -c -d "$_ibe_disk" -p "$_ibe_pn" -L "$_ibe_lbl" -l "$_ibe_ldr" >/dev/null ||
-      die "install: efibootmgr -c failed — the '$_ibe_lbl' boot entry ($_ibe_disk -p $_ibe_pn -> $_ibe_ldr) could not be created"
-    # Real-server evidence (Dell PowerEdge R640, 2026-09-28): the create's
-    # BootOrder update persisted, but the new Boot variable was NOT yet visible
-    # in the immediate post-create listing — some firmware commits the variable
-    # late (NVRAM write latency; it was still absent after the FIRST bounded
-    # verify — 5 attempts, 2s apart, ~10s — and present + correct when run by
-    # hand minutes later; the boot then worked). The old immediate verify
-    # refused fail-closed and killed an otherwise-complete install, and the
-    # first retry bound was still too tight for that firmware. Bounded backoff
-    # (raised, same R640 evidence): re-read the listing up to 10 attempts,
-    # ALPINE_FDE_BOOTENTRY_RETRY_SLEEP apart (default 5s, ~50s total — the
-    # test seam for the interval), each re-verifying the SAME label + GUID +
-    # loader match (inst_bootentry_find), before declaring failure.
-    _ibe_try=0
-    while :; do
-      _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse "$_ibe_lbl")
-      _ibe_mine=$(inst_bootentry_find "$_ibe_fresh" "$_ibe_lcpu")
-      [ -n "$_ibe_mine" ] && break
-      _ibe_try=$((_ibe_try + 1))
-      [ "$_ibe_try" -ge 10 ] && break
-      warn "install: the '$_ibe_lbl' entry is not in the efibootmgr listing yet (attempt $_ibe_try/10) — likely firmware NVRAM write latency (Dell); retrying"
-      sleep "${ALPINE_FDE_BOOTENTRY_RETRY_SLEEP:-5}"
-    done
-    [ -n "$_ibe_mine" ] ||
-      die "install: the '$_ibe_lbl' boot entry was created but is not in the efibootmgr listing after 10 attempts (~50s) — refusing to guess the entry number (likely cause: firmware NVRAM write latency — some firmware, notably Dell, commits the new boot variable late; re-running the install converges idempotently, or create the entry manually)"
-    info "install: created boot entry Boot$_ibe_mine '$_ibe_lbl' -> HD(1,GPT,$_ibe_pu) $_ibe_ldr"
+  _ibr_new=${_ibr_new% }
+  _ibr_new=${_ibr_new# }
+  _ibr_csv=$(printf '%s' "$_ibr_new" | tr ' ' ',')
+  "$_ibr_eb" -o "$_ibr_csv" >/dev/null ||
+    die "install: efibootmgr -o $_ibr_csv failed — the boot pair (Boot$_ibr_first, Boot$_ibr_second) could not be placed at the front of BootOrder"
+  return 0
+}
+
+# inst_bootentry_prune KEEP-KVER... — sweep the NVRAM so it never outlives the
+# ESP keep set (the pair invariant: at most 3 kernel versions = at most 6
+# entries, always version-pairs, oldest pruned first): deletes the boot
+# entries of every kver NOT in the keep-set arguments (BOTH variants) plus any
+# LEGACY entries, then rewrites BootOrder over the survivors (relative order
+# preserved). Called from the build's prune step, `kernel prune` and
+# `kernel remove`. Best-effort SKIP (warn) when NVRAM is unreachable — the ESP
+# prune must not fail because a build context has no efivarfs; the next
+# ensure/prune on the machine converges.
+inst_bootentry_prune() {
+  _ibp_eb=$(inst_efibootmgr)
+  if ! command -v "$_ibp_eb" >/dev/null 2>&1 && [ ! -f "$_ibp_eb" ]; then
+    warn "install: efibootmgr not available — skipping the NVRAM boot-entry sweep (entries for pruned kernels remain until the next build on the machine)"
+    return 0
   fi
-  # FIRST in BootOrder: the previous order preserved behind us (still-existing
-  # entries only — the deletes above do not rewrite BootOrder), entries the
-  # listing has but BootOrder never mentioned appended defensively
-  _ibe_all=$(printf '%s\n' "$_ibe_fresh" | awk 'NF { print $1 }' | tr '\n' ' ')
-  _ibe_obo=$("$_ibe_eb" -v 2>/dev/null | awk '/^BootOrder:/ { sub(/^BootOrder:[ \t]*/, ""); print tolower($0) }' | tr ',' ' ')
-  _ibe_new=" $_ibe_mine "
-  for _ibe_n in $_ibe_obo $_ibe_all; do
-    if [ "$_ibe_n" = "$_ibe_mine" ]; then continue; fi
-    case $_ibe_new in
-    *" $_ibe_n "*) continue ;;
+  if ! inst_bootentry_efivars_ok; then
+    warn "install: no EFI variable support — skipping the NVRAM boot-entry sweep (entries for pruned kernels remain until the next build on the machine)"
+    return 0
+  fi
+  _ibp_list=$("$_ibp_eb" -v 2>/dev/null | inst_bootentry_parse)
+  while IFS=' ' read -r _ibp_n _ibp_g _ibp_l _ibp_k _ibp_v; do
+    [ -n "${_ibp_n:-}" ] || continue
+    _ibp_drop=0
+    case $_ibp_k in
+    LEGACY) _ibp_drop=1 ;;
+    -) _ibp_drop=0 ;;
+    *)
+      _ibp_hit=0
+      for _ibp_w in "$@"; do
+        [ "$_ibp_k" = "$_ibp_w" ] && _ibp_hit=1 && break
+      done
+      [ "$_ibp_hit" -eq 0 ] && _ibp_drop=1
+      ;;
     esac
-    case " $_ibe_all " in
-    *" $_ibe_n "*) _ibe_new="$_ibe_new$_ibe_n " ;;
+    if [ "$_ibp_drop" -eq 1 ]; then
+      if "$_ibp_eb" -b "$_ibp_n" -B >/dev/null 2>&1; then
+        info "install: pruned boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — its kernel is outside the keep set"
+      else
+        warn "install: cannot prune boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — orphaned NVRAM entry remains (a re-run converges)"
+      fi
+    fi
+  done <<EOF
+$_ibp_list
+EOF
+  # BootOrder over the survivors only, RELATIVE ORDER PRESERVED (a deleted
+  # entry may still be listed in BootOrder; the firmware tolerates it, but the
+  # order should stay clean — and the prune must never promote an arbitrary
+  # survivor to the front; the build's ensure owns the boot priority)
+  _ibp_fresh=$("$_ibp_eb" -v 2>/dev/null | inst_bootentry_parse)
+  _ibp_all=$(printf '%s\n' "$_ibp_fresh" | awk 'NF { print $1 }' | tr '\n' ' ')
+  _ibp_obo=$("$_ibp_eb" -v 2>/dev/null | awk '/^BootOrder:/ { sub(/^BootOrder:[ \t]*/, ""); print tolower($0) }' | tr ',' ' ')
+  _ibp_new=''
+  for _ibp_n in $_ibp_obo $_ibp_all; do
+    case " $_ibp_all " in
+    *" $_ibp_n "*) ;;
+    *) continue ;;
     esac
+    case " $_ibp_new " in
+    *" $_ibp_n "*) continue ;;
+    esac
+    _ibp_new="$_ibp_new$_ibp_n "
   done
-  _ibe_new=${_ibe_new% }
-  _ibe_new=${_ibe_new# }
-  _ibe_csv=$(printf '%s' "$_ibe_new" | tr ' ' ',')
-  "$_ibe_eb" -o "$_ibe_csv" >/dev/null ||
-    die "install: efibootmgr -o $_ibe_csv failed — '$_ibe_lbl' (Boot$_ibe_mine) could not be placed FIRST in BootOrder"
-  info "install: Boot$_ibe_mine '$_ibe_lbl' is FIRST in BootOrder ($_ibe_csv)"
+  _ibp_new=${_ibp_new% }
+  if [ -n "$_ibp_new" ]; then
+    _ibp_csv=$(printf '%s' "$_ibp_new" | tr ' ' ',')
+    "$_ibp_eb" -o "$_ibp_csv" >/dev/null ||
+      warn "install: efibootmgr -o $_ibp_csv failed — BootOrder still names the pruned entries (the firmware skips them; a re-run converges)"
+  fi
+  return 0
+}
+
+# inst_bootentry_ensure_best_effort ESP_MNT KVER — the BUILD-lane spelling of
+# the NVRAM pair ensure (the install record's inst_bootentry_ensure stays
+# fail-closed — it is the install's last line; the build's ensure is
+# BEST-EFFORT by design: after the ESP/manifest pair is consistent, a
+# firmware-administration concern must never fail a build). Every
+# resolution/precondition failure — no efivarfs, no efibootmgr, the ESP mount
+# not resolvable to a partition device (test containers, offline builds), no
+# baseline esp_partuuid — is a loud warn + skip; the next build ON the machine
+# converges. Only run when the guard passes does the real ensure execute.
+inst_bootentry_ensure_best_effort() {
+  _ibem_mnt=$1
+  _ibem_kver=$2
+  _ibem_eb=$(inst_efibootmgr)
+  if ! command -v "$_ibem_eb" >/dev/null 2>&1 && [ ! -f "$_ibem_eb" ]; then
+    warn "kernel build: efibootmgr not available — skipping the NVRAM boot-entry pair for $_ibem_kver (the install/build on the machine converges)"
+    return 0
+  fi
+  if ! inst_bootentry_efivars_ok; then
+    warn "kernel build: no EFI variable support — skipping the NVRAM boot-entry pair for $_ibem_kver"
+    return 0
+  fi
+  # the ESP partition device from the LIVE mount table (in-chroot /proc is
+  # bound by the install record; a context without the ESP mounted — unit
+  # sandboxes — cannot resolve it and skips)
+  _ibem_dev=''
+  for _ibem_m in "$_ibem_mnt" "$_ibem_mnt/"; do
+    _ibem_dev=$(awk -v m="$_ibem_m" '$2 == m { print $1; exit }' /proc/mounts 2>/dev/null)
+    [ -n "$_ibem_dev" ] && break
+  done
+  if [ -z "$_ibem_dev" ] || ! inst_part_split "$_ibem_dev" >/dev/null 2>&1; then
+    warn "kernel build: the ESP mount $_ibem_mnt is not resolvable to a partition device — skipping the NVRAM boot-entry pair for $_ibem_kver"
+    return 0
+  fi
+  if (inst_bootentry_ensure "$_ibem_dev" "$_ibem_mnt" "$_ibem_kver"); then
+    return 0
+  fi
+  warn "kernel build: the NVRAM boot-entry pair for $_ibem_kver could not be ensured (see above) — the ESP/manifest pair is consistent; re-run the build on the machine to converge"
   return 0
 }
 
@@ -2121,24 +2428,39 @@ cmd_install_main() {
   # H-G1 fail-closed contract enforced by the cmdline-pins guard (§8.2) on
   # every kernel build — not a dracut module knob.
   _im_cmdline_extra=$(inst_cmdline_extra)
-  # DUAL CONSOLE BY DEFAULT (real-server, Dell PowerEdge R640 2026-09-28): the
-  # pre-dual-console emission carried NO console= words, so a headless boot was
-  # invisible on serial — the kernel logged to the (absent) video console only
-  # and the initrd unseal hook's /dev/console went nowhere. We now emit
-  # console=tty0 console=ttyS0,115200 BEFORE the rd.* pins: kernel messages
-  # print to BOTH consoles, and the LAST console= word wins for /dev/console,
-  # so the initrd unseal hook (and later /dev/console writers) land on serial.
-  # ALPINE_FDE_CMDLINE_EXTRA still appends AFTER ours; a user-provided extra
-  # containing console= words becomes the last console= and thus wins
-  # /dev/console — acceptable (their explicit choice), NOT a pin violation
-  # (the guard checks only the §8.2 H-G1 rd.* pins).
-  if [ "$(inst_root_fs)" = "btrfs" ]; then
-    inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
-  else
-    inst_plan_write /etc/alpine-fde/cmdline.txt \
-      "root=UUID=$_im_uuid ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff${_im_cmdline_extra:+ $_im_cmdline_extra}"
-  fi
+  # TWO-UKI CONSOLE VARIANTS (two-UKI boot design, Samuel 2026-09-29): the
+  # cmdline composition is ONE function (lib/cmdline.sh cmdline_compose)
+  # emitting BOTH variants; install writes BOTH build inputs:
+  #   /etc/alpine-fde/cmdline.txt        DEFAULT — console=ttyS0,115200 THEN
+  #                                      console=tty0: kernel messages print to
+  #                                      BOTH consoles and tty0 LAST makes the
+  #                                      virtual console /dev/console for initrd
+  #                                      userspace (the unseal hook's prompt
+  #                                      renders on the SCREEN; serial stays
+  #                                      covered by the hook's dual-emission
+  #                                      fan-out). This FLIPS the pre-two-UKI
+  #                                      ordering (serial last) — that ordering
+  #                                      now lives ONLY in the serial variant.
+  #   /etc/alpine-fde/cmdline-serial.txt SERIAL/RECOVERY — console=tty0 THEN
+  #                                      console=ttyS0,115200: serial LAST, the
+  #                                      remote/passphrase lane (the -serial
+  #                                      UKI, NVRAM entry "Alpine FDE - <kver>
+  #                                      serial (<date>)").
+  # The pre-two-UKI dual-console emission (tty0 first, serial last) was the
+  # R640 2026-09-28 headless fix; the two-UKI design keeps BOTH orderings
+  # available at boot instead of picking one for every boot.
+  # ALPINE_FDE_CMDLINE_EXTRA still appends AFTER the pins in BOTH variants; a
+  # user-provided extra containing console= words becomes the last console= and
+  # thus wins /dev/console — acceptable (their explicit choice), NOT a pin
+  # violation (the guard checks only the §8.2 H-G1 rd.* pins).
+  _im_btrfs=0
+  [ "$(inst_root_fs)" = "btrfs" ] && _im_btrfs=1
+  # shellcheck disable=SC2086  # EXTRA is word-split deliberately
+  inst_plan_write /etc/alpine-fde/cmdline.txt \
+    "$(cmdline_compose default "$_im_uuid" "$_im_btrfs" $_im_cmdline_extra)"
+  # shellcheck disable=SC2086  # word split intended (same EXTRA seam)
+  inst_plan_write /etc/alpine-fde/cmdline-serial.txt \
+    "$(cmdline_compose serial "$_im_uuid" "$_im_btrfs" $_im_cmdline_extra)"
   # CR-01 + §4.1: persist the resolved topology + ESP mount for the build
   # side. ABSENT conf file (or absent keys) = defaults: ROOT_FS=btrfs,
   # BCACHE=0, TOPOLOGY=single — consumers must not require the file to exist.
@@ -2427,7 +2749,7 @@ cmd_install_main() {
   # re-partitioned ESP leaves entries that boot "Boot Failed"). No EFI
   # variable support (container): the record SKIPS with the exact manual
   # command instead of failing the completed install.
-  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt # task #27: the Alpine FDE NVRAM boot entry -> HD(1,GPT,<esp-part-guid>) \EFI\BOOT\BOOTX64.EFI, FIRST in BootOrder (idempotent; stale-GUID entries replaced)"
+  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt \$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1) # task #27 + two-UKI design: the firmware NVRAM boot-entry PAIR (\"Alpine FDE - <kver> (<date>)\" -> \EFI\Linux\alpine-fde-<kver>.efi FIRST, \"Alpine FDE - <kver> serial (<date>)\" -> \EFI\Linux\alpine-fde-<kver>-serial.efi second; the firmware loads the UKIs directly, systemd-boot is only the removable fallback), HD(1,GPT,<esp-part-guid>), idempotent (family entries at dead GUIDs/stale loaders replaced; legacy single-UKI entries deleted)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
   # Operationally AFTER the ceremony + secret-dependent steps (the guest build

@@ -295,14 +295,20 @@ assert_not_contains "plan: single topology crypttab has NO password-cache (verba
     "$(grep -F 'none luks,tpm2-device=auto,discard' <<<"$INS_OUT")" "password-cache"
 # G-ST10/§8.2: btrfs rootflags + fail-closed pins verbatim
 assert_contains "plan: G-ST10 rootflags=subvol=@ on the btrfs cmdline" "$INS_OUT" \
-    "rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
+    "rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
 assert_contains "plan: fail-closed cmdline pins verbatim" "$INS_OUT" "rd.shell=0 rd.emergency=poweroff"
-# DUAL CONSOLE (real-server, Dell PowerEdge R640 2026-09-28): BOTH console
-# words emitted by default, tty0 FIRST and serial LAST — the last console=
-# wins /dev/console, so kernel messages print to both and the initrd unseal
-# hook lands on serial. The pins come AFTER the console words.
-assert_contains "plan: dual console — tty0 then ttyS0,115200, before the rd.* pins" "$INS_OUT" \
+# TWO-UKI CONSOLE VARIANTS (Samuel, 2026-09-29): BOTH cmdline build inputs are
+# emitted. DEFAULT: ttyS0,115200 FIRST and tty0 LAST — kernel printk fans out
+# to both, and the LAST console= word makes the virtual console /dev/console
+# for initrd userspace. SERIAL/RECOVERY: tty0 first, ttyS0,115200 LAST —
+# /dev/console is the UART (the -serial UKI's cmdline, the remote/passphrase
+# lane). The pins come AFTER the console words in BOTH variants.
+assert_contains "plan: dual console DEFAULT — ttyS0,115200 then tty0 LAST, before the rd.* pins" "$INS_OUT" \
+    "ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
+assert_contains "plan: dual console SERIAL variant — tty0 then ttyS0,115200 LAST" "$INS_OUT" \
     "ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
+assert_contains "plan: the SERIAL variant lands in cmdline-serial.txt" "$INS_OUT" \
+    ">/etc/alpine-fde/cmdline-serial.txt"
 # ADR-13/§3.3: dracut is REJECTED on Alpine (mkinitfs is the initramfs
 # generator, G-C8) — no dracut config residue may appear in the plan
 assert_not_contains "plan: NO dracut conf drop (ADR-13: mkinitfs, not dracut)" "$INS_OUT" \
@@ -696,8 +702,8 @@ assert_not_contains "ext4: no mkfs.btrfs" "$INS_OUT" "mkfs.btrfs"
 assert_not_contains "ext4: no subvolume records" "$INS_OUT" "btrfs subvolume"
 assert_not_contains "ext4: no subvol fstab" "$INS_OUT" "subvol="
 assert_not_contains "ext4: no rootflags (legacy cmdline verbatim)" "$INS_OUT" "rootflags"
-assert_eq "ext4: legacy cmdline pins verbatim (dual console, serial last)" "1" \
-    "$(grep -Ec 'root=UUID=[0-9a-f-]{36} ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff' <<<"$INS_OUT")"
+assert_eq "ext4: cmdline pins verbatim (dual console, tty0 last in the DEFAULT variant)" "1" \
+    "$(grep -Ec 'root=UUID=[0-9a-f-]{36} ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff' <<<"$INS_OUT")"
 assert_contains "ext4: legacy fstab verbatim" "$INS_OUT" "/ ext4 defaults 0 1"
 assert_contains "ext4: conf records ROOT_FS=ext4" "$INS_OUT" "ROOT_FS=ext4"
 APK_TXN_EXT4=$(grep -m1 'apk add --no-cache' <<<"$INS_OUT")

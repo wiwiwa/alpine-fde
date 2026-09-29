@@ -8,28 +8,40 @@
 # Sequence (no partial ESP state survives a failure; ADR-8 loud failure):
 #   0. config + loud-fail precondition: release key material checked BEFORE any
 #      ESP mutation; failure persists the /etc/alpine-fde/build-failed marker
-#   1. initramfs via the lib/initramfs.sh seam (default dracut --hostonly)
-#   2. ukify build: assemble + offline PCR 11 prediction in one pass
-#      (--measure --json=short --pcr-banks=sha256 --phases=enter-initrd) and
-#      ukify-native .pcrsig/.pcrpkey embedding for Mechanism A'' (static-7 +
-#      signed-11); the measure implementation is resolved by the blocker-#16
-#      guarded probe (real systemd-measure → lib/measure.sh shim → loud 64)
-#   3. combined {7,11} policy digest via lib/policy.sh (audit/display data;
-#      the A'' token pins only the release pubkey — no pcrsign under A'')
-#   4. sbsign (Secure Boot) + sbverify assertion
-#   5. atomic ESP install (lib/esp.sh)
-#   6. manifest upsert + meta
+#   1. initramfs via the lib/initramfs.sh seam (default dracut --hostonly) —
+#      built ONCE, embedded in BOTH UKI variants
+#   1c. serial-variant cmdline (two-UKI design): /etc/alpine-fde/
+#      cmdline-serial.txt, or the flip derived from the default (lib/cmdline.sh);
+#      pins-guarded like the default — FATAL on failure (pair consistency)
+#   2. ukify build PER VARIANT (default: console=ttyS0,115200 console=tty0 —
+#      tty0 last; serial: console=tty0 console=ttyS0,115200 — serial last):
+#      assemble + offline PCR 11 prediction in one pass (--measure --json=short
+#      --pcr-banks=sha256 --phases=enter-initrd) and ukify-native
+#      .pcrsig/.pcrpkey embedding for Mechanism A'' (static-7 + signed-11);
+#      the measure implementation is resolved by the blocker-#16 guarded probe
+#      (real systemd-measure → lib/measure.sh shim → loud 64). The pcr11
+#      predictions DIFFER per variant (the cmdline is measured).
+#   3. combined {7,11} policy digests via lib/policy.sh, one per variant
+#      (audit/display data; the A'' token pins only the release pubkey — no
+#      pcrsign under A'')
+#   4. sbsign (Secure Boot) + sbverify assertion, per variant
+#   5. atomic ESP install of BOTH variants (lib/esp.sh): EFI/Linux/
+#      alpine-fde-<kver>.efi + alpine-fde-<kver>-serial.efi
+#   6. manifest upsert + meta — the entry carries BOTH variants (base fields =
+#      default; additive *_serial fields)
 #   6b. ENSURE-ONCE A'' enrollment: token present → metadata read only
 #      (s14: kernel updates are TPM-free) and the standing enrollment's
 #      keyslot/token_id stamped onto every manifest entry (§8.4, incl. the
 #      NEW kver — upsert carry-over is same-kver only); token absent →
-#      exactly ONE cryptenroll, then keyslot/token_id recorded (§8.4);
+#      exactly ONE Mechanism B enrollment (the per-VARIANT token pair,
+#      lib/cmd/reseal.sh), then keyslot/token_id recorded (§8.4);
 #      volume unreachable → warn + empty bookkeeping (documented escape)
-#   7. manifest + ESP prune to the single keep set (current + retention)
+#   7. manifest + ESP prune to the single keep set (current + retention, at
+#      most 3 kernel versions; the -serial siblings prune WITH their kver)
 #      (only reached after 5, 6 and 6b succeeded)
-#   8. predictions.json (B-G11: pcr11 enter-initrd, policy_digest, signature,
-#      sizes, section digests, tool versions) — machine-readable handoff for the
-#      harness prediction checks (§12)
+#   8. predictions.json (B-G11: pcr11 enter-initrd per variant, policy_digest,
+#      signature, sizes, section digests, tool versions) — machine-readable
+#      handoff for the harness prediction checks (§12)
 #   9. clear the failure marker
 #
 # --re-sign-all (B-G12): recompute every retained entry's policy_digest from its
@@ -198,12 +210,18 @@ cmd_kernel_build_main() {
     }
 
     _kernel_lib common.sh
+    _kernel_lib cmdline.sh
     _kernel_lib measure.sh
     _kernel_lib policy.sh
     _kernel_lib manifest.sh
     _kernel_lib keys.sh
     _kernel_lib esp.sh
     _kernel_lib initramfs.sh
+    # the NVRAM boot-entry pair + sweep (two-UKI design) lives in the install
+    # lane; ONE efibootmgr implementation serves both (sourced, like reseal
+    # above, as a sibling in the same command directory)
+    # shellcheck disable=SC1091
+    . "${ALPINE_FDE_CMD_DIR:?}/install.sh"
     # G-R3: the build's ensure-once enroll step IS reseal's enrollment
     # (reseal_run/reseal_ensure_once shared core); sourced next to this command.
     # shellcheck disable=SC1091  # sibling in the same command directory
@@ -218,6 +236,13 @@ cmd_kernel_build_main() {
     _uk_predictions="$_uk_etc/predictions.json"
     _uk_baseline="$_uk_etc/baseline.json"
     _uk_cmdline=${CMDLINE_PATH:-"$_uk_etc/cmdline.txt"}
+    # two-UKI design: the SERIAL/RECOVERY variant cmdline (lib/cmdline.sh). The
+    # install lane writes /etc/alpine-fde/cmdline-serial.txt next to the
+    # default; a target predating it gets the serial line DERIVED from the
+    # default (console pair flipped) into the build workdir (step 1c — a build
+    # never mutates the target's /etc). The path is only a default: the
+    # derivation may override it inside the guarded body.
+    _uk_cmdline_serial_path=${CMDLINE_SERIAL_PATH:-"$_uk_etc/cmdline-serial.txt"}
     _uk_kernel="${_uk_root}/boot/vmlinuz-$_uk_kver"
     # boot-lane finding #9: Alpine ships FLAVOR-named kernels — /boot/vmlinuz-lts
     # (or -virt), with the release only in /lib/modules/<kver> — so the
@@ -261,6 +286,15 @@ cmd_kernel_build_main() {
             die "kernel build: invalid retention '$_uk_retention' (expected a non-negative integer)"
             ;;
     esac
+    # two-UKI design bound (Samuel, 2026-09-29): at most THREE kernel versions
+    # on the ESP/NVRAM — current + 2 previous. keep = current + <retention>
+    # others, so retention is capped at 2; a higher setting is CLAMPED with a
+    # loud warn (a silent override of the bound would re-grow the firmware
+    # boot menu past the six-entry pair invariant).
+    if [ "$_uk_retention" -gt 2 ]; then
+        warn "kernel build: RETENTION=$_uk_retention exceeds the three-version bound (current + 2 previous) — clamping to 2 (the ESP holds at most three UKI pairs, the NVRAM at most six boot entries)"
+        _uk_retention=2
+    fi
 
     require_pkgs jq:jq openssl:openssl ukify:ukify sbsign:sbsigntool sbverify:sbsigntool
 
@@ -399,9 +433,13 @@ cmd_kernel_build_main() {
         err "kernel build: $_uk_fail_reason"
         exit "$ALPINE_FDE_FAIL_CLOSED"
     }
-    _uk_uki="$_uk_work/uki.efi"
-    _uk_uki_signed="$_uk_work/uki.signed.efi"
-    _uk_measure="$_uk_work/measure.json"
+    # two-UKI design: ONE workdir, per-variant artifacts (default + serial)
+    _uk_uki="$_uk_work/uki-default.efi"
+    _uk_uki_signed="$_uk_work/uki-default.signed.efi"
+    _uk_measure="$_uk_work/measure-default.json"
+    _uk_uki_serial="$_uk_work/uki-serial.efi"
+    _uk_uki_signed_serial="$_uk_work/uki-serial.signed.efi"
+    _uk_measure_serial="$_uk_work/measure-serial.json"
 
     # _uk_body runs inside a `||` context, which SUPPRESES errexit for its whole
     # duration — strict_mode is dead in here. The contract is therefore explicit
@@ -450,7 +488,35 @@ _uk_body() {
         return 1
     fi
 
-    # --- 2. ukify: assemble + measure + Mechanism A'' .pcrsig ----------------------
+    # --- 1c. serial-variant cmdline (two-UKI design) ---------------------------------
+    # The DEFAULT cmdline is $_uk_cmdline (pins-guarded in the cmd entry). The
+    # SERIAL variant is the SAME line with the console pair flipped
+    # (lib/cmdline.sh cmdline_serial_of). /etc/alpine-fde/cmdline-serial.txt
+    # (written by the install lane) is canonical; a target predating it gets
+    # the flip DERIVED into the workdir — never written back to /etc (a build
+    # must not mutate the target's config). The serial variant is FATAL on
+    # failure (ADR-8 pair consistency): both UKIs are built to the workdir
+    # BEFORE any ESP/manifest mutation, so a failed serial variant leaves the
+    # previous pair untouched.
+    if [ -f "$_uk_cmdline_serial_path" ]; then
+        _uk_cmdline_serial=$_uk_cmdline_serial_path
+    else
+        _uk_cmdline_serial="$_uk_work/cmdline-serial.txt"
+        if ! cmdline_serial_file "$_uk_cmdline" "$_uk_cmdline_serial"; then
+            _uk_fail_reason="cannot derive the serial-variant cmdline from $_uk_cmdline"
+            err "kernel build: $_uk_fail_reason"
+            return 1
+        fi
+        info "kernel build: derived the serial-variant cmdline from $(basename "$_uk_cmdline") (no cmdline-serial.txt on the target)"
+    fi
+    if ! _uk_pins_reason=$(cmdline_pins_check "$_uk_cmdline_serial"); then
+        _uk_fail_reason="serial variant: $_uk_pins_reason"
+        err "kernel build: serial variant: $_uk_pins_reason"
+        err "kernel build: refusing to embed an unpinned serial cmdline (emergency-shell escape) — restore rd.shell=0 rd.emergency=poweroff"
+        return 1
+    fi
+
+    # --- 2. ukify: assemble + measure + Mechanism A'' .pcrsig (per variant) ----------
     # Verified flag surface (ukify 261): .pcrsig embedding happens via
     # --pcr-private-key/--pcr-public-key/--phases; there is no --pcr-signature
     # option in this release (manual .pcrsig content injection is --pcrsig=).
@@ -475,63 +541,96 @@ _uk_body() {
     fi
     info "kernel build: measure implementation: $_uk_measure_impl"
     _uk_measure_tools=$(measure_tools_arg "$_uk_measure_impl")
-    set -- \
-        "--linux=$_uk_kernel" \
-        "--initrd=$_uk_work/initrd.img" \
-        "--cmdline=@$_uk_cmdline" \
-        "--os-release=@$_uk_osrelease" \
-        "--uname=$_uk_kver" \
-        --pcr-banks=sha256 \
-        --phases=enter-initrd \
-        "--pcr-private-key=$_uk_keyfile" \
-        "--pcr-public-key=$_uk_keydir/release.pub" \
-        --measure --json=short \
-        "--output=$_uk_uki"
-    if [ -n "$_uk_measure_tools" ]; then
-        set -- "$@" "$_uk_measure_tools"
-    fi
 
-    if [ -n "${STUB_PATH:-}" ]; then
-        set -- "$@" "--stub=$STUB_PATH"
-    fi
-    if ! ukify build "$@" >"$_uk_measure"; then
-        _uk_fail_reason="ukify build failed (kernel $_uk_kver)"
-        err "kernel build: $_uk_fail_reason"
-        return 1
-    fi
-    _uk_pcr11=$(jq -r '.sha256[] | select(.phase == "enter-initrd") | .hash' "$_uk_measure")
-    if [ "${#_uk_pcr11}" -ne 64 ] || ! policy_check_digest "$_uk_pcr11"; then
-        _uk_fail_reason="ukify did not predict an enter-initrd PCR 11 digest"
-        err "kernel build: ukify did not predict an enter-initrd PCR 11 digest (got '${_uk_pcr11:-<none>}')"
-        return 1
-    fi
-
-    # --- 3. combined policy digest (audit/display data; A'' never pcrsigns) --------
-    _uk_policy_digest=''
-    _uk_signature=''
-    if policy_check_digest "$_uk_d7"; then
-        _uk_policy_digest=$(policy_digest "$_uk_d7" "$_uk_pcr11")
-    else
-        warn "kernel build: baseline PCR 7 pending — policy_digest/signature recorded as empty (run 'alpine-fde audit --init')"
-    fi
-
-    # --- 4. Secure Boot signing + verification --------------------------------------
-    # MD-01: explicit guards — sbsign failing must not fall through into sbverify
-    # and get misreported as "sbverify rejected the signed UKI".
-    if ! sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
-        --output "$_uk_uki_signed" "$_uk_uki" >/dev/null; then
-        _uk_fail_reason="sbsign failed (key/cert: $_uk_keydir)"
-        err "kernel build: sbsign failed — check the signing key (key: $_uk_keyfile)"
-        return 1
-    fi
-    sbverify --cert "$_uk_keydir/release.crt" "$_uk_uki_signed" >/dev/null || {
-        _uk_fail_reason="sbverify rejected the signed UKI"
-        err "kernel build: sbverify rejected the signed UKI"
-        return 1
+    # _uk_build_variant VARIANT CMDLINE OUT-UKI OUT-SIGNED MEAS-JSON — the
+    # per-variant assemble + measure + sign leg (steps 2+4 for one variant).
+    # Everything is staged INSIDE the workdir: an ESP write happens only in
+    # step 5, after BOTH variants signed. On success sets _uk_v_pcr11 (the
+    # enter-initrd prediction — DISTINCT per variant, the cmdline is measured).
+    _uk_build_variant() {
+        _ukbv_v=$1
+        _ukbv_cl=$2
+        _ukbv_out=$3
+        _ukbv_signed=$4
+        _ukbv_meas=$5
+        set -- \
+            "--linux=$_uk_kernel" \
+            "--initrd=$_uk_work/initrd.img" \
+            "--cmdline=@$_ukbv_cl" \
+            "--os-release=@$_uk_osrelease" \
+            "--uname=$_uk_kver" \
+            --pcr-banks=sha256 \
+            --phases=enter-initrd \
+            "--pcr-private-key=$_uk_keyfile" \
+            "--pcr-public-key=$_uk_keydir/release.pub" \
+            --measure --json=short \
+            "--output=$_ukbv_out"
+        if [ -n "$_uk_measure_tools" ]; then
+            set -- "$@" "$_uk_measure_tools"
+        fi
+        if [ -n "${STUB_PATH:-}" ]; then
+            set -- "$@" "--stub=$STUB_PATH"
+        fi
+        if ! ukify build "$@" >"$_ukbv_meas"; then
+            _uk_fail_reason="ukify build failed ($_ukbv_v variant, kernel $_uk_kver)"
+            err "kernel build: $_uk_fail_reason"
+            return 1
+        fi
+        _uk_v_pcr11=$(jq -r '.sha256[] | select(.phase == "enter-initrd") | .hash' "$_ukbv_meas")
+        if [ "${#_uk_v_pcr11}" -ne 64 ] || ! policy_check_digest "$_uk_v_pcr11"; then
+            _uk_fail_reason="ukify did not predict an enter-initrd PCR 11 digest ($_ukbv_v variant)"
+            err "kernel build: ukify did not predict an enter-initrd PCR 11 digest ($_ukbv_v variant, got '${_uk_v_pcr11:-<none>}')"
+            return 1
+        fi
+        # MD-01: explicit guards — sbsign failing must not fall through into
+        # sbverify and get misreported as "sbverify rejected the signed UKI".
+        if ! sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
+            --output "$_ukbv_signed" "$_ukbv_out" >/dev/null; then
+            _uk_fail_reason="sbsign failed ($_ukbv_v variant; key/cert: $_uk_keydir)"
+            err "kernel build: sbsign failed ($_ukbv_v variant) — check the signing key (key: $_uk_keyfile)"
+            return 1
+        fi
+        sbverify --cert "$_uk_keydir/release.crt" "$_ukbv_signed" >/dev/null || {
+            _uk_fail_reason="sbverify rejected the signed UKI ($_ukbv_v variant)"
+            err "kernel build: sbverify rejected the signed UKI ($_ukbv_v variant)"
+            return 1
+        }
+        return 0
     }
 
-    # --- 5. atomic ESP install -------------------------------------------------------
+    # DEFAULT first, SERIAL second — the boot-priority order; the default
+    # variant's artifacts are untouched by a serial-variant failure (no ESP
+    # writes happened yet — ADR-8 pair consistency, fatal on the serial leg)
+    _uk_build_variant default "$_uk_cmdline" "$_uk_uki" "$_uk_uki_signed" "$_uk_measure" || return 1
+    _uk_pcr11=$_uk_v_pcr11
+    _uk_build_variant serial "$_uk_cmdline_serial" "$_uk_uki_serial" "$_uk_uki_signed_serial" "$_uk_measure_serial" || return 1
+    _uk_pcr11_serial=$_uk_v_pcr11
+    info "kernel build: pcr11(default)=$_uk_pcr11 pcr11(serial)=$_uk_pcr11_serial"
+
+    # --- 3. combined policy digests (audit/display data; A'' never pcrsigns) --------
+    # DISTINCT per variant: the PolicyPCR digest embeds the variant's own PCR 11
+    # prediction (the measured cmdline differs).
+    _uk_policy_digest=''
+    _uk_policy_digest_serial=''
+    _uk_signature=''
+    _uk_signature_serial=''
+    if policy_check_digest "$_uk_d7"; then
+        _uk_policy_digest=$(policy_digest "$_uk_d7" "$_uk_pcr11")
+        _uk_policy_digest_serial=$(policy_digest "$_uk_d7" "$_uk_pcr11_serial")
+    else
+        warn "kernel build: baseline PCR 7 pending — policy_digest/signature recorded as empty for BOTH variants (run 'alpine-fde audit --init')"
+    fi
+
+    # --- 5. atomic ESP install (BOTH variants) ---------------------------------------
+    # Pair order: default first (boot priority), serial immediately after; each
+    # install is individually atomic (temp + fsync + rename, lib/esp.sh). A
+    # failure here is fatal for the whole build — the pair must stand together,
+    # and BOTH artifacts were already fully built + signed in the workdir, so
+    # this is a pure copy: a failure here cannot corrupt the default (the
+    # staging write precedes the rename).
     esp_install_uki "$_uk_uki_signed" "$_uk_kver"
+    esp_install_uki "$_uk_uki_signed_serial" "$_uk_kver" serial
+    info "kernel build: installed the UKI pair for $_uk_kver (default + serial)"
 
     # --- 5b. §8.3: the INSTALLED boot managers must be SIGNED too -------------
     # The guarded copy record installs the Alpine loader UNSIGNED; with Secure
@@ -562,29 +661,52 @@ _uk_body() {
         return 1
     fi
     manifest_upsert "$_uk_manifest" "$_uk_kver" "$_uk_pcr11" "$_uk_policy_digest" "$_uk_signature"
+    # two-UKI design: the entry carries BOTH variants' predictions — the serial
+    # fields are additive (_serial suffix), the base fields stay the DEFAULT
+    # variant (schema v1 consumers — status/audit/recovery — keep reading them)
+    manifest_set_variant "$_uk_manifest" "$_uk_kver" serial \
+        "$_uk_pcr11_serial" "$_uk_policy_digest_serial" "$_uk_signature_serial"
     manifest_set_meta "$_uk_manifest" "$_uk_kver" "$_uk_pubkey_fp"
 
     # --- 6b. ENSURE-ONCE TPM enrollment (Mechanism B; §6.1/§8.1, s14 semantics,
-    # ADR-19/ADR-20, G-U1) --------------------------------------------
-    # Kernel updates are TPM-free: when the LUKS2 volume already carries a
-    # systemd-tpm2 token this step is a metadata read only (ZERO TPM operations)
-    # and the standing enrollment's keyslot/token_id are stamped onto every
+    # ADR-19/ADR-20, G-U1; two-UKI: the TOKEN PAIR, one policy per variant) ----
+    # Kernel updates are TPM-free: when the LUKS2 volume already carries the
+    # standing token PAIR this step is a metadata read only (ZERO TPM
+    # operations) and the standing keyslots/token ids are stamped onto every
     # manifest entry (§8.4: repeated per entry — the NEW kver's upserted entry
-    # starts empty). A fresh volume gets exactly ONE Mechanism B enrollment
-    # (seal under static PCR 7 + release-pubkey-signed PCR 11; §6.1/§7.2), then
-    # enrolled.json is written and the manifest records the enrollment's
-    # keyslot/token_id (§8.4).
+    # starts empty). A fresh volume gets exactly ONE pair enrollment (a seal
+    # per console variant under static PCR 7 + release-pubkey-signed PCR 11;
+    # §6.1/§7.2 — the SERIAL token pins its DISTINCT policy digest via the
+    # serial UKI's own .pcrsig, extracted below); a PARTIAL state (one token —
+    # a legacy enrollment or a crash between the pair's seals) is completed
+    # non-destructively. enrolled.json records BOTH variants' keyslot/token_id,
+    # and so does the manifest (§8.4).
     # An unreachable volume is the documented precondition escape (warn + empty
     # bookkeeping). Prune (6c/7) runs only after this succeeded — an enroll
     # failure lands on the ADR-8 marker path with the pre-enroll ESP/manifest
     # state (UKI install may stand).
+    # The serial UKI's own .pcrsig (objcopy-guarded: a tree without binutils
+    # skips it — the serial token then carries the live/default policy digest,
+    # warned in reseal).
+    _uk_pcrsig_serial_file=''
+    if command -v objcopy >/dev/null 2>&1; then
+        _uk_pcrsig_serial_file="$_uk_work/pcrsig-serial.json"
+        if ! objcopy -O binary --only-section=.pcrsig "$_uk_uki_signed_serial" \
+            "$_uk_pcrsig_serial_file" 2>/dev/null || [ ! -s "$_uk_pcrsig_serial_file" ]; then
+            warn "kernel build: cannot extract the serial UKI's .pcrsig — the serial token will carry the live/default policy digest"
+            _uk_pcrsig_serial_file=''
+        fi
+    else
+        warn "kernel build: objcopy not available — the serial token will carry the live/default policy digest (install binutils for the distinct serial policy)"
+    fi
     _uk_luks_uuid=$(reseal_crypttab_uuid "${_uk_root}/etc/crypttab" || true)
     _uk_luks_dev=''
     if [ -n "$_uk_luks_uuid" ]; then
         _uk_luks_dev="$(reseal_by_uuid_dir)/$_uk_luks_uuid"
     fi
     RESEAL_ENROLLED=0
-    if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub"; then
+    if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub" \
+        "$_uk_pcrsig_serial_file"; then
         _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: ${_uk_luks_dev:-<none>})${RESEAL_FAIL_REASON:+: $RESEAL_FAIL_REASON}"
         err "kernel build: $_uk_fail_reason"
         return 1
@@ -593,28 +715,33 @@ _uk_body() {
         # LO-02/MD-01: the enrolled.json write is guarded — a silent empty-write
         # would leave the §8.4 record missing while the build reports success
         if ! reseal_record "$_uk_luks_uuid" "$_uk_policy_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" \
-            "$_uk_keydir/release.pub"; then
+            "$_uk_keydir/release.pub" "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
             _uk_fail_reason="writing enrolled.json failed after enrollment"
             err "kernel build: $_uk_fail_reason"
             return 1
         fi
-        manifest_set_enrollment "$_uk_manifest" "$RESEAL_SLOT" "$RESEAL_TOKEN_ID"
+        manifest_set_enrollment "$_uk_manifest" "$RESEAL_SLOT" "$RESEAL_TOKEN_ID" \
+            "${RESEAL_SLOT_SERIAL:-}" "${RESEAL_TOKEN_ID_SERIAL:-}"
     elif [ -n "$_uk_luks_dev" ] && [ -e "$_uk_luks_dev" ]; then
-        # Token standing (the s14 zero-TPM-op path): §8.4 stamps the standing
-        # enrollment's keyslot/token_id onto EVERY manifest entry — incl. the
-        # NEW kver just upserted (upsert carry-over covers same-kver rebuilds
-        # only). Source: the token introspection ensure-once already read —
-        # a luksDump metadata read only, still ZERO TPM operations.
+        # Pair standing (the s14 zero-TPM-op path): §8.4 stamps the standing
+        # keyslots/token ids onto EVERY manifest entry — incl. the NEW kver
+        # just upserted (upsert carry-over covers same-kver rebuilds only).
+        # Source: the token introspection ensure-once already read — a luksDump
+        # metadata read only, still ZERO TPM operations. Lower token id =
+        # default variant (the pair is enrolled in that order).
         _uk_standing=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-standing.XXXXXX") ||
             die "kernel build: mktemp failed"
         if reseal_cryptsetup luksDump --dump-json-metadata "$_uk_luks_dev" \
             >"$_uk_standing" 2>/dev/null; then
-            _uk_slot=$(luks_json_token_keyslot "$_uk_standing" systemd-tpm2 || true)
-            _uk_tok=$(reseal_json_token_id "$_uk_standing" systemd-tpm2)
-            if [ -n "$_uk_slot" ] && [ -n "$_uk_tok" ]; then
-                manifest_set_enrollment "$_uk_manifest" "$_uk_slot" "$_uk_tok"
+            _uk_pair=$(token_pair_bookkeeping "$_uk_standing")
+            # shellcheck disable=SC2086  # exactly four '-'-padded fields
+            set -- $_uk_pair
+            if [ "$1" != "-" ] && [ "$2" != "-" ]; then
+                manifest_set_enrollment "$_uk_manifest" "$1" "$2" \
+                    "$([ "$3" != "-" ] && printf '%s' "$3")" \
+                    "$([ "$4" != "-" ] && printf '%s' "$4")"
             else
-                warn "kernel build: cannot parse the standing token's keyslot/token_id on $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
+                warn "kernel build: cannot parse the standing tokens' keyslot/token_id on $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
             fi
         else
             warn "kernel build: cannot re-read LUKS2 metadata of $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
@@ -639,14 +766,33 @@ _uk_body() {
         err "kernel build: $_uk_fail_reason"
         return 1
     fi
+    # --- 7b. NVRAM boot-entry sweep + pair (two-UKI design; best-effort) ------------
+    # The firmware boot entries must never outlive the ESP keep set: the sweep
+    # deletes the pruned kernels' entries (BOTH variants — at most three
+    # version-pairs = six entries, oldest pruned first), the ensure then stands
+    # THIS build's pair (default FIRST, serial second — the boot priority).
+    # Best-effort by design (see inst_bootentry_ensure_best_effort): a context
+    # without efivarfs/efibootmgr/ESP-device resolution skips with a warn; the
+    # next build ON the machine converges.
+    # shellcheck disable=SC2086  # word split intended: one kver per line
+    inst_bootentry_prune $_uk_keep
+    inst_bootentry_ensure_best_effort "$(esp_dir)" "$_uk_kver"
 
-    # --- 8. predictions.json (B-G11/B-G15) -------------------------------------------
+    # --- 8. predictions.json (B-G11/B-G15; BOTH variants) -----------------------------
+    # The base fields stay the DEFAULT variant (harness consumers, §12); the
+    # serial variant rides the additive *_serial fields.
     if ! _uk_sections=$(ukify inspect "$_uk_uki_signed" --json=short); then
         _uk_fail_reason="ukify inspect failed on the installed UKI"
         err "kernel build: $_uk_fail_reason"
         return 1
     fi
+    if ! _uk_sections_serial=$(ukify inspect "$_uk_uki_signed_serial" --json=short); then
+        _uk_fail_reason="ukify inspect failed on the installed serial UKI"
+        err "kernel build: $_uk_fail_reason"
+        return 1
+    fi
     _uk_uki_size=$(wc -c <"$_uk_uki_signed" | tr -d '[:space:]')
+    _uk_uki_size_serial=$(wc -c <"$_uk_uki_signed_serial" | tr -d '[:space:]')
     _uk_ukify_ver=$(ukify --version 2>/dev/null | head -n1)
     _uk_sbsign_ver=$(sbsign --version 2>/dev/null | head -n1)
     _uk_openssl_ver=$(openssl version 2>/dev/null | head -n1)
@@ -656,20 +802,30 @@ _uk_body() {
         --arg pcr11 "$_uk_pcr11" \
         --arg pd "$_uk_policy_digest" \
         --arg sig "$_uk_signature" \
+        --arg pcr11s "$_uk_pcr11_serial" \
+        --arg pds "$_uk_policy_digest_serial" \
+        --arg sigs "$_uk_signature_serial" \
         --arg mode "$_uk_policy_mode" \
         --arg fp "$_uk_pubkey_fp" \
         --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg uki_size "$_uk_uki_size" \
+        --arg uki_size_serial "$_uk_uki_size_serial" \
         --arg ukify_ver "$_uk_ukify_ver" \
         --arg sbsign_ver "$_uk_sbsign_ver" \
         --arg openssl_ver "$_uk_openssl_ver" \
         --argjson retention "$_uk_retention" \
         --argjson sections "$_uk_sections" \
+        --argjson sections_serial "$_uk_sections_serial" \
         '{kernel_version: $kver, pcr_bank: "sha256", phase: "enter-initrd",
           pcr11_digest: $pcr11, policy_digest: $pd, signature: $sig,
+          pcr11_digest_serial: $pcr11s, policy_digest_serial: $pds,
+          signature_serial: $sigs,
           policy_mode: $mode, pubkey_fp: $fp,
-          uki_size: ($uki_size | tonumber), retention: $retention,
+          uki_size: ($uki_size | tonumber),
+          uki_size_serial: ($uki_size_serial | tonumber),
+          retention: $retention,
           sections: ($sections | with_entries(.value |= {size: .size, sha256: .sha256})),
+          sections_serial: ($sections_serial | with_entries(.value |= {size: .size, sha256: .sha256})),
           tools: {ukify: $ukify_ver, sbsign: $sbsign_ver, openssl: $openssl_ver},
           updated_at: $now}' >"$_uk_predictions_tmp"; then
         err "kernel build: assembling predictions.json failed"
@@ -679,7 +835,7 @@ _uk_body() {
 
     # --- 9. success: clear the failure marker -----------------------------------------
     rm -f "$_uk_marker"
-    info "kernel build: kernel $_uk_kver installed and recorded (pcr11=$_uk_pcr11 policy=${_uk_policy_digest:-<pending>})"
+    info "kernel build: kernel $_uk_kver installed and recorded (default + serial; pcr11=$_uk_pcr11 pcr11_serial=$_uk_pcr11_serial policy=${_uk_policy_digest:-<pending>})"
     return 0
 }
 

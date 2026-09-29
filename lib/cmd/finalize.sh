@@ -345,6 +345,29 @@ fin_completion_steps() {
         _fcs_pcrsig=$(reseal_sign_pcrsig "$_fcs_stage" "$_fcs_keydir") ||
             die "finalize: cannot produce the signed {7,11} policy (.pcrsig) — ALPINE_FDE_PCRSIG or an unlockable release.pem is required (§9.1)"
     fi
+    # two-UKI design: the SERIAL variant's .pcrsig so the finalized state stands
+    # the WHOLE token pair (one policy per console variant). Source: env
+    # (ALPINE_FDE_PCRSIG_SERIAL), else the -serial UKI's own section on the ESP.
+    # BEST-EFFORT: without it a single finalized token stands and the next
+    # kernel build completes the pair (reseal_ensure_once's PARTIAL path).
+    _fcs_pcrsig_serial=''
+    if [ -n "${ALPINE_FDE_PCRSIG_SERIAL:-}" ]; then
+        _fcs_pcrsig_serial=$ALPINE_FDE_PCRSIG_SERIAL
+    elif command -v objcopy >/dev/null 2>&1; then
+        _fcs_esp=${ALPINE_FDE_ESP:-}
+        if [ -z "$_fcs_esp" ] && command -v esp_dir >/dev/null 2>&1; then
+            _fcs_esp=$(esp_dir 2>/dev/null || true)
+        fi
+        [ -n "$_fcs_esp" ] || _fcs_esp=/efi
+        _fcs_uki_serial=$(ls "$_fcs_esp"/EFI/Linux/alpine-fde-*-serial.efi 2>/dev/null | head -n 1)
+        if [ -n "$_fcs_uki_serial" ] && objcopy -O binary --only-section=.pcrsig \
+            "$_fcs_uki_serial" "$_fcs_stage/pcrsig-serial.json" 2>/dev/null &&
+            [ -s "$_fcs_stage/pcrsig-serial.json" ]; then
+            _fcs_pcrsig_serial=$_fcs_stage/pcrsig-serial.json
+        else
+            warn "finalize: cannot extract the serial UKI's .pcrsig — a single finalized token stands; the next kernel build completes the two-UKI token pair"
+        fi
+    fi
     # --- per-member keyslot mutations (§9.1 Stage 2 steps 3-4) -----------------
     # ORDER CONSTRAINT — authorization liveness of the NON-INTERACTIVE service:
     # the re-unsealed provisional credential (AUTHFILE) authorizes BOTH
@@ -389,7 +412,8 @@ fin_completion_steps() {
             # subshell isolation: the seal/token mutators die fail-closed —
             # contain them so the member context is what the operator sees
             if ! (seal_upgrade_token "$_fcs_keydir" "$_fcs_dev" "$_fcs_pcrsig" \
-                "$_fcs_stage/token-$(basename "$_fcs_dev").json" "$_fcs_auth"); then
+                "$_fcs_stage/token-$(basename "$_fcs_dev").json" "$_fcs_auth" \
+                "$_fcs_pcrsig_serial"); then
                 die "finalize: token upgrade failed for $(basename "$_fcs_dev") — trust stays unfinalized (ground truth: the provisional seal stands); fix the cause and retry (§9.1 crash idempotency)"
             fi
             printf 'alpine-fde: member %s: token upgraded to Mechanism B {PCR 7, PCR 11}\n' \

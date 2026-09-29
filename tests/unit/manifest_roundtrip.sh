@@ -84,6 +84,54 @@ assert_eq "prune: keeps only listed kver" "6.12.8-1-amd64" "$(manifest_kvers "$M
 assert_eq "prune: bookkeeping survives on the kept entry" "3" \
     "$(manifest_get "$M" "6.12.8-1-amd64" | jq -r .keyslot)"
 
+# --- two-UKI design: per-variant prediction fields + serial token bookkeeping -----
+# manifest_set_variant stamps ONE variant's fields; the base fields stay the
+# DEFAULT variant (schema v1 consumers keep reading them)
+MV="$TMP/variants.json"
+manifest_new "6.12.8-1-amd64" "fp" | manifest_atomic_write "$MV"
+manifest_upsert "$MV" "6.12.8-1-amd64" "p11-default" "pd-default" "sig-default"
+rc=0; manifest_set_variant "$MV" "6.12.8-1-amd64" serial "p11-serial" "pd-serial" "sig-serial" || rc=1
+assert_rc "set_variant: serial fields stamped" 0 "$rc"
+assert_eq "set_variant: base pcr11_digest stays the DEFAULT variant" "p11-default" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .pcr11_digest)"
+assert_eq "set_variant: serial pcr11 recorded (additive field)" "p11-serial" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .pcr11_digest_serial)"
+assert_eq "set_variant: serial policy_digest recorded" "pd-serial" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .policy_digest_serial)"
+assert_eq "set_variant: serial signature recorded" "sig-serial" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .signature_serial)"
+rc=0; manifest_set_variant "$MV" "6.12.8-1-amd64" default "p11-default-2" "pd-default-2" "sig-default-2" || rc=1
+assert_rc "set_variant: the default variant writes the BASE fields" 0 "$rc"
+assert_eq "set_variant: default variant overwrote the base pcr11" "p11-default-2" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .pcr11_digest)"
+assert_eq "set_variant: serial fields untouched by the default write" "p11-serial" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .pcr11_digest_serial)"
+rc=0; ( manifest_set_variant "$MV" "6.12.8-1-amd64" typoo "x" "y" "z" >/dev/null 2>&1 ) || rc=$?
+assert_rc "set_variant: unknown variant dies fail-closed 64" 64 "$rc"
+rc=0; manifest_set_variant "$MV" "no-such-kver" serial "x" "y" "z" || rc=1
+assert_rc "set_variant: a missing entry is a rc-1 no-op (upsert runs first)" 1 "$rc"
+manifest_load "$MV" >/dev/null
+assert_rc "set_variant: rewritten document still schema-valid" 0 $?
+# the serial fields ride an upsert REPLACEMENT's carry-over? NO: upsert replaces
+# the entry wholesale (same-kver rebuild) — the build re-stamps the serial
+# fields after every upsert (kernel-build step 6)
+manifest_upsert "$MV" "6.12.8-1-amd64" "p11-new" "pd-new" "sig-new"
+assert_eq "upsert after set_variant: the entry is replaced (serial fields dropped until re-stamped)" \
+    "null" "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .pcr11_digest_serial)"
+# serial enrollment bookkeeping (one token policy per variant)
+rc=0; manifest_set_enrollment "$MV" "3" "2" "4" "5" || rc=1
+assert_rc "set_enrollment: serial bookkeeping accepted" 0 "$rc"
+assert_eq "set_enrollment: default keyslot/token_id on the entry" '{"keyslot":"3","token_id":"2"}' \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -c '{keyslot, token_id}')"
+assert_eq "set_enrollment: serial keyslot/token_id on the entry" '{"keyslot_serial":"4","token_id_serial":"5"}' \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -c '{keyslot_serial, token_id_serial}')"
+rc=0; manifest_set_enrollment "$MV" "8" "9" || rc=1
+assert_rc "set_enrollment: the 3-arg form stays valid" 0 "$rc"
+assert_eq "set_enrollment: omitted serial values leave prior serial bookkeeping" "4" \
+    "$(manifest_get "$MV" "6.12.8-1-amd64" | jq -r .keyslot_serial)"
+
+
+
 # --- meta -------------------------------------------------------------------------
 manifest_set_meta "$M" "6.12.8-1-amd64" "deadbeef"
 assert_eq "manifest_set_meta: pubkey_fp recorded" "deadbeef" "$(jq -r .pubkey_fp "$M")"

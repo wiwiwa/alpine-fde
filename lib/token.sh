@@ -206,30 +206,65 @@ token_kill_slot() {
 #   * recovery keyslot 0 byte-identical to the pre-state (when it existed)
 token_post_assert() {
     [ $# -eq 5 ] || die "token_post_assert: usage: <pre_json> <post_json> <pub_b64> <pcrs_json> <slot>"
-    _tpa_pre=$1 _tpa_post=$2 _tpa_pub=$3 _tpa_pcrs=$4 _tpa_slot=$5
+    token_post_assert_multi "$1" "$2" "$3" "$4" "$5"
+}
+
+# token_post_assert_multi <pre_json> <post_json> <pub_b64> <pcrs_json> SLOT... —
+# the enroll post-assert skeleton generalized over the two-UKI TOKEN PAIR (one
+# token policy per console variant): exactly as many systemd-tpm2 tokens as
+# SLOT arguments stand afterwards, each with
+#   * tpm2-pubkey == <pub_b64> (the pinned release key)
+#   * tpm2-pcrs == <pcrs_json> for the mode ([11] / [7,11])
+#   * a well-formed 64-hex tpm2-policy-hash (upstream 257 refuses without it)
+#   * a keyslot from the SLOT set, != 0 (recovery slot), no two tokens on the
+#     same slot
+# and recovery keyslot 0 byte-identical to the pre-state (when it existed).
+token_post_assert_multi() {
+    [ $# -ge 5 ] || die "token_post_assert_multi: usage: <pre_json> <post_json> <pub_b64> <pcrs_json> <slot>..."
+    _tpa_pre=$1 _tpa_post=$2 _tpa_pub=$3 _tpa_pcrs=$4
+    shift 4
+    _tpa_want="$*"
+    _tpa_want_n=$#
     _tpa_pre0=$(jq -rS '.keyslots["0"] // empty' "$_tpa_pre" 2>/dev/null)
     _tpa_fail=''
     _tpa_n=$(jq -r '[.tokens // {} | .[] | select(.type? == "systemd-tpm2")] | length' \
         "$_tpa_post" 2>/dev/null)
-    [ "$_tpa_n" = "1" ] || _tpa_fail="expected exactly 1 systemd-tpm2 token, found ${_tpa_n:-0}"
+    [ "$_tpa_n" = "$_tpa_want_n" ] ||
+        _tpa_fail="expected exactly $_tpa_want_n systemd-tpm2 token(s), found ${_tpa_n:-0}"
     if [ -z "$_tpa_fail" ]; then
-        _tpa_tok=$(jq -c 'first(.tokens // {} | to_entries[] | select(.value.type? == "systemd-tpm2") | .value)' \
-            "$_tpa_post" 2>/dev/null)
-        _tpa_got_slot=$(printf '%s' "$_tpa_tok" | jq -r '.keyslots[0] // empty')
-        _tpa_got_pub=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-pubkey"] // empty')
-        _tpa_got_pcrs=$(printf '%s' "$_tpa_tok" | jq -c '.["tpm2-pcrs"] // empty')
-        [ "$_tpa_got_slot" = "$_tpa_slot" ] ||
-            _tpa_fail="token keyslot is '${_tpa_got_slot:-none}', want $_tpa_slot"
-        [ -z "$_tpa_fail" ] && [ "$_tpa_got_slot" = "0" ] &&
-            _tpa_fail="token must reference a keyslot != 0 (recovery slot)"
-        [ -z "$_tpa_fail" ] && [ "$_tpa_got_pub" != "$_tpa_pub" ] &&
-            _tpa_fail="token pubkey mismatch (not the pinned release key)"
-        [ -z "$_tpa_fail" ] && [ "$_tpa_got_pcrs" != "$_tpa_pcrs" ] &&
-            _tpa_fail="token pcrs are $_tpa_got_pcrs, want $_tpa_pcrs for this mode"
+        # per-token assertions: pubkey, pcrs, policy-hash, slot membership
+        _tpa_got_slots=$(
+            jq -r '[.tokens // {} | .[] | select(.type? == "systemd-tpm2") | .keyslots[0]] | join(" ")' \
+                "$_tpa_post" 2>/dev/null)
+        for _tpa_slot in $_tpa_want; do
+            case " $_tpa_got_slots " in
+            *" $_tpa_slot "*) ;;
+            *)
+                _tpa_fail="no token references keyslot $_tpa_slot (slots found: ${_tpa_got_slots:-none})"
+                break
+                ;;
+            esac
+            [ "$_tpa_slot" = "0" ] && _tpa_fail="a token must never reference keyslot 0 (recovery slot)"
+        done
         if [ -z "$_tpa_fail" ]; then
-            _tpa_pol=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-policy-hash"] // empty')
-            printf '%s' "$_tpa_pol" | grep -qE '^[0-9a-f]{64}$' ||
-                _tpa_fail="token tpm2-policy-hash missing or malformed (upstream 257 refuses the token without it)"
+            while IFS="
+" read -r _tpa_tok; do
+                [ -n "$_tpa_tok" ] || continue
+                _tpa_got_pub=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-pubkey"] // empty')
+                _tpa_got_pcrs=$(printf '%s' "$_tpa_tok" | jq -c '.["tpm2-pcrs"] // empty')
+                [ "$_tpa_got_pub" = "$_tpa_pub" ] ||
+                    _tpa_fail="token pubkey mismatch (not the pinned release key)"
+                [ -z "$_tpa_fail" ] && [ "$_tpa_got_pcrs" != "$_tpa_pcrs" ] &&
+                    _tpa_fail="token pcrs are $_tpa_got_pcrs, want $_tpa_pcrs for this mode"
+                if [ -z "$_tpa_fail" ]; then
+                    _tpa_pol=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-policy-hash"] // empty')
+                    printf '%s' "$_tpa_pol" | grep -qE '^[0-9a-f]{64}$' ||
+                        _tpa_fail="token tpm2-policy-hash missing or malformed (upstream 257 refuses the token without it)"
+                fi
+                [ -n "$_tpa_fail" ] && break
+            done <<EOF
+$(jq -c '.tokens // {} | .[] | select(.type? == "systemd-tpm2")' "$_tpa_post" 2>/dev/null)
+EOF
         fi
     fi
     if [ -z "$_tpa_fail" ] && [ -n "$_tpa_pre0" ]; then
@@ -242,6 +277,23 @@ token_post_assert() {
         return 1
     fi
     return 0
+}
+
+# token_pair_bookkeeping META_JSON — print the standing token pair's
+# keyslot/token-id bookkeeping as ONE line "SLOT_D TOK_D SLOT_S TOK_S"
+# (lower token id = the DEFAULT variant — the two-UKI pair is enrolled in that
+# order; fields are '-' when fewer than two systemd-tpm2 tokens stand).
+# Lives in the token layer (seal.sh's upgrade path reads it back) — reseal.sh's
+# reseal_pair_bookkeeping is a thin alias.
+token_pair_bookkeeping() {
+    jq -r '
+        [.tokens // {} | to_entries[]
+            | select(.value.type? == "systemd-tpm2")
+            | {id: (.key | tonumber), slot: (.value.keyslots[0] // "-")}]
+        | sort_by(.id)
+        | [(.[0].slot // "-"), ((.[0].id // "-") | tostring),
+           (.[1].slot // "-"), ((.[1].id // "-") | tostring)]
+        | join(" ")' "$1" 2>/dev/null || printf -- '- - - -\n'
 }
 
 return 0
