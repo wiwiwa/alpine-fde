@@ -380,7 +380,18 @@ _fdh_resolve_dev() {
             case ${1#UUID=} in
                 *[!0-9a-fA-F-]*) return 1 ;;
             esac
-            if command -v "$FDE_NLPLUG_FINDFS" >/dev/null 2>&1; then
+            # R640 2026-09-29: nlplug-findfs can exit 0 with NO output in the
+        # packed initramfs (empty device -> cryptsetup fails instantly, every
+        # attempt burns). Resolve bcache members DIRECTLY instead: cryptsetup
+        # is guaranteed in the initramfs and luksUUID only reads the header.
+        for _fdh_bcd in /dev/bcache[0-9]*; do
+            [ -e "$_fdh_bcd" ] || continue
+            if [ "$(cryptsetup luksUUID "$_fdh_bcd" 2>/dev/null)" = "${1#UUID=}" ]; then
+                printf '%s\n' "$_fdh_bcd"
+                return 0
+            fi
+        done
+        if command -v "$FDE_NLPLUG_FINDFS" >/dev/null 2>&1; then
                 # REAL-SERVER R640 (verified boot 2026-09-28): this initramfs's
                 # /init runs nlplug-findfs + mdev — NO udevd — so NOTHING ever
                 # creates /dev/disk/by-uuid entries; a bare by-uuid print
