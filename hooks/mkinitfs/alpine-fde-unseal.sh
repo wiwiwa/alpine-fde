@@ -321,6 +321,24 @@ if [ "$_fdh_sb" != "1" ] || [ "$_fdh_sm" != "0" ]; then
 fi
 _msg "Secure Boot guard: secureboot=1 setup_mode=0 — verified boot confirmed (pre-unseal guard, ADR-20)"
 
+# --- bcache self-registration (R640 2026-09-29) ---------------------------------
+# The initramfs may have NO udevd (stock mdev hotplug never runs
+# 69-bcache.rules), so the bcache backing set would never assemble and every
+# member resolve below starves. Register every visible disk/partition
+# directly: non-bcache devices just fail the sysfs write harmlessly; the
+# kernel then emits the bcacheN uevents nlplug-findfs resolves members by
+# (no udevd required — it rides the kernel netlink socket).
+if modprobe bcache 2>/dev/null; then
+    _fdh_bcreg=0
+    for _fdh_bc in /dev/sd[a-z] /dev/sd[a-z][0-9] /dev/nvme[0-9]n[0-9] \
+        /dev/nvme[0-9]n[0-9]p[0-9] /dev/vd[a-z] /dev/vd[a-z][0-9]; do
+        [ -e "$_fdh_bc" ] || continue
+        echo "$_fdh_bc" > /sys/fs/bcache/register 2>/dev/null && _fdh_bcreg=$((_fdh_bcreg + 1))
+    done
+    [ "$_fdh_bcreg" -gt 0 ] && _msg "bcache: registered $_fdh_bcreg device(s) from the initramfs (mdev hotplug lane)"
+    unset _fdh_bc _fdh_bcreg
+fi
+
 
 # _fdh_hex2bin HEX — hex string -> raw bytes on stdout. Pure busybox awk (no
 # xxd in the initramfs).

@@ -139,12 +139,20 @@ initramfs_features() {
     # never sees its own disk ("/dev/vdb absent; only loop/ram in
     # /sys/class/block; Mounting root: failed -> emergency shell"). mkinitfs's
     # own stock default set carries the same families (ata nvme scsi virtio).
-    # udev is NOT optional on real servers: the R640's bcache assembly depends
-    # on udevd + 69-bcache.rules running in the initramfs (mdev alone never
-    # registers the backing set — verified boot 2026-09-29: no udevd -> no
-    # /dev/bcache0 -> token_missing on an intact seal). udev is the only
-    # hotplug that creates the uevents nlplug-findfs resolves members by.
-    printf '%s\n' "base cryptsetup virtio ata nvme scsi udev $_inf_fs alpine-fde"
+    # udev when the builder actually ships the feature (mkinitfs >= some
+    # Alpine releases dropped features.d/udev.files): udevd + 69-bcache.rules
+    # would be the clean hotplug lane, but pinning an absent feature makes
+    # mkinitfs die fail-closed and breaks every build. The hook self-registers
+    # bcache directly (hooks/mkinitfs/alpine-fde-unseal.sh), so the initramfs
+    # boots either way — udev only ADDS the by-uuid symlinks for
+    # FDE_DISK_BY_UUID_DIR consumers.
+    _ini_udev=''
+    [ -f /etc/mkinitfs/features.d/udev.files ] && _ini_udev=' udev'
+    if [ -n "${ALPINE_FDE_ROOT:-}" ] &&
+        [ -f "$ALPINE_FDE_ROOT/etc/mkinitfs/features.d/udev.files" ]; then
+        _ini_udev=' udev'
+    fi
+    printf '%s\n' "base cryptsetup virtio ata nvme scsi$_ini_udev $_inf_fs alpine-fde"
 }
 
 # initramfs_build <out> <kver> — produce the initramfs for <kver> at <out>.
