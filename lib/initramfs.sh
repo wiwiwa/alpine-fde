@@ -139,7 +139,12 @@ initramfs_features() {
     # never sees its own disk ("/dev/vdb absent; only loop/ram in
     # /sys/class/block; Mounting root: failed -> emergency shell"). mkinitfs's
     # own stock default set carries the same families (ata nvme scsi virtio).
-    printf '%s\n' "base cryptsetup virtio ata nvme scsi $_inf_fs alpine-fde"
+    # udev is NOT optional on real servers: the R640's bcache assembly depends
+    # on udevd + 69-bcache.rules running in the initramfs (mdev alone never
+    # registers the backing set — verified boot 2026-09-29: no udevd -> no
+    # /dev/bcache0 -> token_missing on an intact seal). udev is the only
+    # hotplug that creates the uevents nlplug-findfs resolves members by.
+    printf '%s\n' "base cryptsetup virtio ata nvme scsi udev $_inf_fs alpine-fde"
 }
 
 # initramfs_build <out> <kver> — produce the initramfs for <kver> at <out>.
@@ -160,7 +165,15 @@ initramfs_build() {
         # the feature lists, so nothing topology-specific rides the argv.
         _ini_features=$(initramfs_features)
         info "initramfs: mkinitfs features: $_ini_features"
-        mkinitfs -c /etc/mkinitfs/mkinitfs.conf \
+        # run against the TARGET root when installing host-side (the live-env
+        # install lane): the kver's /lib/modules and the features.d/custom_files
+        # payload live under $ALPINE_FDE_ROOT, not the running host — verified
+        # R640 2026-09-29: a host-root run dies "lib/modules/<kver> does not
+        # exist" and, worse, silently packs the HOST's /etc/mkinitfs payload.
+        _ini_root=${ALPINE_FDE_ROOT:-}
+        _ini_conf=/etc/mkinitfs/mkinitfs.conf
+        [ -n "$_ini_root" ] && _ini_conf="$_ini_root/etc/mkinitfs/mkinitfs.conf"
+        mkinitfs ${_ini_root:+-b "$_ini_root"} -c "$_ini_conf" \
             -F "$_ini_features" \
             -o "$_ini_out" "$_ini_kver" \
             || die "initramfs: mkinitfs failed for kernel $_ini_kver"
