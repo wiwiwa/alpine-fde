@@ -306,7 +306,13 @@ mkauth "$FAKEYS/pk.auth" PK "$GUID" 'PK1'
 # built from (REAL-SERVER 2026-09-28: staged as db.cer/KEK.cer/PK.cer because
 # the firmware setup UI imports X.509 certs, not .auth packets). Formats as
 # stored in a real keydir: release.crt is PEM, kek/pk .cert.der are DER.
-printf 'RELEASE-CRT-PEM' >"$FAKEYS/release.crt"
+# release.crt must be a REAL certificate (2026-09-29): the staging converts
+# it PEM -> DER with openssl x509 (Dell .cer import is DER-only), so the
+# db.cer pin compares against a live conversion of this exact cert.
+openssl req -x509 -newkey rsa:2048 -keyout "$tmp/release.key" \
+    -out "$FAKEYS/release.crt" -days 30 -nodes \
+    -subj "/CN=alpine-fde-test-release" 2>/dev/null
+openssl x509 -in "$FAKEYS/release.crt" -outform der >"$tmp/release.der"
 printf 'KEK-CERT-DER' >"$FAKEYS/kek.cert.der"
 printf 'PK-CERT-DER' >"$FAKEYS/pk.cert.der"
 # the ESP fallback stages the .auth packets AND the .esl lists (KeyTool.efi
@@ -414,6 +420,19 @@ for _b_pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der';
     _b_src=${_b_pair#* }
     assert_eq "enroll: fallback staged the import-ready $_b_cer" "1" \
         "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_cer" ] && echo 1 || echo 0)"
+done
+# REAL-SERVER 2026-09-29 (Dell PowerEdge R640): db.cer is the DER ENCODING of
+# release.crt, NOT a PEM byte copy — the firmware UI rejected the PEM .cer
+# ("The import operation did not complete successfully") while DER imported
+# fine. KEK.cer / PK.cer stay byte copies (their keydir artifacts are DER).
+assert_eq "enroll: db.cer is the DER encoding of release.crt (Dell UIs reject PEM .cer)" \
+    "$(cat "$tmp/release.der")" "$(cat "$tmp/esp-b/alpine-fde-keys/db.cer")"
+assert_eq "enroll: db.cer parses as DER and carries the release.crt subject" \
+    "$(openssl x509 -in "$FAKEYS/release.crt" -noout -subject)" \
+    "$(openssl x509 -inform der -in "$tmp/esp-b/alpine-fde-keys/db.cer" -noout -subject)"
+for _b_pair in 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+    _b_cer=${_b_pair%% *}
+    _b_src=${_b_pair#* }
     assert_eq "enroll: $_b_cer is a byte-for-byte copy of $_b_src" \
         "$(cat "$FAKEYS/$_b_src")" "$(cat "$tmp/esp-b/alpine-fde-keys/$_b_cer")"
 done
@@ -617,8 +636,8 @@ for _f_f in db.auth kek.auth pk.auth db.cer KEK.cer PK.cer README.txt '!import_a
     assert_eq "enroll deferred: staged $_f_f" "1" \
         "$([ -f "$tmp/esp-f/alpine-fde-keys/$_f_f" ] && echo 1 || echo 0)"
 done
-assert_eq "enroll deferred: db.cer is a byte-for-byte copy of release.crt" \
-    "$(cat "$FAKEYS/release.crt")" "$(cat "$tmp/esp-f/alpine-fde-keys/db.cer")"
+assert_eq "enroll deferred: db.cer is the DER encoding of release.crt (not a PEM copy)" \
+    "$(cat "$tmp/release.der")" "$(cat "$tmp/esp-f/alpine-fde-keys/db.cer")"
 _f_readme=$(cat "$tmp/esp-f/alpine-fde-keys/README.txt")
 assert_contains "enroll deferred: README leads with the DEFER note" "$_f_readme" \
     "DEFERRED ENROLLMENT"

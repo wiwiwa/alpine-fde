@@ -230,8 +230,14 @@ printf 'PKPRIV' >"$EK/pk.priv.pem"
 printf 'PKCERT' >"$EK/pk.cert.pem"
 # the operator's OWN certs in the keydir artifact forms (REAL-SERVER
 # 2026-09-28: the ESP fallback stages them as import-ready db.cer/KEK.cer/
-# PK.cer — the firmware setup UI cannot import .auth packets)
-printf 'RELEASE-CRT-PEM' >"$EK/release.crt"
+# PK.cer — the firmware setup UI cannot import .auth packets). release.crt
+# must be a REAL certificate (2026-09-29): the staging converts it PEM -> DER
+# with openssl x509 (Dell .cer import is DER-only), so the db.cer pin
+# compares against a live conversion of this exact cert.
+openssl req -x509 -newkey rsa:2048 -keyout "$TMP/release.key" \
+    -out "$EK/release.crt" -days 30 -nodes \
+    -subj "/CN=alpine-fde-test-release" 2>/dev/null
+openssl x509 -in "$EK/release.crt" -outform der >"$TMP/release.der"
 printf 'KEK-CERT-DER' >"$EK/kek.cert.der"
 printf 'PK-CERT-DER' >"$EK/pk.cert.der"
 
@@ -331,6 +337,18 @@ for pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
     cer=${pair%% *}; src=${pair#* }
     assert_eq "ESP fallback staged the import-ready $cer" "1" \
         "$([ -f "$ESP3/alpine-fde-keys/$cer" ] && echo 1 || echo 0)"
+done
+# REAL-SERVER 2026-09-29 (Dell PowerEdge R640): db.cer is the DER ENCODING of
+# release.crt, NOT a PEM byte copy — the firmware UI rejected the PEM .cer
+# ("The import operation did not complete successfully") while DER imported
+# fine. KEK.cer / PK.cer stay byte copies (their keydir artifacts are DER).
+assert_eq "db.cer is the DER encoding of release.crt (Dell UIs reject PEM .cer)" \
+    "$(cat "$TMP/release.der")" "$(cat "$ESP3/alpine-fde-keys/db.cer")"
+assert_eq "db.cer parses as DER and carries the release.crt subject" \
+    "$(openssl x509 -in "$EK/release.crt" -noout -subject)" \
+    "$(openssl x509 -inform der -in "$ESP3/alpine-fde-keys/db.cer" -noout -subject)"
+for pair in 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+    cer=${pair%% *}; src=${pair#* }
     assert_eq "$cer is a byte-for-byte copy of $src" \
         "$(cat "$EK/$src")" "$(cat "$ESP3/alpine-fde-keys/$cer")"
 done

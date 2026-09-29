@@ -194,8 +194,10 @@ fw_var_write() {
 # when the firmware refuses NVRAM enrollment (blocker #12 declutter): stages
 # the three .auth packets (db.auth/kek.auth/pk.auth) + the operator's OWN
 # certificates as import-ready db.cer/KEK.cer/PK.cer (REAL-SERVER 2026-09-28,
-# Dell PowerEdge R640: the firmware setup UI imports X.509 .cer/.der/.crt
-# ONLY — it cannot import .auth packets, so without the certs the operator
+# Dell PowerEdge R640: the firmware setup UI imports X.509 .cer files ONLY —
+# DER-encoded (2026-09-29: the PEM byte-copy db.cer was rejected by the UI;
+# see the staging comment below) — it cannot import .auth packets, so without
+# the certs the operator
 # had NO importable files for PK/KEK/db and had to unlock the LUKS target to
 # fish release.crt/kek.cert.der/pk.cert.der out of /etc/alpine-fde/keys) +
 # the vendor .cer set + README.txt (the operator decision tree, printable
@@ -251,9 +253,20 @@ fw_auth_esp_fallback() {
     # #25 cert-mixup fix, the db authorizes BOOT-IMAGE signers; kek.esl =
     # kek.cert.der; pk.esl = pk.cert.der), so the keydir must already carry
     # them; a missing cert is a custody bug and dies fail-closed like a
-    # missing packet. Formats as stored: release.crt is PEM, kek/pk
-    # .cert.der are DER — firmware UIs accept both.
-    for _fef_pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
+    # missing packet. Formats: kek.cert.der / pk.cert.der are stored DER and
+    # stage as byte copies; release.crt is stored PEM and db.cer stages as its
+    # DER ENCODING — REAL-SERVER 2026-09-29 (Dell PowerEdge R640): Dell's
+    # firmware UI REJECTED the PEM byte-copy db.cer ("The import operation
+    # did not complete successfully") while the DER KEK.cer/PK.cer imported
+    # fine in an earlier round — Dell's .cer import is DER-only, so the PEM ->
+    # DER conversion happens at staging time (openssl is present in every
+    # environment this runs in: the live env and the guest both carry it).
+    [ -f "$_fef_keys/release.crt" ] ||
+        die "firmware: cannot stage $_fef_dst/db.cer — release.crt is missing from $_fef_keys (the .auth packets are built from this cert; provision stage1 custody bug)"
+    openssl x509 -in "$_fef_keys/release.crt" -outform der -out "$_fef_dst/db.cer" ||
+        die "firmware: cannot convert $_fef_keys/release.crt (PEM) -> $_fef_dst/db.cer (DER) — openssl x509 failed (a malformed release.crt is a provision stage1 custody bug); repair manually with: openssl x509 -in release.crt -outform der -out db.cer"
+    info "firmware: staged db.cer (DER, from release.crt) into $_fef_dst (ESP fallback)"
+    for _fef_pair in 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
         _fef_cer=${_fef_pair%% *}
         _fef_src=${_fef_pair#* }
         [ -f "$_fef_keys/$_fef_src" ] ||
@@ -307,9 +320,11 @@ STEP 1 — did the firmware ACCEPT the installer's NVRAM writes?
 
 STEP 2 (refused case only) — import order in the firmware UI:
 
-  The firmware setup UI imports X.509 CERTIFICATES (.cer/.der/.crt) — it
-  cannot import .auth packets. The import-ready certificates are staged
-  here next to the packets:
+  The firmware setup UI imports X.509 CERTIFICATES — it cannot import .auth
+  packets. Dell PowerEdge firmware imports .cer files in DER encoding ONLY
+  (a PEM .cer is rejected with "The import operation did not complete
+  successfully"), so every staged .cer in this directory is DER. The
+  import-ready certificates are staged here next to the packets:
 
     1. db.cer  — Key Database (the alpine-fde release certificate;
                  trusts the signed bootloader/kernel)
@@ -330,9 +345,10 @@ STEP 2 (refused case only) — import order in the firmware UI:
   write; when importing through the UI you import them as the two files
   listed above.
 
-  Formats: db.cer is PEM, KEK.cer / PK.cer are DER — firmware UIs accept
-  both. (The vendor .cer basename matches certs/vendor/; it differs when
-  ALPINE_FDE_DB_VENDOR_DIR points elsewhere.)
+  Formats: ALL the staged .cer files are DER. db.cer is the DER encoding of
+  the keydir's release.crt (converted at staging time — the PEM original is
+  NOT importable on Dell firmware). (The vendor .cer basename matches
+  certs/vendor/; it differs when ALPINE_FDE_DB_VENDOR_DIR points elsewhere.)
 
   The .auth packets staged alongside (db.auth kek.auth pk.auth) are for
   KeyTool.efi / efi-updatevar repair only — the firmware setup UI cannot

@@ -54,7 +54,7 @@ Findings from a live Dell PowerEdge install (2026-09). The installer and boot ho
    4. Import **`PK.cer`** into the Platform Key **last** — enrolling the PK flips the platform to **User Mode** and locks the key database; no further key imports are possible until the PK is removed again.
    5. **Enable Secure Boot** (the platform must show User Mode, Custom mode), set the firmware administrator password, save and exit, and let the install/first boot finish (first boot stays guarded until the keys are imported, ADR-20).
 
-   `db.cer` is PEM and `KEK.cer` / `PK.cer` are DER — the firmware UI accepts both formats.
+   All the staged `.cer` files are **DER** — Dell PowerEdge firmware imports `.cer` files in DER encoding only (a PEM `.cer` is rejected with "The import operation did not complete successfully"; observed live 2026-09-29). `db.cer` is the DER encoding of the keydir's `release.crt`, converted at staging time.
 6. **Boot entry is created for you.** `install` creates the firmware boot entry labeled **`Alpine FDE`** (capitalized), targeting the ESP's `\EFI\BOOT\BOOTX64.EFI`, first in `BootOrder` (idempotent: re-installs reuse or recreate it — no manual `efibootmgr` run is needed).
 
 ---

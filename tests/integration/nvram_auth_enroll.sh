@@ -383,9 +383,14 @@ mkvar "$E7" SetupMode "$GUID_GLOBAL" 0
 printf '\007\000\000\000FACTORY-PK' >"$E7/PK-$GUID_GLOBAL"
 KD7=$T/keys-defer
 cp -r "$T/keys" "$KD7"
-printf -- '-----BEGIN CERTIFICATE-----\nRELEASE-CRT\n-----END CERTIFICATE-----\n' >"$KD7/release.crt"
+# release.crt must be a REAL PEM certificate (2026-09-29): the deferred
+# staging converts it PEM -> DER with openssl x509 (Dell's .cer import is
+# DER-only — a PEM .cer is rejected by the firmware UI), so a fake PEM body
+# would die fail-closed in the conversion.
+cp "$MKAUTH_CERT" "$KD7/release.crt"
 printf 'KEK-CERT-DER-BYTES' >"$KD7/kek.cert.der"
 printf 'PK-CERT-DER-BYTES' >"$KD7/pk.cert.der"
+openssl x509 -in "$KD7/release.crt" -outform der >"$T/release.der"
 DEFER_MARKER="$T/deferred-marker"
 rm -f "$DEFER_MARKER"
 UPDATE_LOG3="$T/update3.log"; CHATTR_LOG3="$T/chattr3.log"
@@ -409,6 +414,13 @@ for v in db.cer KEK.cer PK.cer; do
     assert_file_exists "deferred enroll: staged the import-ready $v" \
         "$T/esp-defer/alpine-fde-keys/$v"
 done
+# REAL-SERVER 2026-09-29 (Dell PowerEdge R640): db.cer stages as the DER
+# encoding of release.crt — the firmware UI rejects PEM .cer imports
+assert_eq "deferred enroll: db.cer is the DER encoding of release.crt (Dell UIs reject PEM .cer)" \
+    "$(cat "$T/release.der")" "$(cat "$T/esp-defer/alpine-fde-keys/db.cer")"
+assert_eq "deferred enroll: db.cer parses as DER and carries the release.crt subject" \
+    "$(openssl x509 -in "$KD7/release.crt" -noout -subject)" \
+    "$(openssl x509 -inform der -in "$T/esp-defer/alpine-fde-keys/db.cer" -noout -subject)"
 assert_file_exists "deferred enroll: README.txt staged" \
     "$T/esp-defer/alpine-fde-keys/README.txt"
 assert_contains "deferred enroll: README leads with the DEFER note" \
