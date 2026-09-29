@@ -582,6 +582,42 @@ _uk_body() {
             err "kernel build: ukify did not predict an enter-initrd PCR 11 digest ($_ukbv_v variant, got '${_uk_v_pcr11:-<none>}')"
             return 1
         fi
+        # Mechanism A''/G-B6 .pcrsig injection (R640 2026-09-29): the hook's I3
+        # gate and the seal's PolicyAuthorize consume the ALPINE-FDE signature
+        # shape — {"sha256":[{"pcrs":[7,11],"pol":<policy digest>,"sig":<release
+        # -key sig>}]} — produced by policy_sign_json over the entry's d7
+        # (finalized baseline) and d11 (this variant's prediction). ukify's own
+        # embedded .pcrsig is the systemd shape with pcrs [11]-only, which the
+        # hook's extraction can never match ("no release-key-signed .pcrsig
+        # entry" -> passphrase on every boot). With a finalized baseline, REBUILD
+        # the UKI with --pcrsig=<signed json> so the embedded section is the
+        # alpine-fde shape; without a baseline keep the pending behaviour (the
+        # boot falls back to the recovery passphrase).
+        _ukbv_pcrsig="$_uk_work/pcrsig-$_ukbv_v.json"
+        if policy_check_digest "$_uk_d7"; then
+            policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
+                "$_uk_keydir/release.pub" "$_ukbv_pcrsig" || {
+                _uk_fail_reason="policy signature failed ($_ukbv_v variant)"
+                err "kernel build: $_uk_fail_reason"
+                return 1
+            }
+            set -- \
+                "--linux=$_uk_kernel" \
+                "--initrd=$_uk_work/initrd.img" \
+                "--cmdline=@$_ukbv_cl" \
+                "--os-release=@$_uk_osrelease" \
+                "--uname=$_uk_kver" \
+                --pcr-banks=sha256 \
+                "--pcr-public-key=$_uk_keydir/release.pub" \
+                "--pcrsig=$_ukbv_pcrsig" \
+                "--output=$_ukbv_out"
+            if ! ukify build "$@" >/dev/null; then
+                _uk_fail_reason="ukify --pcrsig injection failed ($_ukbv_v variant)"
+                err "kernel build: $_uk_fail_reason"
+                return 1
+            fi
+            info "kernel build: embedded alpine-fde .pcrsig ($_ukbv_v variant, pol from d7+d11)"
+        fi
         # MD-01: explicit guards — sbsign failing must not fall through into
         # sbverify and get misreported as "sbverify rejected the signed UKI".
         if ! sbsign --key "$_uk_keyfile" --cert "$_uk_keydir/release.crt" \
