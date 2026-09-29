@@ -850,6 +850,11 @@ echo "alpine-fde-harness: invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-uns
 # lost/corrupted 16550 burst under -j load cannot false-fail a single-emission
 # console assert. The production splice (lib/initramfs.sh) leaves the seam
 # OFF — an operator's console is not a capture pipe.
+# COMPOSITION with the hook's dual-console fan-out (R640 fix): while this
+# seam is ON the hook SUPPRESSES its explicit /dev/ttyS0 fan-out member — the
+# echo copy already owns serial duplication, so the guest's serial capture
+# sees exactly live+echo per sentence (what every e2e count pins) and the
+# guest's video console additionally renders the live lines. No triple.
 FDE_SERIAL_ECHO=1
 export FDE_SERIAL_ECHO
 sh /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh

@@ -77,6 +77,22 @@
 #      bound takes the genuine token_missing verdict (preamble + prompt).
 #      Without the nlplug-findfs binary the resolver goes straight to the
 #      by-uuid path (FDE_DISK_BY_UUID_DIR stays meaningful).
+#  12. dual-console fan-out (real-server R640, 2026-09-29): the target cmdline
+#      ends with console=ttyS0,115200 and LAST-CONSOLE-WINS makes /dev/console
+#      SERIAL-ONLY — the operator's screen froze at the kernel disk-attach
+#      line while the hook sat invisible at the recovery prompt. Every pinned
+#      message therefore renders on BOTH the console stream (/dev/console,
+#      stderr — unchanged) AND the video console (FDE_DEV_DIR/tty0, falling
+#      back to tty1) AND on ttyS0 when ttyS0 is present and NOT already the
+#      kernel's preferred console (CON_CONSDEV flag in FDE_PROC_CONSOLES —
+#      then the stderr write already reaches that UART and an explicit second
+#      write would double production serial). Device resolution happens ONCE
+#      at hook start; a device absent or unwritable is DROPPED and can never
+#      fail a message or the hook (stubs: a tty0 that is a directory; an empty
+#      dev dir). The passphrase READ stays on /dev/console (stdin) — only the
+#      prompt TEXT fans out. Under FDE_SERIAL_ECHO=1 the ttyS0 fan-out member
+#      is SUPPRESSED: the echo copy already owns serial duplication, so the
+#      e2e's live+echo counts hold with no triple emission.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -118,6 +134,11 @@ BIN=$TMP/bin
 LOG=$TMP/argv.log
 : >"$LOG"
 mkdir -p "$BIN" "$TMP/extra" "$TMP/tmp" "$TMP/newroot/etc/alpine-fde"
+# hermetic device-probe default for run_hook (item 12): an EMPTY dev dir means
+# the fan-out resolves to the console stream alone — byte-identical emission
+# counts to every pre-fan-out leg. The dual-console legs below populate their
+# own stub dev dirs (regular files: tty ttys ignore O_APPEND, stubs accumulate).
+mkdir -p "$TMP/dev"
 
 # --- fixtures -------------------------------------------------------------------
 KEYDIR=$REPO/fixtures/keys
@@ -394,6 +415,7 @@ run_hook() { # <stdin-file> [VAR=VAL ...]
         FDE_CRYPTTAB="$TMP/crypttab" FDE_TMPDIR="$TMP/tmp" \
         FDE_EFIVARS_DIR="$TMP/efivars" \
         FDE_NLPLUG_FINDFS="$BIN/nlplug-findfs" \
+        FDE_DEV_DIR="$TMP/dev" \
         FDE_TEST_TOKEN_FILE="$TMP/token.json" "$@" \
         sh "$HOOK" <"$stdin" >"$TMP/out.log" 2>&1
     echo $?
@@ -1069,7 +1091,7 @@ run_live_leg() {
 
     LIVE=$TMP/live
     LIVEBIN=$LIVE/bin
-    mkdir -p "$LIVEBIN" "$LIVE/extra" "$LIVE/tmp" "$LIVE/newroot/etc/alpine-fde"
+    mkdir -p "$LIVEBIN" "$LIVE/extra" "$LIVE/tmp" "$LIVE/dev" "$LIVE/newroot/etc/alpine-fde"
     TPMDIR=$TMP/live-swtpm
     if ! swtpm_start "$TPMDIR"; then
         _fail "live leg: swtpm did not start"
@@ -1142,6 +1164,7 @@ EOF
         FDE_NEWROOT="$LIVE/newroot" FDE_EXTRA_DIR="$LIVE/extra" \
         FDE_CRYPTTAB="$LIVE/crypttab" FDE_TMPDIR="$LIVE/tmp" \
         FDE_EFIVARS_DIR="$LIVE/efivars" \
+        FDE_DEV_DIR="$LIVE/dev" \
         sh "$HOOK" </dev/null >"$LIVE/hook.out" 2>&1
     LIVE_RC=$?
     assert_rc "live swtpm: hook rc 0" 0 "$LIVE_RC"
@@ -1174,7 +1197,7 @@ fi
 
 # the hook's SB-guard reject path reads the efivars dir — reuse the fixture
 SBG=$TMP/sb-guard
-mkdir -p "$SBG/sys/firmware/efi/efivars" "$SBG/tmp"
+mkdir -p "$SBG/sys/firmware/efi/efivars" "$SBG/tmp" "$SBG/dev"
 GUID_GLOBAL="8be4df61-93ca-11d2-aa0d-00e098032b8c"
 # SecureBoot=0, SetupMode=1 -> the SB guard fires
 printf '\007\000\000\000\000' >"$SBG/sys/firmware/efi/efivars/SecureBoot-$GUID_GLOBAL"
@@ -1185,6 +1208,7 @@ printf '\007\000\000\000\001' >"$SBG/sys/firmware/efi/efivars/SetupMode-$GUID_GL
 chmod 555 "$SBG/sys/firmware/efi/efivars"
 OUT_A=$(FDE_EFIVARS_DIR="$SBG/sys/firmware/efi/efivars" \
     FDE_NEWROOT="$SBG" FDE_TMPDIR="$SBG/tmp" \
+    FDE_DEV_DIR="$SBG/dev" \
     sh "$HOOK" 2>&1)
 SBG_RC=$?
 chmod 755 "$SBG/sys/firmware/efi/efivars"
@@ -1205,11 +1229,12 @@ assert_contains "write-fails: reboot -f called (not poweroff)" "$OUT_A" \
 # (b) OsIndications write SUCCEEDS (spec-compliant firmware): Enter-prompt +
 #     reboot-into-setup unchanged
 SBG2=$TMP/sb-guard-ok
-mkdir -p "$SBG2/sys/firmware/efi/efivars" "$SBG2/tmp"
+mkdir -p "$SBG2/sys/firmware/efi/efivars" "$SBG2/tmp" "$SBG2/dev"
 printf '\007\000\000\000\000' >"$SBG2/sys/firmware/efi/efivars/SecureBoot-$GUID_GLOBAL"
 printf '\007\000\000\000\001' >"$SBG2/sys/firmware/efi/efivars/SetupMode-$GUID_GLOBAL"
 OUT_B=$(FDE_EFIVARS_DIR="$SBG2/sys/firmware/efi/efivars" \
     FDE_NEWROOT="$SBG2" FDE_TMPDIR="$SBG2/tmp" \
+    FDE_DEV_DIR="$SBG2/dev" \
     sh "$HOOK" 2>&1)
 assert_contains "OsIndications-ok: boot-to-firmware-setup requested" "$OUT_B" \
     "boot-to-firmware-setup requested"
@@ -1246,5 +1271,101 @@ assert_eq "serial echo: bounded to 3 opens then poweroff once (semantics unchang
 # (The seam's OFF default is pinned by every earlier leg: they set no
 # FDE_SERIAL_ECHO and assert the exact single-emission counts, e.g.
 # "3-strike: prompts carry (attempt 1..3 of 3) counters == 1 1 1".)
+
+# =============================================================================
+# 12. DUAL-CONSOLE FAN-OUT (real-server R640, 2026-09-29; header pin item 12):
+#     with last-console-wins console=ttyS0 the /dev/console stream is
+#     serial-only — the operator's SCREEN froze at the kernel disk-attach
+#     line while the hook sat invisible at the recovery prompt. Every pinned
+#     message (refusal line, warn preamble, closing line, prompt sentence +
+#     attempt counter) must appear on the console stream AND on the video
+#     console AND on ttyS0 (when present and not already the kernel's
+#     preferred console). Stub devices are regular files (ttys ignore
+#     O_APPEND; stubs accumulate); FDE_PROC_CONSOLES is stubbed so the
+#     CONSDEV dedupe is deterministic on any host.
+# =============================================================================
+reset_leg
+mkdir -p "$TMP/dev-dual"
+: >"$TMP/dev-dual/tty0"
+: >"$TMP/dev-dual/ttyS0"
+printf 'tty0 -W- (E   p a) 4:7\nttyS0 -W- (E   p a) 4:64\n' >"$TMP/proc-consoles-noconsdev"
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TPM_FAIL=1 FDE_OPEN_FAIL=1 \
+    FDE_DEV_DIR="$TMP/dev-dual" FDE_PROC_CONSOLES="$TMP/proc-consoles-noconsdev")
+assert_ne "dual console: hook rc nonzero (3-strike fail-closed unchanged)" "0" "$rc"
+# console stream (/dev/console via stderr) — the pinned counts, unchanged
+assert_eq "dual console: console stream carries the token_missing preamble ONCE" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
+assert_eq "dual console: console stream carries the closing line ONCE" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/out.log" || true)"
+assert_eq "dual console: console stream carries exactly 3 countered prompts" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/out.log" || true)"
+assert_eq "dual console: console stream attempt counters (attempt 1..3 of 3)" "1 1 1" \
+    "$(grep -cF '(attempt 1 of 3)' "$TMP/out.log" || true) $(grep -cF '(attempt 2 of 3)' "$TMP/out.log" || true) $(grep -cF '(attempt 3 of 3)' "$TMP/out.log" || true)"
+# VIDEO console (the R640 fix): EVERY pinned user-visible line also renders
+for dev in tty0 ttyS0; do
+    assert_eq "dual console: $dev carries the TPM-absent refusal line" "1" \
+        "$(grep -cF "$(sentinel_of unseal_tpm_absent)" "$TMP/dev-dual/$dev" || true)"
+    assert_eq "dual console: $dev carries the token_missing preamble" "1" \
+        "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/dev-dual/$dev" || true)"
+    assert_eq "dual console: $dev carries the audit/reseal closing line" "1" \
+        "$(grep -cF "$(sentinel_of unseal_warn_reclose)" "$TMP/dev-dual/$dev" || true)"
+    assert_eq "dual console: the PROMPT renders on $dev (sentence + counter, 3 events)" "3" \
+        "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/dev-dual/$dev" || true)"
+    assert_eq "dual console: $dev carries the (attempt 1..3 of 3) counters" "1 1 1" \
+        "$(grep -cF '(attempt 1 of 3)' "$TMP/dev-dual/$dev" || true) $(grep -cF '(attempt 2 of 3)' "$TMP/dev-dual/$dev" || true) $(grep -cF '(attempt 3 of 3)' "$TMP/dev-dual/$dev" || true)"
+    assert_eq "dual console: $dev carries NO [serial-echo] copy (echo seam OFF)" "0" \
+        "$(grep -cF '[serial-echo]' "$TMP/dev-dual/$dev" || true)"
+done
+assert_eq "dual console: console stream carries NO [serial-echo] copy (echo OFF)" "0" \
+    "$(grep -cF '[serial-echo]' "$TMP/out.log" || true)"
+assert_eq "dual console: bounded to 3 opens then poweroff once (semantics unchanged)" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
+
+# --- 12b. CONSDEV dedupe: when the kernel's preferred console (/dev/console,
+#          CON_CONSDEV in /proc/consoles) IS ttyS0, the stderr write already
+#          reaches the UART — the explicit ttyS0 fan-out member is SUPPRESSED
+#          so production serial stays single-emission ("single emission is
+#          the shipped UX"); the video console still receives everything.
+reset_leg
+mkdir -p "$TMP/dev-consdev"
+: >"$TMP/dev-consdev/tty0"
+: >"$TMP/dev-consdev/ttyS0"
+printf 'tty0 -W- (EC ) 4:7\nttyS0 -W- (EC  p a) 4:64\n' >"$TMP/proc-consoles-consdev"
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TPM_FAIL=1 FDE_OPEN_FAIL=1 \
+    FDE_DEV_DIR="$TMP/dev-consdev" FDE_PROC_CONSOLES="$TMP/proc-consoles-consdev")
+assert_ne "consdev dedupe: hook rc nonzero (fail-closed unchanged)" "0" "$rc"
+assert_eq "consdev dedupe: ttyS0 receives NOTHING (the console write already reaches the UART)" "0" \
+    "$(grep -cF 'alpine-fde-unseal:' "$TMP/dev-consdev/ttyS0" || true)"
+assert_eq "consdev dedupe: tty0 still carries the token_missing preamble" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/dev-consdev/tty0" || true)"
+assert_eq "consdev dedupe: tty0 still carries exactly 3 countered prompts" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/dev-consdev/tty0" || true)"
+
+# --- 12c. tty1 FALLBACK: no tty0 -> the video fan-out resolves to tty1
+reset_leg
+mkdir -p "$TMP/dev-tty1"
+: >"$TMP/dev-tty1/tty1"
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TPM_FAIL=1 FDE_OPEN_FAIL=1 FDE_DEV_DIR="$TMP/dev-tty1")
+assert_ne "tty1 fallback: hook rc nonzero (fail-closed unchanged)" "0" "$rc"
+assert_eq "tty1 fallback: tty1 carries the token_missing preamble" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/dev-tty1/tty1" || true)"
+assert_eq "tty1 fallback: the PROMPT renders on tty1 (3 events)" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/dev-tty1/tty1" || true)"
+
+# --- 12d. DEVICE-MISSING / UNWRITABLE paths: a device that is absent (the
+#          empty run_hook dev dir every earlier leg runs under) or present
+#          but unopenable (tty0 stubbed as a DIRECTORY — the subshell open
+#          probe fails) is DROPPED from the fan-out and never fails a
+#          message or the hook; the console stream stays complete.
+reset_leg
+mkdir -p "$TMP/dev-bad/tty0" # a DIRECTORY: -e true, `: >dir` fails
+rc=$(run_hook "$TMP/stdin-3bad" FDE_TPM_FAIL=1 FDE_OPEN_FAIL=1 FDE_DEV_DIR="$TMP/dev-bad")
+assert_ne "unwritable tty0: hook rc nonzero (dropped device never fails the hook)" "0" "$rc"
+assert_eq "unwritable tty0: console stream keeps the token_missing preamble" "1" \
+    "$(grep -cF "$(sentinel_of unseal_warn_token_missing)" "$TMP/out.log" || true)"
+assert_eq "unwritable tty0: console stream keeps exactly 3 countered prompts" "3" \
+    "$(grep -cE "$(sentinel_of unseal_prompt_re)" "$TMP/out.log" || true)"
+assert_eq "unwritable tty0: bounded to 3 opens then poweroff once" \
+    "3 1" "$(argv_count '^cryptsetup open') $(argv_count '^poweroff')"
 
 finish

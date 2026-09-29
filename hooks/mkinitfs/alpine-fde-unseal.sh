@@ -48,7 +48,25 @@
 #
 # Test seams (the real boot path uses the defaults): FDE_CRYPTTAB,
 # FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
-# FDE_NLPLUG_FINDFS. (FDE_NEWROOT retired with the state flip, item 10b.)
+# FDE_NLPLUG_FINDFS, FDE_DEV_DIR, FDE_PROC_CONSOLES. (FDE_NEWROOT retired
+# with the state flip, item 10b.)
+#   DUAL-CONSOLE FAN-OUT (REAL-SERVER R640, 2026-09-29): the target cmdline
+#   ends with console=ttyS0,115200 and LAST-CONSOLE-WINS makes /dev/console
+#   SERIAL-ONLY — kernel printk fans out to every console= device, but the
+#   hook's userspace writes (stderr) reached the serial port ALONE: on the
+#   R640 the operator's SCREEN froze at the kernel disk-attach line while the
+#   hook sat invisible at the recovery prompt. Every user-visible emission
+#   (_msg, _err, _fdh_warn, the prompt text + attempt counter) therefore fans
+#   out via _fdh_console_emit: /dev/console (stderr, ALWAYS — the read side;
+#   the PASSPHRASE READ itself stays on /dev/console, only the text fans out)
+#   PLUS the video console (/dev/tty0, falling back to /dev/tty1) and
+#   /dev/ttyS0, each probed present+openable ONCE at hook start (FDE_DEV_DIR
+#   is the device dir, default /dev) — a device that is absent or unwritable
+#   is dropped from the fan-out and can never fail a message or the hook.
+#   /dev/ttyS0 joins the fan-out only when the kernel's preferred console
+#   (/dev/console, CON_CONSDEV in FDE_PROC_CONSOLES, default /proc/consoles)
+#   is NOT already ttyS0 — the stderr write already reaches that UART, and an
+#   explicit second write would double every production serial line.
 #   FDE_SERIAL_ECHO (default 0; the e2e initrd splice turns it ON — decision
 #   queue item 24a): every console line is emitted TWICE — the live line, then
 #   an "[serial-echo]" copy a breath later — so one lost/corrupted 16550 burst
@@ -63,7 +81,11 @@
 #   prompt events") while each prompt EVENT is corroborated from either
 #   emission (candidate-set unique attempt counting in the scenarios). OFF in
 #   production: an operator's console is not a capture pipe; single emission
-#   is the shipped UX.
+#   is the shipped UX. COMPOSITION with the fan-out (no triple serial): while
+#   the seam is ON the explicit /dev/ttyS0 fan-out member is SUPPRESSED — the
+#   echo copy already owns serial duplication (live + echo, both via
+#   /dev/console = 2 per sentence, exactly what the e2e counts pin), while the
+#   video console still receives every live line.
 #
 # Busybox mkinitfs environment only: no bashisms, no GNU tools beyond busybox
 # (sha256sum/od/dd/sed/awk/tr/mktemp/date), openssl + cryptsetup + tpm2-tools
@@ -97,6 +119,57 @@ FDE_NLPLUG_FINDFS=${FDE_NLPLUG_FINDFS:-nlplug-findfs}
 # Item 24a corroboration seam (see the header comment): 0 = single emission
 # (production default), 1 = dual emission (live line + "[serial-echo]" copy).
 FDE_SERIAL_ECHO=${FDE_SERIAL_ECHO:-0}
+# Dual-console fan-out seams (see the header comment; the real boot path uses
+# the defaults /dev and /proc/consoles).
+FDE_DEV_DIR=${FDE_DEV_DIR:-/dev}
+FDE_PROC_CONSOLES=${FDE_PROC_CONSOLES:-/proc/consoles}
+
+# Console device resolution — O(1), ONCE at hook start (never per message):
+#   _fdh_console_video  the video console to ALSO write ('' when none)
+#   _fdh_console_serial the serial device to ALSO write ('' when redundant)
+# Each candidate must EXIST and be OPENABLE (`: >dev` in a subshell — a
+# redirection failure on a special builtin could abort the hook, so the probe
+# is isolated) or it is dropped from the fan-out: a missing device never
+# fails a message and never fails the hook.
+_fdh_console_video=''
+for _fdh_c in "$FDE_DEV_DIR/tty0" "$FDE_DEV_DIR/tty1"; do
+    if [ -e "$_fdh_c" ] && ( : >"$_fdh_c" ) 2>/dev/null; then
+        _fdh_console_video=$_fdh_c
+        break
+    fi
+done
+# /dev/ttyS0 joins the fan-out ONLY when (a) the e2e echo seam is OFF — under
+# FDE_SERIAL_ECHO=1 the "[serial-echo]" copy already duplicates every line on
+# the console path and an explicit UART write would TRIPLE the serial traffic
+# the e2e counts pin at live+echo — and (b) the kernel's preferred console
+# (CON_CONSDEV, the 'C' flag in /proc/consoles) is NOT already ttyS0 — then
+# /dev/console (stderr) already reaches the UART and a second write would
+# double every production serial line ("single emission is the shipped UX").
+# An unreadable /proc/consoles falls safe to INCLUDE (a redundant line beats
+# a swallowed one; /dev/tty0-then-tty1 above still carries the video).
+_fdh_console_serial=''
+if [ "$FDE_SERIAL_ECHO" != 1 ] && [ -e "$FDE_DEV_DIR/ttyS0" ] &&
+    ( : >"$FDE_DEV_DIR/ttyS0" ) 2>/dev/null; then
+    if ! grep -q '^ttyS0 .*(.*C' "$FDE_PROC_CONSOLES" 2>/dev/null; then
+        _fdh_console_serial=$FDE_DEV_DIR/ttyS0
+    fi
+fi
+
+# _fdh_console_emit FMT [ARG] — ONE user-visible emission to EVERY console:
+# /dev/console (stderr) always, plus the video and serial devices resolved
+# above (APPEND opens — a tty ignores O_APPEND, a regular-file test stub
+# accumulates). Per-device write failures are guarded (`|| :`); the
+# resolution-time probes make them the rare case. FMT is an internal literal.
+_fdh_console_emit() {
+    printf "$1" "${2-}" >&2
+    if [ -n "$_fdh_console_video" ]; then
+        printf "$1" "${2-}" >>"$_fdh_console_video" 2>/dev/null || :
+    fi
+    if [ -n "$_fdh_console_serial" ]; then
+        printf "$1" "${2-}" >>"$_fdh_console_serial" 2>/dev/null || :
+    fi
+    return 0
+}
 
 # Warn-before-prompt REASON preambles (user decision queue item 8, §8.2 step
 # 5): ONE canonical sentence per refusal class, printed verbatim by the branch
@@ -113,13 +186,17 @@ FDE_WARN_SIG_REFUSED='the booted kernel image failed signature/PCR policy — li
 FDE_WARN_TOKEN_MISSING='the TPM seal is absent — the TPM may have been cleared'
 FDE_WARN_CLOSING='after boot, run: audit, then reseal to restore passwordless unlock'
 
-# _msg LINE — the console emission. With FDE_SERIAL_ECHO=1 (item 24a) the line
-# is immediately re-emitted as an "[serial-echo]" copy: a SECOND, independent
-# UART burst a breath after the first, so one lost/corrupted burst under
-# parallel load leaves the other intact. Both copies carry the pinned sentence
-# VERBATIM — asserts that require the text are corroborated, never weakened.
+# _msg LINE — the console emission, fanned out to BOTH consoles via
+# _fdh_console_emit (/dev/console + video + serial per the resolution above).
+# With FDE_SERIAL_ECHO=1 (item 24a) the line is immediately re-emitted as an
+# "[serial-echo]" copy: a SECOND, independent burst a breath after the first,
+# so one lost/corrupted burst under parallel load leaves the other intact.
+# The echo copy stays on the console stream only (stderr): the seam OWNS
+# serial duplication, the fan-out owns device coverage — together they never
+# triple-emit on serial. Both copies carry the pinned sentence VERBATIM —
+# asserts that require the text are corroborated, never weakened.
 _msg() {
-    printf 'alpine-fde-unseal: %s\n' "$1" >&2
+    _fdh_console_emit 'alpine-fde-unseal: %s\n' "$1"
     [ "$FDE_SERIAL_ECHO" = 1 ] || return 0
     printf 'alpine-fde-unseal: [serial-echo] %s\n' "$1" >&2
 }
@@ -313,7 +390,10 @@ _fdh_resolve_dev() {
 # status-spec decision 10b): N is 1-based and counted across ALL members
 # (3 strikes TOTAL). The counter PREFIXES the pinned prompt shape (sentinel
 # unseal_prompt_re still matches the "enter the recovery passphrase …(keyslot
-# 0):" suffix).
+# 0):" suffix). The PROMPT TEXT (sentence + counter + the after-read newline)
+# renders on BOTH consoles via _fdh_console_emit (R640: the prompt must be
+# VISIBLE on the screen, not only on serial); the READ itself stays on
+# /dev/console (stdin — the input device is never split).
 _fdh_prompt_pass() {
     # Item 24a: the prompt's LIVE emission is byte-identical to the pinned
     # shape (sentinel unseal_prompt_re) and stays SINGLE — the bounded-loop
@@ -322,8 +402,8 @@ _fdh_prompt_pass() {
     # unseal_prompt_echo_re): a second independent burst corroborating the
     # prompt EVENT (a lost live prompt line no longer starves a feed that is
     # prompt-synchronized) WITHOUT duplicating the countable sentence.
-    printf 'alpine-fde-unseal: %s\n' \
-        "(attempt $2 of $FDE_MAX_ATTEMPTS) enter the recovery passphrase for $1 (keyslot 0): " >&2
+    _fdh_console_emit 'alpine-fde-unseal: %s\n' \
+        "(attempt $2 of $FDE_MAX_ATTEMPTS) enter the recovery passphrase for $1 (keyslot 0): "
     if [ "$FDE_SERIAL_ECHO" = 1 ]; then
         printf 'alpine-fde-unseal: [serial-echo] (attempt %s of %s) recovery-passphrase prompt opened for %s (keyslot 0)\n' \
             "$2" "$FDE_MAX_ATTEMPTS" "$1" >&2
@@ -335,7 +415,7 @@ _fdh_prompt_pass() {
     IFS= read -r _fdh_pass || _fdh_pass=''
     if [ "$_fdh_echo_off" = 1 ]; then
         stty echo 2>/dev/null || :
-        printf '\n' >&2
+        _fdh_console_emit '\n'
     fi
     printf '%s' "$_fdh_pass"
 }
