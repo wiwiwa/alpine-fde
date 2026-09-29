@@ -156,6 +156,33 @@ write_post_ok() { # SLOT(=2)
         }
     }' >"$T/luks-post.json"
 }
+# the two-UKI PAIR post state: TWO systemd-tpm2 tokens (default slot 3 +
+# serial slot 4), each pubkey/pcrs/policy-hash well-formed so the REAL
+# token_post_assert_multi passes
+write_post_pair() {
+    jq -n --arg der "$DER" '{
+        "keyslots": {
+            "0": { "type": "luks2", "key_size": 64, "kdf": { "type": "argon2id", "salt": "AAA" } },
+            "1": { "type": "luks2", "key_size": 64, "kdf": { "type": "argon2id", "salt": "BBB" } },
+            "2": { "type": "luks2", "key_size": 64, "kdf": { "type": "argon2id", "salt": "CCC" } },
+            "3": { "type": "luks2", "key_size": 64, "kdf": { "type": "argon2id", "salt": "DDD" } }
+        },
+        "tokens": {
+            "0": { "type": "systemd-tpm2", "keyslots": ["2"],
+                   "tpm2-blob": "AAEAC0RhdGE=", "tpm2-pcrs": [7, 11],
+                   "tpm2-pcr-bank": "sha256",
+                   "tpm2-policy-hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                   "tpm2-primary-alg": "rsa", "tpm2-pubkey": $der,
+                   "tpm2-signature": "U0lH" },
+            "1": { "type": "systemd-tpm2", "keyslots": ["3"],
+                   "tpm2-blob": "AAEAC0RhdGE=", "tpm2-pcrs": [7, 11],
+                   "tpm2-pcr-bank": "sha256",
+                   "tpm2-policy-hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                   "tpm2-primary-alg": "rsa", "tpm2-pubkey": $der,
+                   "tpm2-signature": "U0lH" }
+        }
+    }' >"$T/luks-post.json"
+}
 write_post_two() {
     jq -n --arg der "$DER" '{
         "keyslots": { "0": { "type": "luks2" }, "1": { "type": "luks2" } },
@@ -445,12 +472,14 @@ restore_state
 : >"$FNLOG"
 rm -f "$T/staged-pass"
 RESEAL_RC=0
+write_post_pair
 wire_stubs
 reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || RESEAL_RC=1
 assert_eq "fn: reseal_run(b) rc 0" "0" "$RESEAL_RC"
-assert_eq "fn: seal op invoked once" "1" "$(grep -c seal_finalized "$FNLOG")"
-assert_eq "fn: keyslot added" "1" "$(grep -c token_add_keyslot "$FNLOG")"
-assert_eq "fn: token imported" "1" "$(grep -c token_import "$FNLOG")"
+# two-UKI: the run stands the TOKEN PAIR (one seal per console variant)
+assert_eq "fn: seal op invoked TWICE (the pair)" "2" "$(grep -c seal_finalized "$FNLOG")"
+assert_eq "fn: BOTH keyslots added" "2" "$(grep -c token_add_keyslot "$FNLOG")"
+assert_eq "fn: BOTH tokens imported" "2" "$(grep -c token_import "$FNLOG")"
 assert_eq "fn: NO retire on a fresh volume" "0" "$(grep -c -e token_remove -e token_kill_slot "$FNLOG")"
 assert_eq "fn: RESEAL_SLOT" "2" "$RESEAL_SLOT"
 assert_eq "fn: RESEAL_TOKEN_ID" "0" "$RESEAL_TOKEN_ID"
@@ -461,7 +490,7 @@ assert_eq "fn: staged passphrase SCRUBBED after the run" "absent" \
 # reseat: standing token -> retire calls IN THE SAME RUN
 reset_state
 write_pre_token
-write_post_ok
+write_post_pair
 : >"$FNLOG"
 RESEAL_RC=0
 reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || RESEAL_RC=1
@@ -470,28 +499,52 @@ assert_eq "fn reseat: RESEAL_WIPE=yes" "yes" "$RESEAL_WIPE"
 assert_eq "fn reseat: old token removed" "1" "$(grep -c token_remove "$FNLOG")"
 assert_eq "fn reseat: old slot killed" "1" "$(grep -c token_kill_slot "$FNLOG")"
 
-# >1 standing tokens: loud refusal, nothing enrolled
+# two-UKI: a standing PAIR retires IN THE SAME RUN (both tokens + slots).
+# keyslot 0 carries the SAME rich form write_post_pair pins (the post-assert
+# checks recovery slot 0 byte-identity).
 reset_state
 cat >"$T/luks-pre.json" <<'EOF'
-{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"}},
+{"keyslots":{"0":{"type":"luks2","key_size":64,"kdf":{"type":"argon2id","salt":"AAA"}},"1":{"type":"luks2"},"2":{"type":"luks2"}},
  "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]},"1":{"type":"systemd-tpm2","keyslots":["2"]}}}
+EOF
+write_post_pair
+: >"$FNLOG"
+RESEAL_RC=0
+reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 || RESEAL_RC=1
+assert_eq "fn reseat pair: rc 0" "0" "$RESEAL_RC"
+assert_eq "fn reseat pair: RESEAL_WIPE=yes" "yes" "$RESEAL_WIPE"
+assert_eq "fn reseat pair: BOTH old tokens removed" "2" "$(grep -c token_remove "$FNLOG")"
+assert_eq "fn reseat pair: BOTH old slots killed" "2" "$(grep -c token_kill_slot "$FNLOG")"
+assert_eq "fn reseat pair: TWO fresh seals (the pair)" "2" "$(grep -c seal_finalized "$FNLOG")"
+assert_eq "fn reseat pair: TWO fresh tokens imported" "2" "$(grep -c token_import "$FNLOG")"
+
+# >2 standing tokens (beyond the pair): loud refusal, nothing enrolled
+reset_state
+cat >"$T/luks-pre.json" <<'EOF'
+{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"},"3":{"type":"luks2"}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]},"1":{"type":"systemd-tpm2","keyslots":["2"]},"2":{"type":"systemd-tpm2","keyslots":["3"]}}}
 EOF
 : >"$FNLOG"
 RESEAL_RC=0
 EE_REASON=$(reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || RESEAL_RC=1
-assert_eq "fn >1 tokens: rc 1" "1" "$RESEAL_RC"
-assert_contains "fn >1 tokens: message names the count" "$EE_REASON" "2 systemd-tpm2 tokens"
-assert_eq "fn >1 tokens: NO seal op" "0" "$(grep -c seal_finalized "$FNLOG")"
+assert_eq "fn >2 tokens: rc 1" "1" "$RESEAL_RC"
+assert_contains "fn >2 tokens: message names the count" "$EE_REASON" "3 systemd-tpm2 tokens"
+assert_contains "fn >2 tokens: cites the pair bound" "$EE_REASON" "expected <= 2: the two-UKI token pair"
+assert_eq "fn >2 tokens: NO seal op" "0" "$(grep -c seal_finalized "$FNLOG")"
 
-# post-assert failure with the REAL token_post_assert: rc 1, nothing recorded
+# post-assert failure with the REAL multi assert: reseal_run stands the PAIR,
+# so a post state holding ONE token fires "expected exactly 2" (rc 1, nothing
+# recorded)
 wire_real_post_assert
 reset_state
 write_pre_notoken
-write_post_two
+write_post_ok
 RESEAL_RC=0
 PA_REASON=$(reseal_run b "$KEYDIR/release.pub" "$ALPINE_FDE_BY_UUID_DIR/$UUID" 0 2>&1) || RESEAL_RC=1
 assert_eq "fn post-assert failure: rc 1" "1" "$RESEAL_RC"
-assert_contains "fn post-assert failure: names the assert" "$PA_REASON" "exactly 1 systemd-tpm2 token"
+# two-UKI design: reseal_run stands the TOKEN PAIR, so the post-assert wants TWO
+assert_contains "fn post-assert failure: names the assert" "$PA_REASON" \
+    "expected exactly 2 systemd-tpm2 token(s)"
 assert_absent "fn post-assert failure: no enrolled.json (caller records only on rc 0)" "$(sp_enrolled_file)"
 
 # G-IL7/HW-3: the ensure-once contract survives the rewire
@@ -505,10 +558,9 @@ assert_eq "ensure-once: standing token stands (rc 0)" "0" "$EO_RC"
 assert_eq "ensure-once: NO seal op (zero TPM ops, s14)" "0" "$(grep -c seal_finalized "$FNLOG")"
 assert_eq "ensure-once: RESEAL_ENROLLED stays 0" "0" "$RESEAL_ENROLLED"
 
-# >1 standing tokens on the ensure-once path: loud refusal citing the REAL
-# LUKS2 slot budget (§7.2: LUKS2 provides 32 keyslots; the enrollment's free
-# slot domain is 1..31 — token_free_slot) — the stale "capped at 8" claim is
-# gone
+# two-UKI design: exactly TWO standing tokens is the PAIR — the ensure-once
+# s14 zero-TPM-op path (one policy per console variant; the unseal hook scans
+# token ids 0..31 and uses the booting UKI's own .pcrsig either way)
 reset_state
 cat >"$T/luks-pre.json" <<'EOF'
 {"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"}},
@@ -516,14 +568,36 @@ cat >"$T/luks-pre.json" <<'EOF'
 EOF
 write_post_ok
 : >"$FNLOG"
+EO_PAIR_RC=0
+RESEAL_ENROLLED=0
+EO_PAIR_OUT=$(reseal_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO_PAIR_RC=1
+assert_eq "ensure-once pair standing: rc 0" "0" "$EO_PAIR_RC"
+assert_contains "ensure-once pair standing: names the standing PAIR" "$EO_PAIR_OUT" \
+    "the systemd-tpm2 token PAIR already stands"
+assert_eq "ensure-once pair standing: NO seal op (zero TPM ops, s14)" "0" \
+    "$(grep -c seal_finalized "$FNLOG")"
+
+# >2 standing tokens (beyond the pair) on the ensure-once path: loud refusal
+# citing the REAL LUKS2 slot budget (§7.2: LUKS2 provides 32 keyslots; the
+# enrollment's free slot domain is 1..31 — token_free_slot) — the stale
+# "capped at 8" claim is gone
+reset_state
+cat >"$T/luks-pre.json" <<'EOF'
+{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"},"2":{"type":"luks2"},"3":{"type":"luks2"}},
+ "tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]},"1":{"type":"systemd-tpm2","keyslots":["2"]},"2":{"type":"systemd-tpm2","keyslots":["3"]}}}
+EOF
+write_post_ok
+: >"$FNLOG"
 EO2_RC=0
 EO2_OUT=$(reseal_ensure_once "$ALPINE_FDE_BY_UUID_DIR/$UUID" "$KEYDIR/release.pub" 2>&1) || EO2_RC=1
-assert_eq "ensure-once >1 tokens: rc 1" "1" "$EO2_RC"
-assert_contains "ensure-once >1 tokens: names the count" "$EO2_OUT" "2 systemd-tpm2 tokens"
-assert_contains "ensure-once >1 tokens: cites manual intervention" "$EO2_OUT" "manual intervention"
-assert_contains "ensure-once >1 tokens: cites the REAL LUKS2 slot budget (32)" \
+assert_eq "ensure-once >2 tokens: rc 1" "1" "$EO2_RC"
+assert_contains "ensure-once >2 tokens: names the count" "$EO2_OUT" "3 systemd-tpm2 tokens"
+assert_contains "ensure-once >2 tokens: cites the pair bound" "$EO2_OUT" \
+    "expected <= 2: the two-UKI token pair"
+assert_contains "ensure-once >2 tokens: cites manual intervention" "$EO2_OUT" "manual intervention"
+assert_contains "ensure-once >2 tokens: cites the REAL LUKS2 slot budget (32)" \
     "$EO2_OUT" "32 keyslots"
-assert_not_contains "ensure-once >1 tokens: stale 'capped at 8' claim GONE" \
+assert_not_contains "ensure-once >2 tokens: stale 'capped at 8' claim GONE" \
     "$EO2_OUT" "capped at 8"
 
 swtpm_stop "$STATE" || true
