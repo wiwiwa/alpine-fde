@@ -385,7 +385,6 @@ seal_unseal() {
     tpm flushcontext -t >/dev/null 2>&1 || true
     _su_rc=0
     tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1 &&
-        tpm policypcr -S "$_su_w/sess.ctx" -l "sha256:$_su_sel" >/dev/null 2>&1 &&
         tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
             -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1 &&
         tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \

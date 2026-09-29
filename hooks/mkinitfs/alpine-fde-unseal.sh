@@ -682,7 +682,6 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
                             -c "$_fdh_w/seal.ctx" >/dev/null 2>&1; then
                         tpm2_flushcontext -t >/dev/null 2>&1 || :
                         if tpm2_startauthsession --policy-session -S "$_fdh_w/sess.ctx" >/dev/null 2>&1 &&
-                            tpm2_policypcr -S "$_fdh_w/sess.ctx" -l "sha256:$_fdh_sel" >/dev/null 2>&1 &&
                             tpm2_policyauthorize -S "$_fdh_w/sess.ctx" -i "$_fdh_w/pol.bin" \
                                 -n "$_fdh_w/pub.name" -t "$_fdh_w/ticket.bin" >/dev/null 2>&1 &&
                             tpm2_unseal -c "$_fdh_w/seal.ctx" -p "session:$_fdh_w/sess.ctx" \
