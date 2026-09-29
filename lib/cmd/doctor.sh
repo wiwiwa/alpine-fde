@@ -161,6 +161,9 @@ doctor_pcr_bank_report() {
             ;;
     esac
     printf '[fail]    no SHA-256 PCR bank — TPM selects only: %s(§13 requires SHA-256 PCRs)\n' "$_dpb_banks"
+    printf '          fix BEFORE installing: firmware setup -> TPM settings -> enable the SHA-256\n'
+    printf '          PCR bank / TPM2 Algorithm Selection = SHA256, then reboot (Dell: Tpm2Algorithm\n'
+    printf '          attribute; the install reseals against SHA-256 PCRs and cannot run without it)\n'
     return 1
 }
 

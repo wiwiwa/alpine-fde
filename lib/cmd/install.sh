@@ -1414,6 +1414,17 @@ inst_preflight() {
   for _if_disk in "$@"; do
     [ -b "$_if_disk" ] || [ -f "$_if_disk" ] || die "install: target disk not found: $_if_disk"
   done
+  # §13 R640 2026-09-29: firmware TPM settings can ship SHA-1-only (Dell
+  # Tpm2Algorithm=SHA1) — the install would run to completion and only DIE at
+  # the reseal/finalize, when the SHA-256 PCR bank turns out missing. A
+  # READABLE TPM with no sha256 bank fails loud HERE, before any disk
+  # mutation, with the exact firmware remedy; an unreadable/absent TPM (unit
+  # tests, TPM-less hosts) only warns — the reseal/finalize still gates.
+  _if_pcrbanks=$(tpm getcap pcrs 2>/dev/null) || _if_pcrbanks=''
+  case $_if_pcrbanks in
+    ''|*sha256*) warn "install: SHA-256 PCR bank UNVERIFIED (no TPM read) — confirm the firmware enables the SHA-256 bank before resealing (§13)" ;;
+    *) die "install: no SHA-256 PCR bank — the TPM selects only: $_if_pcrbanks — fix in firmware setup (TPM settings -> enable the SHA-256 PCR bank / TPM2 Algorithm Selection = SHA256) and reboot BEFORE installing (the seal is SHA-256 and cannot be created without it)" ;;
+  esac
   # hooks/ ships the Alpine layout (ADR-13/ADR-19, G-C16): kernel-hooks.d
   # build/remove hooks → /etc/kernel-hooks.d/, the mkinitfs unseal hook +
   # features.d entry → /etc/mkinitfs/, the apk trigger → /etc/apk/triggers/,
