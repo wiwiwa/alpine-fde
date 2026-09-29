@@ -437,7 +437,11 @@ _fdh_prompt_pass() {
     if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
         stty -echo 2>/dev/null && _fdh_echo_off=1
     fi
-    IFS= read -r _fdh_pass || _fdh_pass=''
+    # R640 2026-09-29: fd 0 in the spliced-init context is NOT the console —
+    # read returned EOF instantly and burned all attempts in ~1s. Read the
+    # passphrase from /dev/console explicitly (the one channel both the video
+    # and serial lanes land on, and where the prompt itself went).
+    IFS= read -r _fdh_pass < /dev/console || _fdh_pass=''
     if [ "$_fdh_echo_off" = 1 ]; then
         stty echo 2>/dev/null || :
         _fdh_console_emit '\n'
