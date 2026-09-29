@@ -250,8 +250,17 @@ _initramfs_splice_block() {
             printf '\tif [ -x /%s ]; then\n' "$INITRAMFS_HOOK_PATH"
             printf '\t\tFDE_NEWROOT="$sysroot" /%s\n' "$INITRAMFS_HOOK_PATH"
             printf '\t\t# the hook opened the mapped container — mount THAT, not the raw UUID\n'
-            printf '\t\tif [ -e /dev/mapper/root ]; then\n'
+            printf '\t\t# (the crypttab target naming is root1/root2; prefer the exact root\n'
+            printf '\t\t# device, else the first opened mapper — R640 2026-09-29: /dev/bcache1\n'
+            printf '\t\t# (the raw LUKS container) must never reach the root mount)\n'
+            printf '\t\tif [ -e /dev/mapper/root1 ]; then\n'
+            printf '\t\t\tKOPT_root=/dev/mapper/root1\n'
+            printf '\t\telif [ -e /dev/mapper/root ]; then\n'
             printf '\t\t\tKOPT_root=/dev/mapper/root\n'
+            printf '\t\telse\n'
+            printf '\t\t\tfor _fde_m in /dev/mapper/root*; do\n'
+            printf '\t\t\t\t[ -e "$_fde_m" ] && { KOPT_root=$_fde_m; break; }\n'
+            printf '\t\t\tdone\n'
             printf '\t\tfi\n'
             printf '\tfi\n'
             printf '\t# <<< alpine-fde unseal splice (%s) <<<\n' "$INITRAMFS_SPLICE_MARKER"
