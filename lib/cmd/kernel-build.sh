@@ -597,48 +597,38 @@ _uk_body() {
         # pending behaviour (the boot falls back to the recovery passphrase);
         # without objcopy warn loudly (same fallback).
         _ukbv_pcrsig="$_uk_work/pcrsig-$_ukbv_v.json"
-        if policy_check_digest "$_uk_d7"; then
+        if policy_check_digest "$_uk_d7" && command -v objcopy >/dev/null 2>&1; then
+            # Mechanism A''/G-B6 .pcrsig (R640 2026-09-29, set -x boot trace):
+            # the hook's I3 gate and the seal's PolicyAuthorize consume OUR
+            # entry — {"pcrs":[7,11],"pol":<policy digest>,"sig":<release-key
+            # sig>} over the entry's d7 (finalized baseline) and d11 (the
+            # prediction) — while the stub exports the section bytes to
+            # /.extra verbatim (verified live: an invalid/truncated section is
+            # still exported; a clean [7,11]-only JSON without the stub's own
+            # [11] entry is not). Replace the section with OUR entry FIRST
+            # followed by the original ukify entry: objcopy --update-section
+            # keeps the section size (truncating the ukify tail harmlessly —
+            # our entry lands complete), the stub still exports the bytes, and
+            # the hook extracts our complete [7,11] entry. Without a finalized
+            # baseline keep the pending behaviour (passphrase fallback).
+            _ukbv_orig="$_uk_work/pcrsig-orig-$_ukbv_v.json"
+            objcopy --dump-section .pcrsig="$_ukbv_orig" "$_ukbv_out" "$_ukbv_out.dump"
             if policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
-                "$_uk_keydir/release.pub" "$_ukbv_pcrsig"; then
-                if command -v objcopy >/dev/null 2>&1; then
-                    # R640 2026-09-29 (set -x boot trace): objcopy --update-section
-                    # TRUNCATES the replacement to the section's existing size — our
-                    # JSON (with the pkfp/d7/d11 fields) is larger than ukify's, the
-                    # stored section ended mid-signature, and the hook's sig
-                    # extraction came up empty (no closing quote -> no match).
-                    # Pad the replacement with trailing SPACES (JSON-safe, the
-                    # hook flattens whitespace anyway) to EXACTLY the original
-                    # section size; if even the compact form cannot fit, warn and
-                    # keep the ukify shape (passphrase-fallback boot).
-                    _ukbv_orig="$_uk_work/pcrsig-orig-$_ukbv_v.bin"
-                    objcopy --dump-section .pcrsig="$_ukbv_orig" "$_ukbv_out" /dev/null
-                    _ukbvs_old=$(wc -c <"$_ukbv_orig")
-                    _ukbvs_new=$(wc -c <"$_ukbv_pcrsig")
-                    if [ "$_ukbvs_new" -gt "$_ukbvs_old" ]; then
-                        jq -c '{"sha256": [{"pcrs": [7, 11], "pkfp": .sha256[0].pkfp, "pol": .sha256[0].pol, "sig": .sha256[0].sig}]}' \
-                            "$_ukbv_pcrsig" >"$_ukbv_pcrsig.c" 2>/dev/null &&
-                            _ukbvs_new=$(wc -c <"$_ukbv_pcrsig.c") &&
-                            _ukbv_pcrsig="$_ukbv_pcrsig.c"
-                    fi
-                    if [ "$_ukbvs_new" -le "$_ukbvs_old" ]; then
-                        [ "$_ukbvs_new" -lt "$_ukbvs_old" ] &&
-                            printf '%*s' $((_ukbvs_old - _ukbvs_new)) '' >>"$_ukbv_pcrsig"
-                        if objcopy --update-section .pcrsig="$_ukbv_pcrsig" \
-                            "$_ukbv_out" "$_ukbv_out.new" 2>/dev/null; then
-                            mv "$_ukbv_out.new" "$_ukbv_out"
-                            info "kernel build: embedded alpine-fde .pcrsig ($_ukbv_v variant, $_ukbvs_old bytes)"
-                        else
-                            warn "kernel build: objcopy .pcrsig update failed ($_ukbv_v variant) — the UKI keeps the ukify shape (the boot falls back to the recovery passphrase)"
-                        fi
-                    else
-                        warn "kernel build: the alpine-fde .pcrsig ($_ukbvs_new bytes) exceeds the ukify section ($_ukbvs_old bytes) — keeping the ukify shape (the boot falls back to the recovery passphrase)"
-                    fi
+                "$_uk_keydir/release.pub" "$_ukbv_pcrsig" &&
+                jq -s '{"sha256": (.[0].sha256 + .[1].sha256)}' \
+                    "$_ukbv_pcrsig" "$_ukbv_orig" >"$_ukbv_pcrsig.m" 2>/dev/null; then
+                if objcopy --update-section .pcrsig="$_ukbv_pcrsig.m" \
+                    "$_ukbv_out" "$_ukbv_out.new" 2>/dev/null; then
+                    mv "$_ukbv_out.new" "$_ukbv_out"
+                    info "kernel build: embedded alpine-fde-first merged .pcrsig ($_ukbv_v variant)"
                 else
-                    warn "kernel build: objcopy not available — the UKI keeps the ukify .pcrsig shape (install binutils for passwordless unlock; the boot falls back to the recovery passphrase)"
+                    warn "kernel build: objcopy .pcrsig update failed ($_ukbv_v variant) — the UKI keeps the ukify shape (the boot falls back to the recovery passphrase)"
                 fi
             else
                 warn "kernel build: policy signature failed ($_ukbv_v variant) — the UKI keeps the ukify .pcrsig shape (the boot falls back to the recovery passphrase)"
             fi
+        elif ! policy_check_digest "$_uk_d7"; then
+            warn "kernel build: baseline PCR 7 pending — the .pcrsig keeps the ukify shape (the boot falls back to the recovery passphrase until 'audit --init' + reseal)"
         fi
         # MD-01: explicit guards — sbsign failing must not fall through into
         # sbverify and get misreported as "sbverify rejected the signed UKI".
