@@ -372,7 +372,14 @@ _fdh_resolve_dev() {
                 # the uevent matching the spec (-t: ms of uevent silence) and
                 # prints the /dev node. by-uuid stays the fallback for
                 # udev-equipped images, keeping FDE_DISK_BY_UUID_DIR meaningful.
-                _fdh_nf=$($FDE_NLPLUG_FINDFS -t 5000 "$1" 2>/dev/null) && {
+                # REAL-SERVER R640 (verified boot 2026-09-29): -t only bounds
+                # UEVENT SILENCE — every straggler uevent (PERC/NIC attach
+                # tail) resets it, so the resolver blocked ~5.5 min on a
+                # member that could never appear (no udevd -> bcache never
+                # assembled) and starved FDE_ATTACH_WAIT_SECS from the
+                # outside. busybox timeout gives the call a HARD ceiling so
+                # the §8.2 bound stays the bound.
+                _fdh_nf=$(timeout 10 "$FDE_NLPLUG_FINDFS" -t 5000 "$1" 2>/dev/null) && {
                     printf '%s\n' "$_fdh_nf"
                     return 0
                 }
