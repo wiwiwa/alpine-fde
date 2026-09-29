@@ -26,11 +26,11 @@
 #      3072 bits (ADR-16 fail-closed rc 2, keys_rsa3072_guard)
 #   6. LUKS device resolvable via /dev/disk/by-uuid/<baseline target.luks_uuid>
 #   7. a usable TPM via TCTI (tpm2 getcap probe; seal_require_env)
-# Then reseal_run: the Mechanism B enrollment (seal under the finalized {7,11}
-# policy + keyslot + token + retire-on-reseat), post-asserted via
-# `cryptsetup luksDump --dump-json-metadata` (exactly one systemd-tpm2 token,
-# pubkey == the keydir release key, pcrs [7,11], keyslot != 0, recovery
-# keyslot 0 byte-identical), then enrolled.json.
+# Then reseal_run: the Mechanism B TOKEN-PAIR enrollment (two-UKI design: one
+# seal + keyslot + token per console variant, retire-on-reseat), post-asserted
+# via `cryptsetup luksDump --dump-json-metadata` (exactly the token PAIR,
+# pubkey == the keydir release key, pcrs [7,11], distinct keyslots != 0,
+# recovery keyslot 0 byte-identical), then enrolled.json.
 #
 # Signed-policy source (§9.1 step 6): --pcrsig FILE (or ALPINE_FDE_PCRSIG env)
 # supplies the release-key-signed .pcrsig JSON the seal embeds; its entry is
