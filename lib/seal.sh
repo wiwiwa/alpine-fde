@@ -701,11 +701,11 @@ seal_upgrade_token() {
                 err "seal_upgrade_token: the serial token did not stand — post-assert refused"
                 _sut_rc=1
             else
-                token_post_assert_multi "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' \
+                token_post_assert_multi "$_sut_pre" "$_sut_post" "$_sut_pub" '[11]' \
                     "$_sut_new_slot" "$_sut_slot_s" || _sut_rc=1
             fi
         else
-            token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' "$_sut_new_slot" || _sut_rc=1
+            token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[11]' "$_sut_new_slot" || _sut_rc=1
         fi
         if [ "$_sut_rc" -ne 0 ]; then
             err "seal_upgrade_token: post-assertions failed — the finalized token is NOT standing as expected; manual intervention required (§8.3)"
