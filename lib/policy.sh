@@ -216,7 +216,7 @@ policy_sign_json() {
     _pol_pd=$(policy_digest "$1" "$2")
     if ! jq -n --arg sig "$_pol_b64" --arg pkfp "$_pol_fp" --arg pol "$_pol_pd" \
         --arg d7 "$1" --arg d11 "$2" \
-        '{"sha256": [{"pcrs": [7, 11], "pkfp": $pkfp, "pol": $pol, "sig": $sig,
+        '{"sha256": [{"pcrs": [11], "pkfp": $pkfp, "pol": $pol, "sig": $sig,
                       "d7": $d7, "d11": $d11}]}' \
         >"$5"; then
         rm -rf "$_pol_tmp"
