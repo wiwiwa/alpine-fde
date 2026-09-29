@@ -589,34 +589,31 @@ _uk_body() {
         # (finalized baseline) and d11 (this variant's prediction). ukify's own
         # embedded .pcrsig is the systemd shape with pcrs [11]-only, which the
         # hook's extraction can never match ("no release-key-signed .pcrsig
-        # entry" -> passphrase on every boot). With a finalized baseline, REBUILD
-        # the UKI with --pcrsig=<signed json> so the embedded section is the
-        # alpine-fde shape; without a baseline keep the pending behaviour (the
-        # boot falls back to the recovery passphrase).
+        # entry" -> passphrase on every boot). With a finalized baseline, REPLACE
+        # the .pcrsig section content with the signed alpine-fde JSON via objcopy
+        # (POST-ukify, PRE-sbsign — sbsign must sign the final bytes; ukify's
+        # --pcrsig= would re-validate the section against its own PCR policy and
+        # reject the different digest construction). Without a baseline keep the
+        # pending behaviour (the boot falls back to the recovery passphrase);
+        # without objcopy warn loudly (same fallback).
         _ukbv_pcrsig="$_uk_work/pcrsig-$_ukbv_v.json"
         if policy_check_digest "$_uk_d7"; then
-            policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
-                "$_uk_keydir/release.pub" "$_ukbv_pcrsig" || {
-                _uk_fail_reason="policy signature failed ($_ukbv_v variant)"
-                err "kernel build: $_uk_fail_reason"
-                return 1
-            }
-            set -- \
-                "--linux=$_uk_kernel" \
-                "--initrd=$_uk_work/initrd.img" \
-                "--cmdline=@$_ukbv_cl" \
-                "--os-release=@$_uk_osrelease" \
-                "--uname=$_uk_kver" \
-                --pcr-banks=sha256 \
-                "--pcr-public-key=$_uk_keydir/release.pub" \
-                "--pcrsig=$_ukbv_pcrsig" \
-                "--output=$_ukbv_out"
-            if ! ukify build "$@" >/dev/null; then
-                _uk_fail_reason="ukify --pcrsig injection failed ($_ukbv_v variant)"
-                err "kernel build: $_uk_fail_reason"
-                return 1
+            if policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
+                "$_uk_keydir/release.pub" "$_ukbv_pcrsig"; then
+                if command -v objcopy >/dev/null 2>&1; then
+                    if objcopy --update-section .pcrsig="$_ukbv_pcrsig" \
+                        "$_ukbv_out" "$_ukbv_out.new" 2>/dev/null; then
+                        mv "$_ukbv_out.new" "$_ukbv_out"
+                        info "kernel build: embedded alpine-fde .pcrsig ($_ukbv_v variant)"
+                    else
+                        warn "kernel build: objcopy .pcrsig update failed ($_ukbv_v variant) — the UKI keeps the ukify shape (the boot falls back to the recovery passphrase)"
+                    fi
+                else
+                    warn "kernel build: objcopy not available — the UKI keeps the ukify .pcrsig shape (install binutils for passwordless unlock; the boot falls back to the recovery passphrase)"
+                fi
+            else
+                warn "kernel build: policy signature failed ($_ukbv_v variant) — the UKI keeps the ukify .pcrsig shape (the boot falls back to the recovery passphrase)"
             fi
-            info "kernel build: embedded alpine-fde .pcrsig ($_ukbv_v variant, pol from d7+d11)"
         fi
         # MD-01: explicit guards — sbsign failing must not fall through into
         # sbverify and get misreported as "sbverify rejected the signed UKI".
