@@ -263,6 +263,12 @@ if [ ! -d "$FDE_EFIVARS_DIR" ]; then
     mount -t efivarfs efivarfs "$FDE_EFIVARS_DIR" >/dev/null 2>&1 || :
 fi
 
+# operator debug gate: `fde_hook_debug` on the kernel cmdline turns on sh -x
+# tracing for the whole main flow (console-visible; normal boots stay quiet)
+case " $(cat /proc/cmdline 2>/dev/null) " in
+    *" fde_hook_debug"*) set -x ;;
+esac
+
 _fdh_sb=$(_fdh_efivar_u8 SecureBoot) || _fdh_sb=''
 _fdh_sm=$(_fdh_efivar_u8 SetupMode) || _fdh_sm=''
 case $_fdh_sb in
