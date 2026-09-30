@@ -376,8 +376,8 @@ fin_completion_steps() {
     # nothing the next `kernel build` does not restore (reseal_ensure_once's
     # PARTIAL path re-runs with both anchored sources).
     if [ -n "$_fcs_pcrsig_serial" ]; then
-        _fcs_serd7=$(seal_pcrsig_field "$_fcs_pcrsig_serial" 11 d7 2>/dev/null)
-        _fcs_serd11=$(seal_pcrsig_field "$_fcs_pcrsig_serial" 11 d11 2>/dev/null)
+        _fcs_serd7=$(seal_pcrsig_field "$_fcs_pcrsig_serial" "7,11" d7 2>/dev/null)
+        _fcs_serd11=$(seal_pcrsig_field "$_fcs_pcrsig_serial" "7,11" d11 2>/dev/null)
         if [ -z "$_fcs_serd7" ] || [ -z "$_fcs_serd11" ]; then
             warn "finalize: the serial UKI's .pcrsig carries no d7/d11 anchors — a single finalized token stands; the next kernel build completes the two-UKI token pair"
             _fcs_pcrsig_serial=''

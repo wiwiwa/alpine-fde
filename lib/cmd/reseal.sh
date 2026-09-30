@@ -542,7 +542,7 @@ reseal_run() {
         return 1
     fi
     _er_pub_b64=$(openssl pkey -pubin -in "$_er_pub" -outform DER 2>/dev/null | openssl base64 -A)
-    if ! token_post_assert_multi "$_er_pre" "$_er_post" "$_er_pub_b64" '[11]' \
+    if ! token_post_assert_multi "$_er_pre" "$_er_post" "$_er_pub_b64" '[7, 11]' \
         "$RESEAL_SLOT" "$RESEAL_SLOT_SERIAL"; then
         rm -rf "$_er_stage"
         rm -f "$_er_pre" "$_er_post"
