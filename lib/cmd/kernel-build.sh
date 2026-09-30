@@ -613,7 +613,32 @@ _uk_body() {
             # baseline keep the pending behaviour (passphrase fallback).
             _ukbv_orig="$_uk_work/pcrsig-orig-$_ukbv_v.json"
             objcopy --dump-section .pcrsig="$_ukbv_orig" "$_ukbv_out" "$_ukbv_out.dump"
-            if policy_sign_json "$_uk_d7" "$_uk_v_pcr11" "$_uk_keyfile" \
+            # LIVE-ANCHOR PREFERENCE (R640 2026-09-30): the boot-time
+            # policyauthorize requires the entry's pol == policy_digest over the
+            # LIVE PCR 7/11 the hook's policypcr reads. When the build runs ON
+            # the booted target, the live PCR 11 read IS the value the next boot
+            # sees (one extend site — the hook's phase extend — and PCR state
+            # resets per boot), so prefer it over the ukify measurement model:
+            # the model's enter-initrd prediction diverged from what the real
+            # stub measures on the R640 (9bd005bb predicted vs d15b0e8e live for
+            # the SAME UKI — every boot refused at policyauthorize). Without a
+            # reachable TPM (host-side builds) keep the prediction.
+            _uk_pol_d7=$_uk_d7
+            _uk_pol_d11=$_uk_v_pcr11
+            if command -v tpm2_pcrread >/dev/null 2>&1 &&
+                tpm2_pcrread sha256:7,11 >"$_uk_work/pcr-live.read" 2>/dev/null; then
+                _uk_live7=$(sed -n 's/^ *7 *: *0[xX]//p' \
+                    "$_uk_work/pcr-live.read" | tr 'A-F' 'a-f' | head -n 1)
+                _uk_live11=$(sed -n 's/^ *11 *: *0[xX]//p' \
+                    "$_uk_work/pcr-live.read" | tr 'A-F' 'a-f' | head -n 1)
+                if policy_check_digest "$_uk_live7" && policy_check_digest "$_uk_live11" &&
+                    { [ "$_uk_live7" != "$_uk_pol_d7" ] || [ "$_uk_live11" != "$_uk_pol_d11" ]; }; then
+                    warn "kernel build: live PCR 7/11 anchor deviates from the measurement model (live d11=${_uk_live11:-none} vs predicted ${_uk_pol_d11:-none}) — anchoring the pol to the LIVE values"
+                    _uk_pol_d7=$_uk_live7
+                    _uk_pol_d11=$_uk_live11
+                fi
+            fi
+            if policy_sign_json "$_uk_pol_d7" "$_uk_pol_d11" "$_uk_keyfile" \
                 "$_uk_keydir/release.pub" "$_ukbv_pcrsig" &&
                 jq -c '.sha256[0] | {pcrs: .pcrs, pkfp: .pkfp, pol: .pol, sig: .sig}' \
                     "$_ukbv_pcrsig" >"$_ukbv_pcrsig.m" 2>/dev/null; then
