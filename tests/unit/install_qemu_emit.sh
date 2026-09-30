@@ -138,7 +138,7 @@ assert_eq "emitted script: NO dracut conf drop (ADR-13)" "0" \
 # SERIAL/RECOVERY variant (ttyS0,115200 LAST — the remote/passphrase lane, the
 # -serial UKI's cmdline).
 assert_contains "cmdline drop emitted: DEFAULT variant — ttyS0 first, tty0 LAST, pins after" "$(cat "$SCRIPT")" \
-    "rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
+    "rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
 assert_contains "cmdline drop emitted: SERIAL variant — tty0 first, ttyS0,115200 LAST" "$(cat "$SCRIPT")" \
     "ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline-serial.txt"
 # item 26a (ADR-7 AMENDED — zram removed from the design): zero zram residue in

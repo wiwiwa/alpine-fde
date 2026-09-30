@@ -28,8 +28,8 @@ printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main' 'https://dl-cdn
 printf '%s\n' 'root UUID=<UUID> none luks,tpm2-device=auto,discard' >/etc/crypttab
 printf '%s\n' 'UUID=<UUID> / btrfs subvol=@,defaults 0 1' 'UUID=<UUID> /home btrfs subvol=@home,defaults 0 2' 'UUID=<UUID> /.snapshots btrfs subvol=@snapshots,defaults 0 2' 'PARTUUID=<esp-partuuid> /efi vfat umask=0077 0 2' >/etc/fstab
 printf '%s\n' 'auto lo' 'iface lo inet loopback' '' 'auto eth0' 'iface eth0 inet dhcp' >/etc/network/interfaces
-printf '%s\n' 'root=UUID=<UUID> rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline.txt
-printf '%s\n' 'root=UUID=<UUID> rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline-serial.txt
+printf '%s\n' 'root=UUID=<UUID> rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline.txt
+printf '%s\n' 'root=UUID=<UUID> rootfstype=btrfs rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff' >/etc/alpine-fde/cmdline-serial.txt
 printf '%s\n' '# alpine-fde runtime config (KEY=VALUE).' '# Absent file or absent keys = built-in defaults: ROOT_FS=btrfs, BCACHE=0, TOPOLOGY=single.' 'ROOT_FS=btrfs' 'BCACHE=0' 'TOPOLOGY=single' 'ESP_PATH=/efi' >/etc/alpine-fde/alpine-fde.conf
 # HOST: mkdir -p <TMP>/mnt/proc <TMP>/mnt/sys <TMP>/mnt/dev && mount -t proc proc <TMP>/mnt/proc && mount --bind /sys <TMP>/mnt/sys && mount --bind /dev <TMP>/mnt/dev
 # HOST: mkdir -p <TMP>/mnt/dev/shm && mount --bind /dev/shm <TMP>/mnt/dev/shm

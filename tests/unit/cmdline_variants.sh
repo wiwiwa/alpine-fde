@@ -34,10 +34,10 @@ assert_eq "console words: serial is tty0 first, ttyS0 LAST" \
 
 # --- composition: btrfs + ext4, both variants -------------------------------------
 assert_eq "compose: default/btrfs — rootflags, tty0 last, pins after the consoles" \
-    "root=UUID=$UUID rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff" \
+    "root=UUID=$UUID rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff" \
     "$(cmdline_compose default "$UUID" 1)"
 assert_eq "compose: serial/btrfs — ttyS0 last, SAME pins" \
-    "root=UUID=$UUID rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff" \
+    "root=UUID=$UUID rootfstype=btrfs rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff" \
     "$(cmdline_compose serial "$UUID" 1)"
 assert_eq "compose: default/ext4 — no rootflags" \
     "root=UUID=$UUID ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff" \
@@ -55,7 +55,7 @@ assert_eq "pair: the non-console content is byte-identical" \
 
 # --- EXTRA words append AFTER the pins in BOTH variants ----------------------------
 assert_eq "extra: appends after the pins (default)" \
-    "root=UUID=$UUID rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff quiet" \
+    "root=UUID=$UUID rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff quiet" \
     "$(cmdline_compose default "$UUID" 1 quiet)"
 assert_eq "extra: appends after the pins (serial)" \
     "root=UUID=$UUID ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff intel_iommu=on" \
