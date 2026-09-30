@@ -66,7 +66,13 @@ cmdline_compose() {
     done
     _cc_console=$(cmdline_console_words "$_cc_variant") || return $?
     if [ "$_cc_btrfs" = "1" ]; then
-        printf 'root=UUID=%s rootflags=subvol=@ ro %s rd.shell=0 rd.emergency=poweroff%s\n' \
+        # rootfstype PIN (real-server blocker, 2026-09-30): the unseal splice
+        # rewrites root= to the mapper path, and busybox mount without -t
+        # probes the fs type — on the R640 the probe never reached btrfs and
+        # the mount died ENOENT (no kernel btrfs attempt logged) on a PERFECTLY
+        # assembled single-device fs. Pin the type; multi-device btrfs still
+        # needs the bcache/btrfs-scan lanes.
+        printf 'root=UUID=%s rootfstype=btrfs rootflags=subvol=@ ro %s rd.shell=0 rd.emergency=poweroff%s\n' \
             "$_cc_uuid" "$_cc_console" "${_cc_extra:+ $_cc_extra}"
     else
         printf 'root=UUID=%s ro %s rd.shell=0 rd.emergency=poweroff%s\n' \
