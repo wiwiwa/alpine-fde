@@ -800,6 +800,19 @@ for _fdh_wd in $_fdh_members; do
     done
 done
 
+# BTRFS DEVICE SCAN (real-server blocker, R640 2026-09-30): the stock init's
+# mount step probes the root fs type and mounts the mapper — for a MULTI-device
+# btrfs volume the kernel only assembles members it has SCANNED (BTRFS_IOC_
+# SCAN_DEV); busybox mount never scans, so a 2-disk root mounts ENOENT with
+# every member already open. Scan every open mapper the hook produced — a
+# single-device volume just registers one device, harmlessly.
+command -v btrfs >/dev/null 2>&1 &&
+    for _fdh_dm in /dev/mapper/root*; do
+        [ -e "$_fdh_dm" ] || continue
+        btrfs device scan "$_fdh_dm" >/dev/null 2>&1 || :
+    done
+unset _fdh_dm 2>/dev/null || :
+
 # (item 10b) NO post-unlock marker write: the unlock itself is the only fact
 # this hook produces; the trust state stays derivable from the container.
 

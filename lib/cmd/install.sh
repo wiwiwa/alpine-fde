@@ -2564,6 +2564,34 @@ cmd_install_main() {
   # step 7; mkinitfs reads the list at build time (idempotent).
   inst_exec host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
   inst_exec guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
+  # STANDARD OPENRC ENROLLMENT (real-server blocker, R640 2026-09-30): the
+  # freshly-populated target shipped a COMPLETELY EMPTY sysinit runlevel and a
+  # boot runlevel with ONLY networking — no mdev, no hwdrivers, no modules.
+  # Consequences at first boot: NIC drivers never load (/etc/modules ignored —
+  # the `modules` service was not enrolled), /dev/disk/by-uuid never populates,
+  # and btrfs multi-device assembly starves. The finalize service then fails
+  # ("member device not resolvable") and the box is only reachable over serial.
+  # Enroll the stock Alpine set (all providers ship in alpine-base/openrc —
+  # failure-#2 discipline: this runs after the in-chroot apk transaction).
+  inst_exec guest 'rc-update add devfs sysinit && rc-update add dmesg sysinit && rc-update add mdev sysinit && rc-update add hwdrivers sysinit'
+  inst_exec guest 'rc-update add modules boot && rc-update add hostname boot && rc-update add bootmisc boot && rc-update add sysctl boot && rc-update add syslog boot && rc-update add btrfs-scan boot'
+  inst_exec guest 'rc-update add mount-ro shutdown && rc-update add killprocs shutdown && rc-update add savecache shutdown && rc-update add local default'
+  # NO-UDEV BY-UUID SEAM (same blocker): mdev does not populate
+  # /dev/disk/by-uuid for the LUKS containers, and finalize/reseal resolve
+  # members through it. Drop the same idempotent link-fixup the R640 rescue
+  # proved out, run once per boot before the default-runlevel consumers.
+  inst_plan_write /etc/local.d/00-fde-links.start \
+    '#!/bin/sh' \
+    '# create /dev/disk/by-uuid symlinks for the crypttab LUKS containers' \
+    '# (mdev does not populate by-uuid for bcache members; no udev here)' \
+    'mkdir -p /dev/disk/by-uuid' \
+    "awk '\$4 ~ /luks/ { sub(/^UUID=/, \"\", \$2); print \$2 }' /etc/crypttab |" \
+    'while read -r u; do' \
+    '    [ -e "/dev/disk/by-uuid/$u" ] && continue' \
+    '    dev=$(blkid 2>/dev/null | grep "$u" | cut -d: -f1 | head -1)' \
+    '    [ -n "$dev" ] && ln -sf "$dev" "/dev/disk/by-uuid/$u"' \
+    'done'
+  inst_exec guest 'chmod +x /etc/local.d/00-fde-links.start'
   inst_exec guest 'rc-update add networking boot'
   # REAL-SERVER BLOCKER (headless, Dell PowerEdge R640 first verified boot
   # 2026-09-28): the guest shipped NEITHER a serial getty NOR sshd — on a
