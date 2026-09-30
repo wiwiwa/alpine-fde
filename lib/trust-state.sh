@@ -155,13 +155,11 @@ ts_state() {
     case $_tst_pcrs in
         '') printf 'unknown\n'; return 0 ;;
     esac
-    if [ "$_tst_pcrs" = "[11]" ]; then
-        printf 'provisional\n'
-        return 0
-    fi
-    if [ "$_tst_pcrs" = "[7,11]" ]; then
-        # the ephemeral keyslot surviving next to a {7,11} token is the
-        # per-member mid-completion crash shape — still unfinalized (§9.1)
+    if [ "$_tst_pcrs" = "[11]" ] || [ "$_tst_pcrs" = "[7,11]" ]; then
+        # The finalized selection is PCR 11 (the pipeline speaks [11] end to
+        # end); [7,11] is the legacy Mechanism B shape and stays finalized.
+        # In both shapes the surviving ephemeral keyslot is the per-member
+        # mid-completion crash form — still unfinalized (§9.1).
         if ts_ephemeral_present "$_tst_meta"; then
             printf 'provisional\n'
             return 0

@@ -173,10 +173,38 @@ seal_keydir_check() {
 # seal_pcrsig_field <pcrsig.json> <pcrs_csv> <field> — extract <field> of the
 # .pcrsig entry whose pcrs list matches (e.g. "11" or "7,11"). Empty output =
 # no matching entry (wrong selection).
+# Accepts BOTH shapes:
+#   * the `systemd-measure sign` wrapper {"sha256":[{pcrs,...},...]} (jq), and
+#   * the COMPACT single object {"pcrs":[11],"pkfp",...,"pol","sig"} that
+#     `kernel build` injects into the UKI's .pcrsig section to FIT the
+#     section's original size (objcopy truncation; real-server blocker — the
+#     boot hook consumes this same shape). The section may additionally carry
+#     stale tail bytes of the PREVIOUS section content after the compact
+#     object (truncation keeps old bytes), so the fallback reads the FIRST
+#     matching field only — index-based, never a greedy last-match.
 seal_pcrsig_field() {
-    jq -r --arg sel "$2" --arg f "$3" \
+    _spf_val=$(jq -r --arg sel "$2" --arg f "$3" \
         'first(.sha256 // [] | .[] | select((.pcrs | join(",")) == $sel) | .[$f]) // empty' \
-        "$1" 2>/dev/null
+        "$1" 2>/dev/null)
+    [ -n "$_spf_val" ] && { printf '%s\n' "$_spf_val"; return 0; }
+    _spf_flat=$(tr -d '\n\t ' <"$1" 2>/dev/null) || return 0
+    case $_spf_flat in
+        *"\"pcrs\":[$2]"*) ;;
+        *) return 0 ;;
+    esac
+    case $3 in
+        pol) _spf_key='"pol":"' ;;
+        sig) _spf_key='"sig":"' ;;
+        pkfp) _spf_key='"pkfp":"' ;;
+        d7) _spf_key='"d7":"' ;;
+        d11) _spf_key='"d11":"' ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "$_spf_flat" | LC_ALL=C awk -v k="$_spf_key" '
+        { i = index($0, k); if (i > 0) {
+            r = substr($0, i + length(k)); j = index(r, "\"");
+            print substr(r, 1, j - 1); exit }
+        }'
 }
 
 # seal_verify_pcrsig <keydir> <pcrsig.json> <pcrs_csv> <expected_digest> — the
@@ -343,7 +371,26 @@ seal_unseal() {
     esac
     seal_require_env
     _su_d11=$(seal_pcrread 11)
-    if [ "$_su_mode" = finalized ]; then
+    # G-B6 anchors first (the documented pure data check): the entry's own
+    # d7/d11 components, exactly like the enroll-side gate in seal_enroll —
+    # NOT the live PCRs. The finalized token's signed `pol` is anchored to the
+    # BUILD's predicted digests; after a full boot the live PCR 11 has moved on
+    # (userspace extends), so a live-PCR oracle would flag every honest entry
+    # as tampered (real-server blocker, 2026-09-30). The live read stays as
+    # the legacy fallback for anchor-less entries.
+    _su_ad7=$(seal_pcrsig_field "$_su_sig" "$_su_sel" d7)
+    _su_ad11=$(seal_pcrsig_field "$_su_sig" "$_su_sel" d11)
+    if [ -n "$_su_ad7" ] && [ -n "$_su_ad11" ]; then
+        policy_check_digest "$_su_ad7" ||
+            die "seal: cannot recompute the anchored PCR-11 digest: the entry's d7 anchor is not a sha256 hex digest: '$_su_ad7'"
+        policy_check_digest "$_su_ad11" ||
+            die "seal: cannot recompute the anchored PCR-11 digest: the entry's d11 anchor is not a sha256 hex digest: '$_su_ad11'"
+        _su_fresh=$(policy_digest "$_su_ad7" "$_su_ad11")
+    elif [ -n "$_su_ad11" ]; then
+        policy_check_digest "$_su_ad11" ||
+            die "seal: cannot recompute the anchored PCR-11 digest: the entry's d11 anchor is not a sha256 hex digest: '$_su_ad11'"
+        _su_fresh=$(seal_digest_11 "$_su_ad11")
+    elif [ "$_su_mode" = finalized ]; then
         _su_d7=$(seal_pcrread 7)
         _su_fresh=$(policy_digest "$_su_d7" "$_su_d11")
     else

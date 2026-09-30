@@ -348,7 +348,28 @@ if modprobe bcache 2>/dev/null; then
         echo "$_fdh_bc" > /sys/fs/bcache/register 2>/dev/null && _fdh_bcreg=$((_fdh_bcreg + 1))
     done
     [ "$_fdh_bcreg" -gt 0 ] && _msg "bcache: registered $_fdh_bcreg device(s) from the initramfs (mdev hotplug lane)"
-    unset _fdh_bc _fdh_bcreg
+    # R640 2026-09-30: a backing device registered BEFORE its cache set goes
+    # "pending"; on set registration the kernel attaches pending devices — but
+    # the attach can silently miss one (observed: sdc stayed unattached while
+    # sdb/sdd attached, no bcacheN and no error). Force-attach every registered
+    # backing device that has a bcache sysfs dir but no attached state.
+    sleep 1
+    for _fdh_bc in /sys/block/sd[a-z]/bcache /sys/block/sd[a-z][0-9]/bcache \
+        /sys/block/nvme[0-9]n[0-9]/bcache /sys/block/vd[a-z]/bcache; do
+        [ -d "$_fdh_bc" ] || continue
+        _fdh_state=$(cat "$_fdh_bc/state" 2>/dev/null) || continue
+        [ "$_fdh_state" != "no-cache" ] && continue
+        _fdh_set=''
+        for _fdh_ent in /sys/fs/bcache/*-*-*-*-*/; do
+            [ -d "$_fdh_ent" ] || continue
+            _fdh_set=${_fdh_ent%/}
+            break
+        done
+        [ -n "$_fdh_set" ] || continue
+        echo "$_fdh_set" > "$_fdh_bc/attach" 2>/dev/null && \
+            _msg "bcache: force-attached ${_fdh_bc%/bcache} to set $_fdh_set"
+    done
+    unset _fdh_bc _fdh_bcreg _fdh_state _fdh_set _fdh_ent
 fi
 
 

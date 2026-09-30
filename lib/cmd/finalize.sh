@@ -368,6 +368,21 @@ fin_completion_steps() {
             warn "finalize: cannot extract the serial UKI's .pcrsig — a single finalized token stands; the next kernel build completes the two-UKI token pair"
         fi
     fi
+    # A serial .pcrsig WITHOUT the d7/d11 anchors cannot pass the G-B6 gate
+    # honestly: the compact entry `kernel build` injects (to fit the section)
+    # carries only pol/pkfp/sig, and the live-PCR fallback would flag the
+    # build-anchored pol as tampered (real-server blocker, 2026-09-30). The
+    # signature is inert at unseal, so dropping the serial source here costs
+    # nothing the next `kernel build` does not restore (reseal_ensure_once's
+    # PARTIAL path re-runs with both anchored sources).
+    if [ -n "$_fcs_pcrsig_serial" ]; then
+        _fcs_serd7=$(seal_pcrsig_field "$_fcs_pcrsig_serial" 11 d7 2>/dev/null)
+        _fcs_serd11=$(seal_pcrsig_field "$_fcs_pcrsig_serial" 11 d11 2>/dev/null)
+        if [ -z "$_fcs_serd7" ] || [ -z "$_fcs_serd11" ]; then
+            warn "finalize: the serial UKI's .pcrsig carries no d7/d11 anchors — a single finalized token stands; the next kernel build completes the two-UKI token pair"
+            _fcs_pcrsig_serial=''
+        fi
+    fi
     # --- per-member keyslot mutations (§9.1 Stage 2 steps 3-4) -----------------
     # ORDER CONSTRAINT — authorization liveness of the NON-INTERACTIVE service:
     # the re-unsealed provisional credential (AUTHFILE) authorizes BOTH
