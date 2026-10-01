@@ -16,7 +16,12 @@ umask 077
 PROG=alpine-fde
 ALPINE_FDE_VERSION='0.1.0'
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# Symlink-safe lib resolution (R640 2026-10-01): /usr/local/bin/alpine-fde is
+# a SYMLINK to /opt/alpine-fde/bin/alpine-fde — resolving libs from dirname $0
+# without readlink -f landed in /usr/local/lib (empty) instead of the tree
+# beside the real script. busybox readlink -f exists; fall back to $0.
+_alf_target=$(readlink -f -- "$0" 2>/dev/null) || _alf_target=''
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${_alf_target:-$0}")" && pwd)
 # shellcheck disable=SC1091  # resolved at runtime next to the binary
 . "$SCRIPT_DIR/../lib/common.sh"
 
