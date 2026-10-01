@@ -281,6 +281,56 @@ fin_provisional_unseal() {
     [ -s "$_fpn_out" ]
 }
 
+# _fin_bootorder_default_first — SERIAL-FIRST flip-back (R640 2026-10-01):
+# install orders the SERIAL UKI entry first on serial-attached machines (the
+# first boot's one recovery passphrase is read from /dev/console, which the
+# default UKI binds to the video console); once the trust chain FINALIZES the
+# default UKI must lead again (the video console is the richer operator
+# surface). Best-effort fail-open: a missing efibootmgr/uname, a failed read
+# or a failed write is a QUIET return 0 — a BootOrder that will not flip must
+# never break finalization. Entries key on kver + variant, NEVER the label
+# date (labels carry a stamp that changes on every rebuild). Idempotent: an
+# already-default-first order is re-issued.
+_fin_bootorder_default_first() {
+    command -v uname >/dev/null 2>&1 || return 0
+    _fbf_kver=$(uname -r 2>/dev/null) || return 0
+    [ -n "$_fbf_kver" ] || return 0
+    command -v efibootmgr >/dev/null 2>&1 || return 0
+    _fbf_out=$(efibootmgr -v 2>/dev/null) || return 0
+    _fbf_list=${ALPINE_FDE_TMPDIR:-/tmp}/.fde-bootorder.$$
+    printf '%s\n' "$_fbf_out" | awk -v k="$_fbf_kver" '
+        /^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\*/ {
+            num = $1; sub(/^Boot/, "", num); sub(/\*/, "", num)
+            if ($2 == "Alpine" && $3 == "FDE" && $4 == "-" && $5 == k) {
+                if ($6 == "serial") print num, "serial"
+                else print num, "default"
+            }
+        }' > "$_fbf_list" 2>/dev/null || return 0
+    _fbf_def=''
+    _fbf_ser=''
+    while read -r _fbf_num _fbf_variant; do
+        [ "$_fbf_variant" = default ] && [ -z "$_fbf_def" ] && _fbf_def=$_fbf_num
+        [ "$_fbf_variant" = serial ] && [ -z "$_fbf_ser" ] && _fbf_ser=$_fbf_num
+    done < "$_fbf_list"
+    rm -f "$_fbf_list"
+    [ -n "$_fbf_def" ] || [ -n "$_fbf_ser" ] || return 0 # none of ours standing
+    _fbf_order=$(printf '%s\n' "$_fbf_out" | sed -n 's/^BootOrder:[ \t]*//p' | tr ',' ' ')
+    _fbf_new=''
+    [ -n "$_fbf_def" ] && _fbf_new="$_fbf_def "
+    [ -n "$_fbf_ser" ] && _fbf_new="$_fbf_new$_fbf_ser "
+    for _fbf_n in $_fbf_order; do
+        case " $_fbf_new " in
+            *" $_fbf_n "*) continue ;;
+        esac
+        _fbf_new="$_fbf_new$_fbf_n "
+    done
+    _fbf_new=${_fbf_new% }
+    [ -n "$_fbf_new" ] || return 0
+    _fbf_csv=$(printf '%s' "$_fbf_new" | tr ' ' ',')
+    efibootmgr -o "$_fbf_csv" >/dev/null 2>&1 || :
+    return 0
+}
+
 # fin_completion_steps AUTHFILE — the §9.1 Stage 2 == Stage 3 completion chain,
 # shared verbatim by the guided command and the first-boot service (ADR-20
 # amended): Secure Boot guard -> audit --init -> temporary ephemeral keyslot
@@ -457,6 +507,12 @@ fin_completion_steps() {
     # ground truth itself (token {7,11} standing, ephemeral keyslot purged —
     # lib/trust-state.sh reads it back as `finalized`).
     fde_attempt_clear
+
+    # SERIAL-FIRST flip-back (R640 2026-10-01): install ordered the SERIAL
+    # UKI first on serial-attached machines so the first boot's one recovery
+    # passphrase was typable — with trust FINALIZED the default UKI must
+    # lead again. Best-effort: never breaks finalization.
+    _fin_bootorder_default_first
     return 0
 }
 
