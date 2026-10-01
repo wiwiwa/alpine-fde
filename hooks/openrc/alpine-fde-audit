@@ -49,6 +49,13 @@
 
 description="Alpine FDE boot-time firmware/platform audit (FR-6)"
 
+# OpenRC's openrc-run resolves ${command} for EVERY service (unset-variable
+# guard — "openrc-run.sh: line 424: command: parameter not set" killed this
+# oneshot on the R640 2026-10-01 first boot). These are CUSTOM-start()
+# oneshots: the default start that would exec $command is overridden below,
+# so /bin/true only keeps the runner's variable resolution happy.
+command="/bin/true"
+
 depend() {
     need localmount
     # §8.1: run LAST in the runlevel, immediately before the login prompt
