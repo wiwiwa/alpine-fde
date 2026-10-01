@@ -22,3 +22,12 @@ kernel/fs/ext4
 kernel/fs/jbd2
 kernel/fs/mbcache
 kernel/drivers/md/bcache
+# USB + HID stack (R640 2026-10-01): the iDRAC virtual keyboard is a USB HID
+# device — without these subtrees it never enumerates in the initramfs and
+# the recovery passphrase is UNTYPEABLE at the video console (the recovery
+# read is /dev/console; on the default UKI that is the virtual console).
+# Directory entries pack the whole subtree through the modules.dep closure,
+# same mechanism as the TPM entry above.
+kernel/drivers/hid
+kernel/drivers/usb/host
+kernel/drivers/usb/common
