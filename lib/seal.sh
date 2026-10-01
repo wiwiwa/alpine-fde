@@ -747,11 +747,17 @@ seal_upgrade_token() {
                 err "seal_upgrade_token: the serial token did not stand — post-assert refused"
                 _sut_rc=1
             else
-                token_post_assert_multi "$_sut_pre" "$_sut_post" "$_sut_pub" '[11]' \
+                # the upgrade POST-state is the FINALIZED selection: the seal
+                # above wrote {7,11} tokens (seal_finalized), so the assert
+                # must expect '[7,11]' — asserting the provisional '[11]'
+                # against the freshly-upgraded metadata rejected a correct
+                # pair on the R640 2026-10-01 first boot
+                token_post_assert_multi "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' \
                     "$_sut_new_slot" "$_sut_slot_s" || _sut_rc=1
             fi
         else
-            token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[11]' "$_sut_new_slot" || _sut_rc=1
+            # same ordering rule: the upgrade wrote the finalized {7,11} seal
+            token_post_assert "$_sut_pre" "$_sut_post" "$_sut_pub" '[7,11]' "$_sut_new_slot" || _sut_rc=1
         fi
         if [ "$_sut_rc" -ne 0 ]; then
             err "seal_upgrade_token: post-assertions failed — the finalized token is NOT standing as expected; manual intervention required (§8.3)"

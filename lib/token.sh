@@ -254,7 +254,14 @@ token_post_assert_multi() {
                 _tpa_got_pcrs=$(printf '%s' "$_tpa_tok" | jq -c '.["tpm2-pcrs"] // empty')
                 [ "$_tpa_got_pub" = "$_tpa_pub" ] ||
                     _tpa_fail="token pubkey mismatch (not the pinned release key)"
-                [ -z "$_tpa_fail" ] && [ "$_tpa_got_pcrs" != "$_tpa_pcrs" ] &&
+                # spacing-insensitive pcr-list compare: the want literal is
+                # hand-written ('[7,11]' / '[7, 11]' both appear across
+                # callers) while the token side is jq -c compact — compare
+                # SPACE-STRIPPED so a correct token can never fail on format
+                # (R640 2026-10-01: "pcrs are [7,11], want [7, 11]" rejected
+                # an exactly-right standing pair and blocked enrolled.json)
+                [ -z "$_tpa_fail" ] && \
+                    [ "$(printf '%s' "$_tpa_got_pcrs" | tr -d ' ')" != "$(printf '%s' "$_tpa_pcrs" | tr -d ' ')" ] &&
                     _tpa_fail="token pcrs are $_tpa_got_pcrs, want $_tpa_pcrs for this mode"
                 if [ -z "$_tpa_fail" ]; then
                     _tpa_pol=$(printf '%s' "$_tpa_tok" | jq -r '.["tpm2-policy-hash"] // empty')
