@@ -500,6 +500,49 @@ _fdh_prompt_pass() {
 #   _fdh_attach_missing  1 when ANY resolved member device path did not exist
 #                     at probe time — the device-attach race signal (R640)
 # re-scan-safe: callable twice (the bounded attach wait re-invokes it).
+_fdh_scan_token_for() { # <dev> — set _fdh_tok/_fdh_exp_err for ONE member
+    _fdh_tok=''
+    _fdh_exp_err=''
+    _fdh_dev=$1
+    if [ ! -e "$_fdh_dev" ]; then
+        # member not attached (yet): remember the race signal — the
+        # export below still runs so the refusal stays VISIBLE
+        _fdh_attach_missing=1
+    fi
+    _fdh_tid=0
+    # LUKS2 allows up to 32 tokens (ids 0..31): scan the FULL valid range —
+    # a token parked at id >=16 must still be found, never silently
+    # dropped into the passphrase fallback (§8.2 step 2)
+    while [ "$_fdh_tid" -le 31 ]; do
+        _fdh_out=$(cryptsetup token export --token-id "$_fdh_tid" "$_fdh_dev" 2>"$_fdh_w/exp.err")
+        if [ $? -ne 0 ]; then
+            # fail VISIBLE: keep the FIRST line of WHY an export was
+            # refused, so the recovery path is diagnosable from console
+            if [ -s "$_fdh_w/exp.err" ] && [ -z "$_fdh_exp_err" ]; then
+                _fdh_exp_err=$(head -n 1 "$_fdh_w/exp.err" | tr -d '\r')
+            fi
+        else
+            _fdh_tokflat=$(printf '%s' "$_fdh_out" | tr -d ' \t\n\r')
+            case $_fdh_tokflat in
+                *'"type":"systemd-tpm2"'*) _fdh_tok=$_fdh_out ;;
+            esac
+            if [ -z "$_fdh_tok" ] && [ -z "$_fdh_exp_err" ]; then
+                # a successful export the type filter rejected: keep a
+                # fingerprint of the payload for the console record
+                _fdh_exp_err="token id $_fdh_tid exported, no systemd-tpm2 type in [$(printf '%s' \
+                    "$_fdh_tokflat" | cut -c 1-60)]"
+            fi
+        fi
+        [ -n "$_fdh_tok" ] && break
+        _fdh_tid=$((_fdh_tid + 1))
+    done
+    return 0
+}
+
+# _fdh_scan_token — aggregate probe across ALL members: the FIRST member
+# token (for the attach-race probe + presence check) and the OR of every
+# member's attach-missing signal. The per-member unseal loop below re-scans
+# each member individually (_fdh_scan_token_for).
 _fdh_scan_token() {
     _fdh_tok=''
     _fdh_exp_err=''
@@ -512,38 +555,7 @@ _fdh_scan_token() {
             continue
         fi
         _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
-        if [ ! -e "$_fdh_dev" ]; then
-            # member not attached (yet): remember the race signal — the
-            # export below still runs so the refusal stays VISIBLE
-            _fdh_attach_missing=1
-        fi
-        _fdh_tid=0
-        # LUKS2 allows up to 32 tokens (ids 0..31): scan the FULL valid range —
-        # a token parked at id >=16 must still be found, never silently
-        # dropped into the passphrase fallback (§8.2 step 2)
-        while [ "$_fdh_tid" -le 31 ]; do
-            _fdh_out=$(cryptsetup token export --token-id "$_fdh_tid" "$_fdh_dev" 2>"$_fdh_w/exp.err")
-            if [ $? -ne 0 ]; then
-                # fail VISIBLE: keep the FIRST line of WHY an export was
-                # refused, so the recovery path is diagnosable from console
-                if [ -s "$_fdh_w/exp.err" ] && [ -z "$_fdh_exp_err" ]; then
-                    _fdh_exp_err=$(head -n 1 "$_fdh_w/exp.err" | tr -d '\r')
-                fi
-            else
-                _fdh_tokflat=$(printf '%s' "$_fdh_out" | tr -d ' \t\n\r')
-                case $_fdh_tokflat in
-                    *'"type":"systemd-tpm2"'*) _fdh_tok=$_fdh_out ;;
-                esac
-                if [ -z "$_fdh_tok" ] && [ -z "$_fdh_exp_err" ]; then
-                    # a successful export the type filter rejected: keep a
-                    # fingerprint of the payload for the console record
-                    _fdh_exp_err="token id $_fdh_tid exported, no systemd-tpm2 type in [$(printf '%s' \
-                        "$_fdh_tokflat" | cut -c 1-60)]"
-                fi
-            fi
-            [ -n "$_fdh_tok" ] && break
-            _fdh_tid=$((_fdh_tid + 1))
-        done
+        _fdh_scan_token_for "$_fdh_dev"
         [ -n "$_fdh_tok" ] && break
     done
     return 0
@@ -588,6 +600,15 @@ else
 fi
 
 # --- §8.2 steps 2+3: token path -------------------------------------------------
+# per-member state — initialized UNCONDITIONALLY: the TPM-absent path skips
+# the whole _fdh_w-guarded block below, and the recovery loop's `case
+# $_fdh_opened_list` must never trip strict-mode's unset-variable guard
+_fdh_opened_list=''
+_fdh_prev_tokdigest=''
+_fdh_prev_passfile=''
+_fdh_any_tok=0
+_fdh_exp_err_first=''
+_fdh_pos=0
 _fdh_pass_file=''
 _fdh_w=''
 if [ "$_fdh_tpm_ok" = 1 ]; then
@@ -615,7 +636,39 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
         fi
     fi
 
-    if [ -n "$_fdh_tok" ]; then
+    for _fdh_wd in $_fdh_members; do
+        _fdh_pos=$((_fdh_pos + 1))
+        if [ $((_fdh_pos % 2)) -eq 1 ]; then
+            _fdh_target=$_fdh_wd
+            continue
+        fi
+        _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
+        _fdh_scan_token_for "$_fdh_dev"
+        if [ -n "$_fdh_exp_err" ] && [ -z "$_fdh_exp_err_first" ]; then
+            _fdh_exp_err_first=$_fdh_exp_err
+        fi
+        _fdh_pass_file=''
+        _fdh_tokdigest=''
+        if [ -z "$_fdh_tok" ] && [ -n "$_fdh_prev_passfile" ]; then
+            # a RAID1 leg with NO token of its own: the previous member's
+            # secret MAY still open it (shared-volume model) — best-effort;
+            # a genuine mismatch falls into the recovery path below
+            _fdh_pass_file=$_fdh_prev_passfile
+        fi
+        if [ -n "$_fdh_tok" ]; then
+            # bcache-multi per-member unseal (R640 2026-10-01): each member's
+            # OWN token is exported, gated, and unsealed — containers enrolled
+            # with INDEPENDENT volume passphrases each get their own secret
+            # (§8.2 step 3 generalization; the recovery credential stays
+            # shared — keyslot 0 is common by ceremony).
+            _fdh_any_tok=1
+            _fdh_tokdigest=$(printf '%s' "$_fdh_tok" | tr -d ' \t\n\r' | sha256sum | awk '{print $1}')
+            if [ -n "$_fdh_prev_passfile" ] && [ "$_fdh_tokdigest" = "$_fdh_prev_tokdigest" ]; then
+                # identical-token fast path (true RAID1 sharing — §8.2's
+                # original model): reuse the previous member's unseal, ONE
+                # TPM round-trip, byte-identical console texture
+                _fdh_pass_file=$_fdh_prev_passfile
+            else
         # §7.2 dash-form token (lib/token.sh schema): tpm2-blob, tpm2-pcrs,
         # tpm2-pcr-bank, tpm2-signature (+ type checked above, keyslots logged)
         _fdh_tokflat=$(printf '%s' "$_fdh_tok" | tr -d ' \t\n\r')
@@ -732,32 +785,24 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
                 _fdh_warn "$FDE_WARN_SEAL_REFUSED"
             fi
         fi
-    else
-        _msg "no systemd-tpm2 token found on any crypttab member — recovery passphrase path (§8.2)${_fdh_exp_err:+ [last export refusal: $_fdh_exp_err]}"
+            fi
+        fi
+        if [ -n "$_fdh_pass_file" ]; then
+            if cryptsetup open --type luks --key-file - "$_fdh_dev" "$_fdh_target" <"$_fdh_pass_file" >/dev/null 2>&1; then
+                _fdh_opened_list="$_fdh_opened_list $_fdh_target "
+                _msg "unlocked $_fdh_target ($_fdh_dev) via the TPM token"
+            else
+                _msg "token unlock failed for $_fdh_target — recovery passphrase path (§8.2)"
+            fi
+            _fdh_prev_tokdigest=$_fdh_tokdigest
+            _fdh_prev_passfile=$_fdh_pass_file
+        fi
+    done
+    if [ "$_fdh_any_tok" = 0 ]; then
+        _msg "no systemd-tpm2 token found on any crypttab member — recovery passphrase path (§8.2)${_fdh_exp_err_first:+ [last export refusal: $_fdh_exp_err_first]}"
         # token_missing class: the seal is gone from the containers (§8.2 step 2)
         _fdh_warn "$FDE_WARN_TOKEN_MISSING"
     fi
-fi
-
-# --- open every member with the unsealed secret (§8.2 step 3; RAID1: the
-# unsealed passphrase is reused across all members without re-prompting) -------
-_fdh_opened_list=''
-if [ -n "$_fdh_pass_file" ]; then
-    _fdh_pos=0
-    for _fdh_wd in $_fdh_members; do
-        _fdh_pos=$((_fdh_pos + 1))
-        if [ $((_fdh_pos % 2)) -eq 1 ]; then
-            _fdh_target=$_fdh_wd
-            continue
-        fi
-        _fdh_dev=$(_fdh_resolve_dev "$_fdh_wd") || continue
-        if cryptsetup open --type luks --key-file - "$_fdh_dev" "$_fdh_target" <"$_fdh_pass_file" >/dev/null 2>&1; then
-            _fdh_opened_list="$_fdh_opened_list $_fdh_target "
-            _msg "unlocked $_fdh_target ($_fdh_dev) via the TPM token"
-        else
-            _msg "token unlock failed for $_fdh_target — recovery passphrase path (§8.2)"
-        fi
-    done
     rm -rf "$_fdh_w"
     _fdh_w=''
     _fdh_pass_file=''

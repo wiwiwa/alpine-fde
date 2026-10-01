@@ -544,8 +544,8 @@ assert_eq "token success: NO attempt counter (no prompt at all)" "0" \
 reset_leg
 rc=$(run_hook "$TMP/stdin1" FDE_TEST_TOKEN_MIN_ID=17)
 assert_rc "high token-id: hook rc 0" 0 "$rc"
-assert_eq "high token-id: scan reaches id 17 and exports the token" "1" \
-    "$(argv_count 'token export --token-id 17')"
+assert_eq "high token-id: scan reaches id 17 and exports the token" "2" \
+    "$(argv_count 'token export --token-id 17')"  # bcache-multi per-member scan: the aggregate attach-race probe + the member scan each walk to id 17 — exports are idempotent header reads, not TPM round-trips
 assert_eq "high token-id: unseal still happens" "1" "$(argv_count '^tpm2_unseal')"
 assert_eq "high token-id: exactly one open (no prompt fallback)" "1" "$(argv_count '^cryptsetup open')"
 assert_eq "high token-id: no poweroff" "0" "$(argv_count '^poweroff')"
@@ -668,7 +668,7 @@ reset_leg
 mkdir -p "$TMP/never-uuid"
 rc=$(run_hook "$TMP/stdin-rec" FDE_DISK_BY_UUID_DIR="$TMP/never-uuid" FDE_ATTACH_WAIT_SECS=2 FDE_TEST_REQUIRE_NODE=1 FDE_TEST_NLPLUG_ATTACH_AFTER=9999)
 assert_rc "attach bound exhausted: recovery passphrase still unlocks" 0 "$rc"
-assert_eq "attach bound exhausted: nlplug-findfs consulted through the bound (scan + 2 probes + the open-loop resolve), silent" "4" \
+assert_eq "attach bound exhausted: nlplug-findfs consulted through the bound (aggregate scan + 2 probes + the member scan resolve + the recovery-loop resolve), silent" "5" \
     "$(argv_count '^nlplug-findfs')"
 assert_contains "attach bound exhausted: the wait notice is printed" \
     "$(cat "$TMP/out.log")" "waiting up to 2s"
