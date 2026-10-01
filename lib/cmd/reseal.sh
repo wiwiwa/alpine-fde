@@ -114,8 +114,11 @@ reseal_lock_acquire() {
     fi
     exec 9>>"$_ela_f"
     # blocking with a generous bound: a racing postinst pass WAITS rather than
-    # fails; a wedged holder fails loudly instead of hanging forever
-    if ! flock -w 120 9; then
+    # fails; a wedged holder fails loudly instead of hanging forever.
+    # PORTABILITY (R640 2026-10-01): GNU flock's -w is NOT in busybox — the
+    # busybox build failed instantly and was MISREPORTED as a lock timeout.
+    # timeout(1) + flock -x works on both (busybox provides both)
+    if ! timeout 120 flock -x 9; then
         err "enroll: another enrollment holds the lock ($_ela_f) — timed out after 120s"
         exec 9>&-
         return 1
@@ -388,6 +391,7 @@ reseal_run() {
     # the CLI precondition gate
     keys_rsa3072_guard "${_er_pub%/*}"
     RESEAL_SLOT=''
+    # shellcheck disable=SC2034  # contract output: written to the crash-resume env (line ~512, string-interpolated) and caller-visible per the header — shellcheck cannot see either read
     RESEAL_TOKEN_ID=''
     RESEAL_SLOT_SERIAL=''
     RESEAL_TOKEN_ID_SERIAL=''
