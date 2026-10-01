@@ -159,7 +159,7 @@ line_no() { printf '%s\n' "$1" | grep -Fnm1 "$2" | cut -d: -f1; }
 reset_nvram '' '0002,0003'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
 printf '0003|66666666-7777-8888-9999-000000000000|UEFI Shell|\\EFI\\shell.efi\n' >>"$NVRAM/entries"
-assert_rc "fresh NVRAM: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+ALPINE_FDE_SERIAL_FIRST=no assert_rc "fresh NVRAM: rc 0 (serial-first seam off: the default-first pins below hold)" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_contains "fresh: the pair is created (default named)" "$ASSERT_RC_OUTPUT" "created boot entry"
 assert_eq "fresh: TWO entries created" "2" "$(grep -cF 'efibootmgr -c ARGS' "$NVRAM/log")"
 CREATE=$(grep -F 'efibootmgr -c ARGS' "$NVRAM/log" | head -1)
@@ -173,6 +173,16 @@ assert_contains "fresh: the serial entry points at the SERIAL UKI" \
 assert_eq "fresh: BootOrder = default FIRST, serial SECOND, others preserved" \
     "0001,0004,0002,0003" "$(cat "$NVRAM/order")"
 
+# --- 1b. serial-first ordering: ALPINE_FDE_SERIAL_FIRST=yes puts the SERIAL
+#        UKI FIRST (the first boot's recovery read is /dev/console — ttyS0 on
+#        the serial variant; R640 2026-10-01). The finalize flow flips back.
+# =============================================================================
+reset_nvram '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi
+0003|66666666-7777-8888-9999-000000000000|UEFI Shell|\\EFI\\shell.efi' '0002,0003'
+ALPINE_FDE_SERIAL_FIRST=yes assert_rc "serial-first: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+assert_eq "serial-first: BootOrder = serial FIRST, default SECOND, others preserved" \
+    "0004,0001,0002,0003" "$(cat "$NVRAM/order")"
+
 # =============================================================================
 # 2. idempotent reuse: existing same-kver/same-variant entries at the CURRENT
 #    GUID + loader are reused — NO duplicates created
@@ -180,7 +190,7 @@ assert_eq "fresh: BootOrder = default FIRST, serial SECOND, others preserved" \
 reset_nvram "0005|$GUID|$LBL_DEF|$LDR_DEF
 0006|$GUID|$LBL_SER|$LDR_SER" '0005,0006,0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "reuse: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+ALPINE_FDE_SERIAL_FIRST=no assert_rc "reuse: rc 0" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_eq "reuse: NO -c (no duplicate)" "0" "$(grep -cF 'efibootmgr -c ARGS' "$NVRAM/log")"
 assert_contains "reuse: info names the reused default entry" "$ASSERT_RC_OUTPUT" "reusing boot entry Boot0005"
 assert_contains "reuse: info names the reused serial entry" "$ASSERT_RC_OUTPUT" "reusing boot entry Boot0006"
@@ -333,10 +343,10 @@ ALPINE_FDE_BOOTENTRY_RETRY_SLEEP=0
 FAKE_LAG_COUNT=7
 reset_nvram '' '0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "lag7 (beyond the retired 5-attempt bound): rc 0 via the raised retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+ALPINE_FDE_SERIAL_FIRST=no assert_rc "lag7 (beyond the retired 5-attempt bound): rc 0 via the raised retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_contains "lag7: the pair is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
 assert_contains "lag7: the retry warned about NVRAM latency while waiting" "$ASSERT_RC_OUTPUT" "NVRAM write latency"
-assert_contains "lag7: the warn names the raised attempt bound" "$ASSERT_RC_OUTPUT" "attempt 1/10"
+assert_contains "lag7: the warn names the raised attempt bound" "$ASSERT_RC_OUTPUT" "attempt 1/24"
 assert_eq "lag7: the pair is at the front in order (default first, serial second)" \
     "0001,0003,0002" "$(cat "$NVRAM/order")"
 assert_eq "lag7: the recovered entries pin the CURRENT GUID" "2" "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
@@ -345,7 +355,7 @@ assert_eq "lag7: the recovered entries pin the CURRENT GUID" "2" "$(grep -c "|$G
 FAKE_LAG_COUNT=2
 reset_nvram '' '0002'
 printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Microsoft\\bootmgfw.efi\n' >>"$NVRAM/entries"
-assert_rc "lag2 (within the new bound): rc 0 via the retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
+ALPINE_FDE_SERIAL_FIRST=no assert_rc "lag2 (within the new bound): rc 0 via the retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_contains "lag2: the pair is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
 assert_eq "lag2: the pair is at the front" "0001,0003,0002" "$(cat "$NVRAM/order")"
 FAKE_LAG_COUNT=
@@ -359,7 +369,7 @@ NEVER_RC=$?
 assert_eq "never: rc 64 (still fail-closed, no entry-number guessing)" "64" "$NEVER_RC"
 assert_contains "never: the die keeps the refuse-to-guess clause" "$OUT" "refusing to guess the entry number"
 assert_contains "never: the die names NVRAM write latency (Dell) as the likely cause" "$OUT" "NVRAM write latency"
-assert_contains "never: the die reports the RAISED bounded attempts" "$OUT" "after 10 attempts (~50s)"
+assert_contains "never: the die reports the RAISED bounded attempts" "$OUT" "after 24 attempts (~240s)"
 assert_eq "never: the DEFAULT entry WAS created in the fake NVRAM (the write, not the read, succeeded); the serial leg never ran" "1" \
     "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
 assert_eq "never: BootOrder untouched (no guessing)" "0002" "$(cat "$NVRAM/order")"

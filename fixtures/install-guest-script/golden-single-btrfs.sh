@@ -18,7 +18,7 @@ set -eux
 # HOST: btrfs subvolume create <TMP>/mnt/@snapshots
 # HOST: umount <TMP>/mnt
 # HOST: mount -o subvol=@ /dev/mapper/root-crypt <TMP>/mnt && mkdir -p <TMP>/mnt/home <TMP>/mnt/.snapshots <TMP>/mnt/efi
-# HOST: mount -o subvol=@home /dev/mapper/root-crypt <TMP>/mnt/home
+# HOST: mount -o subvol=@home /dev/mapper/root-crypt <TMP>/mnt/home && chmod 755 <TMP>/mnt/home # fresh subvol defaults to root-only 0700 — /home must be traversable (R640 2026-10-01: 0700 @home made every non-root user's authorized_keys invisible to sshd's strict-modes walk — pubkey auth silently failed)
 # HOST: mount -o subvol=@snapshots /dev/mapper/root-crypt <TMP>/mnt/.snapshots
 # HOST: mkfs.vfat -F 32 -n EFI <TMP>/disk.img1
 # HOST: mount <TMP>/disk.img1 <TMP>/mnt/efi

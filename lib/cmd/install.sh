@@ -657,6 +657,19 @@ inst_bootentry_ensure() {
   # behind (oldest last — prune order)
   _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse)
   _ibe_reorder_pair "$_ibe_eb" "$_ibe_def_entry" "$_ibe_ser_entry" "$_ibe_fresh"
+  # SERIAL-FIRST FIRST BOOT (R640 2026-10-01): the first boot runs on the
+  # PROVISIONAL seal, which typically refuses (the installer's ukify
+  # measurement diverges from the real stub) — the one recovery passphrase
+  # is read from /dev/console, which the DEFAULT UKI binds to the VIDEO
+  # console (tty0, last-console-wins). On a serial-attached machine that
+  # read is unreachable (no USB HID in the initramfs either) — order the
+  # SERIAL UKI first (serial last => /dev/console is ttyS0); the finalize
+  # flow re-orders default-first once trust is finalized.
+  _isf=${ALPINE_FDE_SERIAL_FIRST:-auto} # seam: auto (detect) | yes | no — the unit legs pin BOTH modes explicitly
+  if [ "$_isf" = yes ] || { [ "$_isf" = auto ] && grep -q 'console=ttyS' /proc/cmdline 2>/dev/null; }; then
+    info "install: serial console detected — ordering the SERIAL UKI first for the first boot (the finalize flow re-orders default-first after trust finalizes)"
+    _ibe_reorder_pair "$_ibe_eb" "$_ibe_ser_entry" "$_ibe_def_entry" "$_ibe_fresh"
+  fi
   info "install: boot entries standing for $_ibe_kver (default Boot$_ibe_def_entry FIRST, serial Boot$_ibe_ser_entry second; the firmware loads the UKIs directly)"
   return 0
 }
@@ -715,12 +728,12 @@ inst_bootentry_ensure_one() {
       "$_ibeo_kver" "$_ibeo_var" "$_ibeo_lclbl")
     [ -n "$_ibeo_mine" ] && break
     _ibeo_try=$((_ibeo_try + 1))
-    [ "$_ibeo_try" -ge 10 ] && break
-    warn "install: the '$_ibeo_lbl' entry is not in the efibootmgr listing yet (attempt $_ibeo_try/10) — likely firmware NVRAM write latency (Dell); retrying"
-    sleep "${ALPINE_FDE_BOOTENTRY_RETRY_SLEEP:-5}"
+    [ "$_ibeo_try" -ge 24 ] && break
+    warn "install: the '$_ibeo_lbl' entry is not in the efibootmgr listing yet (attempt $_ibeo_try/24) — likely firmware NVRAM write latency (Dell); retrying"
+    sleep "${ALPINE_FDE_BOOTENTRY_RETRY_SLEEP:-10}"
   done
   [ -n "$_ibeo_mine" ] ||
-    die "install: the '$_ibeo_lbl' boot entry was created but is not in the efibootmgr listing after 10 attempts (~50s) — refusing to guess the entry number (likely cause: firmware NVRAM write latency — some firmware, notably Dell, commits the new boot variable late; re-running the install converges idempotently, or create the entry manually)"
+    die "install: the '$_ibeo_lbl' boot entry was created but is not in the efibootmgr listing after 24 attempts (~240s) — refusing to guess the entry number (firmware NVRAM write latency; the R640 needed >50s and up to ~2min — the ESP fallback loader still boots the UKIs meanwhile; re-running the install converges idempotently)"
   info "install: created boot entry Boot$_ibeo_mine '$_ibeo_lbl' -> HD(1,GPT,$_ibeo_guid) $_ibeo_ldr"
   printf '%s\n' "$_ibeo_mine"
   return 0
@@ -2345,7 +2358,7 @@ cmd_install_main() {
     inst_exec host "btrfs subvolume create $_im_mnt/@snapshots"
     inst_exec host "umount $_im_mnt"
     inst_exec host "mount -o subvol=@ $_im_mapper $_im_mnt && mkdir -p $_im_mnt/home $_im_mnt/.snapshots $_im_mnt$_im_esp_mnt"
-    inst_exec host "mount -o subvol=@home $_im_mapper $_im_mnt/home"
+    inst_exec host "mount -o subvol=@home $_im_mapper $_im_mnt/home && chmod 755 $_im_mnt/home # fresh subvol defaults to root-only 0700 — /home must be traversable (R640 2026-10-01: 0700 @home made every non-root user's authorized_keys invisible to sshd's strict-modes walk — pubkey auth silently failed)"
     inst_exec host "mount -o subvol=@snapshots $_im_mapper $_im_mnt/.snapshots"
     inst_exec host "mkfs.vfat -F 32 -n EFI $_im_esp"
     inst_exec host "mount $_im_esp $_im_mnt$_im_esp_mnt"
@@ -2564,6 +2577,16 @@ cmd_install_main() {
   # step 7; mkinitfs reads the list at build time (idempotent).
   inst_exec host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
   inst_exec guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
+  # HEADLESS ACCESS (R640 2026-10-01): adduser -D leaves the account LOCKED
+  # (no password) and the sshd policy is PermitRootLogin no — without a
+  # staged operator key the fresh install's SSH path is INOPERABLE. Set
+  # ALPINE_FDE_ADMIN_PUBKEY (path to an OpenSSH PUBLIC key on the installer
+  # host) to stage it for the admin account + wheel doas; unset = status quo.
+  if [ -n "${ALPINE_FDE_ADMIN_PUBKEY:-}" ] && [ -r "$ALPINE_FDE_ADMIN_PUBKEY" ]; then
+    _iap_b64=$(openssl base64 -A -in "$ALPINE_FDE_ADMIN_PUBKEY" 2>/dev/null || base64 -w0 "$ALPINE_FDE_ADMIN_PUBKEY")
+    info "install: staging operator pubkey for $_im_user + wheel doas (headless access)"
+    inst_exec guest "mkdir -p /home/$_im_user/.ssh && printf %s $_iap_b64 | base64 -d > /home/$_im_user/.ssh/authorized_keys && chown -R $_im_user:$_im_user /home/$_im_user/.ssh && chmod 700 /home/$_im_user/.ssh && chmod 600 /home/$_im_user/.ssh/authorized_keys && mkdir -p /etc/doas.d && printf 'permit nopass :wheel\n' > /etc/doas.d/alpine-fde.conf # headless: locked account + pubkey-only access + wheel doas"
+  fi
   # STANDARD OPENRC ENROLLMENT (real-server blocker, R640 2026-09-30): the
   # freshly-populated target shipped a COMPLETELY EMPTY sysinit runlevel and a
   # boot runlevel with ONLY networking — no mdev, no hwdrivers, no modules.
