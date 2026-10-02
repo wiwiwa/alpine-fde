@@ -1182,8 +1182,9 @@ assert_contains "[boot B] tooling payload extracted in-guest" "$LOG" "P2B-42-OK"
 assert_contains "[boot B] dead fixture token removed (teardown before enroll)" "$LOG" "T9-52-GONE"
 assert_contains "[boot B] production CLI ran (Mechanism B seal, fixture marker)" "$LOG" \
     "$(sentinel_of cli_seal_slot)"
+# d77b115 made the enroll line per-member: `alpine-fde: enrolled <uuid> (policy_mode=...)`
 assert_contains "[boot B] production CLI's own success marker" "$LOG" \
-    "alpine-fde: enrolled (policy_mode="
+    "alpine-fde: enrolled $DISK_UUID (policy_mode="
 assert_not_contains "[boot B] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG" \
     "$(sentinel_of cryptenroll_enrolled)"
 assert_eq "[boot B] production CLI rc 0" "0" "$CLI_RC"
@@ -1376,10 +1377,14 @@ if (( FROM_CACHE == 1 )); then
     # run-dir contract: console.log is this run's (boot C) console evidence
     cp "$C/console.log" "$RUN/console.log"
     LOG_CACHED=$(cat "$RUN/console.log" 2>/dev/null || true)
+    # DISK_UUID is only assigned in the fresh-enroll branch — resolve it here
+    # for the marker needle (set -u; the cached disk is the same image boot C
+    # just ran on)
+    DISK_UUID=$(timeout 60 cryptsetup luksUUID "$RUN/disk.img") || { echo "s00b: luksUUID failed (from-cache)"; exit 1; }
     assert_not_contains "[from-cache] ZERO Mechanism B seals (the cache is never re-enrolled over)" \
         "$LOG_CACHED" "$(sentinel_of cli_seal_slot)"
     assert_not_contains "[from-cache] no enrollment success marker" "$LOG_CACHED" \
-        "alpine-fde: enrolled (policy_mode"
+        "alpine-fde: enrolled $DISK_UUID (policy_mode"
     assert_not_contains "[from-cache] no fed tooling session ran (no enroll work redone)" \
         "$LOG_CACHED" "P2B-42-OK"
 fi

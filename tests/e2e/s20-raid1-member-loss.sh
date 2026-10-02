@@ -27,17 +27,21 @@
 #           missing-member pool mounts — asserts the degraded mount option
 #           in /proc/mounts + `btrfs filesystem show` state + the canary,
 #           clean poweroff.
-#   Phase 3a (restore + production finalization): member 2 restored (the
-#           PRE-BUILT second-member image back at its path); fed session on
-#           the CANONICAL member images unlocks BOTH and runs the PRODUCTION
-#           `alpine-fde finalize`: the per-member loop upgrades BOTH
-#           containers to the Mechanism B {PCR 7, PCR 11} token
-#           (seal_upgrade_token — each member enters finalize with ZERO
-#           standing tokens, so the upgrade takes the seal branch exactly
-#           once per member, authorized by the operator recovery passphrase
-#           verified at keyslot 0), install state finalized (the §8.4 state
-#           doc is scenario-ephemeral here — the DURABLE evidence is the
-#           standing {7,11} tokens, asserted host-side post-boot).
+#   Phase 3a (restore + production credential restoration): member 2 restored
+#           (the PRE-BUILT second-member image back at its path); fed session
+#           on the CANONICAL member images unlocks BOTH and runs the
+#           PRODUCTION `alpine-fde reseal`: the per-member sweep seals the
+#           Mechanism B {PCR 7, PCR 11} token into each container (each
+#           member enters with ZERO standing tokens, so the sweep takes the
+#           fresh-seal branch exactly once per member, authorized by the
+#           recovery keyslot 0 credential via ALPINE_FDE_LUKS_KEYFILE=/rp —
+#           the fixture rekeys slot 0 on BOTH members to the §13-floored
+#           recovery passphrase first). ADR-21-era port (2026-10-03): the
+#           guided finalize's ground-truth gate correctly refuses a
+#           tokenless, non-installer container (trust-state unknown,
+#           lib/trust-state.sh) — the §10 runbook leg is "audit, then
+#           reseal" (the shipped advisory); the DURABLE evidence is the
+#           standing {7,11} tokens, asserted host-side post-boot.
 #   Phase 3b (full pool, zero-input): both members boot with their standing
 #           tokens: the harness unlock of root1 is the ZERO-INPUT token path
 #           (token_discovered/pcr_sig_added/unlocked sentinels, UNSEALED, no
@@ -65,10 +69,11 @@
 #     check — a non-degraded full-pool mount with the canary intact.
 #   * The dead suppressor token (s00b mechanism) exists only to keep the
 #     harness stand-in enroll branch out of the loop on the ROOT member;
-#     member 1's is removed in the fed session before finalize. Member 2
-#     carries NO token into finalize: seal_upgrade_token seals the fresh
+#     member 1's is removed in the fed session before the reseal. Member 2
+#     carries NO token into the reseal: the sweep seals the fresh
 #     volume passphrase under the {7,11} policy and adds token + keyslot with
-#     no old enrollment to retire — exactly the "first finalization" shape.
+#     no old enrollment to retire (wipe=no) — exactly the "first
+#     finalization" shape.
 #   * UNLOCK PATH PIN (documented, not silent): the feeding UKI pins
 #     `alpine-fde-unlock=oracle`. The §8.2 hook is the shipped unlock of
 #     record, but this scenario's fed sessions are built on the oracle's
@@ -78,12 +83,13 @@
 #     fail-closed poweroff, which cannot host a multi-command fed session.
 #     The oracle is the harness-documented opt-in for exactly this
 #     (uki-build.sh: "opt-in, for scenarios that explicitly document it").
-#   * The Stage-1 credential ceremony stand-in (§9.1 step 4): the fixture's
+#   * The operator-credential stand-in: the fixture's
 #     well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*alpine-fde*),
 #     so BOTH members are rekeyed in-guest (cryptsetup luksChangeKey
 #     --key-slot 0) to the scenario's floored recovery passphrase — the
-#     amended contract's at-rest shape (operator recovery at keyslot 0
-#     authorizes the guided Stage 3; no key handoff to finalize exists).
+#     at-rest shape the §10 runbook assumes (the recovery credential
+#     authorizes the reseal's luksAddKey via ALPINE_FDE_LUKS_KEYFILE; no key
+#     handoff to the CLI exists).
 #
 # §12 negatives on every boot: no interactive passphrase prompt (prompt_re),
 # no emergency shell (emergency_forbidden), sentinels via the table only.
@@ -117,12 +123,14 @@ ROOTFS_RETENTION=3
 ESP_HEADROOM_MIB=8
 MEMBER_MIB=1024
 
-# §13-floor-OK credentials for the in-guest finalize (the *alpine-fde*
+# §13-floor-OK credentials for the in-guest reseal (the *alpine-fde*
 # substring is blocklisted by the entropy floor, so these avoid it; >=16
 # chars passes). The
 # recovery passphrase is REKEYED into keyslot 0 of BOTH members in-guest
-# (the Stage-1 credential-ceremony stand-in); the key passphrase encrypts
-# release.pem at finalize STEP 2 (ADR-18).
+# (the operator-credential stand-in — it authorizes the reseal's luksAddKey
+# via ALPINE_FDE_LUKS_KEYFILE); the key passphrase seam stays exported for
+# the documented CI env set (an encrypted release.pem would need it; the
+# fixture ships the ADR-18 plaintext staging form).
 S20_RECOVERY='fde-s20-recovery-6c31a9'
 S20_KEYPASS='fde-s20-release-pbkdf2-j2'
 
@@ -278,7 +286,7 @@ _ensure_tpm() {
 # volatile state and the fixture's restart RESTORES it into RAM; a boot
 # served by that restored instance EXTENDS OVER the previous boot's final
 # values (PCR 0/7/11 all shift — "register instability") and the phase-3a
-# finalize's fresh-policy gate dies rc 64. swtpm_stop + swtpm_start (the
+# reseal's fresh-policy gate dies rc 64. swtpm_stop + swtpm_start (the
 # second start finds no volatile file) restores the documented per-boot
 # zeroed-PCR semantics. The bootstrap's post-boot audit window reads the
 # booted register on purpose — this guard is called only at BOOT boundaries.
@@ -497,8 +505,9 @@ for _fl in $(ldd "$(command -v flock)" | awk '$3 ~ /^\// {print $3}'); do
 done
 printf '#!/bin/sh\nexec /opt/flockbin/ld-linux --library-path /opt/flockbin/lib /opt/flockbin/flock "$@"\n' \
     >"$TOOLING/usr/bin/flock"
-# openssl closure (s00b pattern): finalize STEP 2 shells out to openssl for
-# the ADR-18 release.pem encryption/inspection (enc / asn1parse)
+# openssl closure (s00b pattern): Mechanism B's seal path shells out to
+# openssl (random passphrase, base64 blob halves, keys_is_encrypted — and
+# reseal's own require_pkgs demand)
 run_stage tooling-openssl 60 cp -L "$(command -v openssl)" "$TOOLING/opt/sslbin/openssl"
 _ossl_interp=$(ldd "$(command -v openssl)" | awk '/ld-linux/{print $1}')
 if [[ "$_ossl_interp" != "$_jq_interp" ]]; then
@@ -521,8 +530,10 @@ chmod 755 "$TOOLING/usr/bin/tpm2" "$TOOLING/usr/bin/jq" "$TOOLING/usr/bin/openss
 printf 'root1 UUID=%s none luks,tpm2-device=auto,password-cache=yes,discard\nroot2 UUID=%s none luks,tpm2-device=auto,password-cache=yes,discard\n' \
     "$UUID1" "$UUID2" >"$TOOLING/etc/crypttab"
 run_stage tooling-release-pub 60 cp "$RUN/keys/release.pub" "$TOOLING/etc/alpine-fde/keys/release.pub"
-# release.pem = the PLAINTEXT release key (the fixture db.key): finalize STEP 2
-# encrypts it in place (ADR-18) under ALPINE_FDE_KEY_PASSPHRASE
+# release.pem = the PLAINTEXT release key (the fixture db.key): the reseal
+# consumes the provided ALPINE_FDE_PCRSIG, so no in-guest unlock/encryption
+# runs here — the ADR-18 completion is covered by the installer-lifecycle
+# scenarios
 run_stage tooling-release-pem 60 cp "$RUN/keys/db.key" "$TOOLING/etc/alpine-fde/keys/release.pem"
 
 # the FINAL baseline via the REAL CLI (audit --init), PCRs stamped from the
@@ -591,8 +602,10 @@ if grep -q '"expected_pcr7": "pending"' "$RUN/rootfs-etc/etc/alpine-fde/baseline
 fi
 run_stage baseline-copy 60 cp "$RUN/rootfs-etc/etc/alpine-fde/baseline.json" "$TOOLING/etc/alpine-fde/baseline.json"
 # (item 10b: install-state.json is DEAD — no state doc is staged. The
-# provisional ground truth lives IN the containers: the standing {PCR 11}
-# tokens + the temporary ephemeral keyslots; finalize derives it.)
+# containers carry ONLY their recovery keyslots; the §10 runbook's reseal
+# adds the finalized seals — lib/trust-state.sh classifies the pre-reseal
+# shape as unfinalizable-by-derivation, which is exactly why the runbook
+# uses reseal.)
 run_stage tooling-tar 300 tar -C "$TOOLING" -czf "$RUN/tooling.tar.gz" opt etc usr
 
 # the {7,11} policy signature for the FINALIZED token (§6.1.1 pcrsign): the
@@ -646,7 +659,7 @@ _feed_env() {
         "mkdir -p /run/bu /tmp && ln -sf /dev/vdb /run/bu/$UUID1 && ln -sf /dev/vdd /run/bu/$UUID2 && echo P5-40-OK" \
         "P5-40-OK" 'P5-4{1,2}0-OK' "P5-40-OK (by-uuid seams)"
     _feed_line_retry "$bdir" \
-        "export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_RECOVERY_PASSPHRASE=$S20_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S20_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-41-OK" \
+        "export ALPINE_FDE_NO_INSTALL=1 ALPINE_FDE_TCTI=device:/dev/tpmrm0 ALPINE_FDE_BY_UUID_DIR=/run/bu ALPINE_FDE_LUKS_KEYFILE=/rp ALPINE_FDE_RECOVERY_PASSPHRASE=$S20_RECOVERY ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys ALPINE_FDE_KEY_PASSPHRASE=$S20_KEYPASS ALPINE_FDE_TMPDIR=/tmp ALPINE_FDE_PCRSIG=/pcrsig.json ALPINE_FDE_CRYPTSETUP=/usr/bin/cryptsetup-pretty && echo P5-41-OK" \
         "P5-41-OK" 'P5-4{1,2}1-OK' "P5-41-OK (CLI env)"
     _feed_line_retry "$bdir" 'echo P5-43-OK' "P5-43-OK" 'P5-4{1,2}3-OK' "P5-43-OK (env ready)"
 }
@@ -766,12 +779,12 @@ else
 fi
 
 # ============================================================================
-# PHASE 3a — member restored: production finalize enrolls BOTH members
+# PHASE 3a — member restored: production reseal seals BOTH members
 # (CANONICAL member images: the enrollment must persist)
 # ============================================================================
 P3A="$RUN/phase3a"
 run_stage phase3a-restore-member 60 mv "$RUN/root2.lost.img" "$RUN/disk-root2.img"
-echo "# phase 3a: member restored — production finalize (both members, Mechanism B)"
+echo "# phase 3a: member restored — production reseal (both members, Mechanism B)"
 _boot_fed "$P3A" "$RUN/disk-root1.img" "$RUN/disk-root2.img"
 # tooling off the payload tail + member 1 suppressor teardown (member 2
 # carries no token at all — seal_upgrade_token takes the first-seal branch)
@@ -782,7 +795,7 @@ feed_line "$P3A/serial.sock" 'tar -xf /tooling.tgz -C / && echo P2B-$((40+2))-OK
 wait_console "$P3A" "P2B-42-OK" 300
 feed_line "$P3A/serial.sock" 'cryptsetup token remove --token-id 9 /dev/vdb && echo T9-$((51+1))-GONE'
 wait_console "$P3A" "T9-52-GONE" 120
-# unlock member 2 (fed passphrase — its token comes only from finalize below)
+# unlock member 2 (fed passphrase — its token comes only from the reseal below)
 feed_line "$P3A/serial.sock" \
     "printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" | cryptsetup open --type luks --key-file - /dev/vdd root2 && echo B2-\$((40+2))-OPEN"
 # TCG serial corruption guard (same as the bootstrap unlock sentinel)
@@ -790,21 +803,24 @@ wait_console_soft "$P3A" "B2-42-OPEN" 60 || \
     feed_line "$P3A/serial.sock" \
         'cryptsetup status root2 >/dev/null 2>&1 && echo B2-$((40+2))-OPEN'
 wait_console "$P3A" "B2-42-OPEN" 300
-# Stage-1 credential-ceremony stand-in (§9.1 step 4, amended): rekey BOTH
-# members' keyslot 0 to the §13-floored recovery passphrase — the fixture's
-# well-known slot-0 passphrase is floor-BLOCKLISTED, and the amended contract
-# verifies the operator recovery passphrase against keyslot 0 (no key handoff
-# to finalize exists; ADR-20 amended)
+# Operator-credential stand-in: rekey BOTH members' keyslot 0 to the
+# §13-floored recovery passphrase — the fixture's well-known slot-0
+# passphrase is floor-BLOCKLISTED, and the rekeyed credential is what
+# authorizes the reseal's luksAddKey on each member (staged as /rp for
+# ALPINE_FDE_LUKS_KEYFILE; no key handoff to the CLI exists)
 feed_line "$P3A/serial.sock" \
     "printf %s $S20_RECOVERY > /rp && cryptsetup luksChangeKey --key-slot 0 /dev/vdb /rp --key-file /kf0 && cryptsetup luksChangeKey --key-slot 0 /dev/vdd /rp --key-file /kf0 && echo RK-\$((44+1))-OK"
 wait_console "$P3A" "RK-45-OK" 600
+# production reseal (the ADR-21-era §10 runbook leg — see the phase-3a
+# header): the sweep seals EVERY crypttab LUKS member; /rp is the rekeyed
+# recovery credential authorizing both luksAddKey calls
 _feed_env "$P3A"
-feed_line "$P3A/serial.sock" 'timeout 300 /opt/alpine-fde/bin/alpine-fde finalize; echo P6-RC=$?'
+feed_line "$P3A/serial.sock" 'timeout 300 /opt/alpine-fde/bin/alpine-fde reseal; echo P6-RC=$?'
 i=0
 until grep -qE 'P6-RC=[0-9]+' "$P3A/console.log" 2>/dev/null; do
     _qemu_alive_or_die "$P3A" "console-wait:P6-RC"
     _budget_check "console-wait:P6-RC"
-    (( i < 300 )) || _hang_fail CONSOLE-WAIT "P6-RC" "finalize never returned"
+    (( i < 300 )) || _hang_fail CONSOLE-WAIT "P6-RC" "reseal never returned"
     sleep 1
     i=$((i + 1))
 done
@@ -817,22 +833,19 @@ LOG_3A=$(cat "$P3A/console.log" 2>/dev/null || true)
 assert_contains "[phase 3a] tooling extracted" "$LOG_3A" "P2B-42-OK"
 assert_contains "[phase 3a] Stage-1 stand-in: recovery rekeyed into keyslot 0 on BOTH members" "$LOG_3A" \
     "RK-45-OK"
-assert_contains "[phase 3a] finalize: recovery passphrase VERIFIED against keyslot 0 (§9.1 amended)" "$LOG_3A" \
-    "recovery passphrase verified against keyslot 0 (attempt 1) — authorizing the completion"
-assert_contains "[phase 3a] baseline already final (audit skipped, §9.1 idempotency)" "$LOG_3A" \
-    "baseline already final — skipping audit --init"
-assert_contains "[phase 3a] finalize: release.pem encrypted in place (ADR-18)" "$LOG_3A" \
-    "release.pem encrypted (AES-256 PBKDF2, ADR-18)"
-assert_contains "[phase 3a] member 1 upgraded to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
-    "alpine-fde: member $UUID1: token upgraded to Mechanism B {PCR 7, PCR 11}"
-assert_contains "[phase 3a] member 2 upgraded to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
-    "alpine-fde: member $UUID2: token upgraded to Mechanism B {PCR 7, PCR 11}"
+assert_contains "[phase 3a] Stage-1 stand-in: recovery rekeyed into keyslot 0 on BOTH members" "$LOG_3A" \
+    "RK-45-OK"
+# ADR-21-era port (2026-10-03): production reseal per member (see the
+# phase-3a header) — the sweep's own per-member success markers
+assert_contains "[phase 3a] reseal: G-B6 digest-anchored finalized seal" "$LOG_3A" \
+    "seal: G-B6 digest-anchored over the entry's d7/d11 components"
+assert_contains "[phase 3a] member 1 sealed to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
+    "alpine-fde: enrolled $UUID1 (policy_mode=b, token keyslot 1, wipe=no)"
+assert_contains "[phase 3a] member 2 sealed to Mechanism B {PCR 7, PCR 11}" "$LOG_3A" \
+    "alpine-fde: enrolled $UUID2 (policy_mode=b, token keyslot 1, wipe=no)"
 assert_eq "[phase 3a] exactly TWO finalized seals (one per member)" "2" \
     "$(grep -cF "$(sentinel_of cli_seal_slot)" "$P3A/console.log")"
-assert_contains "[phase 3a] no ephemeral keyslot remained (crash-skip of the purge)" "$LOG_3A" \
-    "no temporary ephemeral keyslot remains — skipping the purge"
-assert_contains "[phase 3a] install finalized marker" "$LOG_3A" "alpine-fde: install finalized"
-assert_eq "[phase 3a] production finalize rc 0" "0" "$CLI_RC_3A"
+assert_eq "[phase 3a] production reseal rc 0" "0" "$CLI_RC_3A"
 assert_not_contains "[phase 3a] NO cryptenroll anywhere (Mechanism B never invokes it)" "$LOG_3A" \
     "$(sentinel_of cryptenroll_enrolled)"
 assert_not_contains "[phase 3a] no emergency shell" "$LOG_3A" "$(sentinel_of emergency_forbidden)"
