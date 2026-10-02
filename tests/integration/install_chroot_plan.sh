@@ -362,19 +362,19 @@ assert_eq "defect 5: EVERY executed luksFormat ran --batch-mode (zero interactiv
     "$(grep 'luksFormat' "$ALPINE_FDE_TEST_LOG" | grep -vc -- '--batch-mode')"
 
 # =============================================================================
-# §9.1 step 4 credential ceremony (ADR-20 amended): executed host-side, the
-# ONLY credential seam is stdin (the answers file) — no flag, no env var.
+# §9.1 step 4 credential ceremony — SUPERSEDED by the ADR-21 provisioning
+# escrow: Stage 1 prompts for NOTHING (no recovery keyslot, no account
+# password, no release.pem encryption — the first boot's Stage-2 ceremony
+# sets keyslot 0 + the admin password + encrypts release.pem from the
+# operator's confirmed passphrase). These pins prove the ABSENCE.
 # =============================================================================
-assert_contains "ceremony (1/3): user password set in-chroot via chpasswd" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" "chroot $ALPINE_FDE_INSTALL_MNT /usr/sbin/chpasswd"
+assert_eq "ceremony: SUPERSEDED (ADR-21): NO chpasswd at install (the credentials defer to the first-boot ceremony)" "0" \
+    "$(grep -c 'usr/sbin/chpasswd' "$ALPINE_FDE_TEST_LOG" || true)"
 assert_eq "ceremony: NO interactive passwd(1) step anywhere" "0" \
     "$(grep -Ec '[/:]passwd( |$)' <<<"$(cat "$ALPINE_FDE_TEST_LOG")")"
-# item 12: recovery FIRST; the two derived prompts defaulted to it on bare Enter
-assert_contains "item 12: recovery prompt hint shown (press Enter to reuse)" "$OUT" \
-    "press Enter to reuse the recovery passphrase"
-assert_eq "item 12: the empty-Enter user password REALLY was the recovery passphrase (chpasswd stdin snapshot)" \
-    "admin:Fin4l-Rec0very-X9k2-!qmwjpz" "$(cat "$CHPASSWD_CAPTURE")"
-assert_eq "item 12: release-key prompt ALSO defaulted (exactly 2 hints: user password + release key)" "2" \
+# item 12 (ADR-21): NO derived prompts exist — the recovery passphrase is
+# set at the first boot's ceremony, and the account/release defaults ride it
+assert_eq "item 12: NO reusing-hint anywhere at install (the ceremony prompts are gone)" "0" \
     "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
 # item 27 (real-server failure #4): the recovery enrollment targets the LUKS
 # CONTAINER devices (the luksFormat targets) — a /dev/mapper/* node is the
@@ -382,55 +382,55 @@ assert_eq "item 12: release-key prompt ALSO defaulted (exactly 2 hints: user pas
 # e2e is BLIND to this class: the fixture pre-seeds keyslot 0 and the host
 # ceremony path is never really executed there — these execution-level pins
 # are the harness guard.
+# ADR-21: keyslot 0 is DEFERRED to the first boot's Stage-2 ceremony — the
+# install performs NO recovery luksAddKey at all (the containers open at the
+# first boot via the provisioning escrow; the operator's passphrase enrolls
+# keyslot 0 at the Stage-2 ceremony on the live system).
 ADDKEY=$(grep -m1 'luksAddKey' "$ALPINE_FDE_TEST_LOG")
-assert_contains "item 27: recovery luksAddKey targets the PRIMARY LUKS CONTAINER dev (${DISK}2)" "$ADDKEY" \
-    "cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 --key-file $EPHKEY ${DISK}2"
-assert_not_contains "item 27: recovery luksAddKey NEVER targets /dev/mapper (mapper = decrypted view)" "$ADDKEY" "/dev/mapper/"
+assert_eq "item 27 (ADR-21): NO recovery luksAddKey at install (keyslot 0 deferred to the first-boot ceremony)" "0" \
+    "$(grep -c 'luksAddKey' "$ALPINE_FDE_TEST_LOG" || true)"
+assert_not_contains "item 27: recovery luksAddKey NEVER targets /dev/mapper (mapper = decrypted view)" "${ADDKEY:-}" "/dev/mapper/"
 LUKSDUMP_CER=$(grep -m1 'luksDump' "$ALPINE_FDE_TEST_LOG")
-assert_not_contains "item 27: ceremony crash-resume luksDump also targets the CONTAINER (not the mapper)" "$LUKSDUMP_CER" "/dev/mapper/"
-assert_contains "item 27: ceremony crash-resume luksDump probes the container dev" "$LUKSDUMP_CER" "luksDump ${DISK}2"
+assert_not_contains "item 27: ceremony crash-resume luksDump also targets the CONTAINER (not the mapper)" "${LUKSDUMP_CER:-}" "/dev/mapper/"
 assert_eq "item 27 lint: ZERO executed cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) targeted /dev/mapper" "0" \
     "$(grep 'cryptsetup' "$ALPINE_FDE_TEST_LOG" | grep -E 'luksFormat|luksAddKey|luksRemoveKey' | grep -c '/dev/mapper/')"
-assert_contains "ceremony (3/3): release.pem encrypted via keys_encrypt_release (ADR-18 pkcs8)" \
-    "$(cat "$ALPINE_FDE_TEST_LOG")" \
-    "openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256"
+# ADR-18 deferral: release.pem stages PLAINTEXT (0600, inside the encrypted
+# root); the first boot's Stage-2 ceremony encrypts it with the operator's
+# confirmed passphrase
+assert_eq "ceremony (3/3): NO release.pem encryption at install (deferred to the first-boot ceremony)" "0" \
+    "$(grep -c 'pkcs8 -topk8' "$ALPINE_FDE_TEST_LOG" || true)"
 assert_eq "ceremony: NO secret ever appears in command argv (the log IS the argv record)" "0" \
     "$(grep -Ec 'U5er-P4ss|Fin4l-Rec0very|R3lease-K3ypass' <<<"$(cat "$ALPINE_FDE_TEST_LOG")")"
-# blocker #8 amendment: the plan may REFERENCE ALPINE_FDE_KEY_PASSPHRASE only
-# as an assignment FROM the 0600 staged seam file ($(cat <file>)) — never as
-# a literal value in the emitted text.
-assert_eq "ceremony: the ONLY passphrase-env reference is the seam-file assignment (blocker #8)" "1" \
+# blocker #8 superseded (ADR-21): NO passphrase-env assignment exists at
+# install — the release.pem encryption defers to the first-boot ceremony
+assert_eq "ceremony: SUPERSEDED (ADR-21): NO passphrase-env assignment at install" "0" \
     "$(grep -Fc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat' <<<"$OUT")"
-assert_eq "ceremony: NO passphrase-env assignment from anything but the staged seam file" "0" \
-    "$(grep 'ALPINE_FDE_KEY_PASSPHRASE=' <<<"$OUT" | grep -vFc 'ALPINE_FDE_KEY_PASSPHRASE=$(cat')"
 assert_eq "ceremony: recovery passfile scrubbed (keys_scrub, I1)" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ceremony.*' 2>/dev/null | wc -l)"
 assert_eq "ceremony: encrypt stage scrubbed (keys_encrypt_release tmp)" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-enc.*' 2>/dev/null | wc -l)"
-assert_eq "ceremony (3/3): release.pem on target IS the encrypted form" "1" \
-    "$(grep -qc 'fake-pbes2-encrypted-ADR18' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem" && echo 1 || echo 0)"
-assert_eq "ceremony (3/3): encrypted release.pem locked 0400" "400" \
+assert_eq "ceremony (3/3): release.pem staged PLAINTEXT (the ADR-18 encryption defers to the first-boot ceremony)" "1" \
+    "$(grep -qc 'fake-pbes2-encrypted-ADR18' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem" && echo 0 || echo 1)"
+assert_eq "ceremony (3/3): plaintext release.pem locked 0600" "600" \
     "$(stat -c '%a' "$ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys/release.pem")"
 # ceremony order: AFTER the platform keys (release.pem must exist) and AFTER
 # every MECHANICAL step (user flow directive: the credential ceremony is the
 # LAST interactive section); item 12: recovery passphrase asked FIRST
 O_KEYGEN=$(first_line_no "$OUT" "provision stage1 --mode in-chroot")
-O_CERU=$(first_line_no "$OUT" "host: inst_ceremony_user_password")
-O_CERR=$(first_line_no "$OUT" "host: inst_ceremony_recovery")
-O_CERK=$(first_line_no "$OUT" "host: inst_ceremony_release_key")
+O_ESCW=$(first_line_no "$OUT" "alpine-fde-provision")
 O_ENROLL=$(first_line_no "$OUT" "fw_auth_enroll")
 O_COPY=$(first_line_no "$OUT" "EFI/BOOT/BOOTX64.EFI")
 O_HOOKS=$(first_line_no "$OUT" "etc/kernel-hooks.d/alpine-fde-build.hook")
-assert_eq "order: platform keys BEFORE the ceremony (release.pem must exist)" "1" \
-    "$(( O_KEYGEN > 0 && O_KEYGEN < O_CERR ? 1 : 0 ))"
-assert_eq "order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
-    "$(( O_CERR > 0 && O_CERR < O_CERU && O_CERU < O_CERK ? 1 : 0 ))"
-assert_eq "order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \
-    "$(( O_ENROLL > 0 && O_ENROLL < O_CERR ? 1 : 0 ))"
-assert_eq "order (user flow directive): boot-manager guarded file copy BEFORE the credential ceremony" "1" \
-    "$(( O_COPY > 0 && O_COPY < O_CERR ? 1 : 0 ))"
-assert_eq "order (user flow directive): hooks staging BEFORE the credential ceremony (no secret; a kernel-build input)" "1" \
-    "$(( O_HOOKS > 0 && O_HOOKS < O_CERR ? 1 : 0 ))"
+assert_eq "order: platform keys BEFORE the escrow write (the escrow holds the volume keys from the seal)" "1" \
+    "$(( O_KEYGEN > 0 && O_KEYGEN < O_ESCW ? 1 : 0 ))"
+assert_eq "order (ADR-21): the escrow write present (the provisioning keys staged for the first boot)" "1" \
+    "$(( O_ESCW > 0 ? 1 : 0 ))"
+assert_eq "order (user flow directive): NVRAM enrollment BEFORE the escrow write (mechanical first)" "1" \
+    "$(( O_ENROLL > 0 && O_ENROLL < O_ESCW ? 1 : 0 ))"
+assert_eq "order (user flow directive): boot-manager guarded file copy BEFORE the escrow write" "1" \
+    "$(( O_COPY > 0 && O_COPY < O_ESCW ? 1 : 0 ))"
+assert_eq "order (user flow directive): hooks staging BEFORE the escrow write (no secret; a kernel-build input)" "1" \
+    "$(( O_HOOKS > 0 && O_HOOKS < O_ESCW ? 1 : 0 ))"
 
 LUKS_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
 ROOTFS_UUID=$(grep -oE -- '-U [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ALPINE_FDE_TEST_LOG" | head -1 | awk '{print $2}')
@@ -489,8 +489,8 @@ assert_not_contains "apk txn has NO zram-init (item 26a, ADR-7 amended)" "$CHROO
 # residue may land on the target in ANY topology
 assert_eq "target: NO dracut.conf.d directory (ADR-13)" "0" \
     "$([ -e "$MNT_ETC/dracut.conf.d" ] && echo 1 || echo 0)"
-assert_eq "cmdline.txt verbatim: dual console + rootflags + §8.2 fail-closed pins" \
-    "root=UUID=$LUKS_UUID rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff" \
+assert_eq "cmdline.txt verbatim: default variant (single NVRAM entry, ADR-22) + rootflags + §8.2 fail-closed pins" \
+    "root=UUID=$LUKS_UUID rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 # §4: topology recorded in the target conf (absent file = btrfs default, doc'd)
 assert_contains "conf: ROOT_FS=btrfs recorded" "$(cat "$MNT_ETC/alpine-fde/alpine-fde.conf")" "ROOT_FS=btrfs"
@@ -616,7 +616,7 @@ assert_contains "§9.1 step 3: platform-key ceremony invoked in-chroot (custody 
 # ceremony DOES encrypt the plaintext stage1 leaves (the pin below).
 assert_contains "defer-custody: the executed provision record defers release.pem encryption to ceremony 3/3" "$OUT" \
     "provision stage1 --mode in-chroot --keydir /etc/alpine-fde/keys --defer-custody"
-assert_eq "defer-custody: NO release-key prompt before the ceremony (exactly ONE reusing-hint per derived prompt, both ceremony-owned)" "2" \
+assert_eq "defer-custody: NO release-key prompt anywhere at install (the ceremony is gone; the re-encryption defers to the first boot)" "0" \
     "$(grep -c 'reusing the recovery passphrase' <<<"$OUT")"
 assert_contains "§9.1 step 4: NVRAM enrollment db->KEK->PK in-chroot" "$LOG" \
     "fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi"
@@ -647,12 +647,10 @@ assert_eq "blocker #7: ZERO bootctl invocations anywhere in the run" "0" \
 BLD_LINE=$(grep -m1 'kernel build' "$ALPINE_FDE_TEST_LOG")
 assert_contains "blocker #8: the build record exports the in-chroot release-key dir" "$BLD_LINE" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
-assert_contains "blocker #8: the build record feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file" "$BLD_LINE" \
-    'ALPINE_FDE_KEY_PASSPHRASE=$(cat'
-assert_contains "blocker #8/9: the ceremony (3/3) record stages the seam IN THE TARGET ROOT (guest-visible: the H-02 /dev bind is PLAIN — guest /dev/shm is the target's empty dir, so the host tmpfs seam was invisible in-chroot; blocker #9)" "$OUT" \
-    "host: inst_ceremony_release_key $ALPINE_FDE_INSTALL_MNT/etc/alpine-fde/keys $ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass"
-assert_contains "blocker #9: the build record reads the IN-CHROOT seam path and consumes it (rm after read)" "$BLD_LINE" \
-    '[ -s /run/alpine-fde-release-pass ] && ALPINE_FDE_KEY_PASSPHRASE=$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass'
+assert_not_contains "blocker #8 superseded (ADR-21): the build record feeds NO key passphrase (the re-sign defers to the first-boot ceremony)" "$BLD_LINE" \
+    "ALPINE_FDE_KEY_PASSPHRASE"
+assert_not_contains "blocker #8/9 superseded (ADR-21): NO ceremony seam staged into the target root (the release.pem encryption defers to the first-boot ceremony)" "$OUT" \
+    "host: inst_ceremony_release_key"
 # real-server blocker #11: the record derives the TARGET's installed kernel
 # IN-GUEST (newest dir under /lib/modules) and passes it to kernel build — the
 # retired no-arg form fell back to uname -r, the LIVE ISO kernel (whose
@@ -732,13 +730,8 @@ mv "$T/stub/chroot.save" "$T/stub/chroot"
 chmod +x "$T/stub/chroot"
 assert_eq "blocker #9 exec: the die-before-build scenario fails at the guest build step (64)" "64" "$DB_RC"
 assert_contains "blocker #9 exec: the failure IS the build record" "$DB_OUT" "guest step failed"
-assert_file_exists "blocker #9 exec: the ceremony staged the seam INTO the target root (guest-visible; snapshotted by the stub at build-record time)" \
-    "$SEAM_SNAP"
-assert_eq "blocker #9 exec: the target seam file is 0600" "600" \
-    "$(stat -c '%a' "$SEAM_SNAP" 2>/dev/null)"
-printf '%s' 'Fin4l-Rec0very-X9k2-!qmwjpz' >"$T/seam-expected"
-assert_eq "blocker #9 exec: the target seam file holds the confirmed passphrase (content compared off-log)" "0" \
-    "$(cmp -s "$SEAM_SNAP" "$T/seam-expected" && echo 0 || echo 1)"
+assert_eq "blocker #9 superseded (ADR-21): NO ceremony seam staged into the target root (the release.pem encryption defers to the first-boot ceremony)" "0" \
+    "$([ -e "$SEAM_SNAP" ] && echo 1 || echo 0)"
 assert_eq "blocker #9 exec: the die-path trap scrubbed the target seam (I1)" "0" \
     "$([ -e "$ALPINE_FDE_INSTALL_MNT/run/alpine-fde-release-pass" ] && echo 1 || echo 0)"
 # blocker #8 seam END-TO-END mechanics: replay the REAL record's shell against
@@ -768,7 +761,7 @@ assert_contains "blocker #8: the build sees the release-key dir via the environm
     "keydir=/etc/alpine-fde/keys"
 assert_contains "blocker #12: the build sees ALPINE_FDE_ROOT=/ via the environment (kernel-reality context)" "$(cat "$FAKE_OUT")" \
     "rootenv=/"
-assert_contains "blocker #8: the build decrypts via the passphrase from the environment (staged seam file)" "$(cat "$FAKE_OUT")" \
+assert_not_contains "blocker #8 superseded (ADR-21): the fake build sees NO key passphrase in the environment" "$(cat "$FAKE_OUT")" \
     "pass=Fin4l-Rec0very-X9k2-!qmwjpz"
 assert_contains "blocker #11: the derived TARGET kver reaches the build's argv (newest /lib/modules dir)" "$(cat "$FAKE_OUT")" \
     "argv=kernel build 6.18.35-0-lts"
@@ -789,10 +782,10 @@ assert_eq "item 27 lint (extended): the seal/token choreography record NEVER rec
     "$(grep -m1 'seal_provisional' "$ALPINE_FDE_TEST_LOG" | grep -c '/dev/mapper/')"
 assert_contains "§9.1 step 6: guest line pins the provisional slot contract" "$LOG" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
-# ADR-20 AMENDED: release.pem is encrypted IN STAGE 1 by the §9.1 step 4
-# credential ceremony (keys_encrypt_release, executed host-side); finalize
-# only CONSUMES the encrypted release.pem
-assert_contains "ADR-20 amended: release.pem encrypted in Stage 1 (ceremony 3/3 ran)" \
+# ADR-21: release.pem stages PLAINTEXT (0600, inside the encrypted root) —
+# the first boot's Stage-2 ceremony encrypts it with the operator's confirmed
+# passphrase; finalize no longer consumes a pre-encrypted release.pem
+assert_not_contains "ADR-21: release.pem NOT encrypted in Stage 1 (the encryption defers to the first-boot ceremony)" \
     "$OUT" "host: inst_ceremony_release_key"
 # I1 (§11): the Stage-1 provisional-seal one-liner must scrub its secrets —
 # the random volume passphrase (overwrite-then-unlink, the shared keys_scrub
@@ -896,7 +889,7 @@ assert_contains "blocker #7: the error names the decisive negative" "$NL_OUT" \
     "ships NO loader EFI binary"
 assert_contains "blocker #7: the error says what to fix" "$NL_OUT" \
     "fix the mirror/package set before installing"
-assert_eq "blocker #7: nothing executed but the mirror fetch probe" "1" \
+assert_eq "blocker #7: only the disk discovery + the mirror fetch probe executed (the /sys/block discovery precedes the probe)" "3" \
     "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
 assert_contains "blocker #7: that one command IS the package fetch probe" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "apk fetch --quiet --stdout systemd-boot"
@@ -1181,8 +1174,8 @@ assert_eq "raid1: baseline target.luks_uuid = PRIMARY member" "$MEM1_UUID" \
     "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target luks_uuid)"
 assert_eq "raid1: baseline target.member_uuids (additive schema)" "$MEM1_UUID $MEM2_UUID" \
     "$(baseline_get_in "$MNT_ETC/alpine-fde/baseline.json" target member_uuids)"
-assert_contains "raid1: cmdline dual console + rootflags pins verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
-    "rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff"
+assert_contains "raid1: cmdline default variant (single NVRAM entry, ADR-22) + rootflags verbatim" "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")" \
+    "rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff"
 # G-C24: the provisional seal loop covers BOTH member CONTAINERS in raid1
 # (item 27: primary p2 + secondary p1 — the luksFormat targets)
 SEAL_LINE2=$(grep -m1 'seal_provisional' <<<"$LOG2")
@@ -1197,14 +1190,11 @@ assert_eq "raid1: teardown closes both members (primary first)" "1" \
 EPHKEY2=$(grep -oE "$T/alpine-fde-ephkey\.[A-Za-z0-9]{6}" <<<"$OUT" | head -1)
 assert_eq "raid1: ephemeral key scrubbed at teardown" "0" \
     "$(find "$ALPINE_FDE_TMPDIR" -name 'alpine-fde-ephkey.*' 2>/dev/null | wc -l)"
-# item 27: in raid1 the ceremony enrolls BOTH member CONTAINERS (primary p2 +
-# secondary p1 — the luksFormat targets), never the mappers
-assert_eq "raid1/item 27: exactly 2 recovery luksAddKey records (one per member container)" "2" \
-    "$(grep -c 'luksAddKey' "$ALPINE_FDE_TEST_LOG")"
-assert_contains "raid1/item 27: primary container enrolled (${DISK}2)" "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG")" \
-    "--key-slot 0 --key-file $EPHKEY2 ${DISK}2"
-assert_contains "raid1/item 27: secondary container enrolled (${DISK2}1)" "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG")" \
-    "--key-slot 0 --key-file $EPHKEY2 ${DISK2}1"
+# item 27 (ADR-21): the recovery keyslot 0 is DEFERRED to the first boot's
+# Stage-2 ceremony — the install performs NO recovery luksAddKey in raid1
+# either (the containers open via the provisioning escrow at the first boot)
+assert_eq "raid1/item 27 (ADR-21): NO recovery luksAddKey at install (keyslot 0 deferred)" "0" \
+    "$(grep -c 'luksAddKey' "$ALPINE_FDE_TEST_LOG" || true)"
 assert_eq "raid1/item 27: zero luksAddKey records target /dev/mapper" "0" \
     "$(grep 'luksAddKey' "$ALPINE_FDE_TEST_LOG" | grep -c '/dev/mapper/')"
 
@@ -1322,8 +1312,8 @@ assert_contains "26b: the error says what to fix (configure networking first)" "
 DNS_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" <"$ANSWERS" 2>&1)
 DNS_RC=$?
 assert_eq "26b: repeat (fresh log): unresolvable mirror -> fail-closed 64" "64" "$DNS_RC"
-assert_eq "26b: repeat (fresh log): the ONLY stubbed commands are the two preflight probes (mirror DNS + blocker-#7 loader fetch), ZERO mutations" "2" \
-    "$(wc -l <"$ALPINE_FDE_TEST_LOG")"
+assert_eq "26b: repeat (fresh log): ZERO mutating commands executed (the discovery notes are the only output before the abort)" "0" \
+    "$(grep -acE 'luksFormat|mkfs\.|wipefs|parted|sgdisk|cryptsetup' "$ALPINE_FDE_TEST_LOG" || true)"
 assert_contains "26b: repeat (fresh log): the mirror probe ran" \
     "$(cat "$ALPINE_FDE_TEST_LOG")" "nslookup dl-cdn.alpinelinux.org"
 assert_contains "26b: repeat (fresh log): the loader-binary fetch probe ran (blocker #7 preflight)" \
@@ -1332,23 +1322,15 @@ assert_contains "26b: repeat (fresh log): the loader-binary fetch probe ran (blo
 make_stub nslookup
 
 # =============================================================================
-# §9.1 step 4 negative seam proof: with stdin CLOSED the ceremony fails
-# closed — the prompts are the ONLY credential seam (no flag, no env var).
-# Runs LAST against the main-run fixtures: it mutates the target before it
-# dies (config drops execute before the ceremony), so every later section
-# re-runs install and re-derives its own state.
+# §9.1 step 4 negative seam proof — SUPERSEDED (ADR-21): Stage 1 prompts for
+# NOTHING, so a closed-stdin install proceeds past the old credential gate
+# entirely (the mutation legs after it still prove the escrow is consumed).
 # =============================================================================
 NEG_OUT=$("$REPO/bin/alpine-fde" install --disk "$DISK" 2>&1 </dev/null)
 NEG_RC=$?
-assert_eq "ceremony: stdin closed -> fail-closed 64 (prompts are the only seam)" "64" "$NEG_RC"
-# item 12: recovery is asked FIRST, so the closed-stdin failure happens there
-# (the mismatch loop re-prompts unboundedly per the user directive — bounded
-# attempts are GONE; with scripted input EXHAUSTED the prompt read hits EOF
-# and dies fail-closed: the leg is bounded by INPUT, not by count)
-assert_contains "ceremony: the die names ceremony (1/3) recovery (item 12: asked first)" "$NEG_OUT" \
-    "inst_ceremony_recovery"
-assert_contains "ceremony: the failure is the EOF fail-closed die (bounded by input, not by count)" "$NEG_OUT" \
-    "end of input while waiting for a credential prompt (EOF)"
+assert_eq "ceremony: stdin closed -> the install proceeds past the superseded credential gate (ADR-21)" "0" "$NEG_RC"
+assert_not_contains "ceremony: NO credential prompts anywhere at install" "$NEG_OUT" \
+    "enter the recovery passphrase"
 
 # =============================================================================
 # §8.1 provision row / ADR-18: `install --keydir` is CONSUMED — the
@@ -1553,8 +1535,8 @@ LUX_UUID=$(grep -oE -- '--uuid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 # The extra appends AFTER the default dual-console words — a user-provided
 # console= word becomes the LAST console= and wins /dev/console (acceptable:
 # their explicit choice). The default words still print to both consoles.
-assert_eq "cmdline extra: appended at PLAN time, whitespace-normalized (PCR-11 seam)" \
-    "root=UUID=$LUX_UUID rootflags=subvol=@ ro console=tty0 console=ttyS0,115200 rd.shell=0 rd.emergency=poweroff console=ttyS0,115200 quiet" \
+assert_eq "cmdline extra: appended at PLAN time, whitespace-normalized (default variant, single NVRAM entry — ADR-22)" \
+    "root=UUID=$LUX_UUID rootfstype=btrfs rootflags=subvol=@ ro console=ttyS0,115200 console=tty0 rd.shell=0 rd.emergency=poweroff console=ttyS0,115200 quiet" \
     "$(cat "$MNT_ETC/alpine-fde/cmdline.txt")"
 unset ALPINE_FDE_CMDLINE_EXTRA
 

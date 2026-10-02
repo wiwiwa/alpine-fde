@@ -33,8 +33,10 @@
 #      (s14: kernel updates are TPM-free) and the standing enrollment's
 #      keyslot/token_id stamped onto every manifest entry (§8.4, incl. the
 #      NEW kver — upsert carry-over is same-kver only); token absent →
-#      exactly ONE Mechanism B enrollment (the per-VARIANT token pair,
-#      lib/cmd/reseal.sh), then keyslot/token_id recorded (§8.4);
+#      exactly ONE Mechanism B enrollment (the single finalized token,
+#      lib/cmd/reseal.sh — the serial NVRAM/token lane is retired; the
+#      serial UKI on the ESP is one-shot via UefiTarget), then
+#      keyslot/token_id recorded (§8.4);
 #      volume unreachable → warn + empty bookkeeping (documented escape)
 #   7. manifest + ESP prune to the single keep set (current + retention, at
 #      most 3 kernel versions; the -serial siblings prune WITH their kver)
@@ -671,7 +673,7 @@ _uk_body() {
         return 0
     }
 
-    # DEFAULT first, SERIAL second — the boot-priority order; the default
+    # DEFAULT first, SERIAL second — the build order; the default
     # variant's artifacts are untouched by a serial-variant failure (no ESP
     # writes happened yet — ADR-8 pair consistency, fatal on the serial leg)
     _uk_build_variant default "$_uk_cmdline" "$_uk_uki" "$_uk_uki_signed" "$_uk_measure" || return 1
@@ -695,12 +697,13 @@ _uk_body() {
     fi
 
     # --- 5. atomic ESP install (BOTH variants) ---------------------------------------
-    # Pair order: default first (boot priority), serial immediately after; each
-    # install is individually atomic (temp + fsync + rename, lib/esp.sh). A
-    # failure here is fatal for the whole build — the pair must stand together,
-    # and BOTH artifacts were already fully built + signed in the workdir, so
-    # this is a pure copy: a failure here cannot corrupt the default (the
-    # staging write precedes the rename).
+    # Pair order: default first, serial immediately after (the ESP copy order;
+    # the NVRAM lane is DEFAULT-only — the serial UKI is one-shot via
+    # UefiTarget). Each install is individually atomic (temp + fsync + rename,
+    # lib/esp.sh). A failure here is fatal for the whole build — the pair must
+    # stand together, and BOTH artifacts were already fully built + signed in
+    # the workdir, so this is a pure copy: a failure here cannot corrupt the
+    # default (the staging write precedes the rename).
     esp_install_uki "$_uk_uki_signed" "$_uk_kver"
     esp_install_uki "$_uk_uki_signed_serial" "$_uk_kver" serial
     info "kernel build: installed the UKI pair for $_uk_kver (default + serial)"
@@ -742,38 +745,23 @@ _uk_body() {
     manifest_set_meta "$_uk_manifest" "$_uk_kver" "$_uk_pubkey_fp"
 
     # --- 6b. ENSURE-ONCE TPM enrollment (Mechanism B; §6.1/§8.1, s14 semantics,
-    # ADR-19/ADR-20, G-U1; two-UKI: the TOKEN PAIR, one policy per variant) ----
+    # ADR-19/ADR-20, G-U1; the SINGLE finalized token — the serial NVRAM/token
+    # lane is retired, the serial UKI on the ESP is one-shot via UefiTarget) --
     # Kernel updates are TPM-free: when the LUKS2 volume already carries the
-    # standing token PAIR this step is a metadata read only (ZERO TPM
-    # operations) and the standing keyslots/token ids are stamped onto every
-    # manifest entry (§8.4: repeated per entry — the NEW kver's upserted entry
-    # starts empty). A fresh volume gets exactly ONE pair enrollment (a seal
-    # per console variant under static PCR 7 + release-pubkey-signed PCR 11;
-    # §6.1/§7.2 — the SERIAL token pins its DISTINCT policy digest via the
-    # serial UKI's own .pcrsig, extracted below); a PARTIAL state (one token —
-    # a legacy enrollment or a crash between the pair's seals) is completed
-    # non-destructively. enrolled.json records BOTH variants' keyslot/token_id,
-    # and so does the manifest (§8.4).
+    # standing token this step is a metadata read only (ZERO TPM operations)
+    # and the standing keyslot/token_id is stamped onto every manifest entry
+    # (§8.4: repeated per entry — the NEW kver's upserted entry starts empty).
+    # A fresh volume gets exactly ONE Mechanism B enrollment (static PCR 7 +
+    # release-pubkey-signed PCR 11; §6.1/§7.2); a LEGACY state — the retired
+    # two-UKI token PAIR — stands with an advisory ('reseal --reseat'
+    # converges it to the single-token shape). enrolled.json records the
+    # token's keyslot/token_id, and so does the manifest (§8.4).
     # An unreachable volume is the documented precondition escape (warn + empty
     # bookkeeping). Prune (6c/7) runs only after this succeeded — an enroll
     # failure lands on the ADR-8 marker path with the pre-enroll ESP/manifest
     # state (UKI install may stand).
-    # The serial UKI's own .pcrsig (objcopy-guarded: a tree without binutils
-    # skips it — the serial token then carries the live/default policy digest,
-    # warned in reseal).
-    _uk_pcrsig_serial_file=''
-    if command -v objcopy >/dev/null 2>&1; then
-        _uk_pcrsig_serial_file="$_uk_work/pcrsig-serial.json"
-        if ! objcopy -O binary --only-section=.pcrsig "$_uk_uki_signed_serial" \
-            "$_uk_pcrsig_serial_file" 2>/dev/null || [ ! -s "$_uk_pcrsig_serial_file" ]; then
-            warn "kernel build: cannot extract the serial UKI's .pcrsig — the serial token will carry the live/default policy digest"
-            _uk_pcrsig_serial_file=''
-        fi
-    else
-        warn "kernel build: objcopy not available — the serial token will carry the live/default policy digest (install binutils for the distinct serial policy)"
-    fi
     # bcache-multi (R640 2026-10-01): the ensure-once runs per MEMBER — every
-    # crypttab LUKS container must carry its own standing token pair (the
+    # crypttab LUKS container must carry its own standing token (the
     # containers have INDEPENDENT volume passphrases; a build that checked
     # only the first member silently left root2 on the recovery-prompt path).
     # The manifest's enrollment stamp stays the FIRST member's bookkeeping
@@ -802,8 +790,7 @@ _uk_body() {
         _uk_luks_dev=${_uk_m#*|}
         [ -n "$_uk_luks_dev" ] || continue
         RESEAL_ENROLLED=0
-        if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub" \
-            "$_uk_pcrsig_serial_file"; then
+        if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub"; then
             _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: $_uk_luks_dev)${RESEAL_FAIL_REASON:+: $RESEAL_FAIL_REASON}"
             err "kernel build: $_uk_fail_reason"
             return 1
@@ -814,7 +801,7 @@ _uk_body() {
             # reports success. PER-MEMBER record: each container's enrollment
             # ground truth is its own header + its own enrolled.json entry.
             if ! reseal_record "$_uk_luks_uuid" "$_uk_policy_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" \
-                "$_uk_keydir/release.pub" "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
+                "$_uk_keydir/release.pub"; then
                 _uk_fail_reason="writing enrolled.json failed after enrollment"
                 err "kernel build: $_uk_fail_reason"
                 return 1
@@ -824,12 +811,13 @@ _uk_body() {
     done
 
     if [ -n "$_uk_standing_dev" ] && [ -e "$_uk_standing_dev" ]; then
-        # Pair standing (the s14 zero-TPM-op path): §8.4 stamps the standing
-        # keyslots/token ids onto EVERY manifest entry — incl. the NEW kver
+        # Standing token (the s14 zero-TPM-op path): §8.4 stamps the standing
+        # keyslot/token_id onto EVERY manifest entry — incl. the NEW kver
         # just upserted (upsert carry-over covers same-kver rebuilds only).
         # Source: the token introspection ensure-once already read — a luksDump
-        # metadata read only, still ZERO TPM operations. Lower token id =
-        # default variant (the pair is enrolled in that order).
+        # metadata read only, still ZERO TPM operations. token_pair_bookkeeping
+        # prints the FIRST standing token's fields (a LEGACY pair's second pair
+        # reads '-' and is not stamped).
         _uk_standing=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-standing.XXXXXX") ||
             die "kernel build: mktemp failed"
         if reseal_cryptsetup luksDump --dump-json-metadata "$_uk_standing_dev" \
@@ -867,11 +855,12 @@ _uk_body() {
         err "kernel build: $_uk_fail_reason"
         return 1
     fi
-    # --- 7b. NVRAM boot-entry sweep + pair (two-UKI design; best-effort) ------------
+    # --- 7b. NVRAM boot-entry sweep + default entry (best-effort) -----------------
     # The firmware boot entries must never outlive the ESP keep set: the sweep
-    # deletes the pruned kernels' entries (BOTH variants — at most three
-    # version-pairs = six entries, oldest pruned first), the ensure then stands
-    # THIS build's pair (default FIRST, serial second — the boot priority).
+    # deletes the pruned kernels' entries plus the RETIRED serial entries (the
+    # NVRAM carries DEFAULT entries only — at most one per kernel version),
+    # the ensure then stands THIS build's default entry (first in BootOrder;
+    # the serial UKI on the ESP is one-shot via UefiTarget).
     # Best-effort by design (see inst_bootentry_ensure_best_effort): a context
     # without efivarfs/efibootmgr/ESP-device resolution skips with a warn; the
     # next build ON the machine converges.

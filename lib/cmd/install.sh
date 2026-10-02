@@ -377,25 +377,29 @@ inst_bootmgr_copy_line() {
   printf '%s\n' "ldr=''; for p in /usr/share/systemd/bootctl/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi; do [ -f \"\$p\" ] && { ldr=\"\$p\"; break; }; done; [ -n \"\$ldr\" ] || { echo 'alpine-fde: ERROR: no systemd-boot loader EFI binary found in-chroot (probed /usr/share/systemd/bootctl/systemd-bootx64.efi, /usr/lib/systemd/boot/efi/systemd-bootx64.efi) — the systemd-boot package is missing or incomplete; the boot manager cannot be installed; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; mkdir -p $_bcl_esp/EFI/systemd $_bcl_esp/EFI/BOOT && sbsign --key /etc/alpine-fde/keys/release.pem --cert /etc/alpine-fde/keys/release.crt \"\$ldr\" --output $_bcl_esp/EFI/BOOT/BOOTX64.EFI && cp $_bcl_esp/EFI/BOOT/BOOTX64.EFI $_bcl_esp/EFI/systemd/systemd-bootx64.efi && echo \"alpine-fde: info: boot manager RELEASE-SIGNED (blocker #26 addendum: the firmware verifies the FIRST loaded image — an unsigned BOOTX64.EFI dies before the UKI is ever reached) -> $_bcl_esp/EFI/BOOT/BOOTX64.EFI + $_bcl_esp/EFI/systemd/systemd-bootx64.efi (removable-media fallback path, no NVRAM dependency; §8.3)\" # boot manager via guarded file copy of the systemd-boot loader binary (fail-closed probe; real-server blocker #7)"
 }
 
-# --- UEFI boot entries (NVRAM; task #27 + the two-UKI boot design) ------------
-# The install/build lane ends with the firmware loading the UKIs DIRECTLY: a
-# PAIR of NVRAM boot entries per kernel version (Samuel, 2026-09-29) —
-#   "Alpine FDE - <kver> (<YYYY-MM-DD>)"        -> \EFI\Linux\alpine-fde-<kver>.efi
-#   "Alpine FDE - <kver> serial (<YYYY-MM-DD>)" -> \EFI\Linux\alpine-fde-<kver>-serial.efi
-# each pinned to HD(1,GPT,<esp-part-guid>). The firmware loads each UKI
+# --- UEFI boot entries (NVRAM; task #27 + the default-only boot design) -------
+# The install/build lane ends with the firmware loading the UKI DIRECTLY: ONE
+# NVRAM boot entry per kernel version (Samuel, 2026-10-02 — the serial NVRAM
+# lane RETIRED; the serial UKI FILE still builds + installs to the ESP per
+# kernel and the automation one-shots it via the firmware's UefiTarget) —
+#   "Alpine FDE - <kver> (<YYYY-MM-DD>)" -> \EFI\Linux\alpine-fde-<kver>.efi
+# pinned to HD(1,GPT,<esp-part-guid>). The firmware loads the UKI
 # directly — systemd-boot stays ONLY as the removable-media fallback
 # (\EFI\BOOT\BOOTX64.EFI) and is NOT in the default boot path anymore (which
 # also eliminates the boot-manager menu-wait failure mode). Before this
 # existed, the operator ran efibootmgr BY HAND after every fresh install, and
 # after a RE-partition the hand-made entry kept the OLD partition GUID and died
-# "Boot Failed" — so the ensure below is IDEMPOTENT: a same-kver/same-variant
-# entry pointing at the CURRENT ESP partition GUID + loader is reused (never
-# duplicated); family entries (same kver+variant, anything else — old GUID,
+# "Boot Failed" — so the ensure below is IDEMPOTENT: a same-kver entry
+# pointing at the CURRENT ESP partition GUID + loader is reused (never
+# duplicated); family entries (same kver, anything else — old GUID,
 # old loader, a rebuild's re-stamped date in the label, or a pre-two-UKI
-# legacy "Alpine FDE" entry) are deleted and recreated. RETENTION bounds the
+# legacy "Alpine FDE" entry) are deleted and recreated, and the RETIRED
+# SERIAL entries (the two-UKI shape: serial-labeled family entries at any
+# GUID, or -serial.efi loaders) are SWEPT — the NVRAM carries DEFAULT
+# entries only. RETENTION bounds the
 # whole system at THREE kernel versions (current + 2 previous; the build lane
-# clamps a higher RETENTION with a loud warn), i.e. AT MOST SIX NVRAM entries,
-# always in version-pairs, oldest pruned first (inst_bootentry_prune, called
+# clamps a higher RETENTION with a loud warn), i.e. AT MOST THREE NVRAM
+# entries, oldest pruned first (inst_bootentry_prune, called
 # from the build's prune step, `kernel prune` and `kernel remove`).
 #
 # The record runs IN-GUEST (chroot runner): the ESP is mounted at the §8.1
@@ -411,15 +415,15 @@ inst_bootentry_date() { printf '%s\n' "${ALPINE_FDE_BOOTENTRY_DATE:-$(date -u +%
 # inst_bootentry_label <kver> <variant> — the NVRAM boot-entry label
 # (capitalized, user decision after the real Dell PowerEdge install): the
 # kernel version + build date travel IN the label so the firmware menu shows
-# which pair boots what, and so inst_bootentry_parse can family-match per
-# kver+variant across rebuilds (a rebuild on a later day re-labels the pair —
-# the stale entries are deleted and recreated, never duplicated).
+# which kernel boots, and so inst_bootentry_parse can family-match per kver
+# across rebuilds (a rebuild on a later day re-labels the entry — the stale
+# entry is deleted and recreated, never duplicated). DEFAULT entries only:
+# the serial NVRAM lane is retired (the serial UKI is one-shot via UefiTarget).
 inst_bootentry_label() {
   _ibel_d=$(inst_bootentry_date)
   case $2 in
-  serial) printf '%s\n' "Alpine FDE - $1 serial ($_ibel_d)" ;;
   default) printf '%s\n' "Alpine FDE - $1 ($_ibel_d)" ;;
-  *) die "install: unknown boot-entry variant '$2' (expected: default|serial)" ;;
+  *) die "install: unknown boot-entry variant '$2' (expected: default — the serial NVRAM lane is retired)" ;;
   esac
 }
 
@@ -428,9 +432,8 @@ inst_bootentry_label() {
 # initrd + cmdline up without any boot manager)
 inst_bootentry_loader() {
   case $2 in
-  serial) printf '%s\n' "\\EFI\\Linux\\alpine-fde-$1-serial.efi" ;;
   default) printf '%s\n' "\\EFI\\Linux\\alpine-fde-$1.efi" ;;
-  *) die "install: unknown boot-entry variant '$2' (expected: default|serial)" ;;
+  *) die "install: unknown boot-entry variant '$2' (expected: default — the serial NVRAM lane is retired)" ;;
   esac
 }
 
@@ -574,31 +577,33 @@ inst_bootentry_resolve_kver() {
 }
 
 # inst_bootentry_ensure ESPDEV ESP_MNT [KVER] — the in-guest executor
-# (idempotent, crash-resume safe; re-runs converge). Ensures the WHOLE PAIR
-# for KVER (derived in-guest when omitted), in NVRAM order: the DEFAULT
-# variant FIRST, the SERIAL variant SECOND, everything else preserved behind.
-# ESPDEV is the ESP partition device (§4.1 layout, e.g. /dev/sda1 — visible
-# in-guest through the /dev bind), ESP_MNT the §8.1 ESP mount under the target
-# root (/). The partition GUID the entries pin comes from the §8.4 target
-# metadata (target.esp_partuuid in the on-target baseline — the SAME GUID
-# fstab pins), NOT a fresh probe: the in-guest closure carries no lsblk
-# (util-linux is live-side only). Fail-closed guards: BOTH staged UKIs must
-# exist (the firmware loads the pair DIRECTLY — an entry at an unstaged UKI is
-# a "Boot Failed" brick) and the baseline must resolve the ESP partition.
+# (idempotent, crash-resume safe; re-runs converge). Ensures the SINGLE
+# DEFAULT entry for KVER (derived in-guest when omitted), FIRST in BootOrder,
+# everything else preserved behind. The SERIAL NVRAM lane is RETIRED: no
+# serial entry is ever created, and retired serial entries are swept (the
+# serial UKI FILE still installs to the ESP per kernel — the automation
+# one-shots it via UefiTarget). ESPDEV is the ESP partition device (§4.1
+# layout, e.g. /dev/sda1 — visible in-guest through the /dev bind), ESP_MNT
+# the §8.1 ESP mount under the target root (/). The partition GUID the entry
+# pins comes from the §8.4 target metadata (target.esp_partuuid in the
+# on-target baseline — the SAME GUID fstab pins), NOT a fresh probe: the
+# in-guest closure carries no lsblk (util-linux is live-side only).
+# Fail-closed guards: the staged DEFAULT UKI must exist (the firmware loads
+# it DIRECTLY — an entry at an unstaged UKI is a "Boot Failed" brick) and the
+# baseline must resolve the ESP partition.
 inst_bootentry_ensure() {
   _ibe_esp=$1
   _ibe_espdir=$2
   _ibe_kver=$(inst_bootentry_resolve_kver "${3:-}") ||
     die "install: no kernel version for the boot entries (pass the kver or install the kernel under /lib/modules)"
   _ibe_eb=$(inst_efibootmgr)
-  # fail-closed: BOTH staged UKIs must exist BEFORE any NVRAM write (the
-  # firmware loads these files DIRECTLY — an entry at an unstaged UKI is a
-  # "Boot Failed" brick)
-  for _ibe_v in default serial; do
-    _ibe_uki="$_ibe_espdir/EFI/Linux/$(esp_uki_name "$_ibe_kver" "$_ibe_v")"
-    [ -f "$_ibe_uki" ] ||
-      die "install: $_ibe_uki is missing — refusing to create the $_ibe_v boot entry for $_ibe_kver before the UKI pair is staged (the kernel build must run first)"
-  done
+  # fail-closed: the staged DEFAULT UKI must exist BEFORE any NVRAM write (the
+  # firmware loads the file DIRECTLY — an entry at an unstaged UKI is a
+  # "Boot Failed" brick). The serial UKI is NOT guarded here — the serial
+  # NVRAM lane is retired (no serial entry is created).
+  _ibe_uki="$_ibe_espdir/EFI/Linux/$(esp_uki_name "$_ibe_kver" default)"
+  [ -f "$_ibe_uki" ] ||
+    die "install: $_ibe_uki is missing — refusing to create the default boot entry for $_ibe_kver before the UKI is staged (the kernel build must run first)"
   _ibe_bl=$(sp_baseline_file)
   [ -f "$_ibe_bl" ] ||
     die "install: no baseline at $_ibe_bl — cannot resolve the ESP partition the boot entries must point at"
@@ -627,50 +632,34 @@ inst_bootentry_ensure() {
     esac
   fi
   if [ "$_ibe_skip" = "1" ]; then
-    warn "install: no EFI variable support ($_ibe_vars) — SKIPPING the NVRAM boot entries (the removable-media path still boots); create them manually:"
-    for _ibe_v in default serial; do
-      warn "install:   efibootmgr -c -d $_ibe_disk -p $_ibe_pn -L '$(inst_bootentry_label "$_ibe_kver" "$_ibe_v")' -l '$(inst_bootentry_loader "$_ibe_kver" "$_ibe_v")'   (then 'efibootmgr -o <NUM>,...' with the new number FIRST, pointing at the ESP partition GUID $_ibe_pu)"
-    done
+    warn "install: no EFI variable support ($_ibe_vars) — SKIPPING the NVRAM boot entry (the removable-media path still boots); create it manually:"
+    warn "install:   efibootmgr -c -d $_ibe_disk -p $_ibe_pn -L '$(inst_bootentry_label "$_ibe_kver" default)' -l '$(inst_bootentry_loader "$_ibe_kver" default)'   (then 'efibootmgr -o <NUM>,...' with the new number FIRST, pointing at the ESP partition GUID $_ibe_pu)"
     return 0
   fi
-  # stale family entries FIRST: same kver+variant at ANY other GUID (a
+  # stale family entries FIRST: same-kver DEFAULT entries at ANY other GUID (a
   # re-partitioned ESP leaves the OLD partition GUID in NVRAM — the real
-  # server booted them into "Boot Failed"), plus the pre-two-UKI LEGACY
-  # entries (they point the default boot path at the boot manager, which the
-  # two-UKI design retires). A same-family entry at a stale LOADER (a rebuild
-  # re-stamps the date in the label; the label no longer matches) is handled
-  # inside ensure_one's reuse check — a non-reusable family entry at the right
-  # GUID is deleted there before the create. Same-kver/same-variant entries at
-  # the current GUID that merely DUPLICATE each other collapse on the next
-  # ensure via inst_bootentry_find's first-match reuse (re-run hygiene).
+  # server booted them into "Boot Failed"), the pre-two-UKI LEGACY
+  # entries (they point the default boot path at the boot manager), and the
+  # RETIRED SERIAL entries (the two-UKI shape — any GUID; the serial NVRAM
+  # lane is retired, the serial UKI is one-shot via UefiTarget). A same-family
+  # entry at a stale LOADER (a rebuild re-stamps the date in the label; the
+  # label no longer matches) is handled inside ensure_one's reuse check — a
+  # non-reusable family entry at the right GUID is deleted there before the
+  # create. Same-kver entries at the current GUID that merely DUPLICATE each
+  # other collapse on the next ensure via inst_bootentry_find's first-match
+  # reuse (re-run hygiene).
   inst_bootentry_family_cleanup "$_ibe_lcpu"
-  # reuse-or-create BOTH variants (default first — boot priority)
+  # reuse-or-create the DEFAULT entry (the only NVRAM lane; the serial UKI
+  # file stays ESP-only — one-shot via UefiTarget)
   _ibe_def_entry=$(inst_bootentry_ensure_one "$_ibe_eb" "$_ibe_disk" "$_ibe_pn" \
     "$(inst_bootentry_label "$_ibe_kver" default)" \
     "$(inst_bootentry_loader "$_ibe_kver" default)" \
     "$_ibe_kver" default "$_ibe_lcpu") || return $?
-  _ibe_ser_entry=$(inst_bootentry_ensure_one "$_ibe_eb" "$_ibe_disk" "$_ibe_pn" \
-    "$(inst_bootentry_label "$_ibe_kver" serial)" \
-    "$(inst_bootentry_loader "$_ibe_kver" serial)" \
-    "$_ibe_kver" serial "$_ibe_lcpu") || return $?
-  # BootOrder: default FIRST, serial SECOND, the retained older versions
-  # behind (oldest last — prune order)
+  # BootOrder: the default entry FIRST, the retained older versions behind
+  # (oldest last — prune order)
   _ibe_fresh=$("$_ibe_eb" -v 2>/dev/null | inst_bootentry_parse)
-  _ibe_reorder_pair "$_ibe_eb" "$_ibe_def_entry" "$_ibe_ser_entry" "$_ibe_fresh"
-  # SERIAL-FIRST FIRST BOOT (R640 2026-10-01): the first boot runs on the
-  # PROVISIONAL seal, which typically refuses (the installer's ukify
-  # measurement diverges from the real stub) — the one recovery passphrase
-  # is read from /dev/console, which the DEFAULT UKI binds to the VIDEO
-  # console (tty0, last-console-wins). On a serial-attached machine that
-  # read is unreachable (no USB HID in the initramfs either) — order the
-  # SERIAL UKI first (serial last => /dev/console is ttyS0); the finalize
-  # flow re-orders default-first once trust is finalized.
-  _isf=${ALPINE_FDE_SERIAL_FIRST:-auto} # seam: auto (detect) | yes | no — the unit legs pin BOTH modes explicitly
-  if [ "$_isf" = yes ] || { [ "$_isf" = auto ] && grep -q 'console=ttyS' /proc/cmdline 2>/dev/null; }; then
-    info "install: serial console detected — ordering the SERIAL UKI first for the first boot (the finalize flow re-orders default-first after trust finalizes)"
-    _ibe_reorder_pair "$_ibe_eb" "$_ibe_ser_entry" "$_ibe_def_entry" "$_ibe_fresh"
-  fi
-  info "install: boot entries standing for $_ibe_kver (default Boot$_ibe_def_entry FIRST, serial Boot$_ibe_ser_entry second; the firmware loads the UKIs directly)"
+  _ibe_reorder_front "$_ibe_eb" "$_ibe_def_entry" "$_ibe_fresh"
+  info "install: boot entry standing for $_ibe_kver (default Boot$_ibe_def_entry; the firmware loads the UKI directly; the serial lane is retired — the serial UKI is one-shot via UefiTarget)"
   return 0
 }
 
@@ -741,7 +730,13 @@ inst_bootentry_ensure_one() {
 
 # inst_bootentry_family_cleanup GUID — delete every stale family entry:
 # kver+variant entries NOT at GUID (dead/old partition GUID — boots "Boot
-# Failed") and the LEGACY pre-two-UKI entries. Runs in the CALLER'S shell
+# Failed"), the LEGACY pre-two-UKI entries, and the RETIRED SERIAL entries
+# (the two-UKI shape — serial-labeled family entries at ANY GUID, plus
+# entries whose loader still names a -serial.efi at the CURRENT GUID; the
+# serial NVRAM lane is retired — the NVRAM carries default entries only, the
+# serial UKI is one-shot via UefiTarget). A retired-serial delete failure is
+# a warn (the entry still boots a staged UKI — never fatal), unlike the
+# stale-GUID default delete (fail-closed die). Runs in the CALLER'S shell
 # (here-doc, not a pipe) so the fail-closed die is real.
 inst_bootentry_family_cleanup() {
   _ibfc_guid=$1
@@ -749,6 +744,21 @@ inst_bootentry_family_cleanup() {
   _ibfc_list=$("$_ibfc_eb" -v 2>/dev/null | inst_bootentry_parse)
   while IFS=' ' read -r _ibfc_n _ibfc_g _ibfc_l _ibfc_k _ibfc_v; do
     [ -n "${_ibfc_n:-}" ] || continue
+    case $_ibfc_l in
+    *-serial.efi)
+      # a retired SERIAL loader (even under a hand-edited/foreign label) at
+      # the CURRENT GUID — swept; dead-GUID entries fall through to the
+      # branches below
+      if [ "$_ibfc_g" = "$_ibfc_guid" ]; then
+        if "$_ibfc_eb" -b "$_ibfc_n" -B >/dev/null 2>&1; then
+          info "install: deleted retired serial boot entry Boot$_ibfc_n (loader $_ibfc_l; the serial NVRAM lane is retired — UefiTarget one-shot)"
+        else
+          warn "install: cannot delete the retired serial boot entry Boot$_ibfc_n (loader $_ibfc_l) — it still boots the staged serial UKI (re-run converges)"
+        fi
+        continue
+      fi
+      ;;
+    esac
     case $_ibfc_k in
     -) continue ;; # foreign entry — never touched
     LEGACY)
@@ -756,6 +766,16 @@ inst_bootentry_family_cleanup() {
         info "install: deleted legacy boot entry Boot$_ibfc_n (pre-two-UKI 'Alpine FDE' entry; the firmware now loads the UKIs directly)"
       else
         warn "install: cannot delete the legacy boot entry Boot$_ibfc_n ('Alpine FDE') — it still boots the retired boot-manager path (re-run converges)"
+      fi
+      continue
+      ;;
+    serial)
+      # the RETIRED serial-labeled family — swept at ANY GUID (the current
+      # one included); the serial UKI file stays on the ESP for UefiTarget
+      if "$_ibfc_eb" -b "$_ibfc_n" -B >/dev/null 2>&1; then
+        info "install: deleted retired serial boot entry Boot$_ibfc_n ('$_ibfc_k $_ibfc_v'; the serial NVRAM lane is retired — UefiTarget one-shot)"
+      else
+        warn "install: cannot delete the retired serial boot entry Boot$_ibfc_n ('$_ibfc_k $_ibfc_v') — it still boots the staged serial UKI (re-run converges)"
       fi
       continue
       ;;
@@ -771,21 +791,19 @@ EOF
   return 0
 }
 
-# _ibe_reorder_pair EB FIRST SECOND FRESH — place FIRST then SECOND at the
-# FRONT of BootOrder (the default+serial pair of the ensured kver; the
-# retained older versions keep their relative order behind, entries the
-# listing has but BootOrder never mentioned appended defensively)
-_ibe_reorder_pair() {
+# _ibe_reorder_front EB FIRST FRESH — place FIRST at the FRONT of BootOrder
+# (the default entry of the ensured kver; the retained older versions keep
+# their relative order behind, entries the listing has but BootOrder never
+# mentioned appended defensively)
+_ibe_reorder_front() {
   _ibr_eb=$1
   _ibr_first=$2
-  _ibr_second=$3
-  _ibr_fresh=$4
+  _ibr_fresh=$3
   _ibr_all=$(printf '%s\n' "$_ibr_fresh" | awk 'NF { print $1 }' | tr '\n' ' ')
   _ibr_obo=$("$_ibr_eb" -v 2>/dev/null | awk '/^BootOrder:/ { sub(/^BootOrder:[ \t]*/, ""); print tolower($0) }' | tr ',' ' ')
-  # an empty SECOND (a survivor set of one) keeps the single-front shape
-  _ibr_new=" $_ibr_first ${_ibr_second:+$_ibr_second} "
+  _ibr_new=" $_ibr_first "
   for _ibr_n in $_ibr_obo $_ibr_all; do
-    if [ "$_ibr_n" = "$_ibr_first" ] || [ "$_ibr_n" = "$_ibr_second" ]; then continue; fi
+    if [ "$_ibr_n" = "$_ibr_first" ]; then continue; fi
     case " $_ibr_new " in
     *" $_ibr_n "*) continue ;;
     esac
@@ -797,19 +815,20 @@ _ibe_reorder_pair() {
   _ibr_new=${_ibr_new# }
   _ibr_csv=$(printf '%s' "$_ibr_new" | tr ' ' ',')
   "$_ibr_eb" -o "$_ibr_csv" >/dev/null ||
-    die "install: efibootmgr -o $_ibr_csv failed — the boot pair (Boot$_ibr_first, Boot$_ibr_second) could not be placed at the front of BootOrder"
+    die "install: efibootmgr -o $_ibr_csv failed — the default boot entry (Boot$_ibr_first) could not be placed at the front of BootOrder"
   return 0
 }
 
 # inst_bootentry_prune KEEP-KVER... — sweep the NVRAM so it never outlives the
-# ESP keep set (the pair invariant: at most 3 kernel versions = at most 6
-# entries, always version-pairs, oldest pruned first): deletes the boot
-# entries of every kver NOT in the keep-set arguments (BOTH variants) plus any
-# LEGACY entries, then rewrites BootOrder over the survivors (relative order
-# preserved). Called from the build's prune step, `kernel prune` and
-# `kernel remove`. Best-effort SKIP (warn) when NVRAM is unreachable — the ESP
-# prune must not fail because a build context has no efivarfs; the next
-# ensure/prune on the machine converges.
+# ESP keep set (the default-only invariant: at most 3 kernel versions = at
+# most 3 entries, oldest pruned first): deletes the boot entries of every kver
+# NOT in the keep-set arguments plus any LEGACY and RETIRED SERIAL entries
+# (the serial NVRAM lane is retired — swept regardless of the keep set; the
+# NVRAM carries default entries only), then rewrites BootOrder over the
+# survivors (relative order preserved). Called from the build's prune step,
+# `kernel prune` and `kernel remove`. Best-effort SKIP (warn) when NVRAM is
+# unreachable — the ESP prune must not fail because a build context has no
+# efivarfs; the next ensure/prune on the machine converges.
 inst_bootentry_prune() {
   _ibp_eb=$(inst_efibootmgr)
   if ! command -v "$_ibp_eb" >/dev/null 2>&1 && [ ! -f "$_ibp_eb" ]; then
@@ -826,6 +845,7 @@ inst_bootentry_prune() {
     _ibp_drop=0
     case $_ibp_k in
     LEGACY) _ibp_drop=1 ;;
+    serial) _ibp_drop=1 ;; # the RETIRED serial lane — swept regardless of the keep set
     -) _ibp_drop=0 ;;
     *)
       _ibp_hit=0
@@ -835,9 +855,15 @@ inst_bootentry_prune() {
       [ "$_ibp_hit" -eq 0 ] && _ibp_drop=1
       ;;
     esac
+    case $_ibp_l in
+    *-serial.efi) _ibp_drop=1 ;; # a retired SERIAL loader — swept even under a foreign/edited label
+    esac
     if [ "$_ibp_drop" -eq 1 ]; then
       if "$_ibp_eb" -b "$_ibp_n" -B >/dev/null 2>&1; then
-        info "install: pruned boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — its kernel is outside the keep set"
+        case $_ibp_l in
+        *-serial.efi) info "install: pruned boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — the retired serial lane (NVRAM carries default entries only)" ;;
+        *) info "install: pruned boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — its kernel is outside the keep set" ;;
+        esac
       else
         warn "install: cannot prune boot entry Boot$_ibp_n ('$_ibp_k $_ibp_v') — orphaned NVRAM entry remains (a re-run converges)"
       fi
@@ -955,12 +981,15 @@ Enter confirmation, and a reboot INTO FIRMWARE SETUP (OsIndications) for the
 manual key import: the first boot unlocks via the provisional token and
 alpine-fde-finalize AUTO-FINALIZES under Secure Boot (§9.1 Stage 2);
 `alpine-fde finalize` is the guided/crash-resume entry point (Stage 3).
-The UEFI boot entry (NVRAM, "Alpine FDE" -> the ESP partition's
-HD(1,GPT,<guid>) -> \EFI\BOOT\BOOTX64.EFI) is created IN-GUEST after the
-build — idempotently (same-GUID entries reused, stale-GUID entries replaced),
-FIRST in BootOrder, and SKIPPED with the exact manual efibootmgr command when
-no EFI variable support exists (task #27: the entry used to be typed by hand
-on the real server after every install).
+The UEFI boot entry (NVRAM, "Alpine FDE - <kver> (<date>)" ->
+\EFI\Linux\alpine-fde-<kver>.efi at the ESP partition's
+HD(1,GPT,<guid>)) is created IN-GUEST after the build — idempotently
+(same-GUID entries reused; stale-GUID, legacy and RETIRED-SERIAL entries
+swept — the NVRAM carries DEFAULT entries only; the serial UKI on the ESP is
+one-shot via UefiTarget, never NVRAM-enrolled), FIRST in BootOrder, and
+SKIPPED with the exact manual efibootmgr command when no EFI variable
+support exists (task #27: the entry used to be typed by hand on the real
+server after every install).
 
 Topologies (§4.1): --disk repeatable for Btrfs RAID1 (primary ESP+LUKS,
 secondaries LUKS only); --bcache CACHE_DEV for hybrid acceleration (ESP+cache
@@ -1112,7 +1141,7 @@ inst_exec() {
     if [ -z "${_IEX_TRAP_ARMED:-}" ]; then
       _IEX_TRAP_ARMED=1
       trap '
-                rm -f "${_ime_kf:-}" "${_im_pf_host:-}" 2>/dev/null
+                rm -f "${_ime_kf:-}" 2>/dev/null
                 if [ -n "${_im_mnt:-}" ]; then
                     # boot-lane finding #20: CHILD MOUNTS FIRST — the efivars
                     # bind hangs under /mnt/sys, so the parent must unmount
@@ -1645,166 +1674,6 @@ inst_ceremony_keys_lib() {
   return 0
 }
 
-# inst_ceremony_user_password USER MNT — ceremony 2/3 (item 12): set the
-# account password in-chroot (chpasswd; the secret rides stdin through the
-# pipe, never argv). Bare Enter defaults to the recovery passphrase (asked
-# 1/3); a typed value is confirm-typed as before.
-inst_ceremony_user_password() {
-  _icu_user=$1
-  _icu_mnt=$2
-  [ -n "$_icu_user" ] && [ -n "$_icu_mnt" ] ||
-    die "inst_ceremony_user_password: USER and MNT are required"
-  inst_prompt_secret "alpine-fde: set the password for account '$_icu_user' (no-echo; press Enter to reuse the recovery passphrase): " _icu_p1
-  if [ -z "$_icu_p1" ]; then
-    [ -n "${INST_RECOVERY_PASSPHRASE:-}" ] ||
-      die "install: the account passwords were empty or did not match"
-    _icu_p1=$INST_RECOVERY_PASSPHRASE
-    info "install: credential ceremony (2/3): account '$_icu_user' password: Enter — reusing the recovery passphrase"
-  else
-    while [ -z "$_icu_p1" ] || [ "$_icu_p1" != "${_icu_p2:-}" ]; do
-      unset _icu_p1 _icu_p2
-      warn "install: the account passwords were empty or did not match — re-prompt until met"
-      inst_prompt_secret "alpine-fde: set the password for account '$_icu_user' (no-echo; press Enter to reuse the recovery passphrase): " _icu_p1
-      if [ -z "$_icu_p1" ]; then
-        [ -n "${INST_RECOVERY_PASSPHRASE:-}" ] ||
-          die "install: the account passwords were empty and no recovery passphrase to reuse"
-        _icu_p1=$INST_RECOVERY_PASSPHRASE
-        info "install: credential ceremony (2/3): account '$_icu_user' password: Enter — reusing the recovery passphrase"
-        break
-      fi
-      inst_prompt_secret "alpine-fde: repeat the password: " _icu_p2
-    done
-  fi
-  printf '%s:%s\n' "$_icu_user" "$_icu_p1" | chroot "$_icu_mnt" /usr/sbin/chpasswd ||
-    die "install: setting the '$_icu_user' password in-chroot failed"
-  unset _icu_p1 _icu_p2
-  info "install: credential ceremony (2/3): account '$_icu_user' password set in-chroot (no-echo; the account is loginable)"
-  return 0
-}
-
-# inst_ceremony_recovery AUTH_KEYFILE CONTAINER_DEV... — ceremony 1/3 (item
-# 12: asked FIRST): prompt the recovery passphrase (no-echo, confirm-typed,
-# §13 floor — re-prompt until met, bounded at 3 attempts), stage it as a 0600
-# tmpfs passfile and enroll it into keyslot 0 of EVERY member CONTAINER via
-# luksAddKey, authorized by the staged ephemeral install key (keyslot 2
-# credential). DEVICE CONTRACT (item 27): the CONTAINER_DEV arguments are the
-# LUKS container devices (the luksFormat targets) — NEVER /dev/mapper/* nodes
-# (the decrypted views; container-ops against them fail "not a valid LUKS
-# device"). Crash resume: a container whose keyslot 0 is already populated is
-# skipped. The confirmed value stays in INST_RECOVERY_PASSPHRASE for the two
-# derived prompts (2/3, 3/3) and is unset at the end of the ceremony.
-inst_ceremony_recovery() {
-  _icr_auth=$1
-  shift
-  [ -n "$_icr_auth" ] && [ -f "$_icr_auth" ] ||
-    die "install: the staged ephemeral install key is missing — cannot authorize the recovery enrollment (§9.1 step 4 1/3)"
-  [ $# -ge 1 ] || die "inst_ceremony_recovery: no target container device given"
-  while :; do
-    inst_prompt_secret "alpine-fde: set the LUKS2 recovery passphrase (§13: >=12 chars with 3 character classes, or >=16 chars; permanent recovery credential, keyslot 0): " _icr_p1
-    inst_prompt_secret "alpine-fde: repeat the recovery passphrase: " _icr_p2
-    # shellcheck disable=SC2154  # inst_prompt_secret assigns its named target
-    if [ -n "$_icr_p1" ] && [ "$_icr_p1" = "$_icr_p2" ] && inst_ceremony_floor "$_icr_p1"; then
-      break
-    fi
-    unset _icr_p1 _icr_p2
-    warn "install: recovery passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met"
-  done
-  INST_RECOVERY_PASSPHRASE=$_icr_p1
-  _icr_dir=${ALPINE_FDE_TMPDIR:-/dev/shm}
-  _icr_pf=$(mktemp "$_icr_dir/alpine-fde-ceremony.XXXXXX") ||
-    die "install: cannot stage the recovery passphrase ($_icr_dir usable?)"
-  chmod 600 "$_icr_pf"
-  printf '%s' "$_icr_p1" >"$_icr_pf"
-  unset _icr_p1 _icr_p2
-  inst_ceremony_keys_lib
-  for _icr_d in "$@"; do
-    case $_icr_d in /dev/mapper/*)
-      die "install: $_icr_d is a decrypted mapper view — the recovery enrollment must target the LUKS CONTAINER device (item 27)"
-      ;;
-    esac
-    if cryptsetup luksDump "$_icr_d" 2>/dev/null | grep -q '^0:'; then
-      info "install: $_icr_d keyslot 0 already populated — recovery enrollment skipped (crash resume)"
-      continue
-    fi
-    cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 \
-      --key-slot 0 --key-file "$_icr_auth" "$_icr_d" "$_icr_pf" ||
-      die "install: $_icr_d: enrolling the recovery passphrase into keyslot 0 failed (ephemeral-key authorization)"
-    info "install: credential ceremony (1/3): recovery passphrase enrolled in keyslot 0 of $_icr_d (Argon2id, §13)"
-  done
-  keys_scrub "$_icr_pf"
-  return 0
-}
-
-# inst_ceremony_release_key KEYDIR [SEAMFILE] — ceremony 3/3 (item 12): prompt
-# the release-key passphrase (no-echo; bare Enter reuses the recovery
-# passphrase; a typed value is confirm-typed with the §13 floor — re-prompt
-# until met) and encrypt release.pem in place via the existing
-# keys_encrypt_release (ADR-18, AES-256 PBKDF2), then lock it 0400. With
-# SEAMFILE (real-server blocker #8, retargeted by #9): the confirmed
-# passphrase is ALSO written to the 0600 seam file IN THE TARGET ROOT
-# (<mnt>/run/alpine-fde-release-pass — the H-02 /dev bind is PLAIN, so a host
-# tmpfs seam is invisible guest-side), handing it to the in-chroot
-# `kernel build`: its shell reads it into ALPINE_FDE_KEY_PASSPHRASE
-# (RESOLVED-4, keys_unlock priority 1) — never argv, never the log, consumed
-# (rm) by the build record itself and scrubbed by teardown + the die-path
-# traps (I1). Crash resume: an already-encrypted release.pem
-# (keys_is_encrypted) is skipped AND the seam file stays absent — the build's
-# keys_unlock falls back to its interactive no-echo prompt.
-inst_ceremony_release_key() {
-  _ick_d=$1
-  _ick_pf=${2:-}
-  [ -n "$_ick_d" ] && [ -d "$_ick_d" ] ||
-    die "install: release-key directory missing: ${_ick_d:-} (§9.1 step 3 must provision the platform keys first)"
-  [ -f "$_ick_d/release.pem" ] ||
-    die "install: no release.pem in $_ick_d (§9.1 step 3 platform-key ceremony)"
-  inst_ceremony_keys_lib
-  if keys_is_encrypted "$_ick_d/release.pem"; then
-    info "install: credential ceremony (3/3): release.pem already encrypted (ADR-18) — skipping (crash resume)"
-    chmod 0400 "$_ick_d/release.pem" 2>/dev/null || :
-    unset INST_RECOVERY_PASSPHRASE
-    return 0
-  fi
-  while :; do
-    inst_prompt_secret "alpine-fde: set the release-key passphrase (encrypts release.pem; no-echo; press Enter to reuse the recovery passphrase): " _ick_p1
-    if [ -z "$_ick_p1" ]; then
-      [ -n "${INST_RECOVERY_PASSPHRASE:-}" ] ||
-        die "install: release-key passphrase empty and no recovery passphrase to reuse"
-      _ick_p1=$INST_RECOVERY_PASSPHRASE
-      info "install: credential ceremony (3/3): release-key passphrase: Enter — reusing the recovery passphrase"
-      break
-    fi
-    inst_prompt_secret "alpine-fde: repeat the release-key passphrase: " _ick_p2
-    # shellcheck disable=SC2154  # inst_prompt_secret assigns its named target
-    if [ -n "$_ick_p1" ] && [ "$_ick_p1" = "$_ick_p2" ] && inst_ceremony_floor "$_ick_p1"; then
-      break
-    fi
-    unset _ick_p1 _ick_p2
-    warn "install: release-key passphrase empty/mismatched or below the §13 entropy floor — re-prompt until met"
-  done
-  # shellcheck disable=SC2034  # env seam consumed by keys_encrypt_release
-  ALPINE_FDE_KEY_PASSPHRASE=$_ick_p1
-  unset _ick_p2
-  keys_encrypt_release "$_ick_d" ||
-    die "install: encrypting release.pem (keys_encrypt_release) failed"
-  # real-server blocker #8/#9: hand the passphrase to the in-chroot build via
-  # the 0600 seam file IN THE TARGET ROOT (a host-tmpfs seam is invisible
-  # through the plain H-02 /dev bind) — the secret travels target-file ->
-  # guest env, never argv/log; the build record consumes (rm) it right after
-  # reading and teardown + the die-path traps own the rest (I1).
-  if [ -n "$_ick_pf" ]; then
-    mkdir -p "$(dirname "$_ick_pf")"
-    _ick_um=$(umask)
-    umask 077
-    printf '%s' "$_ick_p1" >"$_ick_pf"
-    umask "$_ick_um"
-    chmod 600 "$_ick_pf"
-  fi
-  unset ALPINE_FDE_KEY_PASSPHRASE INST_RECOVERY_PASSPHRASE _ick_p1
-  chmod 0400 "$_ick_d/release.pem"
-  info "install: credential ceremony (3/3): release.pem encrypted (AES-256 PBKDF2, ADR-18), mode 0400"
-  return 0
-}
-
 # G-C25 (ADR-20 amendment #4): the unfinalized warning banner path is REMOVED
 # — install writes NO banner to /etc/motd or /etc/issue (the operator's own
 # content is never synthesized or touched), and finalize never strips one.
@@ -1827,6 +1696,21 @@ inst_ceremony_release_key() {
 #      keyslot 1 = provisional token — token_free_slot returns 1 on the
 #      freshly ceremoneied container, keyslot 2 = temporary ephemeral install
 #      key), authorized by the staged ephemeral key; then token_import
+#   3. per container (ADR-21 provisioning escrow, ADR-22): the container's
+#      RANDOM VOLUME PASSPHRASE (the just-sealed $SEAL_PASS_FILE — keyslot 1's
+#      credential) is staged as escrow: {target (the crypttab name, resolved
+#      in-guest by UUID match), uuid (cryptsetup luksUUID), pass_b64} — one
+#      ndjson record per member under /run (tmpfs, I1), assembled after the
+#      loop into <ESP>/alpine-fde-provision/volume-keys.json and COMMITTED by
+#      the empty <ESP>/alpine-fde-provision/REQUEST marker written LAST (the
+#      boot-#1 hook consumes the escrow only when REQUEST stands — the
+#      two-file order means a crash can never expose a partial escrow). The
+#      Stage-2 ceremony replaces the escrow with the operator's passphrase
+#      (keyslot 0); until then this ESP file is the ONLY bootstrap credential
+#      of the first boot — any escrow leg failing is fail-closed (exit 1;
+#      crash-resume re-runs converge). Fields are printf-composed (no shell
+#      eval of secret material); the staging copies are scrubbed by the tail
+#      (rm -rf /run/alpine-fde + keys_scrub).
 inst_provisional_enroll_line() {
   _pel_key=$1
   shift
@@ -1842,7 +1726,7 @@ inst_provisional_enroll_line() {
   # ${ALPINE_FDE_TMPDIR:-/tmp}-defaulted stage, seal.sh's mktemp pattern) —
   # not just /run/alpine-fde. The tpm2 argv contract is UNCHANGED (the
   # mkinitfs hook mirrors lib/seal.sh argv-for-argv).
-  printf '%s\n' "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && uki=\$(ls $_pel_esp/EFI/Linux/alpine-fde-*.efi | head -n 1); objcopy -O binary --only-section=.pcrsig \"\$uki\" /run/alpine-fde/pcrsig.json && for d in $_pel_cs; do seal_provisional /etc/alpine-fde/keys \$d /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\${d##*/}.json \$uki && token_add_keyslot \$d \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import \$d /run/alpine-fde/token-\${d##*/}.json \"\$(token_next_id \$d)\" || exit 1; done && keys_scrub \"\$SEAL_PASS_FILE\" && rm -rf /run/alpine-fde \${ALPINE_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/alpine-fde-seal.* # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1 on the CONTAINER dev (item 27); I1 seal-secret scrub"
+  printf '%s\n' "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/seal.sh && require_pkgs objcopy:binutils && mkdir -p /run/alpine-fde && uki=\$(ls $_pel_esp/EFI/Linux/alpine-fde-*.efi | head -n 1); objcopy -O binary --only-section=.pcrsig \"\$uki\" /run/alpine-fde/pcrsig.json && for d in $_pel_cs; do seal_provisional /etc/alpine-fde/keys \$d /run/alpine-fde/pcrsig.json /run/alpine-fde/token-\${d##*/}.json \$uki && token_add_keyslot \$d \"\$SEAL_PASS_FILE\" \"\$SEAL_SLOT\" $_pel_key && token_import \$d /run/alpine-fde/token-\${d##*/}.json \"\$(token_next_id \$d)\" && _eu=\$(cryptsetup luksUUID \"\$d\") && _et=\$(awk -v u=\"UUID=\$_eu\" '\$2==u {print \$1; exit}' /etc/crypttab) && [ -n \"\$_et\" ] && printf '{\"target\":\"%s\",\"uuid\":\"%s\",\"pass_b64\":\"%s\"}\n' \"\$_et\" \"\$_eu\" \"\$(openssl base64 -A <\"\$SEAL_PASS_FILE\")\" >>/run/alpine-fde/escrow.ndjson || exit 1; done && jq -s '{members: .}' /run/alpine-fde/escrow.ndjson >/run/alpine-fde/volume-keys.json && mkdir -p $_pel_esp/alpine-fde-provision && cp /run/alpine-fde/volume-keys.json $_pel_esp/alpine-fde-provision/volume-keys.json && sync && : >$_pel_esp/alpine-fde-provision/REQUEST && sync && rm -f /run/alpine-fde/escrow.ndjson /run/alpine-fde/volume-keys.json && keys_scrub \"\$SEAL_PASS_FILE\" && rm -rf /run/alpine-fde \${ALPINE_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/alpine-fde-seal.* # ADR-20 step 6: provisional Mechanism B seal (PCR 11) -> keyslot 1 on the CONTAINER dev (item 27) + ADR-21/22 provisioning escrow: per-member {target(crypttab),uuid,pass_b64} of the RANDOM VOLUME PASSPHRASE staged on the ESP mount under alpine-fde-provision/ (volume-keys.json written FIRST, the empty REQUEST marker LAST — the boot-#1 hook consumes only a REQUEST-marked escrow; Stage-2 replaces it); I1 seal-secret scrub"
 }
 
 # inst_baseline_pending_write MNT — §9.1 Stage-1 step 2: write the initial
@@ -2186,22 +2070,6 @@ cmd_install_main() {
   # real-server blocker #8 + #9: the release-key PASSPHRASE SEAM for the
   # in-chroot build. Blocker #8 staged it on the HOST tmpfs (/dev/shm) —
   # but the H-02 /dev bind is a PLAIN bind (no sub-mounts), so guest-side
-  # /dev/shm is the target's empty dir and the record's read failed silently
-  # in-chroot (blocker #9; keys_unlock's 9a cache glob /dev/shm/
-  # alpine-fde-release-pass.* is equally blind through the bind — the guest
-  # keys_unlock gets the value via ALPINE_FDE_KEY_PASSPHRASE, priority 1,
-  # which outranks the cache anyway; the 9a cache keeps serving HOST-side
-  # callers where /dev/shm IS the host's). The seam therefore lives IN THE
-  # TARGET ROOT: <mnt>/run/alpine-fde-release-pass (guest /run/
-  # alpine-fde-release-pass), 0600, on the LUKS2 container, written by the
-  # ceremony (3/3) at execute time, consumed-and-REMOVED by the build record
-  # in the same breath, scrubbed by teardown + the die-path traps (I1).
-  # Paths are plan-static and resolve for real in every lane (nothing is
-  # staged until the ceremony writes the file at execute time).
-  _im_pf_host=$_im_mnt/run/alpine-fde-release-pass
-  _im_passfile_disp=$_im_pf_host
-  _im_pf_guest=/run/alpine-fde-release-pass
-
   # --- 1. partition + block layer (§4.1, per topology) -----------------------
   # 1a. RESET a previous FAILED attempt (user-reported, e2e-invisible class):
   #     emitted BEFORE partitioning in every lane so a re-run continues; see
@@ -2576,7 +2444,7 @@ cmd_install_main() {
   # custom_files copies them into the initramfs verbatim. Staged later at
   # step 7; mkinitfs reads the list at build time (idempotent).
   inst_exec host "f=$_im_mnt/etc/mkinitfs/mkinitfs.conf; grep -q alpine-fde \"\$f\" 2>/dev/null || { mkdir -p $_im_mnt/etc/mkinitfs; [ -f \"\$f\" ] && sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 alpine-fde\"/' \"\$f\" || printf 'features=\"alpine-fde udev\"\n' >\"\$f\"; }; sed -n 's/^features=\"\\(.*\\)\"$/\\1/p' \"\$f\" 2>/dev/null | grep -qw udev || sed -i 's/^features=\"\\(.*\\)\"$/features=\"\\1 udev\"/' \"\$f\"; grep -q '^custom_files=' \"\$f\" 2>/dev/null || printf 'custom_files=\"/usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh /usr/lib/udev/rules.d/69-bcache.rules /usr/lib/udev/rules.d/60-tpm.rules\"\n' >>\"\$f\" # §8.2/ADR-13: enable the alpine-fde + udev mkinitfs features (R640: no udev feature = no udevd in the initramfs — the udev rules never run, bcache registration + by-uuid starve) + register the non-ELF payload (hook script + udev rules) via custom_files (blocker #14, idempotent)"
-  inst_exec guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel"
+  inst_exec guest "adduser -D -s /bin/ash $_im_user && addgroup $_im_user wheel; passwd -l root >/dev/null 2>&1 || : # root LOCKED at install (never empty-password; the first-boot ceremony sets root+admin to the operator's passphrase — ADR-21)"
   # HEADLESS ACCESS (R640 2026-10-01): adduser -D leaves the account LOCKED
   # (no password) and the sshd policy is PermitRootLogin no — without a
   # staged operator key the fresh install's SSH path is INOPERABLE. Set
@@ -2652,7 +2520,7 @@ cmd_install_main() {
   # prompt for / encrypt the release key — its own keys_encrypt_release prompt
   # would otherwise precede the ceremony below with no hint and no recovery
   # context. stage1 leaves release.pem PLAINTEXT and ceremony 3/3
-  # (inst_ceremony_release_key) encrypts it — its keys_is_encrypted gate only
+  # (the Stage-2 ceremony) encrypts it — its keys_is_encrypted gate only
   # skips on an ALREADY-encrypted file, so the natural flow completes custody.
   _im_keys=$_im_mnt/etc/alpine-fde/keys
   if [ -n "$_im_kd" ]; then
@@ -2758,9 +2626,13 @@ cmd_install_main() {
   # seal (so keyslot 0 is occupied and token_free_slot yields 1). DEVICE
   # CONTRACT (item 27): the recovery record passes the CONTAINER devices
   # ($_im_containers, the luksFormat targets) — never the /dev/mapper/* views.
-  inst_exec host "inst_ceremony_recovery $_im_lukskey $_im_containers # §9.1 step 4 credential ceremony (1/3) — asked FIRST (item 12): LUKS2 recovery passphrase -> keyslot 0 of EVERY member CONTAINER via luksAddKey, authorized by the staged ephemeral install key. KDF pinned: Argon2id; §13 entropy floor enforced — re-prompt until met, confirm-typed"
-  inst_exec host "inst_ceremony_user_password $_im_user $_im_mnt # §9.1 step 4 credential ceremony (2/3): user account password (no-echo; press Enter to reuse the recovery passphrase — item 12 default-on-empty)"
-  inst_exec host "inst_ceremony_release_key $_im_keys $_im_passfile_disp # §9.1 step 4 credential ceremony (3/3): release.pem encrypted AES-256 PBKDF2 (keys_encrypt_release, ADR-18; press Enter to reuse the recovery passphrase — item 12), mode 0400; 2nd arg = the 0600 passphrase seam file IN THE TARGET ROOT (<mnt>/run/... — guest /run/...; blocker #8/#9)"
+  # CREDENTIAL CEREMONY: SUPERSEDED by the ADR-21 provisioning-escrow flow —
+  # Stage 1 prompts for NOTHING: no recovery keyslot is created (the first
+  # boot's Stage-2 ceremony enrolls keyslot 0 from the operator's passphrase
+  # ×2), the admin account stays pubkey-accessible (the staged
+  # ALPINE_FDE_ADMIN_PUBKEY; its password is set by the same ceremony), and
+  # release.pem encryption is DEFERRED to that ceremony (the file sits 0400
+  # root-only inside the encrypted root until then — ADR-18 amended).
   # step 5 (SECRET-dependent — stays AFTER the ceremony): signed boot manager
   # + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is
   # state-gated OFF — the PROVISIONAL seal below is the only enrollment of
@@ -2785,7 +2657,7 @@ cmd_install_main() {
   # the linux-lts package did not install) and PASSES it to kernel build:
   # the retired no-arg form fell back to `uname -r` — the LIVE ISO's kernel
   # — whose module tree does not exist in the target.
-  inst_exec guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; [ -s $_im_pf_guest ] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat $_im_pf_guest) && rm -f $_im_pf_guest && export ALPINE_FDE_KEY_PASSPHRASE; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde kernel build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
+  inst_exec guest "export ALPINE_FDE_ROOT=/; export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; kv=\$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1); [ -n \"\$kv\" ] || { echo 'alpine-fde: ERROR: no kernel module tree under /lib/modules — the linux-lts kernel package did not install into the target; fix the mirror/package set and re-run (completed steps skip via crash resume)' >&2; exit 1; }; /opt/alpine-fde/bin/alpine-fde kernel build \"\$kv\" # §9.1 step 5 (SECRET-dependent — after the ceremony): signed boot manager + initial UKI (baseline pending ⇒ the build's ensure-once enrollment is state-gated OFF — the PROVISIONAL seal is the only Stage 1 enrollment); blocker #8/#9: keydir exported (keys_dir has no default) + passphrase from the in-target 0600 seam file (never argv); blocker #11: target kver derived in-guest (uname -r is the LIVE ISO kernel); blocker #12: ALPINE_FDE_ROOT=/ — in-chroot the TARGET IS /, and without it the initrd audit has no kernel-reality context (verdicts degrade to bare 'missing' instead of suffix-tolerant satisfaction)"
   # step 6 (SECRET-dependent — stays AFTER the ceremony): PROVISIONAL TPM
   # enrollment (G-C24) — Mechanism B, PCR 11 only,
   # .pcrsig from the just-built UKI; keyslot 1 per member CONTAINER (item 27:
@@ -2814,7 +2686,7 @@ cmd_install_main() {
   # TARGET-TREE PERMISSIONS NORMALIZATION (R640 2026-10-02: / , /etc , /home all came up 0700 — the dispatcher's umask 077 propagates into the guest tree population, and a root-only / breaks EVERY non-root path: sshd strict-modes, pubkey auth, su, shell exec). Runs LATE — after the full population — normalizing only the DIRECTORY level (file modes keep their individual grants); placed BEFORE the bootentry step so a later NVRAM-latency failure cannot skip it.
   inst_exec guest "chmod 755 / /home /etc /var /usr /srv /opt 2>/dev/null; true"
 
-  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt \$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1) # task #27 + two-UKI design: the firmware NVRAM boot-entry PAIR (\"Alpine FDE - <kver> (<date>)\" -> \EFI\Linux\alpine-fde-<kver>.efi FIRST, \"Alpine FDE - <kver> serial (<date>)\" -> \EFI\Linux\alpine-fde-<kver>-serial.efi second; the firmware loads the UKIs directly, systemd-boot is only the removable fallback), HD(1,GPT,<esp-part-guid>), idempotent (family entries at dead GUIDs/stale loaders replaced; legacy single-UKI entries deleted)"
+  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt \$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1) # task #27 + default-only boot design: the firmware NVRAM boot-entry (\"Alpine FDE - <kver> (<date>)\" -> \EFI\Linux\alpine-fde-<kver>.efi, FIRST in BootOrder; the firmware loads the UKI directly, systemd-boot is only the removable fallback; the serial NVRAM lane is RETIRED — retired serial entries are swept, the serial UKI on the ESP is one-shot via UefiTarget), HD(1,GPT,<esp-part-guid>), idempotent (family entries at dead GUIDs/stale loaders replaced; legacy single-UKI entries deleted)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
   # Operationally AFTER the ceremony + secret-dependent steps (the guest build
@@ -2832,7 +2704,7 @@ cmd_install_main() {
   # point (sealed, state written) — a busy host bind must not fail it: every
   # umount gets a lazy (-l) fallback, best-effort, never fatal.
   inst_exec host "umount $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || :; umount $_im_mnt/dev 2>/dev/null || umount -l $_im_mnt/dev 2>/dev/null || :; umount $_im_mnt/sys 2>/dev/null || umount -l $_im_mnt/sys 2>/dev/null || :; umount $_im_mnt/proc 2>/dev/null || umount -l $_im_mnt/proc 2>/dev/null || :; umount -R $_im_mnt 2>/dev/null || umount -l $_im_mnt 2>/dev/null || :; $_im_close"
-  inst_exec host "rm -f $_im_lukskey $_im_passfile_disp # I1: ephemeral install key + release-passphrase seam file scrubbed (§9.1 teardown; blocker #8/#9)"
+  inst_exec host "rm -f $_im_lukskey # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
   # The NVRAM enrollment ran BEFORE the ceremony (mechanical); the outcome is
@@ -2873,7 +2745,7 @@ cmd_install_main() {
   fi
 
   inst_emit_finish
-  rm -f "$_im_lukskey" "${_im_pf_host:-}" 2>/dev/null
+  rm -f "$_im_lukskey" 2>/dev/null
   if [ "${INST_SB_ENROLLED:-}" = "1" ]; then
     printf 'alpine-fde: install complete — direct reboot to disk (NVRAM enrollment succeeded); first boot unlocks via the provisional token and auto-finalizes under Secure Boot (§9.1 Stage 2); `alpine-fde finalize` is the guided/crash-resume entry point (ADR-20)\n' >&2
   elif [ "${INST_SB_DEFERRED:-}" = "1" ]; then

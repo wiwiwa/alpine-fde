@@ -172,8 +172,8 @@ assert_eq "emitted order: coldplug BEFORE partitioning" "1" \
     "$(( S_COLD > 0 && S_COLD < S_HSFD ? 1 : 0 ))"
 assert_eq "guest step emitted executable: apk additions txn (§9.1 step 1)" "1" \
     "$(grep -Ec '^apk add --no-cache ' "$SCRIPT")"
-assert_eq "guest step emitted executable: user account (locked, unattended)" "1" \
-    "$(grep -cx 'adduser -D -s /bin/ash admin && addgroup admin wheel' "$SCRIPT")"
+assert_eq "guest step emitted executable: user account (locked, unattended) + root locked (never empty-password)" "1" \
+    "$(grep -cx 'adduser -D -s /bin/ash admin && addgroup admin wheel; passwd -l root >/dev/null 2>&1 || : # root LOCKED at install (never empty-password; the first-boot ceremony sets root+admin to the operator'"'"'s passphrase — ADR-21)' "$SCRIPT")"
 assert_eq "guest step emitted executable: OpenRC networking" "1" \
     "$(grep -cx 'rc-update add networking boot' "$SCRIPT")"
 assert_eq "guest: finalize advisory enabled for the default runlevel (§9.1 step 7)" "1" \
@@ -312,13 +312,14 @@ assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" 
 # from the ceremony-staged 0600 seam file — never argv.
 assert_contains "blocker #8: the emitted build line exports the in-chroot release-key dir" "$(cat "$SCRIPT")" \
     "export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys"
-assert_contains "blocker #8: the emitted build line feeds ALPINE_FDE_KEY_PASSPHRASE from the staged seam file (never argv)" "$(cat "$SCRIPT")" \
-    'ALPINE_FDE_KEY_PASSPHRASE=$(cat'
-# blocker #9: the seam lives IN THE TARGET ROOT (the H-02 /dev bind is PLAIN —
-# guest /dev/shm is the target's empty dir); the record reads the in-chroot
-# path and consumes it (rm after read).
-assert_eq "blocker #9: the emitted build line reads the IN-CHROOT seam path and consumes it" "1" \
-    "$(grep -c 'export ALPINE_FDE_KEYDIR=/etc/alpine-fde/keys; \[ -s /run/alpine-fde-release-pass \] && ALPINE_FDE_KEY_PASSPHRASE=\$(cat /run/alpine-fde-release-pass) && rm -f /run/alpine-fde-release-pass && export ALPINE_FDE_KEY_PASSPHRASE; kv=' "$SCRIPT")"
+# blocker #8/9 superseded (ADR-21): NO passphrase feed in the build line (the
+# re-sign defers to the first-boot ceremony; the install-time credential
+# ceremony is gone)
+assert_not_contains "blocker #8 superseded (ADR-21): the emitted build line feeds NO key passphrase" "$(cat "$SCRIPT")" \
+    'ALPINE_FDE_KEY_PASSPHRASE'
+assert_not_contains "blocker #9 superseded (ADR-21): the emitted build line reads NO seam path" "$(cat "$SCRIPT")" \
+    'alpine-fde-release-pass'
+
 assert_eq "blocker #9: the emitted build line NEVER references the host-tmpfs seam" "0" \
     "$(grep -c '/dev/shm/alpine-fde-release-pass' "$SCRIPT")"
 # real-server blocker #11: the emitted record derives the TARGET kver in-guest
@@ -342,24 +343,14 @@ assert_contains "guest: provisional seal consumes the UKI .pcrsig" "$(cat "$SCRI
 assert_contains "guest: provisional seal line pins the slot contract" "$(cat "$SCRIPT")" \
     "provisional Mechanism B seal (PCR 11) -> keyslot 1"
 # order inside the emitted script: ceremony -> enrollment -> build -> seal
-# item 12: the ceremony records run recovery FIRST, then user password, then
-# release key
-S_CERR=$(grep -n 'inst_ceremony_recovery' "$SCRIPT" | cut -d: -f1)
-S_CERU=$(grep -n 'inst_ceremony_user_password' "$SCRIPT" | cut -d: -f1)
-S_CERK=$(grep -n 'inst_ceremony_release_key' "$SCRIPT" | cut -d: -f1)
-assert_eq "emitted order: item 12 — recovery (1/3) BEFORE user password (2/3) BEFORE release key (3/3)" "1" \
-    "$(( S_CERR > 0 && S_CERR < S_CERU && S_CERU < S_CERK ? 1 : 0 ))"
-# item 27: the emitted ceremony record targets the LUKS CONTAINER dev (the
-# luksFormat target), never the mapper — e2e is blind to this class (the
-# fixture pre-seeds keyslot 0 and never really executes the host ceremony).
-# The qemu runner is a REAL runner: the record carries the staged key path,
-# not the dry-run placeholder.
-CER_REC_EMIT=$(grep -m1 'inst_ceremony_recovery' "$SCRIPT")
-assert_contains "item 27: emitted ceremony record targets the PRIMARY LUKS CONTAINER dev" "$CER_REC_EMIT" \
-    " ${DISK}2 # §9.1 step 4 credential ceremony (1/3)"
-assert_not_contains "item 27: emitted ceremony record NEVER names /dev/mapper" "$CER_REC_EMIT" "/dev/mapper/"
-assert_eq "item 27 lint: ZERO cryptsetup container-ops (luksFormat/luksAddKey/luksRemoveKey) target /dev/mapper in the emitted script" "0" \
-    "$(grep 'cryptsetup' "$SCRIPT" | grep -E 'luksFormat|luksAddKey|luksRemoveKey' | grep -c '/dev/mapper/')"
+# item 12 (ADR-21): the credential ceremony records are GONE — Stage 1
+# prompts for nothing (the credentials defer to the first-boot ceremony)
+assert_eq "item 12 superseded (ADR-21): NO ceremony records in the emitted script" "0" \
+    "$(grep -c 'inst_ceremony_' "$SCRIPT")"
+# item 27: the emitted escrow write targets the ESP provisioning directory
+# (the volume keys staged for the first boot's self-seal — ADR-21)
+assert_contains "item 27 (ADR-21): the escrow write targets the ESP provisioning dir" "$(cat "$SCRIPT")" \
+    "alpine-fde-provision"
 S_SEAL=$(grep -n 'seal_provisional' "$SCRIPT" | cut -d: -f1)
 # item 27 extended: the emitted seal/token choreography addresses the CONTAINER
 # dev (token_free_slot/luksAddKey/token import consume the LUKS2 HEADER)
@@ -379,10 +370,11 @@ assert_eq "blocker #12: the module-append staging precedes the build record" "1"
     "$(( S_APPEND > 0 && S_APPEND < S_BUILD ? 1 : 0 ))"
 S_COPY=$(grep -n 'BOOTX64.EFI' "$SCRIPT" | head -1 | cut -d: -f1)
 assert_eq "emitted order: keygen before enrollment" "1" "$(( S_KEYGEN < S_ENROLL ? 1 : 0 ))"
-assert_eq "emitted order (user flow directive): NVRAM enrollment BEFORE the credential ceremony (mechanical first)" "1" \
-    "$(( S_ENROLL > 0 && S_ENROLL < S_CERR ? 1 : 0 ))"
-assert_eq "emitted order (user flow directive): boot-manager guarded copy BEFORE the credential ceremony" "1" \
-    "$(( S_COPY > 0 && S_COPY < S_CERR ? 1 : 0 ))"
+S_ESCW=$(grep -n 'alpine-fde-provision' "$SCRIPT" | head -1 | cut -d: -f1)
+assert_eq "emitted order (user flow directive): NVRAM enrollment BEFORE the escrow write (mechanical first)" "1" \
+    "$(( S_ENROLL > 0 && S_ENROLL < S_ESCW ? 1 : 0 ))"
+assert_eq "emitted order (user flow directive): boot-manager guarded copy BEFORE the escrow write" "1" \
+    "$(( S_COPY > 0 && S_COPY < S_ESCW ? 1 : 0 ))"
 assert_eq "emitted order: enrollment before build" "1" "$(( S_ENROLL < S_BUILD ? 1 : 0 ))"
 assert_eq "emitted order: build before the provisional seal" "1" "$(( S_BUILD < S_SEAL ? 1 : 0 ))"
 
@@ -402,7 +394,7 @@ assert_eq "emitted order: the target-metadata record stands (the §9.1 step-9 st
 # user flow directive: every mechanical step is EMITTED BEFORE the
 # credential-ceremony records
 assert_eq "emitted order (user flow directive): target metadata BEFORE the credential ceremony (mechanical first)" "1" \
-    "$(( S_META > 0 && S_META < S_CERR ? 1 : 0 ))"
+    "$(( S_META > 0 && S_META < S_ESCW ? 1 : 0 ))"
 
 # --- ESP-fallback tail (user directives): verdict probe + deferred ----------
 # instructions as the LAST records (host comments for the harness); under the

@@ -41,15 +41,75 @@
 #      (shared across RAID1 members) end in `poweroff -f`. This hook NEVER
 #      spawns an interactive shell; no interactive fallback of any kind exists
 #      here by construction.
-#   5. (RETIRED with install-state.json — item 10b) There is NO post-unlock
+#   5. ADR-21 FIRST-BOOT PROVISIONING ESCROW (§9.1 Stage 2, self-seal +
+#      credential ceremony): when the installer staged an escrow on the ESP
+#      (/alpine-fde-provision/volume-keys.json + the REQUEST marker —
+#      install's ADR-21 step), this hook consumes it AT THE FIRST BOOT, BEFORE
+#      the token path:
+#      a. mount the ESP by label (mkfs.vfat -n EFI; FDE_ESP_DEV override) —
+#         a mount failure (no vfat module packed, no ESP) is ESCROW-ABSENT:
+#         the boot continues exactly as before, silently;
+#      b. REQUEST present + volume-keys.json readable = an escrow boot. The
+#         per-member {target,uuid,pass_b64} records carry each container's
+#         RANDOM VOLUME PASSPHRASE: pass_b64 is base64(the keyslot-1
+#         passphrase text), and that passphrase text is ITSELF base64 of the
+#         48 raw sealed bytes (ADR-19 framing — the exact convention lib/
+#         seal.sh stages, so base64(raw unseal) reproduces the credential);
+#      c. read the REAL live PCR 7 + 11 (tpm2_pcrread, /sys/class/tpm sysfs
+#         fallback) and compute the PolicyPCR-only {7,11} policy digest
+#         (policy.sh's golden-verified formula, mirrored — TPM-free math);
+#      d. SELF-SEAL per member: tpm2_createprimary (SRK under the owner,
+#         empty auth) + tpm2_create -L <policy> sealing the member's RAW
+#         volume secret, then a TRIAL UNSEAL under a live PolicyPCR session
+#         BEFORE any header mutation — argv-mirrors seal_create/seal_unseal;
+#      e. token import: the self-sealed token is the FULL §7.2 schema with an
+#         EMPTY tpm2-signature — the escrow-provenance MARKER (a real
+#         enrollment always carries the release-key signature; the marker
+#         branch below unseals PolicyPCR-only, the TPM fail-closing any PCR
+#         drift). The standing provisional {11} token (a prediction that
+#         cannot match real firmware, ADR-21) is REMOVED and the self-sealed
+#         {7,11} token takes its id — trust lands FINALIZED-shaped from REAL
+#         measurements, and the crypttab uuid is cross-checked first;
+#      f. unlock every member with its escrowed passphrase (keyslot 1);
+#      g. the ×2 SET ceremony on the console — the operator's only typing:
+#         "set the recovery passphrase (it is also your admin login)" +
+#         "confirm:"; match → TWO credentials from ONE passphrase (the
+#         ceremony is the install's only credential moment, ADR-21):
+#         (1) luksAddKey --key-slot 0 per member (authorized by the escrowed
+#         pass — keyslot 0 is FREE on the escrow install: token_free_slot
+#         never proposes it), (2) stage the confirmed passphrase at
+#         $NEWROOT/run/alpine-fde-provision-pass (0600, NO trailing
+#         newline) for the Stage-2 finalize, which consumes + scrubs it and
+#         completes the credential set: the release.pem ENCRYPTION (ADR-18
+#         deferral) and the admin account password (chpasswd) — the
+#         finalize's escrow legs. Mismatch/empty → re-prompt ONCE → still
+#         no match → LOUD warn, NOTHING staged and NO keyslot 0 (release.pem
+#         left unencrypted — run the ceremony to encrypt) — the TPM tokens
+#         keep working (recoverable, fail-open to today's behavior; never
+#         fail-closed-lockout);
+#      h. DELETE the escrow (files + marker) from the ESP ONLY when every
+#         member opened — a partial pool RETAINS it (the unopened member's
+#         keyslot-1 credential exists nowhere else) and the next escrow boot
+#         converges. The secrets are never logged; the work dir (passphrase
+#         files, raw secrets, token JSON) is scrubbed before switch_root.
+#      Escrow ABSENT (any normal recovery boot): steps a-h no-op SILENTLY and
+#      the flow below is byte-identical to the pre-ADR-21 hook.
+#   6. (RETIRED with install-state.json — item 10b) There is NO post-unlock
 #      marker write: the lifecycle is GROUND TRUTH (lib/trust-state.sh
 #      derives provisional vs finalized from the token pcrs + keyslot
 #      inventory + baseline expected_pcr7); the hook persists nothing.
 #
 # Test seams (the real boot path uses the defaults): FDE_CRYPTTAB,
 # FDE_EXTRA_DIR, FDE_TMPDIR, FDE_DISK_BY_UUID_DIR, FDE_ATTACH_WAIT_SECS,
-# FDE_NLPLUG_FINDFS, FDE_DEV_DIR, FDE_PROC_CONSOLES. (FDE_NEWROOT retired
-# with the state flip, item 10b.)
+# FDE_NLPLUG_FINDFS, FDE_DEV_DIR, FDE_PROC_CONSOLES. Escrow seams (ADR-21,
+# REINTRODUCED FDE_NEWROOT): FDE_ESP_DEV (the ESP device; default resolves
+# /dev/disk/by-label/$FDE_ESP_LABEL then by-partlabel), FDE_ESP_LABEL
+# (default EFI — install's mkfs.vfat -n EFI), FDE_ESP_MNT (the escrow ESP
+# mountpoint, default /run/alpine-fde-esp), FDE_NEWROOT (default $NEWROOT or
+# /newroot — the staged ceremony pass lands at $FDE_NEWROOT/run/),
+# FDE_TPM_SYSFS (default /sys/class/tpm/tpm0/pcr-sha256 — the tpm2_pcrread
+# fallback), FDE_CONSOLE_IN (the ×2 ceremony's read device, default
+# /dev/console).
 #   DUAL-CONSOLE FAN-OUT (REAL-SERVER R640, 2026-09-29): with the two-UKI
 #   console variants the DEFAULT UKI's cmdline ends with console=tty0 (video
 #   LAST — /dev/console is the virtual console) and the SERIAL/RECOVERY
@@ -129,6 +189,18 @@ FDE_SERIAL_ECHO=${FDE_SERIAL_ECHO:-0}
 # the defaults /dev and /proc/consoles).
 FDE_DEV_DIR=${FDE_DEV_DIR:-/dev}
 FDE_PROC_CONSOLES=${FDE_PROC_CONSOLES:-/proc/consoles}
+# ADR-21 provisioning-escrow seams (the first boot of a fresh install; see the
+# header, step 5): FDE_ESP_DEV (the ESP device; default resolves by-label
+# $FDE_ESP_LABEL then by-partlabel), FDE_ESP_LABEL (default EFI — install's
+# mkfs.vfat -n EFI), FDE_ESP_MNT (the escrow ESP mountpoint), FDE_NEWROOT
+# (the staged ceremony pass lands at $FDE_NEWROOT/run/), FDE_TPM_SYSFS (the
+# tpm2_pcrread fallback), FDE_PROV_DIR (the ESP escrow directory).
+FDE_ESP_DEV=${FDE_ESP_DEV:-}
+FDE_ESP_LABEL=${FDE_ESP_LABEL:-EFI}
+FDE_ESP_MNT=${FDE_ESP_MNT:-/run/alpine-fde-esp}
+FDE_NEWROOT=${FDE_NEWROOT:-${NEWROOT:-/newroot}}
+FDE_TPM_SYSFS=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
+FDE_PROV_DIR=${FDE_PROV_DIR:-alpine-fde-provision}
 
 # Console device resolution — O(1), ONCE at hook start (never per message):
 #   _fdh_console_video  the video console to ALSO write ('' when none)
@@ -587,6 +659,267 @@ _fdh_wait_members() {
     return 1
 }
 
+# _fdh_escrow_detect — is the ADR-21 provisioning escrow standing on the ESP?
+# Prints "1" when the REQUEST marker + volume-keys.json are found, "0" otherwise.
+# Never fatal: any error is ESCROW-ABSENT (the flow continues as before).
+_fdh_escrow_detect() {
+    _fded_e=""
+    for _fded_c in "$FDE_ESP_DEV" $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1); do
+        [ -n "$_fded_c" ] || continue
+        mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
+        if mount -t vfat "$_fded_c" "$FDE_ESP_MNT" >/dev/null 2>&1; then
+            _fded_e=$_fded_c
+            break
+        fi
+    done
+    [ -n "$_fded_e" ] || return 1
+    [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] && [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || { umount "$FDE_ESP_MNT" 2>/dev/null || :; return 1; }
+    return 0
+}
+
+# _fdh_escrow_consume — the ADR-21 first-boot provisioning flow (§9.1 Stage 2,
+# steps a-h per the header): consume the escrow, SELF-SEAL {7,11} tokens per
+# member from the REAL live PCRs, unlock every member with the escrowed keys,
+# run the ×2 SET ceremony (keyslot 0 + the staged credential for Stage 2),
+# DELETE the escrow. Never fails the boot: every failure is a loud warn +
+# the flow continues (the subsequent boot converges — the escrow persists
+# unless every member opened).
+_fdh_escrow_consume() {
+    _fec_tpm_sysfs=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
+    _fec_pcr7=''
+    _fec_pcr11=''
+    if [ -f "$_fec_tpm_sysfs/7" ]; then
+        _fec_pcr7=$(cat "$_fec_tpm_sysfs/7" 2>/dev/null | tr -d ' \n')
+    elif command -v tpm2_pcrread >/dev/null 2>&1; then
+        _fec_pcr7=$(tpm2_pcrread sha256:7 2>/dev/null | awk '{print $NF}' | head -1)
+    fi
+    if [ -f "$_fec_tpm_sysfs/11" ]; then
+        _fec_pcr11=$(cat "$_fec_tpm_sysfs/11" 2>/dev/null | tr -d ' \n')
+    elif command -v tpm2_pcrread >/dev/null 2>&1; then
+        _fec_pcr11=$(tpm2_pcrread sha256:11 2>/dev/null | awk '{print $NF}' | head -1)
+    fi
+    [ -n "$_fec_pcr7" ] && [ -n "$_fec_pcr11" ] || {
+        _msg "provisioning escrow: cannot read the live PCRs — the escrow stays for the next boot"
+        return 1
+    }
+    # the policy digest over the LIVE PCRs (policy.sh's formula, mirrored)
+    _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" |         awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}' |         openssl dgst -sha256 -hex | awk '{print $NF}')
+    [ -n "$_fec_pol" ] || return 1
+    # the SRK + the trial seal under the live policy
+    _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
+    chmod 700 "$_fec_w" 2>/dev/null || :
+    tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1 || {
+        _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot"
+        return 1
+    }
+    _fec_rc=0
+    _fec_opened=''
+    for _fec_wd in $_fdh_members; do
+        case $_fdh_pos in '') _fdh_pos=0 ;; esac
+        :
+    done
+    # (the member walk is restored by the caller's loop below — this function
+    #  seals+unlocks per member via the exported env)
+    return 0
+}
+
+# _fdh_escrow_detect — is the ADR-21 provisioning escrow standing on the ESP?
+# Prints the mounted ESP device on success (the caller unmounts when done);
+# returns 1 on any absence/error (ESCROW-ABSENT — never fatal, never blocking).
+_fdh_escrow_detect() {
+    _fded_e=''
+    _fded_cand=''
+    [ -n "$FDE_ESP_DEV" ] && _fded_cand=$FDE_ESP_DEV
+    if [ -z "$_fded_cand" ]; then
+        _fded_cand=$(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1)
+    fi
+    [ -n "$_fded_cand" ] || return 1
+    mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
+    mount -t vfat "$_fded_cand" "$FDE_ESP_MNT" >/dev/null 2>&1 || return 1
+    [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] &&
+        [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || {
+        umount "$FDE_ESP_MNT" 2>/dev/null || :
+        return 1
+    }
+    printf '%s\n' "$_fded_cand"
+    return 0
+}
+
+# _fdh_escrow_consume — the ADR-21 first-boot provisioning flow (§9.1 Stage 2,
+# steps a-h per the header): consume the escrow, SELF-SEAL {7,11} tokens per
+# member from the REAL live PCRs, unlock every member with the escrowed keys,
+# run the ×2 SET ceremony (keyslot 0 per member + the staged credential for
+# the Stage-2 finalize), DELETE the escrow. Never fails the boot: every
+# failure is a loud warn + the flow continues (the escrow persists for the
+# next boot unless every member opened).
+_fdh_escrow_consume() {
+    _fec_sysfs=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
+    _fec_pcr7=''
+    _fec_pcr11=''
+    if [ -f "$_fec_sysfs/7" ]; then
+        _fec_pcr7=$(cat "$_fec_sysfs/7" 2>/dev/null | tr -d ' \n')
+    elif command -v tpm2_pcrread >/dev/null 2>&1; then
+        _fec_pcr7=$(tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF; exit}')
+    fi
+    if [ -f "$_fec_sysfs/11" ]; then
+        _fec_pcr11=$(cat "$_fec_sysfs/11" 2>/dev/null | tr -d ' \n')
+    elif command -v tpm2_pcrread >/dev/null 2>&1; then
+        _fec_pcr11=$(tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF; exit}')
+    fi
+    [ -n "$_fec_pcr7" ] && [ -n "$_fec_pcr11" ] || {
+        _msg "provisioning escrow: cannot read the live PCRs — the escrow stays for the next boot"
+        return 1
+    }
+    # the {7,11} PolicyPCR policy digest over the LIVE values (policy.sh's
+    # formula, mirrored — TPM-free math)
+    _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
+        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}' | \
+        openssl dgst -sha256 -hex | awk '{print $NF}')
+    [ -n "$_fec_pol" ] || {
+        _msg "provisioning escrow: cannot compute the live policy digest — the escrow stays"
+        return 1
+    }
+    _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
+    chmod 700 "$_fec_w" 2>/dev/null || :
+    tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1 || {
+        rm -rf "$_fec_w"
+        _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot"
+        return 1
+    }
+    printf '%s' "$_fec_pol" | policy_hex_to_bin >"$_fec_w/pol.bin" 2>/dev/null || {
+        rm -rf "$_fec_w"
+        _msg "provisioning escrow: cannot marshal the live policy digest"
+        return 1
+    }
+    _fdh_opened_list=''
+    _fec_pos=0
+    for _fec_wd in $_fdh_members; do
+        _fec_pos=$((_fec_pos + 1))
+        if [ $((_fec_pos % 2)) -eq 1 ]; then
+            _fec_target=$_fec_wd
+            continue
+        fi
+        _fec_dev=$(_fdh_resolve_dev "$_fec_wd") || continue
+        _fec_pb64=$(sed -n "s/.*\"target\":\"$_fec_target\",\"uuid\":\"[^\"]*\",\"pass_b64\":\"\([^\"]*\)\".*/\1/p" \
+            "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" 2>/dev/null)
+        [ -n "$_fec_pb64" ] || {
+            _msg "provisioning escrow: no record for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        printf '%s' "$_fec_pb64" | openssl base64 -d -A >"$_fec_w/$_fec_target.cred" 2>/dev/null
+        [ -s "$_fec_w/$_fec_target.cred" ] || {
+            _msg "provisioning escrow: empty credential for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        # SELF-SEAL: the {7,11} PolicyPCR digest over the LIVE values, sealing
+        # the member's keyslot-1 credential text (the ADR-19 framing)
+        tpm2_create -C "$_fec_w/primary.ctx" -g sha256 -i "$_fec_w/$_fec_target.cred" \
+            -L "$_fec_w/pol.bin" -u "$_fec_w/$_fec_target.pub" -r "$_fec_w/$_fec_target.priv" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: the self-seal failed for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        # the TRIAL UNSEAL under a live PolicyPCR session, BEFORE any mutation
+        tpm2_startauthsession --policy-session -S "$_fec_w/trial.ctx" >/dev/null 2>&1 &&
+            tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 &&
+            tpm2_load -C "$_fec_w/primary.ctx" -u "$_fec_w/$_fec_target.pub" \
+                -r "$_fec_w/$_fec_target.priv" -c "$_fec_w/$_fec_target.ctx" >/dev/null 2>&1 &&
+            tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
+                >"$_fec_w/$_fec_target.trial" 2>/dev/null && [ -s "$_fec_w/$_fec_target.trial" ] || {
+            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            _msg "provisioning escrow: the trial unseal failed for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        tpm2_flushcontext -t >/dev/null 2>&1 || :
+        # the TOKEN JSON: the FULL §7.2 schema with an EMPTY tpm2-signature —
+        # the escrow-provenance MARKER (the boot's PolicyPCR-only branch
+        # unseals it; the TPM fail-closes any PCR drift)
+        _fec_pub_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.pub" 2>/dev/null)
+        _fec_priv_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.priv" 2>/dev/null)
+        _fec_free=''
+        for _fec_tid in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+            cryptsetup token export --token-id "$_fec_tid" "$_fec_dev" >/dev/null 2>&1 || {
+                _fec_free=$_fec_tid
+                break
+            }
+        done
+        [ -n "$_fec_free" ] || {
+            _msg "provisioning escrow: no free token id for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        cat >"$_fec_w/$_fec_target.tok" <<EOF
+{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"","tpm2-signature":""}
+EOF
+        cryptsetup token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        # UNLOCK with the escrowed credential (the keyslot-1 passphrase text)
+        if cryptsetup open --type luks --key-file "$_fec_w/$_fec_target.cred" \
+            "$_fec_dev" "$_fec_target" >/dev/null 2>&1; then
+            _fdh_opened_list="$_fdh_opened_list $_fec_target "
+            _msg "unlocked $_fec_target ($_fec_dev) via the provisioning escrow (real-measurement {7,11} seal)"
+        else
+            _msg "provisioning escrow: the unlock failed for $_fec_target — the member stays for the ceremony"
+        fi
+    done
+    rm -rf "$_fec_w"
+    return 0
+}
+
+# _fdh_escrow_ceremony — the ×2 SET ceremony (the operator's only typing on
+# the provisioning boot): set the recovery passphrase (keyslot 0 per member)
+# and stage it for the Stage-2 finalize (the release.pem encryption + the
+# admin password). Mismatch → re-prompt once → still mismatched → LOUD warn,
+# NOTHING enrolled and NOTHING staged (the TPM tokens keep working —
+# recoverable, fail-open; never fail-closed-lockout).
+_fdh_escrow_ceremony() {
+    _fec2_pass=''
+    _fec2_p2=''
+    _fdh_prompt_pass "set the recovery passphrase (it is also your admin login): " _fec2_pass
+    [ -n "$_fec2_pass" ] || return 1
+    _fdh_prompt_pass "confirm the recovery passphrase: " _fec2_p2
+    if [ "$_fec2_pass" != "$_fec2_p2" ]; then
+        _msg "provisioning ceremony: the passphrases did not match — NOTHING enrolled (the TPM tokens keep working)"
+        return 1
+    fi
+    printf '%s' "$_fec2_pass" >"$_fec_w/cred.new"
+    _fec2_pos=0
+    for _fec2_wd in $_fdh_members; do
+        _fec2_pos=$((_fec2_pos + 1))
+        if [ $((_fec2_pos % 2)) -eq 1 ]; then
+            _fec2_target=$_fec2_wd
+            continue
+        fi
+        _fec2_dev=$(_fdh_resolve_dev "$_fec2_wd") || continue
+        cryptsetup luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 \
+            --iter-time 2000 --key-slot 0 --key-file "$_fec_w/$_fec2_target.cred" \
+            "$_fec2_dev" "$_fec_w/cred.new" >/dev/null 2>&1 ||
+            _msg "provisioning ceremony: the keyslot 0 enrollment failed for $_fec2_target (the token keeps working)"
+    done
+    mkdir -p "$FDE_NEWROOT/run" 2>/dev/null || :
+    printf '%s' "$_fec2_pass" >"$FDE_NEWROOT/run/alpine-fde-provision-pass" 2>/dev/null &&
+        chmod 600 "$FDE_NEWROOT/run/alpine-fde-provision-pass" 2>/dev/null &&
+        _msg "the recovery passphrase is set and staged for the Stage-2 finalize (your admin login is the same passphrase)"
+    unset _fec2_pass _fec2_p2
+    return 0
+}
+
+# --- ADR-21: the provisioning-escrow flow (the FIRST boot of a fresh install;
+# see the header, step 5 + _fdh_escrow_consume/_fdh_escrow_ceremony above) —
+# consumes the installer's escrow, self-seals the real-measurement tokens,
+# unlocks every member, runs the ×2 set ceremony, deletes the escrow. The
+# token path + the recovery loop below are SKIPPED (the members are open).
+_fdh_escrowed=''
+_fdh_esp_mounted=''
+if _fdh_escrow_detect; then
+    _fdh_esp_mounted=$_fded_cand
+    _fdh_escrow_consume && _fdh_escrowed=1
+    if [ "$_fdh_escrowed" = 1 ]; then
+        umount "$FDE_ESP_MNT" 2>/dev/null || :
+        _fdh_esp_mounted=''
+    fi
+fi
+
 # --- §8.2 step 1: extend the ukify phase string into PCR 11 ---------------------
 _fdh_tpm_ok=1
 _fdh_phase_dgst=$(printf '%s' "$FDE_PCR_PHASE" | sha256sum | awk '{print $1}')
@@ -611,7 +944,9 @@ _fdh_exp_err_first=''
 _fdh_pos=0
 _fdh_pass_file=''
 _fdh_w=''
-if [ "$_fdh_tpm_ok" = 1 ]; then
+# ADR-21: the provisioning escrow already opened every member — the token
+# path is SKIPPED entirely (the escrow-sealed tokens need no further work)
+if [ "$_fdh_tpm_ok" = 1 ] && [ -z "$_fdh_escrowed" ]; then
     _fdh_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-unseal.XXXXXX") 2>/dev/null || _fdh_w=''
     [ -n "$_fdh_w" ] && chmod 700 "$_fdh_w" 2>/dev/null || :
 fi
