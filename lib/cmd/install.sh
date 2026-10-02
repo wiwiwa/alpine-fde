@@ -2811,6 +2811,9 @@ cmd_install_main() {
   # re-partitioned ESP leaves entries that boot "Boot Failed"). No EFI
   # variable support (container): the record SKIPS with the exact manual
   # command instead of failing the completed install.
+  # TARGET-TREE PERMISSIONS NORMALIZATION (R640 2026-10-02: / , /etc , /home all came up 0700 — the dispatcher's umask 077 propagates into the guest tree population, and a root-only / breaks EVERY non-root path: sshd strict-modes, pubkey auth, su, shell exec). Runs LATE — after the full population — normalizing only the DIRECTORY level (file modes keep their individual grants); placed BEFORE the bootentry step so a later NVRAM-latency failure cannot skip it.
+  inst_exec guest "chmod 755 / /home /etc /var /usr /srv /opt 2>/dev/null; true"
+
   inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/cmd/install.sh && require_pkgs efibootmgr:efibootmgr && inst_bootentry_ensure $_im_esp $_im_esp_mnt \$(cd /lib/modules 2>/dev/null && ls -1d */ 2>/dev/null | tr -d '/' | sort -V | tail -n 1) # task #27 + two-UKI design: the firmware NVRAM boot-entry PAIR (\"Alpine FDE - <kver> (<date>)\" -> \EFI\Linux\alpine-fde-<kver>.efi FIRST, \"Alpine FDE - <kver> serial (<date>)\" -> \EFI\Linux\alpine-fde-<kver>-serial.efi second; the firmware loads the UKIs directly, systemd-boot is only the removable fallback), HD(1,GPT,<esp-part-guid>), idempotent (family entries at dead GUIDs/stale loaders replaced; legacy single-UKI entries deleted)"
 
   # --- 8. teardown + scrub (§9.1 Teardown; I1) ------------------------------
