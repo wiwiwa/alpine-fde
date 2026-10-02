@@ -694,7 +694,8 @@ reseal_ensure_once_locked() {
 
 # reseal_crypttab_uuid FILE — the LUKS2 target UUID of the first crypttab line
 # with luks options (the volume the build's enroll step addresses, §8.2
-# verified coupling); empty output when absent
+# verified coupling); empty output when absent. The SINGLE-member accessor —
+# reseal itself targets every member (reseal_crypttab_uuids below).
 reseal_crypttab_uuid() {
     [ -f "$1" ] || return 0
     awk '
@@ -703,6 +704,25 @@ reseal_crypttab_uuid() {
             if (match($2, /^UUID=[^,]*/)) {
                 print substr($2, 6)
                 exit
+            }
+        }
+    ' "$1"
+}
+
+# reseal_crypttab_uuids FILE — EVERY crypttab LUKS member UUID, one per line,
+# first-seen order, duplicates collapsed (same grammar as the accessor above).
+# bcache-multi containers carry INDEPENDENT volume passphrases and each needs
+# its own token pair — reseal with no --uuid seals them ALL (R640 2026-10-01:
+# the default addressed only the FIRST member and root2 fell back to the
+# recovery prompt on every boot until a manual second pass ran).
+reseal_crypttab_uuids() {
+    [ -f "$1" ] || return 0
+    awk '
+        /^[[:space:]]*#/ { next }
+        NF >= 4 && $4 ~ /(^|,)luks(,|$)/ {
+            if (match($2, /^UUID=[^,]*/)) {
+                u = substr($2, 6)
+                if (!(u in seen)) { seen[u] = 1; print u }
             }
         }
     ' "$1"
@@ -746,30 +766,53 @@ cmd_reseal_main() {
 
     require_pkgs cryptsetup:cryptsetup tpm2:tpm2-tools jq:jq openssl:openssl flock:util-linux
 
-    reseal_preconditions "$_em_uuid" "$_em_pcrsig"
-    _em_uuid=$RESEAL_PRE_UUID
-    _em_pub=$RESEAL_PRE_PUB
-    _em_dev=$RESEAL_PRE_DEV
+    # target selection: --uuid targets ONE member (a targeted re-seal);
+    # otherwise EVERY crypttab LUKS member is sealed — bcache-multi
+    # containers carry INDEPENDENT volume passphrases and each needs its own
+    # token pair (R640 2026-10-01: the default addressed only the FIRST
+    # member, and root2 fell back to the recovery prompt on every boot
+    # until a manual second pass with --uuid ran). No crypttab members →
+    # fall back to the baseline target (the single-volume legacy shape).
+    if [ -z "$_em_uuid" ]; then
+        _em_uuids=$(reseal_crypttab_uuids "${ALPINE_FDE_CRYPTTAB:-/etc/crypttab}")
+    fi
+    if [ -z "$_em_uuid" ] && [ -z "$_em_uuids" ]; then
+        reseal_preconditions '' "$_em_pcrsig"
+        _em_uuids=$RESEAL_PRE_UUID
+    fi
 
     # The Mechanism B TOKEN-PAIR enrollment (shared core, G-R3; two-UKI design:
     # one policy per console variant) under the enrollment lock (§8.3
-    # serialization, HW-3); failures die fail-closed 64
+    # serialization, HW-3) — ONE lock for the WHOLE member sweep; failures
+    # die fail-closed 64
     if ! reseal_lock_acquire; then
         die "reseal: cannot take the enrollment lock — refusing an unserialized enrollment"
     fi
     _em_rc=0
-    reseal_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" \
-        "$_em_pcrsig_serial" || _em_rc=1
+    _em_pub=''
+    _em_pub_set=0
+    _em_done=''
+    for _em_u in ${_em_uuid:-$_em_uuids}; do
+        reseal_preconditions "$_em_u" "$_em_pcrsig"
+        _em_uuid=$RESEAL_PRE_UUID
+        _em_dev=$RESEAL_PRE_DEV
+        if [ "$_em_pub_set" = 0 ]; then
+            _em_pub=$RESEAL_PRE_PUB
+            _em_pub_set=1
+        fi
+        reseal_run "$_em_mode" "$_em_pub" "$_em_dev" "$_em_reseat" "$_em_pcrsig" \
+            "$_em_pcrsig_serial" || { _em_rc=1; break; }
+        if ! reseal_record "$_em_uuid" "$_em_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" "$_em_pub" \
+            "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
+            die "reseal: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
+        fi
+        printf 'alpine-fde: enrolled %s (policy_mode=%s, token pair: default keyslot %s + serial keyslot %s, wipe=%s); record: %s\n' \
+            "$_em_uuid" "$_em_mode" "$RESEAL_SLOT" "${RESEAL_SLOT_SERIAL:-<none>}" "$RESEAL_WIPE" "$(sp_enrolled_file)" >&2
+        _em_done="$_em_done $_em_uuid"
+    done
     reseal_lock_release
     if [ "$_em_rc" -ne 0 ]; then
-        die "reseal: enrollment failed — enrolled.json NOT written"
+        die "reseal: enrollment failed — enrolled.json NOT updated for every member (sealed so far:${_em_done:- <none>})"
     fi
-
-    if ! reseal_record "$_em_uuid" "$_em_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" "$_em_pub" \
-        "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
-        die "reseal: enrollment succeeded but enrolled.json could NOT be written — fix the state directory and re-run (loud failure, ADR-8)"
-    fi
-    printf 'alpine-fde: enrolled (policy_mode=%s, token pair: default keyslot %s + serial keyslot %s, wipe=%s); record: %s\n' \
-        "$_em_mode" "$RESEAL_SLOT" "${RESEAL_SLOT_SERIAL:-<none>}" "$RESEAL_WIPE" "$(sp_enrolled_file)" >&2
     return 0
 }
