@@ -772,30 +772,58 @@ _uk_body() {
     else
         warn "kernel build: objcopy not available — the serial token will carry the live/default policy digest (install binutils for the distinct serial policy)"
     fi
-    _uk_luks_uuid=$(reseal_crypttab_uuid "${_uk_root}/etc/crypttab" || true)
-    _uk_luks_dev=''
-    if [ -n "$_uk_luks_uuid" ]; then
-        _uk_luks_dev="$(reseal_by_uuid_dir)/$_uk_luks_uuid"
+    # bcache-multi (R640 2026-10-01): the ensure-once runs per MEMBER — every
+    # crypttab LUKS container must carry its own standing token pair (the
+    # containers have INDEPENDENT volume passphrases; a build that checked
+    # only the first member silently left root2 on the recovery-prompt path).
+    # The manifest's enrollment stamp stays the FIRST member's bookkeeping
+    # (single-record schema, §8.4): nothing consumes a second record — each
+    # container's enrollment ground truth is its own LUKS2 header + its
+    # enrolled.json record. Member strings are uuid|dev with no spaces.
+    _uk_members=''
+    _uk_luks_uuids=$(reseal_crypttab_uuids "${_uk_root}/etc/crypttab" || true)
+    if [ -n "$_uk_luks_uuids" ]; then
+        for _uk_u in $_uk_luks_uuids; do
+            _uk_d="$(reseal_by_uuid_dir)/$_uk_u"
+            [ -n "$_uk_members" ] && _uk_members="$_uk_members "
+            _uk_members="$_uk_members$_uk_u|$_uk_d"
+        done
+    else
+        # legacy single-volume shape: the accessor's FIRST member
+        _uk_luks_uuid=$(reseal_crypttab_uuid "${_uk_root}/etc/crypttab" || true)
+        if [ -n "$_uk_luks_uuid" ]; then
+            _uk_members="$_uk_luks_uuid|$(reseal_by_uuid_dir)/$_uk_luks_uuid"
+        fi
     fi
-    RESEAL_ENROLLED=0
-    if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub" \
-        "$_uk_pcrsig_serial_file"; then
-        _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: ${_uk_luks_dev:-<none>})${RESEAL_FAIL_REASON:+: $RESEAL_FAIL_REASON}"
-        err "kernel build: $_uk_fail_reason"
-        return 1
-    fi
-    if [ "$RESEAL_ENROLLED" -eq 1 ]; then
-        # LO-02/MD-01: the enrolled.json write is guarded — a silent empty-write
-        # would leave the §8.4 record missing while the build reports success
-        if ! reseal_record "$_uk_luks_uuid" "$_uk_policy_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" \
-            "$_uk_keydir/release.pub" "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
-            _uk_fail_reason="writing enrolled.json failed after enrollment"
+
+    _uk_standing_dev=''
+    for _uk_m in $_uk_members; do
+        _uk_luks_uuid=${_uk_m%%|*}
+        _uk_luks_dev=${_uk_m#*|}
+        [ -n "$_uk_luks_dev" ] || continue
+        RESEAL_ENROLLED=0
+        if ! reseal_ensure_once "$_uk_luks_dev" "$_uk_keydir/release.pub" \
+            "$_uk_pcrsig_serial_file"; then
+            _uk_fail_reason="TPM enrollment failed (Mechanism B ensure-once; device: $_uk_luks_dev)${RESEAL_FAIL_REASON:+: $RESEAL_FAIL_REASON}"
             err "kernel build: $_uk_fail_reason"
             return 1
         fi
-        manifest_set_enrollment "$_uk_manifest" "$RESEAL_SLOT" "$RESEAL_TOKEN_ID" \
-            "${RESEAL_SLOT_SERIAL:-}" "${RESEAL_TOKEN_ID_SERIAL:-}"
-    elif [ -n "$_uk_luks_dev" ] && [ -e "$_uk_luks_dev" ]; then
+        if [ "$RESEAL_ENROLLED" -eq 1 ]; then
+            # LO-02/MD-01: the enrolled.json write is guarded — a silent
+            # empty-write would leave the §8.4 record missing while the build
+            # reports success. PER-MEMBER record: each container's enrollment
+            # ground truth is its own header + its own enrolled.json entry.
+            if ! reseal_record "$_uk_luks_uuid" "$_uk_policy_mode" "$RESEAL_WIPE" "$RESEAL_SLOT" \
+                "$_uk_keydir/release.pub" "$RESEAL_SLOT_SERIAL" "$RESEAL_TOKEN_ID_SERIAL"; then
+                _uk_fail_reason="writing enrolled.json failed after enrollment"
+                err "kernel build: $_uk_fail_reason"
+                return 1
+            fi
+        fi
+        [ -n "$_uk_standing_dev" ] || _uk_standing_dev=$_uk_luks_dev
+    done
+
+    if [ -n "$_uk_standing_dev" ] && [ -e "$_uk_standing_dev" ]; then
         # Pair standing (the s14 zero-TPM-op path): §8.4 stamps the standing
         # keyslots/token ids onto EVERY manifest entry — incl. the NEW kver
         # just upserted (upsert carry-over covers same-kver rebuilds only).
@@ -804,7 +832,7 @@ _uk_body() {
         # default variant (the pair is enrolled in that order).
         _uk_standing=$(mktemp "${TMPDIR:-/tmp}/alpine-fde-standing.XXXXXX") ||
             die "kernel build: mktemp failed"
-        if reseal_cryptsetup luksDump --dump-json-metadata "$_uk_luks_dev" \
+        if reseal_cryptsetup luksDump --dump-json-metadata "$_uk_standing_dev" \
             >"$_uk_standing" 2>/dev/null; then
             _uk_pair=$(token_pair_bookkeeping "$_uk_standing")
             # shellcheck disable=SC2086  # exactly four '-'-padded fields
@@ -814,10 +842,10 @@ _uk_body() {
                     "$([ "$3" != "-" ] && printf '%s' "$3")" \
                     "$([ "$4" != "-" ] && printf '%s' "$4")"
             else
-                warn "kernel build: cannot parse the standing tokens' keyslot/token_id on $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
+                warn "kernel build: cannot parse the standing tokens' keyslot/token_id on $_uk_standing_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
             fi
         else
-            warn "kernel build: cannot re-read LUKS2 metadata of $_uk_luks_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
+            warn "kernel build: cannot re-read LUKS2 metadata of $_uk_standing_dev — manifest enrollment bookkeeping left unstamped (§8.4); re-run the build with the volume attached"
         fi
         rm -f "$_uk_standing"
     fi
