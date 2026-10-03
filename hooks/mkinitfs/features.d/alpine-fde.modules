@@ -22,6 +22,13 @@ kernel/fs/ext4
 kernel/fs/jbd2
 kernel/fs/mbcache
 kernel/drivers/md/bcache
+# FAT/vfat + the codepages (s22 2026-10-03): the ADR-21 escrow consume mounts
+# the ESP (vfat, labeled EFI) in the initramfs to read the staged volume keys
+# — without the vfat subtree the mount fails inside the initrd and the
+# provisioning boot can never consume the escrow (the live-env staging is
+# unaffected; this is the first-boot initrd lane only).
+kernel/fs/fat
+kernel/fs/nls
 # USB + HID stack (R640 2026-10-01): the iDRAC virtual keyboard is a USB HID
 # device — without these subtrees it never enumerates in the initramfs and
 # the recovery passphrase is UNTYPEABLE at the video console (the recovery

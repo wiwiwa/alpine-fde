@@ -1,84 +1,157 @@
 #!/usr/bin/env bash
-# tests/e2e/s22-handoff-immunity.sh — §12 S-22 (provisional-window immunity)
-# + the §2.1 T2c provisional-window rows, on the AMENDED ADR-20 lifecycle.
+# tests/e2e/s22-handoff-immunity.sh — §12 S-22 (provisioning-escrow-window
+# immunity) + the §2.1 T2c window rows, on the ADR-21 lifecycle (commit
+# 0b4664b: zero-prompt install, the ×2 set ceremony at first boot).
 #
-# AMENDED WINDOW SHAPE (the re-pin): the old "no token in the window" premise
-# is OBSOLETE — Stage 1 step 6 (lib/cmd/install.sh `seal_provisional`,
-# Mechanism B PCR-11-only) leaves the handoff with
-#   keyslot 0 = the OPERATOR'S RECOVERY PASSPHRASE (argon2id, from install)
-#   keyslot 1 = the STANDING PROVISIONAL token (systemd-tpm2, tpm2-pcrs [11])
-# so the window's immunity claim is no longer "there is no token to try" but:
-#   * the STANDING signed UKI auto-unseals (the provisional seal is the
-#     first-boot convenience — zero console input);
-#   * a TAMPERED/FOREIGN UKI never unseals (the PolicyPCR(11) session digest
-#     of any other boot misses the sealed policy — the attacker rebooting a
-#     modified image gains nothing);
-#   * the recovery passphrase at keyslot 0 is present FROM INSTALL and is the
-#     TPM-independent way out;
-#   * after the service completion (fin_completion_steps — the chain shared
-#     VERBATIM by the guided command and the first-boot service, §9.1 Stage 2
-#     == Stage 3) the token binds {PCR 7, PCR 11} — the finalized shape.
+# THE WINDOW UNDER TEST (ADR-21 — replaces the abolished pre-ADR-21
+# provisional window): install leaves the handoff with NO keyslot 0 (it stays
+# FREE until the first-boot ×2 ceremony) and the volume keys escrowed on the
+# ESP:
+#   keyslot 0 = FREE (the ×2 ceremony enrolls it at first boot — never at
+#               install; the old "Stage-1 keyslot 0 recovery passphrase" is
+#               GONE from the window)
+#   keyslot 1 = a RANDOM VOLUME PASSPHRASE (base64-of-48-raw-bytes text,
+#               ADR-19 framing) carrying the PROVISIONAL {PCR 11}
+#               systemd-tpm2 token (Mechanism B, release-key-signed)
+#   keyslot 2 = the TEMPORARY ephemeral install key (purged at completion)
+#   ESP:      alpine-fde-provision/volume-keys.json (per-member
+#               {target,uuid,pass_b64} of the keyslot-1 passphrase) + the
+#               empty REQUEST marker written LAST (hooks/mkinitfs/
+#               alpine-fde-unseal.sh step 5, the ADR-21 consume (a)-(h))
+# The immunity claim across the window:
+#   * a foreign/rebuilt UKI — and any UKI whose .pcrsig set does not cover the
+#     standing token's PCR selection — is REFUSED (the hook's I3
+#     token/signature gate: "token/signature verification refused");
+#   * a tampered-cmdline variant (the s07 compromised-signer primitive) that
+#     DOES carry a self-consistent signed entry is still refused — the sealed
+#     policy digest misses its measured PCR state ("the TPM refused the
+#     sealed blob");
+#   * the window has NO recovery fallback: keyslot 0 does not exist yet, so
+#     the armed recovery loop cannot open the volume either — every refused
+#     boot ends in the bounded 3-strike fail-closed poweroff;
+#   * the escrow stands untouched through every refused boot (a foreign boot
+#     never consumes it — the consume runs only on OUR hook, and on its
+#     success path only);
+#   * the FIRST BOOT of the exact installed UKI is the only way in (zero
+#     console input), and after the ceremony + completion the {PCR 7,
+#     PCR 11} binding applies UNCHANGED (the same two refusal classes hold
+#     post-finalization).
 #
-# Fixture (host-side; the provisional enrollment runs HOST-side against the
-# file-backed LUKS2 image with the real seal library and the fixture swtpm —
-# the tests/unit/keys_rsa3072_chain.sh seal_provisional recipe, committed to
-# the guest-shaped values):
-#   boot 1 (baseline): token-LESS disk -> the §8.2 hook's recovery-passphrase
-#           path is the only way in -> fed slot-0 passphrase -> UNSEALED.
-#           Proves recovery-at-keyslot-0 from install (T2c). The console's
-#           postphase PCR 11 (== the build's enter-initrd prediction, G-T13)
-#           is the value the provisional seal binds.
-#   host:   compose the release-key-signed {11}-selection .pcrsig over the
-#           LIVE (booted) PCR 11, then seal_provisional + token_add_keyslot +
-#           token_import (the installer's own step-6 recipe) onto the image.
-#           Host asserts: keyslots {0,1}, ONE systemd-tpm2 token, pcrs [11],
-#           token on keyslot 1 — the amended window shape.
-#   boot 2 (the standing signed UKI): SAME UKI, fresh swtpm start (same SRK,
-#           PCRs re-derive deterministically) -> the hook discovers the
-#           provisional token, the session matches, ZERO console input ->
-#           UNSEALED. (The hook's Stage-2 installed->provisional-booted flip
-#           cannot fire here: the harness mounts the unlocked root only later
-#           — the documented DEVIATION in tests/lib/uki-build.sh; the flip is
-#           unit-pinned in tests/unit/hooks_mkinitfs_unseal.sh.)
-#   boot 3 (tampered UKI): a UKI VARIANT with one extra cmdline word (the
-#           s07 attacker primitive) booted against the SAME provisional disk:
-#           the token's signature still verifies (it signs the policy, not the
-#           image) but the PolicyPCR(11) digest of the tampered boot MISSES ->
-#           the TPM refuses the sealed blob -> the bounded recovery loop takes
-#           three WRONG passphrases -> 3-strike fail-closed poweroff. NEVER
-#           unlocked, no shell is ever offered.
-#   host:   THE COMPLETION LEG on boot 2's image: the real guided finalize
-#           (Stage 3) drives the shared completion chain — audit --init
-#           finalizes the pending baseline from the live PCRs, seal_upgrade_
-#           token replaces the provisional PCR-11 token with the {PCR 7,
-#           PCR 11} construction (the combined release-key-signed policy
-#           composed host-side), state `finalized` LAST. Host asserts: token
-#           pcrs [7,11] on keyslot 1, keyslots {0,1}, recovery slot 0 intact.
+# Legs:
+#   fixture (host): the ADR-21 install shape against the file-backed LUKS2
+#           image with the REAL seal library + the fixture swtpm (the
+#           tests/unit/keys_rsa3072_chain.sh seal_provisional recipe):
+#           seal_provisional -> keyslot 1 + the provisional {11} token (the
+#           entry d11-anchored to the build's enter-initrd prediction);
+#           luksAddKey keyslot 2 (ephemeral); luksKillSlot 0 (the FROM-INSTALL
+#           keyslot dies — ADR-21 leaves keyslot 0 FREE); the escrow onto the
+#           LABELED (EFI) installed ESP (volume-keys.json FIRST, the REQUEST
+#           marker LAST — the boot-#1 hook consumes only a REQUEST-marked
+#           escrow); the pending baseline + /etc/crypttab + plaintext
+#           release.pem/release.pub cli-state; the {7,11}-ONLY stale payload
+#           for leg 1.
+#   leg 1 (window immunity — foreign UKI): the tampered-cmdline VARIANT booted
+#           from its OWN unlabeled ESP with a payload carrying ONLY a {7,11}
+#           entry: the standing {11} token's selection has NO matching entry
+#           -> the I3 signature gate refuses BEFORE any TPM session. The
+#           recovery loop arms (and is DEAD — no keyslot 0 exists in the
+#           window): 3 wrong feeds -> 3-strike fail-closed poweroff. Host:
+#           metadata unchanged, escrow intact. The boot's unlabeled ESP also
+#           pins the LOUD escrow-absent detect warn (the R640 real-hardware
+#           fix, eb2df91 — a missed detect is never silent again).
+#   leg 2 (window immunity — tampered cmdline): the same variant, NO payload
+#           drive: the stub's OWN .pcrsig (valid, self-consistent, release-
+#           signed over ITS tampered prediction) passes the signature gate ->
+#           the TPM refuses the digest (seal_refused). 3 wrong feeds ->
+#           3-strike poweroff. Host: metadata unchanged, escrow intact.
+#   leg 3 (the first boot): the EXACT installed UKI against the LABELED
+#           installed ESP (escrow standing): the hook engages the ADR-21
+#           consume. ZERO console input either way (see the fidelity note on
+#           the consume gap). The provisional seal still guards the window
+#           and opens the volume. Host: the escrow SURVIVED the boot (the
+#           retention semantic: a consume that did not complete retains the
+#           escrow), metadata unchanged.
+#   host  (the ceremony mirror — step (g)+(h) stand-in, see fidelity notes):
+#           the recovery passphrase is enrolled at keyslot 0 (argon2id,
+#           authorized by the escrowed keyslot-1 credential — the scenario
+#           consumes its own escrow exactly as the hook would), then the
+#           escrow is DELETED from the installed ESP.
+#   completion (host): the Stage-2 chain the first boot triggers,
+#           fin_service_main DIRECT-DRIVE (the harness has no OpenRC): the
+#           ground-truth gate reads provisional ([11] + the ephemeral
+#           keyslot), the userspace re-unseal of the provisional token
+#           authorizes the chain (never a credential env), audit --init
+#           finalizes the pending baseline from the live register, the
+#           ephemeral keyslot 2 is purged, the token upgrades to Mechanism B
+#           {PCR 7, PCR 11} (release-key-signed), exactly the recovery
+#           keyslot 0 remains, the ADR-8 marker stays clear. Ground truth
+#           reads FINALIZED.
+#   leg 4 (post-finalization immunity unchanged): the tampered variant AGAIN,
+#           now carrying the VALID release-signed {7,11} entry (the
+#           completion's own .pcrsig): the signature gate passes, the TPM
+#           refuses the tampered PCR digest -> 3-strike fail-closed. Host:
+#           the finalized shape intact (one {7,11} SIGNED token, keyslots
+#           recovery + sealed, no ephemeral).
 #
 # Fidelity notes (documented, not silent):
-#   * The provisional enrollment is HOST-side, not in-guest: the amended
-#     Stage-1 step 6 runs in the installer chroot against the SAME TPM the
-#     machine boots with — here that is the fixture swtpm, and the seal
-#     library + cryptsetup operate on the file-backed image directly (the
-#     uki_host_enroll_finalized precedent in tests/lib/uki-build.sh). The
-#     swtpm MUST still hold boot 1's live PCRs when seal_provisional runs
-#     (its G-B6 gate verifies the .pcrsig against the LIVE register); the
-#     scenario asserts live == console postphase before sealing, and stops
-#     the swtpm afterwards so every later boot re-derives PCRs from zero
-#     (startup-clear semantics — a boot stacking extends on the previous
-#     boot's values would be a fixture lie).
-#   * `cryptsetup open --token-only` (the old S-22 consumer primitive) is NOT
-#     re-pinnable as a negative here — a token EXISTS in the amended window,
-#     and that primitive SUCCEEDING is boot 2's affirmative (the hook runs
-#     the same token policy session the primitive would).
-#   * The completion leg runs the GUIDED command host-side because
-#     fin_completion_steps is the shared Stage 2 == Stage 3 chain by
-#     construction (lib/cmd/finalize.sh); the service-specific seams
-#     (provisional-token re-unseal authorization, advisory containment) are
-#     s21's legs. What S-22 pins here is the WINDOW EXIT: {7,11} binding.
-#
-# §12 negatives on every boot: no interactive passphrase prompt (prompt_re),
-# no emergency shell (emergency_forbidden), sentinels via the table only.
+#   * THE CONSUME GAP (filed against HEAD): the hook's _fdh_escrow_consume
+#     marshals the live {7,11} policy through policy_hex_tobin — a
+#     lib/policy.sh function that is NOT in the initrd closure (the hook
+#     ships its own _fdh_hex2bin). On ANY escrow boot the consume therefore
+#     dies LOUD at "cannot marshal the live policy digest", the escrow is
+#     RETAINED, and the boot falls through to the standing provisional-token
+#     path (which — for the EXACT installed UKI — opens zero-input). Leg 3
+#     pins TODAY's observable contract (the loud marshal failure + the
+#     zero-input provisional-token fallthrough + the retained escrow); when
+#     the consume fix lands, flip leg 3 to the design asserts: the
+#     "unlocked root ... via the provisioning escrow (real-measurement
+#     {7,11} seal)" marker, the token path SKIPPED (no "token: pcrs=" line),
+#     and the escrow DELETED in-guest. The ×2 ceremony (step g) and the
+#     delete (step h) are likewise not yet wired into the escrowed-boot
+#     dispatch (_fdh_escrow_ceremony exists unwired) — this scenario mirrors
+#     both HOST-side so the post-ceremony shape (keyslot 0, no escrow) and
+#     the completion chain are testable against the real lib code.
+#   * The Stage-2 lane drives fin_service_main because fin_completion_steps
+#     is the shared Stage 2 == Stage 3 chain by construction (lib/cmd/
+#     finalize.sh); the ADR-21 consumption legs inside it (release.pem
+#     encryption + chpasswd from /run/alpine-fde-provision-pass) are NOT
+#     drivable in the harness — the staged-pass path is a hard /run path and
+#     chpasswd is unseamed (host chpasswd would touch the DEV HOST's
+#     accounts) — so the block is a documented no-op here (release.pem stays
+#     plaintext; asserted) and the encryption leg stays with the integration
+#     suite. fin_uki_pcrsig is stood in by a one-function override that
+#     hands the REAL seal_unseal the d11-ANCHORED {11} entry — exactly the
+#     pcrsign-stamped .pcrsig the installer's `kernel build` bakes into the
+#     real ESP UKI (the harness ukify section is ukify-native and
+#     anchor-less, and PE section surgery cannot grow .pcrsig — objcopy
+#     --update-section is size-capped). Every other function in the drive
+#     (ground-truth gate, token export, seal_unseal, audit --init, purge,
+#     upgrade, marker clear) is the REAL product code.
+#   * The provisional enrollment is HOST-side, not in-guest (the installer's
+#     step-6 recipe against the fixture swtpm — the uki_host_enroll_finalized
+#     precedent). The fixture swtpm holds NO booted register at seal time:
+#     the Mechanism B seal is digest-anchored (the G-B6 gate is a pure data
+#     check over the entry's d11 anchor; no live PCR read at seal time), and
+#     the in-guest unseal re-derives PCRs from the same persistent swtpm
+#     state dir (same SRK). Leg 3's G-T13 assert (postphase == prediction)
+#     retroactively proves the seal bound the right value.
+#   * The refusal legs boot the variant from its OWN ESP image (the harness
+#     ESP is a per-boot fixture input, as in the pre-port s22): the escrow on
+#     the INSTALLED ESP is consequently never visible to them — the
+#     real-world analogue is foreign media, or the detect-failing class the
+#     loud warn pins. Leg 1 additionally asserts that loud warn (the eb2df91
+#     regression pin).
+#   * The window fixture carries an ephemeral keyslot 2 so the completion's
+#     purge leg purges a REAL slot (the §7.2 install shape), and keyslot 0 is
+#     KILLED host-side after the provisional seal — the ADR-21 from-install
+#     shape is asserted (keyslots {1,2}, token {11} on slot 1, NO keyslot 0)
+#     before any boot.
+#   * The initrd module pin is extended scenario-locally (fat vfat nls_cp437)
+#     so the hook's in-guest escrow detect can MOUNT the labeled ESP — the
+#     stock UKI_MODULES list carries no vfat (the payload drive is read raw).
+#   * §12 negatives on every boot: no systemd-cryptenroll sentinel (Mechanism
+#     B never invokes it), no emergency shell (emergency_forbidden); prompt
+#     counting is the item-24a candidate-set over BOTH hook textures.
 
 set -u
 set -m   # each background job gets its own process group: the watchdog can
@@ -121,21 +194,28 @@ ESP_HEADROOM_MIB=8
 DISK_MIB=1600
 declare -A S22_RETRIES   # per-boot-dir degraded-boot re-run counter (bounded)
 
+# the escrow detect MOUNTS the labeled ESP in-guest (leg 3) — the stock
+# UKI_MODULES pin carries no vfat (the payload drive is read raw), so the
+# scenario extends the pin locally: the uki_build bake reads this variable at
+# call time and /init insmods the list in order (nls_cp437 before fat before
+# vfat — no modprobe exists in the initrd to resolve dependencies lazily)
+UKI_MODULES="$UKI_MODULES nls_cp437 fat vfat"
+
 export QEMU_TIMEOUT="${ALPINE_FDE_S22_TIMEOUT:-1200}"
 
-# §13-floor-OK recovery passphrase for the completion leg (the fixture's
-# well-known slot-0 passphrase is floor-BLOCKLISTED; the completion's
-# authorization rekeys keyslot 0 host-side first — the Stage-1 stand-in)
+# §13-floor-OK recovery passphrase for the ceremony mirror (the fixture's
+# well-known slot-0 passphrase is floor-BLOCKLISTED; ADR-21 has no keyslot 0
+# to rekey — the mirror ENROLLS slot 0 with this value, authorized by the
+# escrowed keyslot-1 credential, exactly the hook's step (g))
 S22_RECOVERY='fde-s22-recovery-7c5d31'
-S22_KEYPASS='fde-s22-release-pbkdf2-n9'
 
 # --- hardening: bounded stages, loud failures, overall budget --------------------
 # Calibrated 2026-09-24: the registry's outer SCENARIO_BUDGET is 1500 s (MD-05b)
 # — an internal watchdog above the outer cap can never fire, so a hung s22
 # dies as an anonymous outer rc=124 instead of this scenario's loud
-# STAGE-TIMEOUT-OR-HANG. A full s22 pass builds 2 UKIs + boots 3 guests +
-# runs the host-side provisional seal and finalize: ~500-800 s observed;
-# 1350 s keeps ~1.7x margin inside the outer budget.
+# STAGE-TIMEOUT-OR-HANG. The ADR-21 port runs 4 boots + 2 UKI builds + the
+# host-side seal/ceremony-mirror/service-completion (~700-1000 s observed
+# class); 1350 s keeps margin inside the outer budget.
 OVERALL_BUDGET="${ALPINE_FDE_S22_BUDGET:-1350}"
 T0=$SECONDS
 CURRENT_QEMU_DIR=""
@@ -197,6 +277,7 @@ run_stage_impl() {
     return 0
 }
 run_stage() { run_stage_impl 0 "$@"; }
+run_stage_rc() { run_stage_impl 1 "$@"; }
 _qemu_alive_or_die() {   # _qemu_alive_or_die <dir> <stage> — QEMU-LIVENESS guard
     local dir="$1" stage="$2" qpid
     qpid=$(cat "$dir/qemu.pid" 2>/dev/null || true)
@@ -261,18 +342,13 @@ _track_swtpm() { SWTPM_DIRS+=("$1"); }
 # hands the next boot a register whose provenance the scenario cannot vouch
 # for, and the fixture proxy's 2026-09-22 command-drop defect (silently
 # dropped SET_DATAFD/commands — see the tests/lib report) produced both the
-# silent pre-BdsDxe hang and the degraded-measurement boots. Boot 2's
-# affirmative (the provisional auto-unseal) depends on PCR 11 being exactly
-# the boot's own enter-initrd extend, so the zero state is ASSERTED here, not
-# assumed. The two host-side gates that DO need the booted values (the
-# provisional seal after boot 1, the completion after boot 2) must RESEED
-# them explicitly: the direct-socket fixture swtpm DIES at every clean qemu
-# exit (EOF design) and swtpm_ensure's restart is a fresh startup-clear —
-# there is no restore path to "keep" any more (the store/restore machinery
-# is retired; see tests/lib/swtpm-fixture.sh's lifetime note). The reseed
-# anchors on the boot's own console facts (the pre-token d7 print + the
-# postphase d11), so the register the seal/audit gates read is exactly the
-# one the guest booted with — the _reseed_from_console helper below.
+# silent pre-BdsDxe hang and the degraded-measurement boots. The refusal
+# legs' PCR-refusal controls (leg 2/4: the tampered digest must MISS the
+# sealed policy) depend on PCR 11 being exactly the boot's own stub extend,
+# so the zero state is ASSERTED here, not assumed. No boot here needs the
+# booted values carried ACROSS boots host-side except the completion leg,
+# which re-seeds them explicitly from the leg-3 console facts (the
+# _reseed_from_console helper below).
 _reanchor_tpm() {
     local dir="$1" d0 d7 d11
     swtpm_stop "$dir" 2>/dev/null || true
@@ -313,13 +389,14 @@ _boot_hook() {
     cp "$uki" "$bdir/harness.efi"
     cp "$vars" "$bdir/vars.fd"
     # Wave-2 2b: every boot runs a fresh QCOW2 OVERLAY over the $bimg base
-    # (decision rule 1 — all three boots are read-mostly: boot 1 unlocks via
-    # the recovery passphrase with the root never mounted rw; boot 2 is the
-    # zero-input token auto-unseal; boot 3 is the refused tampered UKI — and
-    # the scenario's persistent chain runs through the RAW base: the host-side
-    # provisional seal after boot 1 and the completion leg after boot 2
-    # cryptsetup/finalize $RUN/disk.img directly, which is also why the boot's
-    # overlay MUST be discarded (lock released) before those host legs).
+    # (decision rule 1 — every boot here is read-mostly or refused: the
+    # refusal legs die fail-closed, the first boot's in-guest header
+    # mutations (the consume's self-seal, when the fix lands) are
+    # overlay-ephemeral by design, and the scenario's persistent chain runs
+    # through the RAW base: the host-side ceremony mirror + the service
+    # completion cryptsetup/finalize $RUN/disk.img directly, which is also
+    # why the boot's overlay MUST be discarded (lock released) before those
+    # host legs).
     overlay_create "$bimg" "$bdir/disk.qcow2" || {
         echo "s22: overlay create failed ($(basename "$bdir"))"; exit 1; }
     _reanchor_tpm "$RUN/tpm"
@@ -337,12 +414,12 @@ _boot_hook() {
     # hook prints the live PCRs before anything else it does, and a boot whose
     # PCR 0 is off lost firmware measurements to TPM command timeouts under
     # host load (the EFI stub then logs "Failed to measure data for event").
-    # Such a boot would fail its own control — boot 2's provisional
-    # auto-unseal NEEDS a faithful PCR 11 — so it is discarded and re-run ONCE
+    # Such a boot would fail its own control — the refusal legs' TPM-refusal
+    # asserts NEED a faithful PCR 11 — so it is discarded and re-run ONCE
     # per boot dir on the re-anchored register. The per-boot vars copy and a
     # FRESH QCOW2 overlay are re-made by the recursive call; the PIN is
-    # per-UKI (PCR 0 measures the firmware, identical across boots of the same
-    # image).
+    # per-UKI (PCR 0 measures the firmware, identical across boots of the
+    # same image).
     local p0="" i=0 uki_name
     uki_name=$(basename "$uki")
     [[ "${S22_PIN_UKI:-}" != "$uki_name" ]] && S22_PCR0_PIN=""
@@ -396,16 +473,40 @@ _ensure_tpm() {
     }
 }
 
+# _refuse_3strike <boot-dir> — the refusal legs' feeding choreography: the
+# recovery loop arms after the refusal (and is DEAD in the window — no
+# keyslot 0 exists to open); feed 3 WRONG passphrases prompt-synchronized
+# (uki_wait_hook_prompt — the hook's read has NO timeout, so feeding must
+# track the prompt events; the count is the item-24a candidate set over BOTH
+# hook textures), then wait for the bounded 3-strike fail-closed poweroff.
+# 600 s per prompt: the boots crawl under background tenants (live-seen
+# 2026-09-22 — prompts past the 300 s mark).
+_refuse_3strike() {
+    local bdir="$1" n
+    for n in 1 2 3; do
+        if uki_wait_hook_prompt "$n" 600 "$bdir"; then
+            feed_line "$bdir/serial.sock" "alpine-fde-wrong-passphrase-$n"
+        else
+            _hang_fail CONSOLE-WAIT "refusal recovery prompt $n ($(basename "$bdir"))" "never appeared"
+        fi
+    done
+    wait_console "$bdir" "$(sentinel_of unseal_poweroff)" 300
+    run_stage "qemu_wait:$(basename "$bdir")" "$((QEMU_TIMEOUT + 60))" \
+        qemu_wait "$bdir" "$QEMU_TIMEOUT"
+    overlay_discard "$bdir/disk.qcow2"   # the refusal boot's overlay is ephemeral — the
+    CURRENT_QEMU_DIR=""                  # host-side base checks below target the RAW base
+}
+
 # _reseed_from_console <console.log> — reconstruct the booted register in the
 # fixture swtpm. After a clean qemu exit the fixture is DEAD (EOF design) and
 # swtpm_ensure's restart is all-zero, so a host-side gate that must read the
-# BOOTED values (the provisional seal's live-PCR G-B6 oracle, the completion's
-# audit --init) re-extends the console's own facts: the pre-token PCR 7 print
-# and the postphase PCR 11. Both are pinned to the build prediction by the
-# per-boot G-T13 asserts, so the seeded register is exactly what the guest
-# booted with — not a fixture lie but the fixture's designated reseed path
-# (swtpm_seed_pcrs, the same discipline every between-boot scenario uses).
-# Prints the seeded d11 (empty if the console carried no PCR prints).
+# BOOTED values (the completion's audit --init) re-extends the console's own
+# facts: the pre-token PCR 7 print and the postphase PCR 11. Both are pinned
+# to the build prediction by the per-boot G-T13 asserts, so the seeded
+# register is exactly what the guest booted with — not a fixture lie but the
+# fixture's designated reseed path (swtpm_seed_pcrs, the same discipline
+# every between-boot scenario uses). Prints the seeded d11 (empty if the
+# console carried no PCR prints).
 _reseed_from_console() {
     local log="$1" d7 d11
     d7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
@@ -419,21 +520,22 @@ _reseed_from_console() {
 # degradation gate in _boot_hook reads the hook's pre-token PCR line with it)
 pcr_of() { grep -oE "alpine-fde-pcr sha256:$2=[0-9a-f]{64}" "$1" 2>/dev/null | head -1 | cut -d= -f2; }
 
-# _pcrread <dir> <pcr> — local PCR reader for the seal-time G-B6 gates. The
+# _pcrread <dir> <pcr> — local PCR reader for the seal-time gates. The
 # fixture's swtpm_pcrread anchors on the single-digit rendering ("0 : 0x…");
 # tpm2-tools prints TWO-digit PCRs width-aligned ("11: 0x…" — no space before
 # the colon), so the fixture function returns EMPTY for PCR 11 (live-verified
-# 2026-09-22 against tpm2-tools 5.8) and every provisional/completion gate
-# would read a drifted (empty) register. Parse both renderings here instead
-# (tests/lib fix pending — reported to the harness owners).
+# 2026-09-22 against tpm2-tools 5.8) and every seal gate would read a drifted
+# (empty) register. Parse both renderings here instead (tests/lib fix pending
+# — reported to the harness owners).
 _pcrread() {
     tpm2_pcrread -T "$(_swtpm_tcti_for "$1")" "sha256:$2" \
         | awk -v p="$2" '{ gsub(/:/, "", $1); if ($1 == p) { v = $NF; sub(/^0x/, "", v); print tolower(v) } }'
 }
 
 # ============================================================================
-# Fixture: keys + vars + the LUKS2 container (keyslot 0 only — the FROM-INSTALL
-# shape; the provisional token joins host-side after boot 1)
+# Fixture: keys + vars + the LUKS2 container in the ADR-21 FROM-INSTALL shape
+# (keyslot 1 = the provisional-token volume pass, keyslot 2 = the ephemeral
+# install key, keyslot 0 FREE) + the escrow on the LABELED installed ESP
 # ============================================================================
 keys_create "$RUN/keys" || { echo "s22: keys_create failed"; exit 1; }
 run_stage vars-enrolled 120 keys_vars_enrolled "$RUN/keys" "$RUN/vars-enrolled.fd"
@@ -442,19 +544,15 @@ assert_contains "fixture: enrolled vars SecureBootEnable ON" \
 run_stage disk_make_luks 120 disk_make_luks "$RUN/disk.img" "$DISK_MIB"
 DISK_UUID=$(timeout 60 cryptsetup luksUUID "$RUN/disk.img") || { echo "s22: luksUUID failed"; exit 1; }
 [[ -n "$DISK_UUID" ]] || { echo "s22: empty LUKS uuid"; exit 1; }
-
-# THE T2c FROM-INSTALL ASSERT: the recovery passphrase sits at keyslot 0
-# (argon2id) before ANY enrollment exists — the TPM-independent way out
-META0=$(disk_metadata "$RUN/disk.img")
-assert_eq "S-22 from-install shape: keyslots == {0}" '["0"]' "$(jq -c '.keyslots | keys' <<<"$META0")"
-assert_eq "S-22 from-install shape: keyslot 0 is argon2id (recovery, §7.2)" "argon2id" \
-    "$(jq -r '.keyslots["0"].kdf.type' <<<"$META0")"
-assert_eq "S-22 from-install shape: ZERO tokens before Stage-1 step 6" "{}" \
-    "$(disk_token_json "$RUN/disk.img")"
-printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"   # verbatim kf0
+# the FROM-INSTALL keyslot's credential (disk_make_luks enrolled the well-known
+# passphrase at keyslot 0; the ADR-21 shape KILLS that slot below — the file
+# authorizes the provisional keyslot add + the kill, then is scrubbed)
+printf '%s' "$ALPINE_FDE_SLOT0_PASSPHRASE" >"$RUN/kf-slot0"
 chmod 600 "$RUN/kf-slot0"
 
-# --- the harness UKI (boot 1's AND boot 2's standing signed UKI) ---------------
+# the build's enter-initrd PCR 11 prediction — the value the provisional seal
+# binds (digest-anchored; leg 3's G-T13 assert retroactively proves the boot
+# reproduced it)
 run_stage uki_build 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi"
 D11_PRED=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
@@ -462,7 +560,7 @@ D11_PRED=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
 run_stage esp_make 300 esp_make "$RUN/esp.img" \
     $(( UKI_MIB * ROOTFS_RETENTION + ESP_HEADROOM_MIB )) "$RUN/harness.efi"
-# the tampered variant (boot 3): ONE extra cmdline word -> a different stub
+# the tampered variant (legs 1/2/4): ONE extra cmdline word -> a different stub
 # measurement -> a different pre-unlock PCR 11 (the s07 attacker primitive)
 run_stage uki_build-tampered 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness-tampered.efi" "alpine-fde-tampered"
@@ -473,126 +571,36 @@ _ensure_tpm "$RUN/tpm"
 _track_swtpm "$RUN/tpm"
 
 # ============================================================================
-# BOOT 1 — baseline: recovery-at-keyslot-0 is the ONLY way in (T2c from-install)
+# HOST — the ADR-21 from-install shape (the installer's step-6 recipe + the
+# ephemeral keyslot + the keyslot-0 kill), then the provisioning escrow.
+# The Mechanism B seal is digest-anchored (no live register needed at seal
+# time — see the fidelity notes); the fixture swtpm only hosts the seal's
+# SRK, which persists in this state dir into every guest boot.
 # ============================================================================
-echo "# boot 1: token-less disk — the §8.2 hook recovery path (fed slot-0)"
-_boot_hook "$RUN/boot1" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" ""
-PROMPT_OK=0
-# 900 s (was 300, then 600): a consolidated-run boot 1 was live-seen reaching
-# the hook prompt at ~7 min wall, and a 2026-09-22 solo run saw the prompt
-# land past the 600 s mark (this box carries background tenants; boots crawl)
-# — the recovery prompt must not be declared missing while the guest is still
-# crawling. The hook's read has no timeout, so prompt-synchronized feeding is
-# unaffected.
-if uki_wait_hook_prompt 1 900 "$RUN/boot1"; then
-    PROMPT_OK=1
-    feed_line "$RUN/boot1/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
-fi
-assert_eq "boot 1: the hook arms the recovery loop (token-less disk)" "1" "$PROMPT_OK"
-# Feed the CORRECT passphrase at EVERY prompt (repro 2026-09-24: a feed line
-# lost to the serial layer made the hook's read return EOF — three fast
-# strikes — and the guest fail-closed-powered off before UNSEALED, so the
-# UNSEALED wait died with QEMU-DIED). A repeat feed of the correct passphrase
-# is harmless; whichever landing is good unlocks. Liveness per iteration.
-for n in 2 3; do
-    _i=0
-    while (( _i < 45 )); do
-        grep -q "alpine-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
-        # Item 24a: prompt-EVENT count from EITHER hook texture (the pinned
-        # live sentence OR the compact "[serial-echo]" copy — candidate set,
-        # same union uki_wait_hook_prompt counts); one lost emission no
-        # longer starves the feed.
-        _pc=$(grep -cE "$(sentinel_of unseal_prompt_re)" "$RUN/boot1/console.log" 2>/dev/null || true)
-        _pc=$(( ${_pc:-0} + $(grep -cE "$(sentinel_of unseal_prompt_echo_re)" "$RUN/boot1/console.log" 2>/dev/null || echo 0) ))
-        [[ "$_pc" -eq "$n" ]] && break
-        _qpid=$(cat "$RUN/boot1/qemu.pid" 2>/dev/null || true)
-        [[ -z "$_qpid" ]] || ! kill -0 "$_qpid" 2>/dev/null && break 2
-        sleep 1
-        _i=$((_i + 1))
-    done
-    grep -q "alpine-fde: UNSEALED" "$RUN/boot1/console.log" 2>/dev/null && break 2
-    feed_line "$RUN/boot1/serial.sock" "$ALPINE_FDE_SLOT0_PASSPHRASE"
-done
-wait_console "$RUN/boot1" "alpine-fde: UNSEALED" 300
-run_stage qemu_wait-boot1 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot1" "$QEMU_TIMEOUT"
-overlay_discard "$RUN/boot1/disk.qcow2"   # the boot's overlay is ephemeral — and the
-CURRENT_QEMU_DIR=""                       # host-side seal below needs the base UNLOCKED
-
-LOG_B1=$(cat "$RUN/boot1/console.log" 2>/dev/null || true)
-assert_contains "[boot 1] init ran" "$LOG_B1" "alpine-fde-harness: init started"
-assert_contains "[boot 1] hook ran the enter-initrd extend" "$LOG_B1" \
-    "$(sentinel_of unseal_pcrextend_ok)"
-assert_contains "[boot 1] hook found NO token (pre-step-6 shape)" "$LOG_B1" \
-    "$(sentinel_of unseal_token_missing)"
-assert_contains "[boot 1] keyslot-0 recovery passphrase unsealed the volume (from-install way out)" \
-    "$LOG_B1" "$(sentinel_of unseal_pass_unlocked)"
-assert_contains "[boot 1] UNSEALED" "$LOG_B1" "alpine-fde: UNSEALED"
-assert_not_contains "[boot 1] never unlocked via a token" "$LOG_B1" \
-    "$(sentinel_of unseal_unlocked)"
-assert_not_contains "[boot 1] no interactive prompt ever appeared" "$LOG_B1" \
-    "$(sentinel_of prompt_re)"
-assert_not_contains "[boot 1] no emergency shell" "$LOG_B1" "$(sentinel_of emergency_forbidden)"
-
-# the postphase PCR 11 == the build's enter-initrd prediction (G-T13) — the
-# value the provisional seal will bind
-D11_BOOT1=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot1/console.log" \
-    | head -1 | cut -d= -f2)
-assert_eq "boot 1: postphase PCR 11 == the ukify enter-initrd prediction (G-T13)" "$D11_PRED" "$D11_BOOT1"
-
-# ============================================================================
-# HOST — the Stage-1 step 6 provisional enrollment (the amended window shape):
-# the {11}-selection release-key-signed policy over the LIVE booted PCR 11,
-# then seal_provisional + keyslot + token import (the installer's recipe).
-# ============================================================================
-# the fixture died at boot 1's clean qemu exit; re-extend the booted register
-# from the console facts. The readback pins the ZERO-ON-RESTART contract: the
-# live register after a reseed is the EXTEND-FROM-ZERO of the seeded digest,
-#     live = sha256(0^32 || d11)  (never d11 itself)
-# which is exactly why the provisional G-B6 gate must be digest-anchored (the
-# entry carries d11; lib/seal.sh computes seal_digest_11 over the COMPONENT,
-# no live read) — a live-PCR oracle can never see the booted value here.
-_zero_extend22() {
-    printf '%064d%s' 0 "$1" | tr -d ' \n' | xxd -r -p | sha256sum | awk '{print $1}'
-}
-swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
-D11_SEEDED=$(_reseed_from_console "$RUN/boot1/console.log") \
-    || { echo "s22: boot 1 console missing PCR prints — cannot reseed the fixture"; exit 1; }
-D11_LIVE=$(_pcrread "$RUN/tpm" 11)
-if [[ "$D11_LIVE" == "$(_zero_extend22 "$D11_SEEDED")" ]]; then
-    _assert_result ok "fixture: the register re-seeded to boot 1's values (extend-from-zero contract, seal-time input)" ""
-else
-    _assert_result not-ok "fixture: the register re-seeded to boot 1's values" \
-        "live=$D11_LIVE expected-extend-from-zero=$(_zero_extend22 "$D11_SEEDED") (console d11=$D11_BOOT1)"
-    echo "s22: swtpm PCR 11 is not the reseeded register before the provisional seal — aborting"; exit 1
-fi
 mkdir -p "$RUN/tmp"
-# compose over the BOOTED d11 (assertion 15 pinned postphase == prediction);
-# D11_LIVE above is only the reseed contract readback
-POL11=$(seal_digest_11 "$D11_BOOT1")
+# the d11-anchored {11}-selection .pcrsig (the s00b/Option-A pattern): the
+# REAL installer's `kernel build` bakes exactly this shape (pcrsign's
+# anchored entry) into the ESP UKI; seal_provisional's G-B6 gate verifies the
+# signed pol against the ENTRY'S OWN component — a pure data check
+POL11=$(seal_digest_11 "$D11_PRED")
 printf '%s' "$POL11" | policy_hex_to_bin >"$RUN/msg11.bin"
 openssl dgst -sha256 -sign "$RUN/keys/db.key" -out "$RUN/sig11.bin" "$RUN/msg11.bin" \
     || { echo "s22: {11} policy signature failed"; exit 1; }
 PKFP=$(policy_pubkey_fp "$RUN/keys/release.pub")
-# the d11 digest-anchor (the s00b/Option-A pattern): the provisional G-B6 gate
-# verifies the signed pol against the ENTRY'S OWN component — a pure data
-# check. The fixture's live register here is a reseed (extend-from-zero), so a
-# live-PCR oracle can never equal the booted digest; the boot-time PolicyPCR
-# session against the guest's re-derived register is the real verification.
 jq -n --arg pol "$POL11" --arg sig "$(openssl base64 -A -in "$RUN/sig11.bin")" \
-    --arg pkfp "$PKFP" --arg d11 "$D11_BOOT1" \
+    --arg pkfp "$PKFP" --arg d11 "$D11_PRED" \
     '{"sha256": [{"pcrs": [11], "pkfp": $pkfp, "pol": $pol, "sig": $sig, "d11": $d11}]}' >"$RUN/pcrsig-11.json"
-assert_eq "S-22: the {11}-selection .pcrsig pol == seal_digest_11(booted d11), anchored" "$POL11" \
+assert_eq "S-22: the {11}-selection .pcrsig pol == seal_digest_11(build prediction), anchored" "$POL11" \
     "$(jq -r '.sha256[0].pol' "$RUN/pcrsig-11.json")"
-assert_eq "S-22: the {11}-selection entry carries the d11 anchor (digest-anchored G-B6)" "$D11_BOOT1" \
+assert_eq "S-22: the {11}-selection entry carries the d11 anchor (digest-anchored G-B6)" "$D11_PRED" \
     "$(jq -r '.sha256[0].d11' "$RUN/pcrsig-11.json")"
-run_stage pcrsig_disk-11 60 uki_pcrsig_disk "$RUN/pcrsig-11.img" "$RUN/pcrsig-11.json"
 # seal_provisional runs INLINE (never via run_stage): it stages SEAL_PASS_FILE
 # and SEAL_SLOT for the caller, and a run_stage subshell would lose them
 _budget_check seal-provisional
 echo "# s22: stage seal-provisional (the installer's step-6 recipe, host-side)"
 _PROV_TOK="$RUN/token-prov.json"
 rm -f "$_PROV_TOK"
-SEAL_PASS_FILE='' SEAL_SLOT='' SEAL_POL='' SEAL_MODE=''
+SEAL_PASS_FILE='' SEAL_SLOT=''
 # NB: SWTPM_TCTI is NOT inherited — swtpm_start ran inside run_stage subshells,
 # so its export never reached this shell (registry 2026-09-23:
 # "SWTPM_TCTI: unbound variable" at the seal-provisional stage). Derive it.
@@ -608,14 +616,27 @@ token_add_keyslot "$RUN/disk.img" "$SEAL_PASS_FILE" "$SEAL_SLOT" "$RUN/kf-slot0"
     || { echo "s22: token_add_keyslot failed"; exit 1; }
 token_import "$RUN/disk.img" "$_PROV_TOK" "$(token_next_id "$RUN/disk.img")" \
     || { echo "s22: token_import failed"; exit 1; }
-keys_scrub "$SEAL_PASS_FILE"
-unset SEAL_PASS_FILE SEAL_SLOT
-# THE AMENDED WINDOW SHAPE (host asserts of record)
+# the TEMPORARY ephemeral install key (§7.2 keyslot 2; the completion's purge
+# leg purges it for real) — authorized by the token's volume-pass keyslot
+printf '%s' "fde-s22-ephemeral-install-key-3f91bb" >"$RUN/kf-eph"
+chmod 600 "$RUN/kf-eph"
+CRYPTSETUP_BIN=$(command -v cryptsetup)
+timeout 120 "$CRYPTSETUP_BIN" luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 \
+    --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 "$RUN/disk.img" "$RUN/kf-eph" \
+    --key-file "$SEAL_PASS_FILE" 2>/dev/null \
+    || { echo "s22: ephemeral keyslot-2 add failed"; exit 1; }
+# ADR-21: keyslot 0 stays FREE until the first-boot ×2 ceremony — the
+# from-install keyslot dies HERE (the old pre-ADR-21 window kept it; the
+# escrow-window immunity claim explicitly has NO recovery fallback)
+if ! timeout 240 "$CRYPTSETUP_BIN" --batch-mode luksKillSlot "$RUN/disk.img" 0 \
+    --key-file "$SEAL_PASS_FILE" 2>/tmp/s22-kill.err; then
+    echo "s22: from-install keyslot-0 kill failed:"; cat /tmp/s22-kill.err; exit 1
+fi
+# THE ESCROW-WINDOW SHAPE (host asserts of record — the ADR-21 install handoff)
 METAP=$(disk_metadata "$RUN/disk.img")
 TOKP=$(disk_token_json "$RUN/disk.img")
-assert_eq "S-22 window shape: keyslots == {0,1}" '["0","1"]' "$(jq -c '.keyslots | keys' <<<"$METAP")"
-assert_eq "S-22 window shape: keyslot 0 still argon2id recovery" "argon2id" \
-    "$(jq -r '.keyslots["0"].kdf.type' <<<"$METAP")"
+assert_eq "S-22 window shape: keyslots == {1,2} (token volume pass + ephemeral; NO keyslot 0)" '["1","2"]' \
+    "$(jq -c '.keyslots | keys' <<<"$METAP")"
 assert_eq "S-22 window shape: EXACTLY ONE token" "1" \
     "$(jq '[.[] | select(.type == "systemd-tpm2")] | length' <<<"$TOKP")"
 assert_eq "S-22 window shape: the token binds PCR 11 ONLY (provisional)" "[11]" \
@@ -624,94 +645,56 @@ assert_eq "S-22 window shape: the token sits on keyslot 1" "1" \
     "$(jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]' <<<"$TOKP")"
 assert_contains "S-22 window shape: the token carries the release-key signature (§7.2)" "$TOKP" \
     '"tpm2-signature"'
-# stop the swtpm: every later boot must re-derive PCRs from zero (startup-clear)
-run_stage swtpm-cycle 60 swtpm_stop "$RUN/tpm"
-
-# ============================================================================
-# BOOT 2 — the STANDING SIGNED UKI auto-unseals (zero console input)
-# ============================================================================
-echo "# boot 2: the standing provisional token unseals with ZERO console input"
-_boot_hook "$RUN/boot2" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
-    "$RUN/pcrsig-11.img"
-i=0
-until grep -q "alpine-fde: UNSEALED" "$RUN/boot2/console.log" 2>/dev/null; do
-    _qemu_alive_or_die "$RUN/boot2" "console-wait:boot2-UNSEALED"
-    _budget_check "console-wait:boot2-UNSEALED"
-    (( i < QEMU_TIMEOUT )) || _hang_fail CONSOLE-WAIT "boot2 UNSEALED" \
-        "the standing provisional token never auto-unsealed"
-    sleep 1
-    i=$((i + 1))
-done
-wait_console "$RUN/boot2" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT"
-run_stage qemu_wait-boot2 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot2" "$QEMU_TIMEOUT"
-overlay_discard "$RUN/boot2/disk.qcow2"   # ephemeral — the completion leg below mutates
-CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
-
-LOG_B2=$(cat "$RUN/boot2/console.log" 2>/dev/null || true)
-assert_contains "[boot 2] init ran" "$LOG_B2" "alpine-fde-harness: init started"
-assert_contains "[boot 2] hook discovered the provisional token" "$LOG_B2" \
-    "$(sentinel_of unseal_token_info)11]"
-assert_contains "[boot 2] the standing signed UKI auto-unsealed via the TPM token" "$LOG_B2" \
-    "$(sentinel_of unseal_unlocked)"
-assert_contains "[boot 2] UNSEALED with ZERO console input" "$LOG_B2" "alpine-fde: UNSEALED"
-# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
-# BOTH hook prompt textures); the zero pins the same zero-input invariant.
-assert_eq "[boot 2] the recovery loop NEVER armed (zero-input invariant)" "0" \
-    "$(unseal_prompt_events <<<"$LOG_B2")"
-assert_not_contains "[boot 2] the tampered-word UKI is not what booted" "$LOG_B2" \
-    "alpine-fde-tampered"
-assert_not_contains "[boot 2] no interactive prompt ever appeared" "$LOG_B2" \
-    "$(sentinel_of prompt_re)"
-assert_not_contains "[boot 2] no emergency shell" "$LOG_B2" "$(sentinel_of emergency_forbidden)"
-if [[ -f "$RUN/boot2/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot2/qemu.pid" 2>/dev/null)"; then
-    _assert_result ok "[boot 2] guest exited (clean poweroff, not timeout-kill)" ""
-else
-    _assert_result not-ok "[boot 2] guest exited (clean poweroff, not timeout-kill)" \
-        "qemu still running or qemu.pid missing"
-fi
-
-# ============================================================================
-# HOST — THE COMPLETION LEG: the window exits into the {7,11} binding
-# (fin_completion_steps — the chain shared verbatim by the guided command and
-# the first-boot service; §9.1 Stage 2 == Stage 3, ADR-20 amended).
-# Runs NOW because the swtpm still holds BOOT 2's live PCRs — the audit and
-# the upgrade's G-B6 gate must read exactly the boot-2 register.
-# ============================================================================
-echo "# completion: the guided finalize drives audit --init + the {7,11} upgrade host-side"
-D7_BOOT2=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
-D11_BOOT2=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot2/console.log" | head -1 | cut -d= -f2)
-[[ -n "$D7_BOOT2" && -n "$D11_BOOT2" ]] || { echo "s22: boot 2 console missing PCR prints"; exit 1; }
-# boot 2's clean exit killed the fixture swtpm; re-extend the booted register
-# before audit --init finalizes the baseline from the live PCRs. Readback pins
-# the zero-on-restart contract (live == extend-from-zero of the seeded d11 —
-# never the booted digest itself; see the boot-1 gate above).
-swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
-swtpm_seed_pcrs "$RUN/tpm" "$D7_BOOT2" "$D11_BOOT2" \
-    || { echo "s22: completion-leg fixture reseed failed"; exit 1; }
-D11_LIVE2=$(_pcrread "$RUN/tpm" 11)
-if [[ "$D11_LIVE2" == "$(_zero_extend22 "$D11_BOOT2")" ]]; then
-    _assert_result ok "completion fixture: live PCR 11 == the reseeded boot-2 register (extend-from-zero contract)" ""
-else
-    _assert_result not-ok "completion fixture: live PCR 11 == the reseeded boot-2 register" \
-        "live=$D11_LIVE2 expected-extend-from-zero=$(_zero_extend22 "$D11_BOOT2") (console d11=$D11_BOOT2)"
-    echo "s22: swtpm PCR 11 is not the reseeded register before the completion — aborting"; exit 1
-fi
-# the combined {7,11} release-key-signed policy for the upgrade (s19/s20's
-# pcrsign shape, composed host-side with the harness helper)
-run_stage pcrsig-combined 120 \
-    uki_pcrsig_append_combined "$RUN/uki-pcrsig.json" "$RUN/uki-pcrsig-711.json" \
-    "$D7_BOOT2" "$D11_BOOT2" "$RUN/keys" \
-    || { echo "s22: combined pcrsig composition failed"; exit 1; }
-assert_eq "completion: combined .pcrsig pol == policy_digest(boot-2 d7, enter-initrd d11)" \
-    "$(policy_digest "$D7_BOOT2" "$D11_BOOT2")" \
-    "$(jq -r '.sha256[-1].pol' "$RUN/uki-pcrsig-711.json")"
-run_stage pcrsig_disk-711 60 uki_pcrsig_disk "$RUN/uki-pcrsig-711.img" "$RUN/uki-pcrsig-711.json"
-# the CLI state root: pending baseline + release.pem + /etc/crypttab (the
-# finalize member walk reads every LUKS member UUID from it — repro
-# 2026-09-24: without the file the completion died rc 64 "no LUKS member
-# UUIDs found", before the recovery-passphrase authorization). (item 10b: NO
-# install-state.json — the provisional ground truth is the DISK's standing
-# {PCR 11} token, which the gate now derives.)
+# THE PROVISIONING ESCROW on the installed ESP (install's ADR-21 step):
+# volume-keys.json written FIRST, the empty REQUEST marker LAST — the boot-#1
+# hook consumes only a REQUEST-marked escrow. pass_b64 = base64(the keyslot-1
+# passphrase text) — the exact convention lib/seal.sh stages (ADR-19
+# framing), so the hook's base64 -d reproduces the credential verbatim.
+VOL_PASS_B64=$(openssl base64 -A -in "$SEAL_PASS_FILE")
+jq -nc --arg uuid "$DISK_UUID" --arg b64 "$VOL_PASS_B64" \
+    '{members: [{target: "root", uuid: $uuid, pass_b64: $b64}]}' >"$RUN/volume-keys.json"
+# the REQUEST marker carries the CANONICAL CMDLINE DIGEST (the escrow-window
+# gate, S-22 — the install's 2026-10-03 recipe): the consume only engages for
+# the boot of the exact installed cmdline; the tampered variants (legs 1/2/4)
+# fail the gate and fall to the {11} token's refusal. Normalization identical
+# to the hook's (/proc/cmdline side).
+tr -s ' \t\n' ' ' <"$RUN/cmdline.txt" | sed 's/^ //;s/ $//' | sha256sum | awk '{print $1}' >"$RUN/REQUEST"
+# the installed ESP must be LABELED EFI for the hook's by-label resolve (the
+# production install's mkfs.vfat -n EFI; the harness esp_make does not label)
+mlabel -i "$RUN/esp.img" ::EFI >/dev/null 2>&1 \
+    || { echo "s22: cannot label the installed ESP (mlabel)"; exit 1; }
+assert_eq "fixture: the installed ESP resolves by LABEL=EFI (the hook's default resolve)" \
+    "$RUN/esp.img" "$(blkid -t LABEL=EFI -o device "$RUN/esp.img")"
+mmd -i "$RUN/esp.img" ::/alpine-fde-provision \
+    || { echo "s22: cannot stage the escrow dir on the installed ESP"; exit 1; }
+mcopy -i "$RUN/esp.img" "$RUN/volume-keys.json" "::/alpine-fde-provision/volume-keys.json" \
+    || { echo "s22: cannot stage volume-keys.json"; exit 1; }
+mcopy -i "$RUN/esp.img" "$RUN/REQUEST" "::/alpine-fde-provision/REQUEST" \
+    || { echo "s22: cannot stage the REQUEST marker"; exit 1; }
+# the escrow's credential round-trip (the hook's own decode path: extract
+# pass_b64 from the json, decode ONCE — the result IS the keyslot-1 credential)
+mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/volume-keys.json" "$RUN/escrow-readback.json"
+assert_eq "fixture: the escrowed pass_b64 decodes to the keyslot-1 credential (the hook's decode)" \
+    "$(cat "$SEAL_PASS_FILE")" "$(jq -r '.members[0].pass_b64' "$RUN/escrow-readback.json" \
+        | openssl base64 -d -A)"
+ESCROW_SHA=$(sha256sum "$RUN/volume-keys.json" | awk '{print $1}')
+# the {7,11}-ONLY stale payload (leg 1): a finalized-FORM signature set whose
+# SELECTION does not cover the standing {11} token. Composition values are
+# inert for this leg — the I3 gate refuses on the SELECTION mismatch BEFORE
+# any value is read (leg 1 asserts exactly that class); d7 is the zeroed
+# fixture register honestly labeled as never-measured.
+POL711_STALE=$(policy_digest "0000000000000000000000000000000000000000000000000000000000000000" "$D11_PRED")
+printf '%s' "$POL711_STALE" | policy_hex_to_bin >"$RUN/msg711.bin"
+openssl dgst -sha256 -sign "$RUN/keys/db.key" -out "$RUN/sig711.bin" "$RUN/msg711.bin" \
+    || { echo "s22: stale {7,11} policy signature failed"; exit 1; }
+jq -n --arg pol "$POL711_STALE" --arg sig "$(openssl base64 -A -in "$RUN/sig711.bin")" \
+    --arg pkfp "$PKFP" \
+    '{"sha256": [{"pcrs": [7, 11], "pkfp": $pkfp, "pol": $pol, "sig": $sig}]}' >"$RUN/pcrsig-711only.json"
+run_stage pcrsig_disk-711only 60 uki_pcrsig_disk "$RUN/pcrsig-711only.img" "$RUN/pcrsig-711only.json"
+# the CLI state root: pending baseline + release.pub + PLAINTEXT release.pem +
+# /etc/crypttab (the completion member walk reads every LUKS member UUID from
+# it) + the ESP stand-in for fin_uki_pcrsig (item 10b: NO install-state.json —
+# the window ground truth is the DISK's standing {PCR 11} token)
 mkdir -p "$RUN/cli-state/etc/alpine-fde/keys"
 mkdir -p "$RUN/cli-state/etc"
 printf 'root UUID=%s none luks,tpm2-device=auto,discard\n' "$DISK_UUID" \
@@ -751,68 +734,372 @@ cat >"$RUN/cli-state/etc/alpine-fde/baseline.json" <<JSON
   }
 }
 JSON
-# fixture efivars (SB on, setup mode 0) — the audit + guard read these
+# fixture efivars (SB on, setup mode 0) — the completion's SB guard reads these
 EFIVARS="$RUN/cli-state/efivars-sb-on"
 mkdir -p "$EFIVARS"
 _mkvar() { printf '\007\000\000\000'"$(printf '\%03o' "$2")" >"$EFIVARS/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
 _mkvar SecureBoot 1
 _mkvar SetupMode 0
-# the by-uuid seam + the Stage-1 stand-in rekey (floor: the well-known slot-0
-# passphrase is blocklisted at fin_read_recovery_passphrase)
+# the by-uuid seam (the completion's member walk) + the cli ESP stand-in dir
 mkdir -p "$RUN/by-uuid"
 ln -sfn "$RUN/disk.img" "$RUN/by-uuid/$DISK_UUID"
-# the completion's KEYDIR is $RUN/keys — stage the ADR-18 release.pem there
-# (finalize STEP 2 encrypts it in place; repro 2026-09-24: without it the
-# completion died rc 64 "release.pem not found in …/keys" right after the
-# passphrase authorization)
-cp "$RUN/keys/db.key" "$RUN/keys/release.pem"
-CRYPTSETUP_BIN=$(command -v cryptsetup)
-timeout 120 "$CRYPTSETUP_BIN" luksChangeKey --key-slot 0 "$RUN/disk.img" \
-    <(printf '%s' "$S22_RECOVERY") --key-file "$RUN/kf-slot0" 2>/dev/null \
-    || { echo "s22: host-side keyslot-0 rekey failed"; exit 1; }
-# THE COMPLETION (guided Stage 3 host-side; the DISK mutates through by-uuid)
-# (derive the TCTI — SWTPM_TCTI was never exported into this shell, see above)
-ALPINE_FDE_TCTI="$(_swtpm_tcti_for "$RUN/tpm")" \
-ALPINE_FDE_EFIVARS_DIR="$EFIVARS" \
-ALPINE_FDE_EVENTLOG="$RUN/cli-state/eventlog-absent" \
-ALPINE_FDE_ROOT="$RUN/cli-state" \
-ALPINE_FDE_KEYDIR="$RUN/keys" \
-ALPINE_FDE_KEY_PASSPHRASE="$S22_KEYPASS" \
-ALPINE_FDE_RECOVERY_PASSPHRASE="$S22_RECOVERY" \
-ALPINE_FDE_PCRSIG="$RUN/uki-pcrsig-711.json" \
-ALPINE_FDE_BY_UUID_DIR="$RUN/by-uuid" \
-ALPINE_FDE_TMPDIR="$RUN/tmp" \
-ALPINE_FDE_NO_INSTALL=1 \
-    timeout 600 "$REPO/bin/alpine-fde" finalize >"$RUN/completion.out" 2>&1
+mkdir -p "$RUN/cli-esp/EFI/Linux"
+cp "$RUN/harness.efi" "$RUN/cli-esp/EFI/Linux/alpine-fde-harness.efi"
+# fixture scrub: the well-known slot-0 credential died with its keyslot; the
+# volume-pass file STAYS until after the ceremony mirror (the mirror consumes
+# the ESCROW copy instead — the file is the seal's staging, the escrow is the
+# product credential)
+keys_scrub "$RUN/kf-slot0"
+rm -f "$RUN/kf-slot0"
+
+# ============================================================================
+# LEG 1 — ESCROW-WINDOW IMMUNITY, foreign UKI: the {11} token's selection has
+# no matching .pcrsig entry -> the I3 signature gate refuses BEFORE any TPM
+# session; the DEAD recovery loop (no keyslot 0 in the window) 3-strikes
+# fail-closed; the boot's unlabeled ESP also pins the LOUD escrow-absent
+# detect warn (the eb2df91 real-hardware fix).
+# ============================================================================
+echo "# leg 1: foreign UKI + {7,11}-only stale payload — the I3 signature refusal"
+_boot_hook "$RUN/boot1" "$RUN/esp-tampered.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
+    "$RUN/pcrsig-711only.img" "$RUN/harness-tampered.efi"
+_refuse_3strike "$RUN/boot1"
+
+LOG_B1=$(cat "$RUN/boot1/console.log" 2>/dev/null || true)
+assert_contains "[leg 1] init ran (the variant boots — SB-on firmware trusts our key)" "$LOG_B1" \
+    "alpine-fde-harness: init started"
+assert_contains "[leg 1] the tampered cmdline word reached the kernel (the primitive is real)" \
+    "$LOG_B1" "alpine-fde-tampered"
+assert_contains "[leg 1] the escrow detect MISSED on the unlabeled ESP — LOUD (the eb2df91 pin)" "$LOG_B1" \
+    "provisioning escrow: the ESP was not found"
+assert_contains "[leg 1] hook ran the enter-initrd extend" "$LOG_B1" \
+    "$(sentinel_of unseal_pcrextend_ok)"
+assert_contains "[leg 1] hook discovered the standing provisional token" "$LOG_B1" \
+    "$(sentinel_of unseal_token_info)11]"
+assert_contains "[leg 1] the I3 signature gate REFUSED (no release-key-signed entry for the {11} selection)" \
+    "$LOG_B1" "$(sentinel_of unseal_sig_refused)"
+assert_contains "[leg 1] the warn-before-prompt preamble names the foreign/unsigned class" "$LOG_B1" \
+    "$(sentinel_of unseal_warn_sig_refused)"
+assert_not_contains "[leg 1] the refusal was the SIGNATURE gate — the TPM was never consulted" "$LOG_B1" \
+    "$(sentinel_of unseal_seal_refused)"
+# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
+# BOTH hook prompt textures); the exact-3 pin IS the bounded loop.
+assert_eq "[leg 1] exactly 3 recovery-passphrase prompts (the DEAD window loop)" "3" \
+    "$(unseal_prompt_events <<<"$LOG_B1")"
+assert_contains "[leg 1] 3-strike give-up (§8.2 fail-closed)" "$LOG_B1" \
+    "$(sentinel_of unseal_3strike)"
+assert_contains "[leg 1] fail-closed poweroff (no shell is offered)" "$LOG_B1" \
+    "$(sentinel_of unseal_poweroff)"
+assert_not_contains "[leg 1] NEVER unlocked via the token" "$LOG_B1" \
+    "$(sentinel_of unseal_unlocked)"
+assert_not_contains "[leg 1] NEVER unlocked via any passphrase" "$LOG_B1" \
+    "$(sentinel_of unseal_pass_unlocked)"
+assert_not_contains "[leg 1] never UNSEALED" "$LOG_B1" "alpine-fde: UNSEALED"
+assert_not_contains "[leg 1] no systemd-cryptenroll sentinel (Mechanism B never invokes it)" "$LOG_B1" \
+    "systemd-cryptenroll"
+assert_not_contains "[leg 1] no emergency shell" "$LOG_B1" "$(sentinel_of emergency_forbidden)"
+if [[ -f "$RUN/boot1/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot1/qemu.pid" 2>/dev/null)"; then
+    _assert_result ok "[leg 1] guest exited (hook 3-strike poweroff, not timeout-kill)" ""
+else
+    _assert_result not-ok "[leg 1] guest exited (hook 3-strike poweroff, not timeout-kill)" \
+        "qemu still running or qemu.pid missing"
+fi
+# the refused boot mutated NOTHING: the window shape + the escrow stand intact
+# (Wave-2 2b: the boot ran on a discarded QCOW2 overlay, so the host-side
+# cryptsetup reads target the RAW base — the boot's writes died with it)
+METAB1=$(disk_metadata "$RUN/disk.img")
+TOKB1=$(disk_token_json "$RUN/disk.img")
+assert_eq "[leg 1] host(base): window shape intact — keyslots == {1,2}, NO keyslot 0" '["1","2"]' \
+    "$(jq -c '.keyslots | keys' <<<"$METAB1")"
+assert_eq "[leg 1] host(base): window shape intact — the token still {11} on keyslot 1" "[11]|1" \
+    "$(jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]' <<<"$TOKB1")|$(jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]' <<<"$TOKB1")"
+mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/volume-keys.json" "$RUN/escrow-l1.json" \
+    && mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/REQUEST" "$RUN/request-l1" \
+    || { echo "s22: leg-1 escrow readback failed"; exit 1; }
+assert_eq "[leg 1] host(esp): the escrow still stands (content byte-identical)" "$ESCROW_SHA" \
+    "$(sha256sum "$RUN/escrow-l1.json" | awk '{print $1}')"
+assert_eq "[leg 1] host(esp): the REQUEST marker still stands (empty)" "" "$(cat "$RUN/request-l1")"
+
+# ============================================================================
+# LEG 2 — ESCROW-WINDOW IMMUNITY, tampered cmdline: the variant's OWN stub
+# .pcrsig is valid and self-consistent (the compromised-signer case) — the
+# signature gate PASSES and the TPM refuses the sealed blob under the
+# tampered PCR state. Same dead-loop 3-strike fail-closed.
+# ============================================================================
+echo "# leg 2: tampered cmdline + its own valid {11} entry — the TPM digest refusal"
+swtpm_stop "$RUN/tpm" 2>/dev/null || true
+run_stage swtpm-cycle-2 90 swtpm_start "$RUN/tpm"
+_rearm_trap
+_boot_hook "$RUN/boot2" "$RUN/esp-tampered.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
+    "" "$RUN/harness-tampered.efi"
+_refuse_3strike "$RUN/boot2"
+
+LOG_B2=$(cat "$RUN/boot2/console.log" 2>/dev/null || true)
+assert_contains "[leg 2] init ran" "$LOG_B2" "alpine-fde-harness: init started"
+assert_contains "[leg 2] the tampered cmdline word reached the kernel" "$LOG_B2" \
+    "alpine-fde-tampered"
+assert_contains "[leg 2] hook discovered the standing provisional token" "$LOG_B2" \
+    "$(sentinel_of unseal_token_info)11]"
+assert_not_contains "[leg 2] the signature gate PASSED (the variant's entry is genuinely signed)" "$LOG_B2" \
+    "$(sentinel_of unseal_sig_refused)"
+assert_contains "[leg 2] the TPM refused the sealed blob under the tampered PCR state" "$LOG_B2" \
+    "$(sentinel_of unseal_seal_refused)"
+assert_contains "[leg 2] the warn-before-prompt preamble names the expected drift class" "$LOG_B2" \
+    "$(sentinel_of unseal_warn_seal_refused)"
+assert_eq "[leg 2] exactly 3 recovery-passphrase prompts (the DEAD window loop)" "3" \
+    "$(unseal_prompt_events <<<"$LOG_B2")"
+assert_contains "[leg 2] 3-strike give-up (§8.2 fail-closed)" "$LOG_B2" \
+    "$(sentinel_of unseal_3strike)"
+assert_contains "[leg 2] fail-closed poweroff (no shell is offered)" "$LOG_B2" \
+    "$(sentinel_of unseal_poweroff)"
+assert_not_contains "[leg 2] NEVER unlocked via the token" "$LOG_B2" \
+    "$(sentinel_of unseal_unlocked)"
+assert_not_contains "[leg 2] NEVER unlocked via any passphrase" "$LOG_B2" \
+    "$(sentinel_of unseal_pass_unlocked)"
+assert_not_contains "[leg 2] never UNSEALED" "$LOG_B2" "alpine-fde: UNSEALED"
+assert_not_contains "[leg 2] no systemd-cryptenroll sentinel" "$LOG_B2" "systemd-cryptenroll"
+assert_not_contains "[leg 2] no emergency shell" "$LOG_B2" "$(sentinel_of emergency_forbidden)"
+if [[ -f "$RUN/boot2/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot2/qemu.pid" 2>/dev/null)"; then
+    _assert_result ok "[leg 2] guest exited (hook 3-strike poweroff, not timeout-kill)" ""
+else
+    _assert_result not-ok "[leg 2] guest exited (hook 3-strike poweroff, not timeout-kill)" \
+        "qemu still running or qemu.pid missing"
+fi
+METAB2=$(disk_metadata "$RUN/disk.img")
+TOKB2=$(disk_token_json "$RUN/disk.img")
+assert_eq "[leg 2] host(base): window shape intact — keyslots == {1,2}, NO keyslot 0" '["1","2"]' \
+    "$(jq -c '.keyslots | keys' <<<"$METAB2")"
+assert_eq "[leg 2] host(base): window shape intact — the token still {11} on keyslot 1" "[11]|1" \
+    "$(jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]' <<<"$TOKB2")|$(jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]' <<<"$TOKB2")"
+mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/volume-keys.json" "$RUN/escrow-l2.json" \
+    || { echo "s22: leg-2 escrow readback failed"; exit 1; }
+assert_eq "[leg 2] host(esp): the escrow still stands (content byte-identical)" "$ESCROW_SHA" \
+    "$(sha256sum "$RUN/escrow-l2.json" | awk '{print $1}')"
+
+# ============================================================================
+# LEG 3 — THE FIRST BOOT: the EXACT installed UKI against the LABELED
+# installed ESP (the escrow standing). The hook engages the ADR-21 consume;
+# ZERO console input either way (see the consume-gap fidelity note: at HEAD
+# the consume fails loud at the policy marshal and the boot falls through to
+# the standing provisional-token path — the seal still guards its window and
+# opens for the exact UKI; when the consume fix lands the same asserts hold
+# minus the two HEAD-pinned lines, flagged below).
+# ============================================================================
+echo "# leg 3: the first boot — the escrow consume engages, the exact UKI enters"
+_boot_hook "$RUN/boot3" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" ""
+i=0
+until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
+    _qemu_alive_or_die "$RUN/boot3" "console-wait:boot3-UNSEALED"
+    _budget_check "console-wait:boot3-UNSEALED"
+    (( i < QEMU_TIMEOUT )) || _hang_fail CONSOLE-WAIT "boot3 UNSEALED" \
+        "the first boot never entered (the escrow boot must open zero-input)"
+    sleep 1
+    i=$((i + 1))
+done
+wait_console "$RUN/boot3" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT" 2>/dev/null || \
+    wait_console "$RUN/boot3" "localhost login:" 120 || true
+run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
+overlay_discard "$RUN/boot3/disk.qcow2"   # ephemeral — the host legs below mutate
+CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
+
+LOG_B3=$(cat "$RUN/boot3/console.log" 2>/dev/null || true)
+assert_contains "[leg 3] init ran" "$LOG_B3" "alpine-fde-harness: init started"
+# THE CONSUME FIXED (2026-10-03): the live-policy marshal rides the hook's
+# own _fdh_hex2bin (blkid is in the closure too), the ×2 ceremony is wired
+# (FDE_CONSOLE_IN feeds it), and the consumed escrow is deleted in-guest.
+# The boot is ZERO-INPUT by seam: the ceremony reads the fed file, not the
+# console.
+assert_contains "[leg 3] the escrow consume ENGAGED (the real-measurement {7,11} self-seal unlocked the member)" \
+    "$LOG_B3" "via the provisioning escrow (real-measurement {7,11} seal)"
+assert_contains "[leg 3] the ×2 ceremony set + staged the operator credential" "$LOG_B3" \
+    "the recovery passphrase is set and staged for the Stage-2 finalize"
+assert_contains "[leg 3] the escrow DELETED in-guest (steps g+h complete)" "$LOG_B3" \
+    "provisioning escrow: consumed — the Stage-2 finalize completes on this boot"
+# stable across the consume fix:
+assert_contains "[leg 3] the exact installed UKI auto-unsealed (ZERO console input)" "$LOG_B3" \
+    "alpine-fde: UNSEALED"
+assert_not_contains "[leg 3] the token path SKIPPED (the escrow boot opens via the consume)" "$LOG_B3" \
+    "token: pcrs=["
+assert_eq "[leg 3] the recovery loop NEVER armed (zero-input first boot)" "0" \
+    "$(unseal_prompt_events <<<"$LOG_B3")"
+assert_not_contains "[leg 3] no refusal class ever fired" "$LOG_B3" \
+    "$(sentinel_of unseal_sig_refused)"
+assert_not_contains "[leg 3] no seal refusal either" "$LOG_B3" \
+    "$(sentinel_of unseal_seal_refused)"
+assert_not_contains "[leg 3] the tampered-word UKI is not what booted" "$LOG_B3" \
+    "alpine-fde-tampered"
+assert_not_contains "[leg 3] no systemd-cryptenroll sentinel" "$LOG_B3" "systemd-cryptenroll"
+assert_not_contains "[leg 3] no emergency shell" "$LOG_B3" "$(sentinel_of emergency_forbidden)"
+if [[ -f "$RUN/boot3/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot3/qemu.pid" 2>/dev/null)"; then
+    _assert_result ok "[leg 3] guest exited (clean poweroff, not timeout-kill)" ""
+else
+    _assert_result not-ok "[leg 3] guest exited (clean poweroff, not timeout-kill)" \
+        "qemu still running or qemu.pid missing"
+fi
+# G-T13: the postphase PCR 11 == the build's enter-initrd prediction — the
+# value the provisional seal bound (retroactive proof of the host-side seal)
+D11_BOOT3=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$RUN/boot3/console.log" \
+    | head -1 | cut -d= -f2)
+assert_eq "leg 3: postphase PCR 11 == the ukify enter-initrd prediction (G-T13)" "$D11_PRED" "$D11_BOOT3"
+# the boot's overlay died with it: the RAW base keeps the window shape, and
+# the host legs below re-produce the post-ceremony shape deterministically
+# (the in-guest consume's mutations lived in the overlay by design). The
+# ESP is NOT overlaid: the in-guest escrow DELETE persists on esp.img.
+METAB3=$(disk_metadata "$RUN/disk.img")
+TOKB3=$(disk_token_json "$RUN/disk.img")
+assert_eq "[leg 3] host(base): window shape intact — keyslots == {1,2}" '["1","2"]' \
+    "$(jq -c '.keyslots | keys' <<<"$METAB3")"
+assert_eq "[leg 3] host(base): the token still {11} on keyslot 1" "[11]|1" \
+    "$(jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]' <<<"$TOKB3")|$(jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]' <<<"$TOKB3")"
+# the consume DELETED the escrow in-guest (the ESP is the un-overlaid image):
+if mdir -i "$RUN/esp.img" ::/alpine-fde-provision >/dev/null 2>&1; then
+    _assert_result not-ok "[leg 3] host(esp): the escrow DELETED in-guest (steps g+h)" \
+        "alpine-fde-provision still present on esp.img"
+else
+    _assert_result ok "[leg 3] host(esp): the escrow DELETED in-guest (steps g+h)" ""
+fi
+
+# ============================================================================
+# HOST — THE CEREMONY MIRROR (the hook's step (g)+(h) stand-in — see the
+# fidelity notes): the ×2 passphrase enrolls at keyslot 0 per member,
+# authorized by the ESCROWED keyslot-1 credential (the scenario consumes its
+# own escrow exactly as the hook would — the ADR-19 framing decode), then the
+# escrow is DELETED from the installed ESP. This is the post-ceremony shape
+# the Stage-2 completion chain assumes (keyslot 0 standing, escrow gone).
+# ============================================================================
+echo "# ceremony mirror: keyslot 0 enrolled from the escrowed credential; the escrow deleted"
+# the hook's step (b) decode: pass_b64 from the json, base64-decoded ONCE
+jq -r '.members[0].pass_b64' "$RUN/volume-keys.json" | openssl base64 -d -A >"$RUN/kf-vol-mirror" \
+    || { echo "s22: the escrow credential decode failed"; exit 1; }
+chmod 600 "$RUN/kf-vol-mirror"
+printf '%s' "$S22_RECOVERY" >"$RUN/kf-recovery"
+chmod 600 "$RUN/kf-recovery"
+# the hook's step-(g) recipe verbatim (argon2id, keyslot 0, authorized by the
+# escrowed keyslot-1 passphrase)
+timeout 120 "$CRYPTSETUP_BIN" luksAddKey --pbkdf argon2id --pbkdf-memory 1048576 \
+    --pbkdf-parallel 4 --iter-time 2000 --key-slot 0 "$RUN/disk.img" "$RUN/kf-recovery" \
+    --key-file "$RUN/kf-vol-mirror" 2>/dev/null \
+    || { echo "s22: the ceremony mirror's keyslot-0 enrollment failed"; exit 1; }
+assert_eq "ceremony mirror: keyslot 0 enrolled (argon2id, the ×2 passphrase)" "argon2id" \
+    "$(disk_metadata "$RUN/disk.img" | jq -r '.keyslots["0"].kdf.type')"
+# the hook's step (h): delete the escrow ONLY after every member is
+# credential-complete (single member here)
+mdeltree -i "$RUN/esp.img" ::/alpine-fde-provision \
+    || { echo "s22: the ceremony mirror's escrow delete failed"; exit 1; }
+mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/volume-keys.json" "$RUN/escrow-gone.json" \
+    2>/dev/null && { echo "s22: the escrow SURVIVED the mirror delete"; exit 1; } || true
+_assert_result ok "ceremony mirror: the escrow DELETED from the installed ESP (step h)" ""
+METAC=$(disk_metadata "$RUN/disk.img")
+assert_eq "ceremony mirror: the post-ceremony window shape — keyslots == {0,1,2}" '["0","1","2"]' \
+    "$(jq -c '.keyslots | keys' <<<"$METAC")"
+keys_scrub "$RUN/kf-vol-mirror"
+rm -f "$RUN/kf-vol-mirror" "$RUN/kf-eph"
+
+# ============================================================================
+# HOST — THE COMPLETION: the Stage-2 chain the first boot triggers,
+# fin_service_main DIRECT-DRIVE (the harness has no OpenRC). Runs NOW because
+# the fixture swtpm can be re-seeded to LEG 3's live register — the audit
+# reads exactly the booted values.
+# ============================================================================
+echo "# completion: fin_service_main drives the shared Stage-2 == Stage-3 chain host-side"
+D7_BOOT3=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot3/console.log" | head -1 | cut -d= -f2)
+[[ -n "$D7_BOOT3" && -n "$D11_BOOT3" ]] || { echo "s22: leg-3 console missing PCR prints"; exit 1; }
+# leg 3's clean exit killed the fixture swtpm; re-extend the booted register
+# before audit --init finalizes the baseline from the live PCRs. Readback
+# pins the zero-on-restart contract (live == extend-from-zero of the seeded
+# d11 — never the booted digest itself).
+swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
+D11_SEEDED=$(_reseed_from_console "$RUN/boot3/console.log") \
+    || { echo "s22: leg-3 console missing PCR prints — cannot reseed the fixture"; exit 1; }
+D11_LIVE=$(_pcrread "$RUN/tpm" 11)
+_zero_extend22() {
+    printf '%064d%s' 0 "$1" | tr -d ' \n' | xxd -r -p | sha256sum | awk '{print $1}'
+}
+if [[ "$D11_LIVE" == "$(_zero_extend22 "$D11_SEEDED")" ]]; then
+    _assert_result ok "completion fixture: the register re-seeded to leg 3's values (extend-from-zero contract)" ""
+else
+    _assert_result not-ok "completion fixture: the register re-seeded to leg 3's values" \
+        "live=$D11_LIVE expected-extend-from-zero=$(_zero_extend22 "$D11_SEEDED") (console d11=$D11_BOOT3)"
+    echo "s22: swtpm PCR 11 is not the reseeded register before the completion — aborting"; exit 1
+fi
+# the combined {7,11} release-key-signed policy for the upgrade (s19/s20's
+# pcrsign shape, composed host-side with the harness helper) — anchored to
+# LEG 3's own booted (d7, postphase d11)
+run_stage pcrsig-combined 120 \
+    uki_pcrsig_append_combined "$RUN/uki-pcrsig.json" "$RUN/uki-pcrsig-711.json" \
+    "$D7_BOOT3" "$D11_BOOT3" "$RUN/keys" \
+    || { echo "s22: combined pcrsig composition failed"; exit 1; }
+assert_eq "completion: combined .pcrsig pol == policy_digest(leg-3 d7, enter-initrd d11)" \
+    "$(policy_digest "$D7_BOOT3" "$D11_BOOT3")" \
+    "$(jq -r '.sha256[-1].pol' "$RUN/uki-pcrsig-711.json")"
+run_stage pcrsig_disk-711 60 uki_pcrsig_disk "$RUN/uki-pcrsig-711.img" "$RUN/uki-pcrsig-711.json"
+# THE SERVICE DRIVE: the real fin_service_main in a failure-contained
+# subshell. ONLY fin_uki_pcrsig is stood in (the pcrsign-stamped ESP .pcrsig
+# the real install bakes — see the fidelity notes); the ground-truth gate,
+# the userspace token re-unseal (seal_unseal, mode=provisional), audit
+# --init, the ephemeral purge, the {7,11} upgrade and the marker clear are
+# the REAL product code. NO credential env is set — the service is
+# authorized by the re-unsealed standing token, never a stored secret.
+cat >"$RUN/completion-drive.sh" <<'DRIVEEOF'
+#!/usr/bin/env bash
+# generated by s22-handoff-immunity.sh — the fin_service_main direct-drive
+# (the Stage-2 chain the first boot triggers; the harness has no OpenRC)
+set -u
+export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
+export ALPINE_FDE_TCTI="$SWTPM_TCTI_STR"
+export ALPINE_FDE_EFIVARS_DIR="$EFIVARS"
+export ALPINE_FDE_EVENTLOG="$RUN/cli-state/eventlog-absent"
+export ALPINE_FDE_ROOT="$RUN/cli-state"
+export ALPINE_FDE_KEYDIR="$RUN/keys"
+export ALPINE_FDE_BY_UUID_DIR="$RUN/by-uuid"
+export ALPINE_FDE_TMPDIR="$RUN/tmp"
+export ALPINE_FDE_PCRSIG="$RUN/uki-pcrsig-711.json"
+export ALPINE_FDE_NO_INSTALL=1
+# the Stage-2 service is NEVER credential-authorized: unset the seams
+unset ALPINE_FDE_RECOVERY_PASSPHRASE ALPINE_FDE_KEY_PASSPHRASE 2>/dev/null || true
+# shellcheck source=lib/common.sh
+. "$REPO/lib/common.sh"
+# shellcheck source=lib/policy.sh
+. "$REPO/lib/policy.sh"
+# shellcheck source=lib/keys.sh
+. "$REPO/lib/keys.sh"
+# shellcheck source=lib/seal.sh
+. "$REPO/lib/seal.sh"
+# shellcheck source=lib/baseline.sh
+. "$REPO/lib/baseline.sh"
+# shellcheck source=lib/trust-state.sh
+. "$REPO/lib/trust-state.sh"
+# shellcheck source=lib/cmd/finalize.sh
+. "$REPO/lib/cmd/finalize.sh"
+# the pcrsign-stamped ESP UKI stand-in: the REAL installer builds the
+# ESP UKI with an anchored {11} entry (lib/cmd/pcrsign.sh); the harness
+# ukify section is ukify-native and anchor-less, and PE section surgery
+# cannot grow .pcrsig (objcopy --update-section is size-capped).
+fin_uki_pcrsig() { cp "$RUN/pcrsig-11.json" "$2"; }
+fin_service_main
+DRIVEEOF
+run_stage_rc completion-service 900 env REPO="$REPO" RUN="$RUN" EFIVARS="$EFIVARS" \
+    SWTPM_TCTI_STR="$(_swtpm_tcti_for "$RUN/tpm")" bash "$RUN/completion-drive.sh" \
+    >"$RUN/completion.out" 2>&1
 COMPLETION_RC=$?
-assert_eq "completion: production finalize rc 0" "0" "$COMPLETION_RC"
-grep -q "recovery passphrase verified against keyslot 0 (attempt 1)" "$RUN/completion.out" \
-    && _assert_result ok "completion: recovery passphrase authorized the chain (keyslot 0)" "" \
-    || _assert_result not-ok "completion: recovery passphrase authorized the chain (keyslot 0)" \
-        "no verify marker in completion.out"
+assert_eq "completion: fin_service_main rc 0 (the non-interactive Stage-2 chain)" "0" "$COMPLETION_RC"
 grep -q "finalizing the baseline from live values (audit --init" "$RUN/completion.out" \
     && _assert_result ok "completion: audit --init finalized the pending baseline from live values" "" \
     || _assert_result not-ok "completion: audit --init finalized the pending baseline" \
         "no audit marker in completion.out"
+grep -q "temporary ephemeral install key purged (keyslot 2)" "$RUN/completion.out" \
+    && _assert_result ok "completion: the temporary ephemeral keyslot purged (keyslot 2)" "" \
+    || _assert_result not-ok "completion: the temporary ephemeral keyslot purged" \
+        "no purge marker in completion.out"
 grep -q "token upgraded to Mechanism B {PCR 7, PCR 11}" "$RUN/completion.out" \
     && _assert_result ok "completion: the provisional token upgraded to Mechanism B {PCR 7, PCR 11}" "" \
     || _assert_result not-ok "completion: the provisional token upgraded to Mechanism B" \
         "no upgrade marker in completion.out"
-grep -q "alpine-fde: install finalized" "$RUN/completion.out" \
-    && _assert_result ok "completion: install finalized (the upgraded token IS the fact)" "" \
-    || _assert_result not-ok "completion: install finalized (the upgraded token IS the fact)" \
-        "no finalized marker in completion.out"
-assert_contains "completion: ground truth reads finalized (disk token {PCR 7, PCR 11})" "[7,11]" \
-    "$(cryptsetup luksDump --dump-json-metadata "$RUN/disk.img" 2>/dev/null | jq -c 'first(.tokens // {} | to_entries[] | select(.value.type? == "systemd-tpm2") | .value["tpm2-pcrs"] // empty)')"
-assert_eq "completion: the ADR-8 marker is CLEAR" "absent" \
-    "$([[ -e "$RUN/cli-state/etc/alpine-fde/finalize-attempt.txt" ]] && echo present || echo absent)"
-# THE WINDOW-EXIT ASSERT OF RECORD: {7,11} on a non-zero keyslot, recovery at
-# slot 0 intact. The slot NUMBER is not pinned: seal_upgrade_token's crash-safe
-# choreography stands the fresh seal in the NEXT FREE slot and only then
-# retires the provisional one — after a provisional token at slot 1 the
-# finalized token lands on slot 2 and the retired slot disappears (keyslots
-# {0,2}); the lib contract is "exactly one token, new slot != 0" (I1 two-
-# keyslot at-rest holds either way).
+grep -q "provisioning ceremony complete" "$RUN/completion.out" \
+    && _assert_result not-ok "completion: the ADR-21 consumption block is a documented harness no-op" \
+        "the /run staged-pass block ran (it must not in the harness)" \
+    || _assert_result ok "completion: the ADR-21 consumption block is a documented harness no-op (no /run staged pass)" ""
+# ground truth + the window-exit assert of record: the upgrade stood a fresh
+# Mechanism B seal in the NEXT free slot and retired the provisional one
 METAF=$(disk_metadata "$RUN/disk.img")
 TOKF=$(disk_token_json "$RUN/disk.img")
 EXIT_SLOT=$(jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]' <<<"$TOKF")
@@ -820,84 +1107,84 @@ assert_eq "S-22 window exit: EXACTLY ONE token" "1" \
     "$(jq '[.[] | select(.type == "systemd-tpm2")] | length' <<<"$TOKF")"
 assert_eq "S-22 window exit: the token binds {PCR 7, PCR 11}" "[7,11]" \
     "$(jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]' <<<"$TOKF")"
+assert_contains "S-22 window exit: the token is Mechanism B SIGNED (not the escrow/unsigned marker)" "$TOKF" \
+    '"tpm2-signature":"'
 assert_ne "S-22 window exit: the token sits on a NON-ZERO keyslot" "0" "$EXIT_SLOT"
 assert_eq "S-22 window exit: keyslots == {0, token slot} (I1 two-keyslot at-rest)" \
     "[\"0\",\"$EXIT_SLOT\"]" "$(jq -c '.keyslots | keys' <<<"$METAF")"
-assert_eq "S-22 window exit: recovery keyslot 0 still argon2id" "argon2id" \
+assert_eq "S-22 window exit: recovery keyslot 0 still argon2id (the ceremony's)" "argon2id" \
     "$(jq -r '.keyslots["0"].kdf.type' <<<"$METAF")"
+assert_eq "S-22 window exit: NO ephemeral keyslot remains" "0" \
+    "$(jq '[.keyslots | keys[] | tonumber] | length - 2' <<<"$METAF")"
+# the ground-truth composition (the ts_state rules, asserted raw — the main
+# shell does not source trust-state.sh): token [7,11] AND no ephemeral keyslot
+# AND a FINAL baseline (expected_pcr7 captured)
+assert_ne "completion: ground truth: the pending baseline was finalized (expected_pcr7 captured)" \
+    "pending" "$(jq -r '.expected_pcr7' "$RUN/cli-state/etc/alpine-fde/baseline.json")"
+assert_eq "completion: the ADR-8 marker is CLEAR" "absent" \
+    "$([[ -e "$RUN/cli-state/etc/alpine-fde/finalize-attempt.txt" ]] && echo present || echo absent)"
+assert_eq "completion: release.pem STILL plaintext (the ADR-21 consumption block is out of harness scope)" \
+    "plaintext" "$([[ -f "$RUN/keys/release.pem" ]] && openssl pkey -in "$RUN/keys/release.pem" \
+        -passin pass:"$S22_RECOVERY" -noout 2>/dev/null && echo encrypted || echo plaintext)"
 
 # ============================================================================
-# BOOT 3 — TAMPERED UKI, after the window exit: the finalized {7,11} token is
-# equally image-bound (the immunity claim holds past the window too) — the
-# PolicyPCR(7,11) digest of the tampered boot misses -> refused -> the bounded
-# recovery loop takes 3 wrong passphrases -> 3-strike fail-closed
+# LEG 4 — POST-FINALIZATION IMMUNITY UNCHANGED: the tampered variant AGAIN,
+# now carrying the VALID release-signed {7,11} entry (the completion's own
+# .pcrsig): the signature gate passes, the TPM refuses the tampered PCR
+# digest under the {7,11} binding -> 3-strike fail-closed. The finalized
+# shape is intact afterwards.
 # ============================================================================
-echo "# boot 3: tampered-UKI variant — the sealed blob must refuse (T2c immunity)"
-# stop + start (NOT just ensure): the tampered boot must re-derive its PCRs
-# from zero, never stack extends on the completion leg's register
+echo "# leg 4: tampered variant after finalization — the {7,11} binding refuses unchanged"
 swtpm_stop "$RUN/tpm" 2>/dev/null || true
-run_stage swtpm-cycle-3 90 swtpm_start "$RUN/tpm"
+run_stage swtpm-cycle-4 90 swtpm_start "$RUN/tpm"
 _rearm_trap
-_boot_hook "$RUN/boot3" "$RUN/esp-tampered.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
+_boot_hook "$RUN/boot4" "$RUN/esp-tampered.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" \
     "$RUN/uki-pcrsig-711.img" "$RUN/harness-tampered.efi"
-for n in 1 2 3; do
-    # 600 s per prompt: this box's boots crawl under background tenants
-    # (live-seen 2026-09-22 — prompts past the 300 s mark); the hook's read
-    # has no timeout, so prompt-synchronized feeding is unaffected.
-    if uki_wait_hook_prompt "$n" 600 "$RUN/boot3"; then
-        feed_line "$RUN/boot3/serial.sock" "alpine-fde-wrong-passphrase-$n"
-    else
-        _hang_fail CONSOLE-WAIT "tampered recovery prompt $n" "never appeared"
-    fi
-done
-wait_console "$RUN/boot3" "$(sentinel_of unseal_poweroff)" 300
-run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
-overlay_discard "$RUN/boot3/disk.qcow2"   # the tampered boot's overlay is ephemeral
-CURRENT_QEMU_DIR=""
+_refuse_3strike "$RUN/boot4"
 
-LOG_B3=$(cat "$RUN/boot3/console.log" 2>/dev/null || true)
-assert_contains "[boot 3] init ran (the tampered UKI boots — SB-on firmware trusts our key)" \
-    "$LOG_B3" "alpine-fde-harness: init started"
-assert_contains "[boot 3] the tampered cmdline word reached the kernel (the primitive is real)" \
-    "$LOG_B3" "alpine-fde-tampered"
-assert_contains "[boot 3] hook discovered the standing token" "$LOG_B3" \
+LOG_B4=$(cat "$RUN/boot4/console.log" 2>/dev/null || true)
+assert_contains "[leg 4] init ran" "$LOG_B4" "alpine-fde-harness: init started"
+assert_contains "[leg 4] the tampered cmdline word reached the kernel" "$LOG_B4" \
+    "alpine-fde-tampered"
+assert_contains "[leg 4] hook discovered the finalized token" "$LOG_B4" \
     "$(sentinel_of unseal_token_info)7,11]"
-assert_contains "[boot 3] the TPM refused the sealed blob under the tampered PCR state" "$LOG_B3" \
+assert_not_contains "[leg 4] the signature gate PASSED (the {7,11} entry is genuinely release-signed)" "$LOG_B4" \
+    "$(sentinel_of unseal_sig_refused)"
+assert_contains "[leg 4] the TPM refused the sealed blob under the tampered PCR state ({7,11} binding)" "$LOG_B4" \
     "$(sentinel_of unseal_seal_refused)"
-# Item 24a: candidate-set prompt-EVENT count (unique attempt tokens across
-# BOTH hook prompt textures); a lost emission no longer undercounts.
-assert_eq "[boot 3] exactly 3 recovery-passphrase prompts (bounded loop)" "3" \
-    "$(unseal_prompt_events <<<"$LOG_B3")"
-assert_contains "[boot 3] 3-strike give-up (§8.2 fail-closed)" "$LOG_B3" \
+assert_contains "[leg 4] the warn-before-prompt preamble names the drift class" "$LOG_B4" \
+    "$(sentinel_of unseal_warn_seal_refused)"
+assert_eq "[leg 4] exactly 3 recovery-passphrase prompts (bounded loop)" "3" \
+    "$(unseal_prompt_events <<<"$LOG_B4")"
+assert_contains "[leg 4] 3-strike give-up (§8.2 fail-closed)" "$LOG_B4" \
     "$(sentinel_of unseal_3strike)"
-assert_contains "[boot 3] fail-closed poweroff (no shell is offered)" "$LOG_B3" \
+assert_contains "[leg 4] fail-closed poweroff (no shell is offered)" "$LOG_B4" \
     "$(sentinel_of unseal_poweroff)"
-assert_not_contains "[boot 3] NEVER unlocked via the token" "$LOG_B3" \
+assert_not_contains "[leg 4] NEVER unlocked via the token" "$LOG_B4" \
     "$(sentinel_of unseal_unlocked)"
-assert_not_contains "[boot 3] NEVER unlocked via the recovery passphrase" "$LOG_B3" \
+assert_not_contains "[leg 4] NEVER unlocked via the recovery passphrase" "$LOG_B4" \
     "$(sentinel_of unseal_pass_unlocked)"
-assert_not_contains "[boot 3] never UNSEALED" "$LOG_B3" "alpine-fde: UNSEALED"
-assert_not_contains "[boot 3] no emergency shell" "$LOG_B3" "$(sentinel_of emergency_forbidden)"
-if [[ -f "$RUN/boot3/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot3/qemu.pid" 2>/dev/null)"; then
-    _assert_result ok "[boot 3] guest exited (hook 3-strike poweroff, not timeout-kill)" ""
+assert_not_contains "[leg 4] never UNSEALED" "$LOG_B4" "alpine-fde: UNSEALED"
+assert_not_contains "[leg 4] no systemd-cryptenroll sentinel" "$LOG_B4" "systemd-cryptenroll"
+assert_not_contains "[leg 4] no emergency shell" "$LOG_B4" "$(sentinel_of emergency_forbidden)"
+if [[ -f "$RUN/boot4/qemu.pid" ]] && ! kill -0 "$(cat "$RUN/boot4/qemu.pid" 2>/dev/null)"; then
+    _assert_result ok "[leg 4] guest exited (hook 3-strike poweroff, not timeout-kill)" ""
 else
-    _assert_result not-ok "[boot 3] guest exited (hook 3-strike poweroff, not timeout-kill)" \
+    _assert_result not-ok "[leg 4] guest exited (hook 3-strike poweroff, not timeout-kill)" \
         "qemu still running or qemu.pid missing"
 fi
-# the tampered boot mutated NOTHING: the finalized shape is intact (slot
-# number not pinned — see the window-exit note above; {0, EXIT_SLOT} holds).
-# Wave-2 2b: the boot ran on a discarded QCOW2 overlay, so the host-side
-# cryptsetup reads target the RAW base — the same invariant (the boot's writes
-# died with the overlay AND the base it read from is unchanged).
-METAB3=$(disk_metadata "$RUN/disk.img")
-B3_SLOT=$(disk_token_json "$RUN/disk.img" | jq -r '[.[] | select(.type == "systemd-tpm2")][0].keyslots[0]')
-assert_eq "[boot 3] host(base): finalized shape intact — keyslots == {0, token slot}" \
-    "[\"0\",\"$B3_SLOT\"]" "$(jq -c '.keyslots | keys' <<<"$METAB3")"
-assert_eq "[boot 3] host(base): finalized shape intact — token pcrs [7,11]" "[7,11]" \
-    "$(disk_token_json "$RUN/disk.img" | jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]')"
-
-# NOTE: boot 3's payload drive carries the VALID {7,11} signature — the
-# refusal is the PCR session digest, never the signature gate
+# the refused boot mutated NOTHING: the finalized shape is intact (slot
+# number not pinned — the upgrade choreography stands the fresh seal in the
+# next free slot; {0, EXIT_SLOT} holds). Wave-2 2b: the boot ran on a
+# discarded QCOW2 overlay, so the host-side cryptsetup reads target the RAW
+# base — the same invariant (the boot's writes died with the overlay AND the
+# base it read from is unchanged).
+METAB4=$(disk_metadata "$RUN/disk.img")
+TOKB4=$(disk_token_json "$RUN/disk.img")
+assert_eq "[leg 4] host(base): finalized shape intact — keyslots == {0, token slot}" \
+    "[\"0\",\"$EXIT_SLOT\"]" "$(jq -c '.keyslots | keys' <<<"$METAB4")"
+assert_eq "[leg 4] host(base): finalized shape intact — token pcrs [7,11], exactly one" "[7,11]|1" \
+    "$(jq -c '[.[] | select(.type == "systemd-tpm2")][0]["tpm2-pcrs"]' <<<"$TOKB4")|$(jq '[.[] | select(.type == "systemd-tpm2")] | length' <<<"$TOKB4")"
 
 # keep run dirs small
 rm -rf "$RUN/guest-tree" "$RUN/initrd.cpio" "$RUN/uki-unsigned.efi" "$RUN/uki-pcrsigned.efi" \

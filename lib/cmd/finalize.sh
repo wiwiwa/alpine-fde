@@ -423,6 +423,32 @@ fin_completion_steps() {
         rm -f "$_fcs_cur"
         if [ "$_fcs_pcrs" = "[7,11]" ]; then
             info "finalize: $(basename "$_fcs_dev"): token already {PCR 7, PCR 11} — skipping the upgrade (crash resume, zero TPM operations)"
+            # ADR-21 hook-consume residue (2026-10-03): the first boot's escrow
+            # self-seal stands its {7,11} token ALONGSIDE the installer's
+            # provisional {PCR 11} token — retire the leftover(s) (token +
+            # keyslot, authorized by AUTHFILE) so the ground truth reads
+            # finalized (one {7,11} token, exactly the recovery keyslot 0
+            # beyond it); best-effort — the (iii) invariant check below still
+            # fails closed on any survivor.
+            _fcs_left_meta=$(mktemp "$_fcs_tmpdir/alpine-fde-fin-lf.XXXXXX") ||
+                die "finalize: mktemp failed"
+            token_dump "$_fcs_dev" "$_fcs_left_meta"
+            _fcs_left_list=$(jq -r '
+                [.tokens // {} | to_entries[]
+                    | select(.value.type? == "systemd-tpm2")
+                    | select(([.value["tpm2-pcrs"][]?] | join(",")) != "7,11")]
+                | .[] | "\(.key) \(.value.keyslots[0])"' "$_fcs_left_meta" 2>/dev/null)
+            rm -f "$_fcs_left_meta"
+            if [ -n "$_fcs_left_list" ]; then
+                printf '%s\n' "$_fcs_left_list" | while read -r _fcs_lt _fcs_ls; do
+                    [ -n "${_fcs_lt:-}" ] || continue
+                    token_remove "$_fcs_dev" "$_fcs_lt" 2>/dev/null || :
+                    if [ -n "${_fcs_ls:-}" ] && [ "$_fcs_ls" != "-" ] && [ "$_fcs_ls" != "0" ]; then
+                        token_kill_slot "$_fcs_dev" "$_fcs_ls" "$_fcs_auth" 2>/dev/null || :
+                    fi
+                    info "finalize: $(basename "$_fcs_dev"): retired the leftover token $_fcs_lt (keyslot ${_fcs_ls:--})"
+                done
+            fi
         else
             # subshell isolation: the seal/token mutators die fail-closed —
             # contain them so the member context is what the operator sees

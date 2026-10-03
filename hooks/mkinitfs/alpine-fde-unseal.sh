@@ -690,78 +690,10 @@ _fdh_escrow_detect() {
         _fdh_console_emit "alpine-fde-unseal: provisioning escrow: the ESP was not found (FDE_ESP_DEV unset and blkid/by-label resolution failed) — escrow boot skipped, the token/recovery path continues" 2>/dev/null || _msg "provisioning escrow: the ESP was not found — escrow boot skipped"
         return 1
     fi
+    _fded_cand=$_fded_e
     [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] && [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || { umount "$FDE_ESP_MNT" 2>/dev/null || :; return 1; }
     return 0
 }
-
-# _fdh_escrow_consume — the ADR-21 first-boot provisioning flow (§9.1 Stage 2,
-# steps a-h per the header): consume the escrow, SELF-SEAL {7,11} tokens per
-# member from the REAL live PCRs, unlock every member with the escrowed keys,
-# run the ×2 SET ceremony (keyslot 0 + the staged credential for Stage 2),
-# DELETE the escrow. Never fails the boot: every failure is a loud warn +
-# the flow continues (the subsequent boot converges — the escrow persists
-# unless every member opened).
-_fdh_escrow_consume() {
-    _fec_tpm_sysfs=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
-    _fec_pcr7=''
-    _fec_pcr11=''
-    if [ -f "$_fec_tpm_sysfs/7" ]; then
-        _fec_pcr7=$(cat "$_fec_tpm_sysfs/7" 2>/dev/null | tr -d ' \n')
-    elif command -v tpm2_pcrread >/dev/null 2>&1; then
-        _fec_pcr7=$(tpm2_pcrread sha256:7 2>/dev/null | awk '{print $NF}' | head -1)
-    fi
-    if [ -f "$_fec_tpm_sysfs/11" ]; then
-        _fec_pcr11=$(cat "$_fec_tpm_sysfs/11" 2>/dev/null | tr -d ' \n')
-    elif command -v tpm2_pcrread >/dev/null 2>&1; then
-        _fec_pcr11=$(tpm2_pcrread sha256:11 2>/dev/null | awk '{print $NF}' | head -1)
-    fi
-    [ -n "$_fec_pcr7" ] && [ -n "$_fec_pcr11" ] || {
-        _msg "provisioning escrow: cannot read the live PCRs — the escrow stays for the next boot"
-        return 1
-    }
-    # the policy digest over the LIVE PCRs (policy.sh's formula, mirrored)
-    _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" |         awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}' |         openssl dgst -sha256 -hex | awk '{print $NF}')
-    [ -n "$_fec_pol" ] || return 1
-    # the SRK + the trial seal under the live policy
-    _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
-    chmod 700 "$_fec_w" 2>/dev/null || :
-    tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1 || {
-        _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot"
-        return 1
-    }
-    _fec_rc=0
-    _fec_opened=''
-    for _fec_wd in $_fdh_members; do
-        case $_fdh_pos in '') _fdh_pos=0 ;; esac
-        :
-    done
-    # (the member walk is restored by the caller's loop below — this function
-    #  seals+unlocks per member via the exported env)
-    return 0
-}
-
-# _fdh_escrow_detect — is the ADR-21 provisioning escrow standing on the ESP?
-# Prints the mounted ESP device on success (the caller unmounts when done);
-# returns 1 on any absence/error (ESCROW-ABSENT — never fatal, never blocking).
-_fdh_escrow_detect() {
-    _fded_e=''
-    _fded_cand=''
-    [ -n "$FDE_ESP_DEV" ] && _fded_cand=$FDE_ESP_DEV
-    if [ -z "$_fded_cand" ]; then
-        _fded_cand=$(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1)
-    fi
-    [ -n "$_fded_cand" ] || return 1
-    mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
-    mount -t vfat "$_fded_cand" "$FDE_ESP_MNT" >/dev/null 2>&1 || return 1
-    [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] &&
-        [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || {
-        umount "$FDE_ESP_MNT" 2>/dev/null || :
-        return 1
-    }
-    printf '%s\n' "$_fded_cand"
-    return 0
-}
-
 # _fdh_escrow_consume — the ADR-21 first-boot provisioning flow (§9.1 Stage 2,
 # steps a-h per the header): consume the escrow, SELF-SEAL {7,11} tokens per
 # member from the REAL live PCRs, unlock every member with the escrowed keys,
@@ -787,6 +719,19 @@ _fdh_escrow_consume() {
         _msg "provisioning escrow: cannot read the live PCRs — the escrow stays for the next boot"
         return 1
     }
+    # the canonical-cmdline gate (S-22, 2026-10-03): the escrow may only be
+    # consumed by the boot of the EXACT installed cmdline — a tampered or
+    # re-signed variant would otherwise self-seal under ITS OWN PCRs and
+    # unlock the volume (the escrow window's whole threat model). /proc/cmdline
+    # is the booted cmdline; the REQUEST marker carries the install-time
+    # digest of /etc/alpine-fde/cmdline.txt (the UKI's .cmdline source). Both
+    # sides normalize whitespace before the digest.
+    _fec_gate=$(tr -s ' \t\n' ' ' </proc/cmdline 2>/dev/null | sed 's/^ //;s/ $//' | sha256sum | awk '{print $1}')
+    _fec_want=$(tr -d ' \n' <"$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" 2>/dev/null)
+    [ -n "$_fec_want" ] && [ "$_fec_gate" = "$_fec_want" ] || {
+        _msg "provisioning escrow: the booted cmdline does not match the installed UKI (the escrow-window gate, S-22) — the escrow stays; the token path continues"
+        return 1
+    }
     # the {7,11} PolicyPCR policy digest over the LIVE values (policy.sh's
     # formula, mirrored — TPM-free math)
     _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
@@ -803,7 +748,10 @@ _fdh_escrow_consume() {
         _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot"
         return 1
     }
-    printf '%s' "$_fec_pol" | policy_hex_to_bin >"$_fec_w/pol.bin" 2>/dev/null || {
+    # _fdh_hex2bin (the hook's own awk transform) — NOT policy_hex_to_bin:
+    # lib/policy.sh is not in the initrd closure (R640 2026-10-03: the
+    # missing command silently killed every escrow boot at this line)
+    printf '%s' "$_fec_pol" | _fdh_hex2bin >"$_fec_w/pol.bin" 2>/dev/null || {
         rm -rf "$_fec_w"
         _msg "provisioning escrow: cannot marshal the live policy digest"
         return 1
@@ -879,7 +827,53 @@ EOF
             _msg "provisioning escrow: the unlock failed for $_fec_target — the member stays for the ceremony"
         fi
     done
+    # the header steps (g)+(h) run ONLY when EVERY member opened: any holdout
+    # leaves the escrow standing (the retry converges on the next boot — the
+    # recovery path covers the unopened members meanwhile)
+    _fec_all=1
+    for _fec_wd in $_fdh_members; do
+        case " $_fdh_opened_list " in *" $_fec_wd "*) ;; *) _fec_all=0 ;; esac
+    done
+    if [ "$_fec_all" = 0 ]; then
+        _msg "provisioning escrow: not every member opened — the escrow stays for the next boot"
+        rm -rf "$_fec_w"
+        return 1
+    fi
+    # (g) the ×2 SET ceremony — keyslot 0 per member (authorized by the
+    # escrowed credentials) + the operator credential staged for Stage 2
+    if ! _fdh_escrow_ceremony; then
+        # fail-open: the {7,11} tokens keep working; the escrow stays for the
+        # next boot's ceremony retry (a reboot re-runs the consume cleanly)
+        _msg "provisioning escrow: the ceremony did not complete — the escrow stays for the next boot"
+        rm -rf "$_fec_w"
+        return 0
+    fi
+    # (h) DELETE the escrow — every member opened AND keyslot 0 now holds the
+    # operator credential; the escrowed keyslot-1 pass has no remaining use
+    rm -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" \
+          "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" 2>/dev/null || :
+    rmdir "$FDE_ESP_MNT/$FDE_PROV_DIR" 2>/dev/null || :
+    sync
+    _msg "provisioning escrow: consumed — the Stage-2 finalize completes on this boot"
     rm -rf "$_fec_w"
+    return 0
+}
+
+# _fdh_read_pass PROMPT VARNAME — the ×2 ceremony's console read: the prompt
+# renders on all consoles (the emit fan-out); the READ itself stays on
+# /dev/console (the R640 fd-0 lesson, cf. _fdh_prompt_pass). NOT the bounded
+# recovery loop — no counter, no pinned sentinel: the ceremony texture is its
+# own (the s22 e2e pins it).
+_fdh_read_pass() {
+    _fdh_console_emit '%s' "$1"
+    if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+        stty -echo 2>/dev/null
+    fi
+    IFS= read -r "$2" < /dev/console || :
+    if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+        stty echo 2>/dev/null
+    fi
+    _fdh_console_emit '\n' 2>/dev/null || :
     return 0
 }
 
@@ -892,9 +886,16 @@ EOF
 _fdh_escrow_ceremony() {
     _fec2_pass=''
     _fec2_p2=''
-    _fdh_prompt_pass "set the recovery passphrase (it is also your admin login): " _fec2_pass
+    _fdh_read_pass "set the recovery passphrase (it is also your admin login): " _fec2_pass
     [ -n "$_fec2_pass" ] || return 1
-    _fdh_prompt_pass "confirm the recovery passphrase: " _fec2_p2
+    _fdh_read_pass "confirm the recovery passphrase: " _fec2_p2
+    if [ "$_fec2_pass" != "$_fec2_p2" ]; then
+        # the header's contract: ONE re-prompt before the fail-open
+        _fdh_console_emit "alpine-fde-unseal: provisioning ceremony: the passphrases did not match — one more attempt" 2>/dev/null || :
+        _fdh_read_pass "set the recovery passphrase (it is also your admin login): " _fec2_pass
+        [ -n "$_fec2_pass" ] || return 1
+        _fdh_read_pass "confirm the recovery passphrase: " _fec2_p2
+    fi
     if [ "$_fec2_pass" != "$_fec2_p2" ]; then
         _msg "provisioning ceremony: the passphrases did not match — NOTHING enrolled (the TPM tokens keep working)"
         return 1
