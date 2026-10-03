@@ -426,7 +426,10 @@ feed_line "$RUN/bootstrap/serial.sock" \
     'mkdir -p /btop && mount -t btrfs /dev/mapper/root /btop && btrfs subvolume create /btop/@ && echo B4-$((41+3))-OK'
 wait_console "$RUN/bootstrap" "B4-44-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" \
-    'printf "s20-canary raid1 member-loss\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && sha256sum /btop/@/canary.txt | cut -d" " -f1 && echo "FSID $(btrfs filesystem show /dev/mapper/root 2>/dev/null | grep -m1 -o "uuid: [0-9a-f-]*")" && echo "UUID1 $(cryptsetup luksUUID /dev/vdb)" && echo "UUID2 $(cryptsetup luksUUID /dev/vdc)" && umount /btop && echo B5-$((44+1))-OK'
+    'printf "s20-canary raid1 member-loss\n" > /btop/@/canary.txt && echo "CANARY-SHA $(sha256sum /btop/@/canary.txt | cut -d" " -f1)" && sha256sum /btop/@/canary.txt | cut -d" " -f1 && echo "FSID uuid: $(btrfs filesystem show /dev/mapper/root 2>/dev/null | grep -m1 -o "uuid: [0-9a-f-]*" | cut -d" " -f2)" && echo "FSID uuid: $(btrfs filesystem show /dev/mapper/root 2>/dev/null | grep -m1 -o "uuid: [0-9a-f-]*" | cut -d" " -f2)" && echo "UUID1 $(cryptsetup luksUUID /dev/vdb)" && echo "UUID2 $(cryptsetup luksUUID /dev/vdc)" && umount /btop && echo B5-$((44+1))-OK'
+# item-24a: the FSID echo is DOUBLED (run 2026-10-03 07:4x: the single burst
+# shredded under -j2 → "btrfs fsid missing from bootstrap console" exit 1;
+# grep takes the first well-formed match)
 wait_console "$RUN/bootstrap" "B5-45-OK" 300
 feed_line "$RUN/bootstrap/serial.sock" 'sync; poweroff -f'
 run_stage qemu_wait-bootstrap "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/bootstrap" "$QEMU_TIMEOUT"

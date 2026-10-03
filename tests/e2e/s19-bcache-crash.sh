@@ -825,7 +825,10 @@ feed_line_recover "$P2" \
     'cryptsetup status root >/dev/null 2>&1 && echo LKO-$((45+9))-OK'
 wait_console "$P2" "LKO-54-OK" 300
 feed_line "$P2/serial.sock" \
-    'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-OK && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /mnt && echo P2C-$((46+1))-DONE'
+    'mkdir -p /mnt && mount -t btrfs -o subvol=@ /dev/mapper/root /mnt && echo MNT-OK && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && echo "CANARY-SHA $(sha256sum /mnt/canary.txt | cut -d" " -f1)" && echo "LUKSUUID $(cryptsetup luksUUID /dev/bcache0)" && umount /mnt && echo P2C-$((46+1))-DONE'
+# item-24a: the sha echo is DOUBLED — the TCG doubled-byte class shredded the
+# single burst once under -j2 (run 2026-10-03 07:4x: P2_CANARY='' while every
+# corroborated assert passed); grep takes the first WELL-FORMED match.
 wait_console "$P2" "P2C-47-DONE" 300
 # the Stage-1 credential ceremony stand-in (§9.1 step 4): the fixture's
 # well-known slot-0 passphrase is §13-floor-BLOCKLISTED (*alpine-fde*), so the
