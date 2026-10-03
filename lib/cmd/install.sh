@@ -706,10 +706,12 @@ inst_bootentry_ensure_one() {
   # hand minutes later; the boot then worked). The old immediate verify
   # refused fail-closed and killed an otherwise-complete install, and the
   # first retry bound was still too tight for that firmware. Bounded backoff
-  # (raised, same R640 evidence): re-read the listing up to 10 attempts,
-  # ALPINE_FDE_BOOTENTRY_RETRY_SLEEP apart (default 5s, ~50s total — the
-  # test seam for the interval), each re-verifying the SAME label + GUID +
-  # loader match (inst_bootentry_find), before declaring failure.
+  # (raised again, 2026-10-03 R640 evidence: an entry took >4 min to surface
+  # and the 24-attempt bound died an otherwise-complete install): up to
+  # ALPINE_FDE_BOOTENTRY_RETRY_MAX attempts (default 48, ~8 min at the 10s
+  # default sleep — the count seam for slow firmware), each re-verifying the
+  # SAME label + GUID + loader match (inst_bootentry_find), before declaring
+  # failure.
   _ibeo_try=0
   while :; do
     _ibeo_fresh=$("$_ibeo_eb" -v 2>/dev/null | inst_bootentry_parse)
@@ -717,12 +719,12 @@ inst_bootentry_ensure_one() {
       "$_ibeo_kver" "$_ibeo_var" "$_ibeo_lclbl")
     [ -n "$_ibeo_mine" ] && break
     _ibeo_try=$((_ibeo_try + 1))
-    [ "$_ibeo_try" -ge 24 ] && break
-    warn "install: the '$_ibeo_lbl' entry is not in the efibootmgr listing yet (attempt $_ibeo_try/24) — likely firmware NVRAM write latency (Dell); retrying"
+    [ "$_ibeo_try" -ge "${ALPINE_FDE_BOOTENTRY_RETRY_MAX:-48}" ] && break
+    warn "install: the '$_ibeo_lbl' entry is not in the efibootmgr listing yet (attempt $_ibeo_try/${ALPINE_FDE_BOOTENTRY_RETRY_MAX:-48}) — likely firmware NVRAM write latency (Dell); retrying"
     sleep "${ALPINE_FDE_BOOTENTRY_RETRY_SLEEP:-10}"
   done
   [ -n "$_ibeo_mine" ] ||
-    die "install: the '$_ibeo_lbl' boot entry was created but is not in the efibootmgr listing after 24 attempts (~240s) — refusing to guess the entry number (firmware NVRAM write latency; the R640 needed >50s and up to ~2min — the ESP fallback loader still boots the UKIs meanwhile; re-running the install converges idempotently)"
+    die "install: the '$_ibeo_lbl' boot entry was created but is not in the efibootmgr listing after ${ALPINE_FDE_BOOTENTRY_RETRY_MAX:-48} attempts — refusing to guess the entry number (firmware NVRAM write latency; the R640 needed >50s and up to ~2min — the ESP fallback loader still boots the UKIs meanwhile; re-running the install converges idempotently)"
   info "install: created boot entry Boot$_ibeo_mine '$_ibeo_lbl' -> HD(1,GPT,$_ibeo_guid) $_ibeo_ldr"
   printf '%s\n' "$_ibeo_mine"
   return 0

@@ -369,7 +369,7 @@ printf '0002|99999999-8888-7777-6666-555555555555|Windows Boot Manager|\\EFI\\Mi
 assert_rc "lag7 (beyond the retired 5-attempt bound): rc 0 via the raised retry" 0 inst_bootentry_ensure /dev/sda1 "$ESPDIR" "$KVER"
 assert_contains "lag7: the entry is created (not reused)" "$ASSERT_RC_OUTPUT" "created boot entry"
 assert_contains "lag7: the retry warned about NVRAM latency while waiting" "$ASSERT_RC_OUTPUT" "NVRAM write latency"
-assert_contains "lag7: the warn names the raised attempt bound" "$ASSERT_RC_OUTPUT" "attempt 1/24"
+assert_contains "lag7: the warn names the raised attempt bound" "$ASSERT_RC_OUTPUT" "attempt 1/48"
 assert_eq "lag7: the entry is at the front in order" \
     "0001,0002" "$(cat "$NVRAM/order")"
 assert_eq "lag7: the recovered entry pins the CURRENT GUID" "1" "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
@@ -392,7 +392,7 @@ NEVER_RC=$?
 assert_eq "never: rc 64 (still fail-closed, no entry-number guessing)" "64" "$NEVER_RC"
 assert_contains "never: the die keeps the refuse-to-guess clause" "$OUT" "refusing to guess the entry number"
 assert_contains "never: the die names NVRAM write latency (Dell) as the likely cause" "$OUT" "NVRAM write latency"
-assert_contains "never: the die reports the RAISED bounded attempts" "$OUT" "after 24 attempts (~240s)"
+assert_contains "never: the die reports the RAISED bounded attempts" "$OUT" "after 48 attempts"
 assert_eq "never: the DEFAULT entry WAS created in the fake NVRAM (the write, not the read, succeeded)" "1" \
     "$(grep -c "|$GUID|Alpine FDE - " "$NVRAM/entries")"
 assert_eq "never: BootOrder untouched (no guessing)" "0002" "$(cat "$NVRAM/order")"

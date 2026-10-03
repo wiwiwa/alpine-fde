@@ -662,17 +662,34 @@ _fdh_wait_members() {
 # _fdh_escrow_detect — is the ADR-21 provisioning escrow standing on the ESP?
 # Prints "1" when the REQUEST marker + volume-keys.json are found, "0" otherwise.
 # Never fatal: any error is ESCROW-ABSENT (the flow continues as before).
+# REAL-SERVER 2026-10-03 (R640): the default resolution needs blkid(1) — the
+# e2e always sets FDE_ESP_DEV, so the VM never exercised this path and the
+# closure shipped without blkid; on real hardware the command was missing,
+# the detect returned 1 SILENTLY, and the provisioning escrow never consumed
+# (the boot fell to the provisional-token path). blkid is now in the pinned
+# closure (features.d/alpine-fde.files) and a missed detect is LOUD.
 _fdh_escrow_detect() {
-    _fded_e=""
-    for _fded_c in "$FDE_ESP_DEV" $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1); do
-        [ -n "$_fded_c" ] || continue
-        mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
-        if mount -t vfat "$_fded_c" "$FDE_ESP_MNT" >/dev/null 2>&1; then
-            _fded_e=$_fded_c
-            break
-        fi
+    _fded_e=''
+    _fded_try=0
+    while [ $_fded_try -lt 3 ]; do
+        _fded_try=$((_fded_try + 1))
+        for _fded_c in "$FDE_ESP_DEV" $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1); do
+            [ -n "$_fded_c" ] || continue
+            mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
+            if mount -t vfat "$_fded_c" "$FDE_ESP_MNT" >/dev/null 2>&1; then
+                _fded_e=$_fded_c
+                break
+            fi
+        done
+        [ -n "$_fded_e" ] && break
+        # the ESP device node may lag the crypttab members on slow RAID/USB
+        # enumeration — settle briefly before declaring the escrow absent
+        [ $_fded_try -lt 3 ] && sleep 2
     done
-    [ -n "$_fded_e" ] || return 1
+    if [ -z "$_fded_e" ]; then
+        _fdh_console_emit "alpine-fde-unseal: provisioning escrow: the ESP was not found (FDE_ESP_DEV unset and blkid/by-label resolution failed) — escrow boot skipped, the token/recovery path continues" 2>/dev/null || _msg "provisioning escrow: the ESP was not found — escrow boot skipped"
+        return 1
+    fi
     [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] && [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || { umount "$FDE_ESP_MNT" 2>/dev/null || :; return 1; }
     return 0
 }

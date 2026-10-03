@@ -23,6 +23,7 @@
 #     the device TCTI)
 /usr/bin/cryptsetup
 /usr/lib/libcryptsetup.so*
+/usr/bin/blkid
 /usr/bin/openssl
 /usr/lib/libcrypto.so*
 /usr/lib/libssl.so*
