@@ -970,8 +970,13 @@ uki_initrd_pack() {
     local root="$tree/initrd-root"
     rm -rf "$root"
     mkdir -p "$root"
-    # hardlink the runtime subtrees (cheap, same filesystem)
-    for item in usr init kf0 rel.pub modules opt; do
+    # hardlink the runtime subtrees (cheap, same filesystem). fde-seams: the
+    # scenario hook-seam env sourced by /init before the hook (s22 leg 3:
+    # FDE_ESP_DEV + FDE_CONSOLE_IN for the ADR-21 escrow consume) — written to
+    # the staging tree by the bake step above; omitting it from the pack list
+    # structurally prevents every seams-based boot from engaging (2026-10-03).
+    for item in usr init kf0 rel.pub modules opt fde-seams; do
+        [ -e "$tree/$item" ] || continue   # absent when no seams are staged
         cp -al "$tree/$item" "$root/$item"
     done
     ln -sfn usr/bin "$root/bin"
