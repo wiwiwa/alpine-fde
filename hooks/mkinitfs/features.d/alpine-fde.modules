@@ -29,6 +29,11 @@ kernel/drivers/md/bcache
 # unaffected; this is the first-boot initrd lane only).
 kernel/fs/fat
 kernel/fs/nls
+# nls_ascii: the kernel's DEFAULT vfat iocharset — requested at mount time,
+# NOT a fat dep-closure member, so the kernel/fs/nls dir entry above does not
+# pull it (R640/s22 2026-10-03: all 3 detect mounts died on "IO charset ascii
+# not found" with cp437 present)
+kernel/fs/nls/nls_ascii.ko
 # USB + HID stack (R640 2026-10-01): the iDRAC virtual keyboard is a USB HID
 # device — without these subtrees it never enumerates in the initramfs and
 # the recovery passphrase is UNTYPEABLE at the video console (the recovery
