@@ -857,6 +857,10 @@ echo "alpine-fde-harness: invoking /usr/share/alpine-fde/mkinitfs/alpine-fde-uns
 # guest's video console additionally renders the live lines. No triple.
 FDE_SERIAL_ECHO=1
 export FDE_SERIAL_ECHO
+# the scenario-controllable hook seams (s22 leg 3: FDE_ESP_DEV +
+# FDE_CONSOLE_IN for the ADR-21 escrow consume; unset = the file is absent
+# and every scenario default holds)
+if [ -f /fde-seams ]; then . /fde-seams; fi
 sh /usr/share/alpine-fde/mkinitfs/alpine-fde-unseal.sh
 hook_rc=$?
 if [ -e /dev/mapper/root ]; then
@@ -904,6 +908,11 @@ INIT
         sed -i 's/@@DEBUG_SHELL@@/1/' "$tree/init"
     else
         sed -i 's/@@DEBUG_SHELL@@//' "$tree/init"
+    fi
+    # the hook-seam env file (verbatim sh lines; sourced by /init before the
+    # hook — see the /fde-seams block in the template above)
+    if [[ -n "${ALPINE_FDE_HARNESS_SEAMS:-}" ]]; then
+        printf '%s\n' "$ALPINE_FDE_HARNESS_SEAMS" >"$tree/fde-seams"
     fi
     chmod 755 "$tree/init"
 }

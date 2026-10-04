@@ -874,7 +874,9 @@ _fdh_read_pass() {
     if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
         stty -echo 2>/dev/null
     fi
-    IFS= read -r "$2" < /dev/console || :
+    # FDE_CONSOLE_IN: the ceremony's read device seam (the s22 e2e feeds a
+    # regular file); the default /dev/console is the R640 operator lane
+    IFS= read -r "$2" < "${FDE_CONSOLE_IN:-/dev/console}" || :
     if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
         stty echo 2>/dev/null
     fi

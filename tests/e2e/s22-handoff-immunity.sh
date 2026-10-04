@@ -553,6 +553,19 @@ chmod 600 "$RUN/kf-slot0"
 # the build's enter-initrd PCR 11 prediction — the value the provisional seal
 # binds (digest-anchored; leg 3's G-T13 assert retroactively proves the boot
 # reproduced it)
+#
+# THE HOOK-SEAM ENV (baked into the initrd as /fde-seams, sourced by /init
+# before the hook — ALL legs get it, and the consume's canonical-cmdline gate
+# makes that safe: legs 1/2/4 boot the TAMPERED cmdline, the gate refuses,
+# the {11} token's refusal holds; leg 3's canonical cmdline passes and the
+# consume engages with the ceremony fed from the baked file — no console
+# typing anywhere):
+#   FDE_ESP_DEV=/dev/vda   the ESP image is qemu's FIRST drive (raw FAT,
+#                          whole disk — no partition table)
+#   FDE_CONSOLE_IN         the ×2 ceremony's read device = the baked file
+#   /tmp/ceremony.in       S22_RECOVERY twice (set + confirm)
+ALPINE_FDE_HARNESS_SEAMS=$'printf "%s\\\\n" fde-s22-recovery-7c5d31 fde-s22-recovery-7c5d31 > /tmp/ceremony.in\nexport FDE_CONSOLE_IN=/tmp/ceremony.in\nexport FDE_ESP_DEV=/dev/vda'
+export ALPINE_FDE_HARNESS_SEAMS
 run_stage uki_build 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi"
 D11_PRED=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
