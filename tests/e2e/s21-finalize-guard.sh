@@ -614,7 +614,12 @@ printf 'Welcome to the Alpine FDE harness fixture — operator content stays.\n'
 # own tpm2_pcrextend-refusing + vfat-to-bind mount shims (see the header)
 run_stage tooling-escrow-copy 60 cp "$RUN/volume-keys.json" \
     "$TOOLING/escrow/esp/alpine-fde-provision/volume-keys.json"
-: >"$TOOLING/escrow/esp/alpine-fde-provision/REQUEST"
+# the REQUEST marker carries the CANONICAL CMDLINE DIGEST (the consume gate,
+# S-22/2026-10-03): the consume only engages when /proc/cmdline matches the
+# installed cmdline — the fed drive's booted cmdline IS $RUN/cmdline.txt
+# (uki_build-feed wrote it), so the fixture stages its normalized digest.
+tr -s ' \t\n' ' ' <"$RUN/cmdline.txt" | sed 's/^ //;s/ $//' | sha256sum | awk '{print $1}' \
+    >"$TOOLING/escrow/esp/alpine-fde-provision/REQUEST"
 run_stage tooling-minipe 60 cp "$RUN/alpine-fde-fixture.efi" \
     "$TOOLING/efi/EFI/Linux/alpine-fde-fixture.efi"
 mkdir -p "$TOOLING/s21shims"
