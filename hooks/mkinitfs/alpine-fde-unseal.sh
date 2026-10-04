@@ -744,7 +744,7 @@ _fdh_escrow_consume() {
     # the {7,11} PolicyPCR policy digest over the LIVE values (policy.sh's
     # formula, mirrored — TPM-free math)
     _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
-        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}' | \
+        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
         openssl dgst -sha256 -hex | awk '{print $NF}')
     [ -n "$_fec_pol" ] || {
         _msg "provisioning escrow: cannot compute the live policy digest — the escrow stays"
