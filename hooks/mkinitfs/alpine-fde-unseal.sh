@@ -676,7 +676,11 @@ _fdh_escrow_detect() {
         for _fded_c in "$FDE_ESP_DEV" $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1); do
             [ -n "$_fded_c" ] || continue
             mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
-            if mount -t vfat "$_fded_c" "$FDE_ESP_MNT" >/dev/null 2>&1; then
+            # iocharset=cp437: the kernel's default vfat iocharset (ascii) is a
+            # mount-time request_module that no dep closure pulls (s22 2026-10-03:
+            # 3 mounts died on "IO charset ascii not found" with cp437 packed);
+            # cp437 IS packed and maps the ASCII escrow paths verbatim
+            if mount -t vfat -o iocharset=cp437 "$_fded_c" "$FDE_ESP_MNT" >/dev/null 2>&1; then
                 _fded_e=$_fded_c
                 break
             fi
