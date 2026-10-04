@@ -691,7 +691,11 @@ _fdh_escrow_detect() {
         return 1
     fi
     _fded_cand=$_fded_e
-    [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] && [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || { umount "$FDE_ESP_MNT" 2>/dev/null || :; return 1; }
+    _msg "provisioning escrow: the ESP escrow detected on $_fded_cand — the consume gate follows"
+    [ -f "$FDE_ESP_MNT/$FDE_PROV_DIR/REQUEST" ] && [ -r "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" ] || {
+        _msg "provisioning escrow: the ESP mounted but the escrow files are absent/unreadable ($FDE_ESP_MNT/$FDE_PROV_DIR/) — escrow boot skipped"
+        umount "$FDE_ESP_MNT" 2>/dev/null || :; return 1
+    }
     return 0
 }
 # _fdh_escrow_consume — the ADR-21 first-boot provisioning flow (§9.1 Stage 2,
@@ -732,6 +736,7 @@ _fdh_escrow_consume() {
         _msg "provisioning escrow: the booted cmdline does not match the installed UKI (the escrow-window gate, S-22) — the escrow stays; the token path continues"
         return 1
     }
+    _msg "provisioning escrow: the gate passed (the cmdline digest matches) — consuming"
     # the {7,11} PolicyPCR policy digest over the LIVE values (policy.sh's
     # formula, mirrored — TPM-free math)
     _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
