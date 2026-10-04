@@ -568,6 +568,11 @@ ALPINE_FDE_HARNESS_SEAMS=$'printf "%s\\\\n" fde-s22-recovery-7c5d31 fde-s22-reco
 export ALPINE_FDE_HARNESS_SEAMS
 run_stage uki_build 1200 \
     uki_build "$RUN" "$RUN/keys" "$RUN/harness.efi"
+# capture the CANONICAL cmdline NOW: the tampered-variant build below
+# overwrites $RUN/cmdline.txt with its own (the +alpine-fde-tampered form),
+# and the escrow's REQUEST marker must carry the CANONICAL digest (leg 3
+# boots the canonical UKI; the gate refuses the tampered one — S-22)
+cp "$RUN/cmdline.txt" "$RUN/cmdline-canonical.txt"
 D11_PRED=$(cat "$RUN/pcr11-enter-initrd.txt" 2>/dev/null)
 [[ -n "$D11_PRED" ]] || { echo "s22: no enter-initrd d11 prediction from the build"; exit 1; }
 UKI_MIB=$(( ($(stat -c%s "$RUN/harness.efi") + 1048575) / 1048576 ))
@@ -671,7 +676,7 @@ jq -nc --arg uuid "$DISK_UUID" --arg b64 "$VOL_PASS_B64" \
 # the boot of the exact installed cmdline; the tampered variants (legs 1/2/4)
 # fail the gate and fall to the {11} token's refusal. Normalization identical
 # to the hook's (/proc/cmdline side).
-tr -s ' \t\n' ' ' <"$RUN/cmdline.txt" | sed 's/^ //;s/ $//' | sha256sum | awk '{print $1}' >"$RUN/REQUEST"
+tr -s ' \t\n' ' ' <"$RUN/cmdline-canonical.txt" | sed 's/^ //;s/ $//' | sha256sum | awk '{print $1}' >"$RUN/REQUEST"
 # the installed ESP must be LABELED EFI for the hook's by-label resolve (the
 # production install's mkfs.vfat -n EFI; the harness esp_make does not label)
 mlabel -i "$RUN/esp.img" ::EFI >/dev/null 2>&1 \
