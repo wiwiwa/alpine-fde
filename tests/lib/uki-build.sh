@@ -181,7 +181,7 @@ uki_guest_tree() {
     local v
     for v in tpm2_pcrread tpm2_pcrextend tpm2_startauthsession tpm2_policypcr \
              tpm2_policyauthorize tpm2_loadexternal tpm2_verifysignature \
-             tpm2_createprimary tpm2_load tpm2_unseal tpm2_flushcontext; do
+             tpm2_createprimary tpm2_create tpm2_load tpm2_unseal tpm2_flushcontext; do
         cp -L "$(command -v "$v")" "$dest/opt/tpm/bin/$v"
     done
     local interp
@@ -221,7 +221,7 @@ uki_guest_tree() {
     local w
     for w in tpm2_pcrextend tpm2_startauthsession tpm2_policypcr \
              tpm2_policyauthorize tpm2_loadexternal tpm2_verifysignature \
-             tpm2_createprimary tpm2_load tpm2_unseal tpm2_flushcontext; do
+             tpm2_createprimary tpm2_create tpm2_load tpm2_unseal tpm2_flushcontext; do
         printf '#!/bin/sh\nexec /opt/tpm/ld-linux-x86-64.so.2 --library-path /opt/tpm/lib /opt/tpm/bin/%s "$@"\n' \
             "$w" >"$dest/usr/bin/$w"
         chmod 755 "$dest/usr/bin/$w"
