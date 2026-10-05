@@ -937,6 +937,19 @@ done
 wait_console "$RUN/boot3" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT" 2>/dev/null || \
     wait_console "$RUN/boot3" "localhost login:" 120 || true
 run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
+# ADR-21 completion capture: qemu_wait does NOT reap the fixture swtpm — it is
+# alive RIGHT HERE holding the booted volatile register, the ONLY faithful
+# copy of the guest's PCR state (the guest's PCR chain is multi-event; extends
+# from zero can never reproduce it — s22f11/s22f12). Save the volatile blob
+# for the completion stage's restore (a HOST-side phase; leg 4's own
+# swtpm stop/start cycle discards the blob before its boot, so the retired
+# store/restore hazard (s15-4) is void).
+if timeout 15 swtpm_ioctl --save volatile --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+    "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1 && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
+    echo "# completion capture: the booted volatile register saved"
+else
+    echo "# completion capture: the volatile save FAILED — the completion falls back to the extend replay"
+fi
 overlay_discard "$RUN/boot3/disk.qcow2"   # ephemeral — the host legs below mutate
 CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
 
@@ -1055,12 +1068,19 @@ D7_BOOT3=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot3/console.l
 # pins the zero-on-restart contract (live == extend-from-zero of the seeded
 # d11 — never the booted digest itself).
 swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
-D11_SEEDED=$(_reseed_from_console "$RUN/boot3/console.log") \
-    || { echo "s22: leg-3 console missing PCR prints — cannot reseed the fixture"; exit 1; }
+# PRIMARY: restore the SAVED booted volatile register (the capture right
+# after boot3's exit) — the exact guest PCR state, PCR7 included. The swtpm
+# restart zeroes everything; the blob brings the boot back.
+if [[ -s "$RUN/tpm-boot3-volatile.bin" ]] && timeout 15 swtpm_ioctl --load volatile \
+    --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1; then
+    echo "# completion capture: the booted volatile register RESTORED"
+else
+    # FALLBACK (soft landing — cannot reproduce the guest's multi-event
+    # chain; the gate below will refuse loudly if it matters)
+    D11_SEEDED=$(_reseed_from_console "$RUN/boot3/console.log") \
+        || { echo "s22: leg-3 console missing PCR prints — cannot reseed the fixture"; exit 1; }
+fi
 D11_LIVE=$(_pcrread "$RUN/tpm" 11)
-_zero_extend22() {
-    printf '%064d%s' 0 "$1" | tr -d ' \n' | xxd -r -p | sha256sum | awk '{print $1}'
-}
 # the contract is the BOOTED register: live PCR 11 == the console's
 # postphase (the value the provisional {11} policy binds). The old pin
 # (extend-from-zero of the SEEDED value) was tautological — it passed while
