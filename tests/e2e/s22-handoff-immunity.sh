@@ -508,11 +508,26 @@ _refuse_3strike() {
 # every between-boot scenario uses). Prints the seeded d11 (empty if the
 # console carried no PCR prints).
 _reseed_from_console() {
-    local log="$1" d7 d11
+    local log="$1" d7 d11 pre11 phase
     d7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
+    pre11=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
     d11=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
-    [[ -n "$d7" && -n "$d11" ]] || return 1
-    swtpm_seed_pcrs "$RUN/tpm" "$d7" "$d11" || return 1
+    [[ -n "$d7" && -n "$pre11" && -n "$d11" ]] || return 1
+    # PCR11 in the guest is NOT a single extend from zero: the preamble
+    # carries a measured value (pre11) and the enter-initrd phase extend
+    # rides ON TOP of it (postphase = H(pre11 ‖ H(phase))). The old seed
+    # extended WITH the postphase digest — a double-extend (live =
+    # H(0‖D11) ≠ D11) — and the provisional {11} unseal refused (s22f11:
+    # 'the TPM refused to unseal under the current PCR state'). Replay the
+    # boot exactly: extend pre11, then the phase-word digest → live11 ==
+    # postphase (byte-verified against the s22f11 artifacts). PCR7 keeps
+    # the fixture's single-extend discipline (the provisional unseal is
+    # PCR11-only; the {7,11} upgrade anchors to the console's TRUE values,
+    # not the live register).
+    phase=$(printf %s "enter-initrd" | sha256sum | awk '{print $1}')
+    swtpm_pcrextend "$RUN/tpm" 7 "$d7" || return 1
+    swtpm_pcrextend "$RUN/tpm" 11 "$pre11" || return 1
+    swtpm_pcrextend "$RUN/tpm" 11 "$phase" || return 1
     printf '%s' "$d11"
 }
 
@@ -1046,11 +1061,15 @@ D11_LIVE=$(_pcrread "$RUN/tpm" 11)
 _zero_extend22() {
     printf '%064d%s' 0 "$1" | tr -d ' \n' | xxd -r -p | sha256sum | awk '{print $1}'
 }
-if [[ "$D11_LIVE" == "$(_zero_extend22 "$D11_SEEDED")" ]]; then
-    _assert_result ok "completion fixture: the register re-seeded to leg 3's values (extend-from-zero contract)" ""
+# the contract is the BOOTED register: live PCR 11 == the console's
+# postphase (the value the provisional {11} policy binds). The old pin
+# (extend-from-zero of the SEEDED value) was tautological — it passed while
+# the seed itself was double-extended and wrong.
+if [[ "$D11_LIVE" == "$D11_BOOT3" ]]; then
+    _assert_result ok "completion fixture: the register re-seeded to leg 3's values (the booted postphase)" ""
 else
     _assert_result not-ok "completion fixture: the register re-seeded to leg 3's values" \
-        "live=$D11_LIVE expected-extend-from-zero=$(_zero_extend22 "$D11_SEEDED") (console d11=$D11_BOOT3)"
+        "live=$D11_LIVE expected-booted=$D11_BOOT3"
     echo "s22: swtpm PCR 11 is not the reseeded register before the completion — aborting"; exit 1
 fi
 # the combined {7,11} release-key-signed policy for the upgrade (s19/s20's
