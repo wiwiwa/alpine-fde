@@ -431,19 +431,44 @@ seal_unseal() {
     fi
     tpm flushcontext -t >/dev/null 2>&1 || true
     _su_rc=0
-    tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1 &&
-        tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
-            -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1 &&
-        tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
-            -o "$_su_w/secret.raw" >/dev/null 2>&1 ||
-        _su_rc=1
     # FRAMING (ADR-19): the TPM yields the RAW secret; every LUKS-facing
     # consumer (cryptsetup keyslot, the mkinitfs hook) gets base64(raw) — the
     # exact form upstream's token plugin hands over and seal_gen_passphrase
     # staged at enroll time.
-    if [ "$_su_rc" -eq 0 ]; then
-        openssl base64 -A -in "$_su_w/secret.raw" >"$_su_out" 2>/dev/null &&
-            [ -s "$_su_out" ] || _su_rc=1
+    # ALPINE_FDE_SEAL_TRACE=1: per-step rc trace on stderr (default OFF — the
+    # generic "drift?" error is the production contract; the e2e completion
+    # sets the seam — s22f19: the silenced && chain hid WHICH step refused)
+    if [ -n "${ALPINE_FDE_SEAL_TRACE:-}" ]; then
+        tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1; _su_r1=$?
+        echo "seal-trace: startauthsession rc=$_su_r1" >&2
+        _su_r2=$_su_r1 _su_r3=1
+        if [ "$_su_r1" -eq 0 ]; then
+            tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
+                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1; _su_r2=$?
+            echo "seal-trace: policyauthorize rc=$_su_r2" >&2
+        fi
+        if [ "$_su_r2" -eq 0 ]; then
+            tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
+                -o "$_su_w/secret.raw" >/dev/null 2>&1; _su_r3=$?
+            echo "seal-trace: unseal rc=$_su_r3" >&2
+        fi
+        if [ "$_su_r3" -eq 0 ]; then
+            openssl base64 -A -in "$_su_w/secret.raw" >"$_su_out" 2>/dev/null &&
+                [ -s "$_su_out" ] && _su_rc=0 || _su_rc=1
+        else
+            _su_rc=1
+        fi
+    else
+        tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1 &&
+            tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
+                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1 &&
+            tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
+                -o "$_su_w/secret.raw" >/dev/null 2>&1 ||
+            _su_rc=1
+        if [ "$_su_rc" -eq 0 ]; then
+            openssl base64 -A -in "$_su_w/secret.raw" >"$_su_out" 2>/dev/null &&
+                [ -s "$_su_out" ] || _su_rc=1
+        fi
     fi
     tpm flushcontext -t >/dev/null 2>&1 || true
     rm -rf "$_su_w"

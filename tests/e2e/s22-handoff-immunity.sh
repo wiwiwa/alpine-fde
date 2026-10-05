@@ -1085,6 +1085,7 @@ cat >"$RUN/completion-drive.sh" <<'DRIVEEOF'
 set -u
 export ALPINE_FDE_CMD_DIR="$REPO/lib/cmd"
 export ALPINE_FDE_TCTI="$SWTPM_TCTI_STR"
+export ALPINE_FDE_SEAL_TRACE=1   # the per-step rc trace of the Mechanism-B unseal session
 export ALPINE_FDE_EFIVARS_DIR="$EFIVARS"
 export ALPINE_FDE_EVENTLOG="$RUN/cli-state/eventlog-absent"
 export ALPINE_FDE_ROOT="$RUN/cli-state"
