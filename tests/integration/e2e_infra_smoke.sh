@@ -444,8 +444,9 @@ fi
 # --- accelerator contract (§12): /dev/kvm is REQUIRED for e2e --------------------
 # Default ALPINE_FDE_ACCEL=kvm: an unusable KVM is a LOUD failure (rc!=0, the
 # message names /dev/kvm) — never a silent TCG downgrade. ALPINE_FDE_ACCEL=tcg
-# is the explicit dev escape hatch, honored verbatim; every other value
-# (including the old silent 'auto') is rejected. Decision is once-per-process,
+# is RETIRED (2026-10-04, operator directive): the TCG boots are 10-20x slower
+# and blow every scenario budget, so an explicit tcg request is REFUSED like
+# every other non-kvm value. Decision is once-per-process,
 # so every case runs _qemu_accel_choose in a fresh subshell.
 ACC=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=kvm; _qemu_kvm_ok() { return 0; }; \
     _qemu_accel_choose 2>/dev/null && printf '%s' "$_qemu_accel" ) )
@@ -460,9 +461,8 @@ MSG=$( ( _qemu_accel=''; unset ALPINE_FDE_ACCEL; _qemu_kvm_ok() { return 1; }; \
     _qemu_accel_choose 2>&1 >/dev/null ) )
 assert_contains "accel: failure message names /dev/kvm" "$MSG" "/dev/kvm"
 assert_not_contains "accel: unusable KVM never downgrades to tcg" "$MSG" "using tcg"
-TCG=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=tcg; _qemu_accel_choose 2>/dev/null \
-    && printf '%s' "$_qemu_accel" ) )
-assert_eq "accel: explicit ALPINE_FDE_ACCEL=tcg honored verbatim" "tcg" "$TCG"
+TCG=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=tcg; _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
+assert_eq "accel: explicit ALPINE_FDE_ACCEL=tcg REFUSED (the retired escape hatch)" "1" "$TCG"
 INV=$( ( _qemu_accel=''; ALPINE_FDE_ACCEL=auto; _qemu_accel_choose >/dev/null 2>&1; echo $? ) )
 assert_eq "accel: 'auto' (silent-decision mode) rejected" "1" "$INV"
 
