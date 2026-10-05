@@ -444,8 +444,8 @@ seal_unseal() {
         _su_r2=$_su_r1 _su_r3=1
         if [ "$_su_r1" -eq 0 ]; then
             tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
-                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1; _su_r2=$?
-            echo "seal-trace: policyauthorize rc=$_su_r2" >&2
+                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" 2>"$_su_w/authz.err" >/dev/null; _su_r2=$?
+            echo "seal-trace: policyauthorize rc=$_su_r2 $(head -c 200 "$_su_w/authz.err" 2>/dev/null | tr '\n' ' ')" >&2
         fi
         if [ "$_su_r2" -eq 0 ]; then
             tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
