@@ -827,7 +827,15 @@ _fdh_escrow_consume() {
         }
         _fec_tstep=policypcr
         tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 || {
-            _msg "provisioning escrow: trial policypcr failed for $_fec_target (the live PolicyPCR digest differs from the sealed policy)"
+            # the 3-way dump: the sealed pol vs the TPM-live PCRs vs the sysfs
+            # PCRs — the mismatch's side names itself (the read channel vs the
+            # encoding)
+            _fec_polhex=$(od -An -tx1 "$_fec_w/pol.bin" 2>/dev/null | tr -d ' \n')
+            _fec_tpm7=$(tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF}')
+            _fec_tpm11=$(tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF}')
+            _fec_sys7=$(cat "$_fec_sysfs/7" 2>/dev/null | tr -d ' \t\n\r')
+            _fec_sys11=$(cat "$_fec_sysfs/11" 2>/dev/null | tr -d ' \t\n\r')
+            _msg "provisioning escrow: trial policypcr failed for $_fec_target — pol.bin=$_fec_polhex tpm7=$_fec_tpm7 tpm11=$_fec_tpm11 sys7=$_fec_sys7 sys11=$_fec_sys11"
             tpm2_flushcontext -t >/dev/null 2>&1 || :
             continue
         }
