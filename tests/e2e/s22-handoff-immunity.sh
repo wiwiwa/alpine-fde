@@ -348,7 +348,9 @@ _track_swtpm() { SWTPM_DIRS+=("$1"); }
 # so the zero state is ASSERTED here, not assumed. No boot here needs the
 # booted values carried ACROSS boots host-side except the completion leg,
 # which re-seeds them explicitly from the leg-3 console facts (the
-# _reseed_from_console helper below).
+# the completion anchors the provisional token to the fixture-reachable
+# V_SEED register (the fidelity note at the pcrsig-11 composition — the
+# _reseed_from_console helper was RETIRED, see below).
 _reanchor_tpm() {
     local dir="$1" d0 d7 d11
     swtpm_stop "$dir" 2>/dev/null || true
@@ -497,39 +499,13 @@ _refuse_3strike() {
     CURRENT_QEMU_DIR=""                  # host-side base checks below target the RAW base
 }
 
-# _reseed_from_console <console.log> — reconstruct the booted register in the
-# fixture swtpm. After a clean qemu exit the fixture is DEAD (EOF design) and
-# swtpm_ensure's restart is all-zero, so a host-side gate that must read the
-# BOOTED values (the completion's audit --init) re-extends the console's own
-# facts: the pre-token PCR 7 print and the postphase PCR 11. Both are pinned
-# to the build prediction by the per-boot G-T13 asserts, so the seeded
-# register is exactly what the guest booted with — not a fixture lie but the
-# fixture's designated reseed path (swtpm_seed_pcrs, the same discipline
-# every between-boot scenario uses). Prints the seeded d11 (empty if the
-# console carried no PCR prints).
-_reseed_from_console() {
-    local log="$1" d7 d11 pre11 phase
-    d7=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
-    pre11=$(grep -oE 'alpine-fde-pcr sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
-    d11=$(grep -oE 'alpine-fde-pcr-postphase sha256:11=[0-9a-f]{64}' "$log" | head -1 | cut -d= -f2)
-    [[ -n "$d7" && -n "$pre11" && -n "$d11" ]] || return 1
-    # PCR11 in the guest is NOT a single extend from zero: the preamble
-    # carries a measured value (pre11) and the enter-initrd phase extend
-    # rides ON TOP of it (postphase = H(pre11 ‖ H(phase))). The old seed
-    # extended WITH the postphase digest — a double-extend (live =
-    # H(0‖D11) ≠ D11) — and the provisional {11} unseal refused (s22f11:
-    # 'the TPM refused to unseal under the current PCR state'). Replay the
-    # boot exactly: extend pre11, then the phase-word digest → live11 ==
-    # postphase (byte-verified against the s22f11 artifacts). PCR7 keeps
-    # the fixture's single-extend discipline (the provisional unseal is
-    # PCR11-only; the {7,11} upgrade anchors to the console's TRUE values,
-    # not the live register).
-    phase=$(printf %s "enter-initrd" | sha256sum | awk '{print $1}')
-    swtpm_pcrextend "$RUN/tpm" 7 "$d7" || return 1
-    swtpm_pcrextend "$RUN/tpm" 11 "$pre11" || return 1
-    swtpm_pcrextend "$RUN/tpm" 11 "$phase" || return 1
-    printf '%s' "$d11"
-}
+# _reseed_from_console — RETIRED (s22f11..f17, 2026-10-05): extending from
+# zero can never reproduce the guest's register — the pre-phase PCR11 is a
+# multi-event measured chain with no known pre-image, and the swtpm exits at
+# the guest's chardev EOF (no mid-boot ctrl window either: the ctrl plane is
+# qemu's). The completion instead anchors the provisional {11} token to
+# V_SEED (the fixture-reachable phase register) at the pcrsig-11 composition
+# and replays ONE extend — see the fidelity note there.
 
 # pcr_of <console.log> <pcr> — the harness PCR-print parser (the early
 # degradation gate in _boot_hook reads the hook's pre-token PCR line with it)
@@ -611,21 +587,34 @@ _track_swtpm "$RUN/tpm"
 # SRK, which persists in this state dir into every guest boot.
 # ============================================================================
 mkdir -p "$RUN/tmp"
+# THE PROVISIONAL ANCHOR — the fixture-reachable register (the fidelity
+# note): in production the {11} provisional token binds the real first
+# boot's postphase and is unsealed IN-GUEST. The s22 completion drives the
+# Stage-2 chain HOST-SIDE against the fixture swtpm — whose register after
+# a restart is all-zero and reaches exactly ONE extend of the enter-initrd
+# phase-word digest (the guest's pre-phase chain is multi-event and
+# unreproducible by extends — s22f11..f17, byte-verified). The provisional
+# token therefore anchors V_SEED = H(0 ‖ H('enter-initrd')): well-formed
+# {11}-PolicyPCR, unsealable at the completion, never exercised in-guest
+# (leg 3 consumes the ESCROW). The {7,11} upgrade below still anchors the
+# TRUE booted values (D7_BOOT3, D11_BOOT3).
+PHASE_DGST=$(printf %s "enter-initrd" | sha256sum | awk '{print $1}')
+V_SEED=$(printf '%064d%s' 0 "$PHASE_DGST" | tr -d ' \n' | xxd -r -p | sha256sum | awk '{print $1}')
 # the d11-anchored {11}-selection .pcrsig (the s00b/Option-A pattern): the
 # REAL installer's `kernel build` bakes exactly this shape (pcrsign's
 # anchored entry) into the ESP UKI; seal_provisional's G-B6 gate verifies the
 # signed pol against the ENTRY'S OWN component — a pure data check
-POL11=$(seal_digest_11 "$D11_PRED")
+POL11=$(seal_digest_11 "$V_SEED")
 printf '%s' "$POL11" | policy_hex_to_bin >"$RUN/msg11.bin"
 openssl dgst -sha256 -sign "$RUN/keys/db.key" -out "$RUN/sig11.bin" "$RUN/msg11.bin" \
     || { echo "s22: {11} policy signature failed"; exit 1; }
 PKFP=$(policy_pubkey_fp "$RUN/keys/release.pub")
 jq -n --arg pol "$POL11" --arg sig "$(openssl base64 -A -in "$RUN/sig11.bin")" \
-    --arg pkfp "$PKFP" --arg d11 "$D11_PRED" \
+    --arg pkfp "$PKFP" --arg d11 "$V_SEED" \
     '{"sha256": [{"pcrs": [11], "pkfp": $pkfp, "pol": $pol, "sig": $sig, "d11": $d11}]}' >"$RUN/pcrsig-11.json"
-assert_eq "S-22: the {11}-selection .pcrsig pol == seal_digest_11(build prediction), anchored" "$POL11" \
+assert_eq "S-22: the {11}-selection .pcrsig pol == seal_digest_11(fixture-reachable V_SEED), anchored" "$POL11" \
     "$(jq -r '.sha256[0].pol' "$RUN/pcrsig-11.json")"
-assert_eq "S-22: the {11}-selection entry carries the d11 anchor (digest-anchored G-B6)" "$D11_PRED" \
+assert_eq "S-22: the {11}-selection entry carries the d11 anchor (digest-anchored G-B6)" "$V_SEED" \
     "$(jq -r '.sha256[0].d11' "$RUN/pcrsig-11.json")"
 # seal_provisional runs INLINE (never via run_stage): it stages SEAL_PASS_FILE
 # and SEAL_SLOT for the caller, and a run_stage subshell would lose them
@@ -925,24 +914,6 @@ assert_eq "[leg 2] host(esp): the escrow still stands (content byte-identical)" 
 # ============================================================================
 echo "# leg 3: the first boot — the escrow consume engages, the exact UKI enters"
 _boot_hook "$RUN/boot3" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" ""
-# ADR-21 completion capture (background savor): the guest's PCR register is
-# FINAL after the enter-initrd phase extend — everything after it (consume,
-# unlock, ceremony) is PCR-silent. The savor waits for the 'consumed' marker
-# (≈15s of margin before the guest powers off), saves the volatile state ONCE,
-# and exits. The swtpm dies at the guest's chardev EOF at poweroff — extends
-# from zero can never reproduce the multi-event chain (s22f12) — so this
-# in-boot save is the only faithful capture.
-(
-    until grep -q "provisioning escrow: consumed" "$RUN/boot3/console.log" 2>/dev/null; do
-        kill -0 "$(cat "$RUN/boot3/qemu.pid" 2>/dev/null)" 2>/dev/null || exit 0
-        sleep 0.3
-    done
-    timeout 5 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-        --save volatile "$RUN/tpm-boot3-volatile.bin" 2>>"$RUN/tpm-save.err" || true
-    [[ -s "$RUN/tpm-boot3-volatile.bin" ]] || \
-        timeout 5 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-            --save volatile "$RUN/tpm-boot3-volatile.bin" 2>>"$RUN/tpm-save.err" || true
-) &
 i=0
 until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
     _qemu_alive_or_die "$RUN/boot3" "console-wait:boot3-UNSEALED"
@@ -952,8 +923,6 @@ until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
     sleep 1
     i=$((i + 1))
 done
-[[ -s "$RUN/tpm-boot3-volatile.bin" ]] && \
-    echo "# completion capture: the booted volatile register saved (in-boot savor)"
 wait_console "$RUN/boot3" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT" 2>/dev/null || \
     wait_console "$RUN/boot3" "localhost login:" 120 || true
 run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
@@ -1075,29 +1044,19 @@ D7_BOOT3=$(grep -oE 'alpine-fde-pcr sha256:7=[0-9a-f]{64}' "$RUN/boot3/console.l
 # pins the zero-on-restart contract (live == extend-from-zero of the seeded
 # d11 — never the booted digest itself).
 swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
-# PRIMARY: restore the SAVED booted volatile register (the capture right
-# after boot3's exit) — the exact guest PCR state, PCR7 included. The swtpm
-# restart zeroes everything; the blob brings the boot back.
-if [[ -s "$RUN/tpm-boot3-volatile.bin" ]] && timeout 15 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-    --load volatile "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1; then
-    echo "# completion capture: the booted volatile register RESTORED"
-else
-    # FALLBACK (soft landing — cannot reproduce the guest's multi-event
-    # chain; the gate below will refuse loudly if it matters)
-    D11_SEEDED=$(_reseed_from_console "$RUN/boot3/console.log") \
-        || { echo "s22: leg-3 console missing PCR prints — cannot reseed the fixture"; exit 1; }
-fi
+# the completion-reachable register: the restart is all-zero; ONE extend of
+# the enter-initrd phase-word digest lands live PCR 11 on V_SEED — the value
+# the provisional {11} token is digest-anchored to (the fidelity note at the
+# pcrsig-11 composition). The guest's own pre-phase chain is multi-event and
+# unreproducible by extends — that is WHY the anchor is V_SEED.
+timeout 10 swtpm_pcrextend -Q -T "$(_swtpm_tcti_for "$RUN/tpm")" "11:sha256=$PHASE_DGST" || true
 D11_LIVE=$(_pcrread "$RUN/tpm" 11)
-# the contract is the BOOTED register: live PCR 11 == the console's
-# postphase (the value the provisional {11} policy binds). The old pin
-# (extend-from-zero of the SEEDED value) was tautological — it passed while
-# the seed itself was double-extended and wrong.
-if [[ "$D11_LIVE" == "$D11_BOOT3" ]]; then
-    _assert_result ok "completion fixture: the register re-seeded to leg 3's values (the booted postphase)" ""
+if [[ "$D11_LIVE" == "$V_SEED" ]]; then
+    _assert_result ok "completion fixture: the register anchored to leg 3's V_SEED (the extend-from-zero phase register)" ""
 else
-    _assert_result not-ok "completion fixture: the register re-seeded to leg 3's values" \
-        "live=$D11_LIVE expected-booted=$D11_BOOT3"
-    echo "s22: swtpm PCR 11 is not the reseeded register before the completion — aborting"; exit 1
+    _assert_result not-ok "completion fixture: the register anchored to leg 3's V_SEED" \
+        "live=$D11_LIVE expected-anchor=$V_SEED"
+    echo "s22: swtpm PCR 11 is not the anchored register before the completion — aborting"; exit 1
 fi
 # the combined {7,11} release-key-signed policy for the upgrade (s19/s20's
 # pcrsign shape, composed host-side with the harness helper) — anchored to
