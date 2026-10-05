@@ -850,7 +850,11 @@ _fdh_escrow_consume() {
         tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
             >"$_fec_w/$_fec_target.trial" 2>"$_fec_w/unseal.err" && [ -s "$_fec_w/$_fec_target.trial" ] || {
             tpm2_flushcontext -t >/dev/null 2>&1 || :
-            _msg "provisioning escrow: trial unseal failed for $_fec_target — tpm2 rc: $(head -c 200 "$_fec_w/unseal.err" 2>/dev/null | tr '\n' ' ')"
+            # the 3-way digest dump: the sealed pol.bin vs the SESSION's computed
+            # digest vs the sysfs inputs — the mismatch's side names itself
+            _fec_polhex=$(od -An -tx1 "$_fec_w/pol.bin" 2>/dev/null | tr -d ' \n')
+            _fec_seed=$(tpm2_getpolicydigest -S "$_fec_w/trial.ctx" --hex 2>/dev/null | awk '{print $NF}' | sed 's/^0x//')
+            _msg "provisioning escrow: trial unseal failed for $_fec_target — tpm2 rc: $(head -c 120 "$_fec_w/unseal.err" 2>/dev/null | tr '\n' ' ') | pol.bin=$_fec_polhex session_digest=$_fec_seed sys7=$_fec_pcr7 sys11=$_fec_pcr11"
             continue
         }
         tpm2_flushcontext -t >/dev/null 2>&1 || :
