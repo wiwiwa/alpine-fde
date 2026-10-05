@@ -905,9 +905,14 @@ _fdh_escrow_consume() {
         }
         busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
         _msg "provisioning escrow: trial unseal PASSED for $_fec_target (+$(_fec_elapsed)s) — the token sweep follows"
-        # the TOKEN JSON: the FULL §7.2 schema with an EMPTY tpm2-signature —
-        # the escrow-provenance MARKER (the boot's PolicyPCR-only branch
-        # unseals it; the TPM fail-closes any PCR drift)
+        # the TOKEN JSON: the FULL §7.2 schema (lib/token.sh token_build_json's
+        # field set; pubkey EMPTY — the escrow-provenance MARKER, the boot's
+        # PolicyPCR-only branch unseals it and the TPM fail-closes any PCR
+        # drift). tpm2-policy-hash is NOT optional: upstream 257's systemd-tpm2
+        # validator refuses the import without it (s22f7: "TPM2 token data
+        # lacks 'tpm2-policy-hash' field") — and it must be the digest the
+        # blob is ACTUALLY sealed under ($_fec_pol), so the boot path's
+        # fail-closed drift check has the real value to compare against.
         _fec_pub_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.pub" 2>/dev/null)
         _fec_priv_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.priv" 2>/dev/null)
         _fec_free=''
@@ -929,7 +934,7 @@ _fdh_escrow_consume() {
             continue
         }
         cat >"$_fec_w/$_fec_target.tok" <<EOF
-{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"","tpm2-signature":""}
+{"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-policy-hash":"$_fec_pol","tpm2-primary-alg":"rsa","tpm2-pubkey":"","tpm2-signature":""}
 EOF
         _msg "provisioning escrow: token import id $_fec_free for $_fec_target starting (+$(_fec_elapsed)s)"
         # --json-file is MANDATORY on cryptsetup 2.7.5: the positional file

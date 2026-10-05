@@ -110,4 +110,13 @@ done
 assert_contains "token import passes --json-file (positional form is ignored by 2.7.5)" \
     "$CONSUME_BODY" 'token import --token-id "$_fec_free" --json-file "$_fec_w/$_fec_target.tok"'
 
+# (i) the §7.2 token schema (lib/token.sh token_build_json parity): the escrow
+# token carries tpm2-policy-hash (upstream 257 refuses the import without it —
+# s22f7) and tpm2-primary-alg, and the policy hash is the LIVE marshaled
+# digest ($ _fec_pol — the value the blob is actually sealed under)
+assert_contains "escrow token carries tpm2-policy-hash from the live digest" \
+    "$CONSUME_BODY" '"tpm2-policy-hash":"$_fec_pol"'
+assert_contains "escrow token carries tpm2-primary-alg" \
+    "$CONSUME_BODY" '"tpm2-primary-alg":"rsa"'
+
 finish
