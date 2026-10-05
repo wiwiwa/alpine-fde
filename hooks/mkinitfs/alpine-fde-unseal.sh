@@ -904,15 +904,23 @@ _fdh_escrow_consume() {
             continue
         }
         busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
+        _msg "provisioning escrow: trial unseal PASSED for $_fec_target (+$(_fec_elapsed)s) — the token sweep follows"
         # the TOKEN JSON: the FULL §7.2 schema with an EMPTY tpm2-signature —
         # the escrow-provenance MARKER (the boot's PolicyPCR-only branch
         # unseals it; the TPM fail-closes any PCR drift)
         _fec_pub_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.pub" 2>/dev/null)
         _fec_priv_b64=$(openssl base64 -A -in "$_fec_w/$_fec_target.priv" 2>/dev/null)
         _fec_free=''
+        _msg "provisioning escrow: token export sweep for $_fec_target starting (+$(_fec_elapsed)s)"
+        # s22f2 (2026-10-05): the FIRST token export's systemd-tpm2 plugin
+        # LOADS the blob into the TPM (the mystery Load in swtpm's timed log
+        # right after the trial unseal) — and the console then froze for the
+        # rest of the run with the TPM idle: the sweep is a stall candidate,
+        # so every export is timeout-wrapped and its outcome traced
         for _fec_tid in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
-            cryptsetup token export --token-id "$_fec_tid" "$_fec_dev" >/dev/null 2>&1 || {
+            busybox timeout 10 cryptsetup token export --token-id "$_fec_tid" "$_fec_dev" >/dev/null 2>&1 || {
                 _fec_free=$_fec_tid
+                _msg "provisioning escrow: token id $_fec_free free for $_fec_target (+$(_fec_elapsed)s)"
                 break
             }
         done
@@ -923,17 +931,19 @@ _fdh_escrow_consume() {
         cat >"$_fec_w/$_fec_target.tok" <<EOF
 {"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"","tpm2-signature":""}
 EOF
-        cryptsetup token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" >/dev/null 2>&1 || {
-            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony"
+        _msg "provisioning escrow: token import id $_fec_free for $_fec_target starting (+$(_fec_elapsed)s)"
+        busybox timeout 30 cryptsetup token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony (rc=$? +$(_fec_elapsed)s)"
             continue
         }
         # UNLOCK with the escrowed credential (the keyslot-1 passphrase text)
-        if cryptsetup open --type luks --key-file "$_fec_w/$_fec_target.cred" \
+        _msg "provisioning escrow: the unlock ($_fec_target) starting (+$(_fec_elapsed)s)"
+        if busybox timeout 60 cryptsetup open --type luks --key-file "$_fec_w/$_fec_target.cred" \
             "$_fec_dev" "$_fec_target" >/dev/null 2>&1; then
             _fdh_opened_list="$_fdh_opened_list $_fec_target "
             _msg "unlocked $_fec_target ($_fec_dev) via the provisioning escrow (real-measurement {7,11} seal)"
         else
-            _msg "provisioning escrow: the unlock failed for $_fec_target — the member stays for the ceremony"
+            _msg "provisioning escrow: the unlock failed for $_fec_target — the member stays for the ceremony (rc=$? +$(_fec_elapsed)s)"
         fi
     done
     # the header steps (g)+(h) run ONLY when EVERY member opened: any holdout
@@ -950,6 +960,7 @@ EOF
     fi
     # (g) the ×2 SET ceremony — keyslot 0 per member (authorized by the
     # escrowed credentials) + the operator credential staged for Stage 2
+    _msg "provisioning escrow: every member opened — the ceremony starting (+$(_fec_elapsed)s)"
     if ! _fdh_escrow_ceremony; then
         # fail-open: the {7,11} tokens keep working; the escrow stays for the
         # next boot's ceremony retry (a reboot re-runs the consume cleanly)

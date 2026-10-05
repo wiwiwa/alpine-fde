@@ -77,10 +77,11 @@ assert_contains "the guard counts bytes via od+awk (closure-safe)" "$CONSUME_BOD
 assert_not_contains "the consume body never uses wc (not in the closure)" \
     "$(printf '%s\n' "$CONSUME_BODY" | grep -v '^[[:space:]]*#')" 'wc '
 
-# (g) wedge discipline — every tpm2 verb in the consume body is busybox-timeout-
-# wrapped; a bare tpm2 invocation at command position is a boot-killer
-# (lines with `command -v tpm2_` are existence probes, not invocations)
-UNWRAPPED=$(printf '%s\n' "$CONSUME_BODY" | sed 's/#.*//' | grep -v 'command -v' | grep -E '(^|[|;& (])tpm2_[a-z]+' | grep -v 'busybox timeout' || true)
+# (g) wedge discipline — every tpm2 verb AND every cryptsetup verb in the
+# consume body is busybox-timeout-wrapped; a bare tpm2/cryptsetup invocation
+# at command position is a boot-killer
+# (lines with `command -v X` are existence probes, not invocations)
+UNWRAPPED=$(printf '%s\n' "$CONSUME_BODY" | sed 's/#.*//' | grep -v 'command -v' | grep -E '(^|[|;& (])(tpm2_[a-z]+|cryptsetup)' | grep -v 'busybox timeout' || true)
 assert_eq "no unwrapped tpm2 verb in the consume body" "" "$UNWRAPPED"
 assert_contains "createprimary runs under busybox timeout" "$CONSUME_BODY" \
     'busybox timeout 90 tpm2_createprimary'
@@ -89,6 +90,10 @@ assert_contains "the self-seal runs under busybox timeout" "$CONSUME_BODY" \
 for verb in startauthsession policypcr load unseal; do
     assert_contains "trial $verb runs under busybox timeout" "$CONSUME_BODY" \
         "busybox timeout 30 tpm2_$verb"
+done
+for cspec in '10 cryptsetup token export' '30 cryptsetup token import' '60 cryptsetup open --type luks'; do
+    assert_contains "consume cryptsetup ($cspec) runs under busybox timeout" "$CONSUME_BODY" \
+        "busybox timeout $cspec"
 done
 
 # (g2) the step traces — a future wedge names its own step
