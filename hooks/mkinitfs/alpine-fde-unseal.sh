@@ -446,8 +446,10 @@ fi
 
 
 # _fdh_hex2bin HEX — hex string -> raw bytes on stdout. Pure busybox awk (no
-# xxd in the initramfs).
-# shellcheck disable=SC2120  # stdin consumer by design
+# xxd in the initramfs). ARG consumer: the value comes from $1 — piping into
+# this function does nothing (s22 leg-3 2026-10-05: the pipe form produced an
+# empty pol.bin with exit 0).
+# shellcheck disable=SC2120  # arg consumer; stdin pipes are silently ignored
 _fdh_hex2bin() {
     printf '%s' "$1" | LC_ALL=C awk '{
         h = "0123456789abcdef"
@@ -788,10 +790,22 @@ _fdh_escrow_consume() {
     }
     # _fdh_hex2bin (the hook's own awk transform) — NOT policy_hex_to_bin:
     # lib/policy.sh is not in the initrd closure (R640 2026-10-03: the
-    # missing command silently killed every escrow boot at this line)
-    printf '%s' "$_fec_pol" | _fdh_hex2bin >"$_fec_w/pol.bin" 2>/dev/null || {
+    # missing command silently killed every escrow boot at this line).
+    # ARG form (the function reads $1 ONLY — it never consumes stdin): the
+    # earlier stdin pipe left $1 empty, awk transformed zero bytes, and
+    # pol.bin was created EMPTY with exit 0 (so the || never fired). The
+    # self-seal then sealed under an empty policy and the trial unseal
+    # refused 0x99d — session policy vs an EMPTY sealed policy (s22 leg-3,
+    # 2026-10-05). The 32-byte check below fails loud so a silent-empty
+    # marshal can never ride into a seal again.
+    _fdh_hex2bin "$_fec_pol" >"$_fec_w/pol.bin" || {
         rm -rf "$_fec_w"
         _msg "provisioning escrow: cannot marshal the live policy digest"
+        return 1
+    }
+    [ "$(wc -c <"$_fec_w/pol.bin" 2>/dev/null)" = "32" ] || {
+        rm -rf "$_fec_w"
+        _msg "provisioning escrow: the marshaled policy digest is not 32 bytes (the hex2bin transform collapsed) — the escrow stays for the next boot"
         return 1
     }
     _fdh_opened_list=''
