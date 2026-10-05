@@ -743,11 +743,28 @@ _fdh_escrow_consume() {
     _msg "provisioning escrow: the gate passed (the cmdline digest matches) — consuming"
     # the {7,11} PolicyPCR policy digest over the LIVE values (policy.sh's
     # formula, mirrored — TPM-free math)
+    # the {7,11} PolicyPCR policy digest — the EXACT mirror of lib/policy.sh
+    # policy_digest (the value the TPM's tpm2_policypcr session computes):
+    #   sha256( zero32 || CC_PolicyPCR(0000017f) || TPML_PCRSELECT{sha256:7,11}
+    #           || sha256(hex2bin(d7)||hex2bin(d11)) )
+    # The earlier simplified sha256(d7||d11) was a DIFFERENT digest — the trial
+    # unseal refused it (s22 2026-10-04: "the trial unseal failed for root").
     _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
         awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
         openssl dgst -sha256 -hex | awk '{print $NF}')
     [ -n "$_fec_pol" ] || {
-        _msg "provisioning escrow: cannot compute the live policy digest — the escrow stays"
+        _msg "provisioning escrow: cannot compute the pcr digest — the escrow stays for the next boot"
+        return 1
+    }
+    _fec_pol=$(printf '%s%s%s%s' \
+        '0000000000000000000000000000000000000000000000000000000000000000' \
+        '0000017f' \
+        '00000001000b03800800' \
+        "$_fec_pol" | \
+        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
+        openssl dgst -sha256 -hex | awk '{print $NF}')
+    [ -n "$_fec_pol" ] || {
+        _msg "provisioning escrow: cannot marshal the live policy digest"
         return 1
     }
     _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
