@@ -18,7 +18,13 @@
 #   (d) structural: no `| _fdh_hex2bin` stdin pipe remains anywhere in the
 #       hook;
 #   (e) structural: the loud empty-file guard (the 32-byte check) sits behind
-#       the write — a silent-empty marshal can never ride into a seal.
+#       the write — a silent-empty marshal can never ride into a seal;
+#   (f) closure discipline (the blkid lesson): the consume body uses NO wc —
+#       wc is NOT in the initrd closure — and counts bytes via od|tr|awk;
+#   (g) wedge discipline (the s22f1 18-min hang): every tpm2 verb in the
+#       consume body runs under `busybox timeout` (bare timeout is NOT in the
+#       closure either), and the step traces (srk created / pol.bin marshaled /
+#       trial step lines) are present so a future wedge names its own step.
 set -u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -63,5 +69,33 @@ assert_not_contains "no stdin-pipe call of _fdh_hex2bin in the hook" "$HOOK_TXT"
 # (e) structural — the loud 32-byte guard behind the write
 assert_contains "the 32-byte empty-marshal guard is present" "$HOOK_TXT" \
     'the marshaled policy digest is not 32 bytes'
+
+# (f) closure discipline — the guard counts via od|tr|awk, never wc
+CONSUME_BODY=$(sed -n '/^_fdh_escrow_consume() {/,/^}/p' "$HOOK")
+assert_contains "the guard counts bytes via od+awk (closure-safe)" "$CONSUME_BODY" \
+    "od -An -tx1 \"\$_fec_w/pol.bin\" 2>/dev/null | tr -d ' \\n' | awk '{print length(\$0)}'"
+assert_not_contains "the consume body never uses wc (not in the closure)" \
+    "$(printf '%s\n' "$CONSUME_BODY" | grep -v '^[[:space:]]*#')" 'wc '
+
+# (g) wedge discipline — every tpm2 verb in the consume body is busybox-timeout-
+# wrapped; a bare tpm2 invocation at command position is a boot-killer
+# (lines with `command -v tpm2_` are existence probes, not invocations)
+UNWRAPPED=$(printf '%s\n' "$CONSUME_BODY" | sed 's/#.*//' | grep -v 'command -v' | grep -E '(^|[|;& (])tpm2_[a-z]+' | grep -v 'busybox timeout' || true)
+assert_eq "no unwrapped tpm2 verb in the consume body" "" "$UNWRAPPED"
+assert_contains "createprimary runs under busybox timeout" "$CONSUME_BODY" \
+    'busybox timeout 90 tpm2_createprimary'
+assert_contains "the self-seal runs under busybox timeout" "$CONSUME_BODY" \
+    'busybox timeout 60 tpm2_create '
+for verb in startauthsession policypcr load unseal; do
+    assert_contains "trial $verb runs under busybox timeout" "$CONSUME_BODY" \
+        "busybox timeout 30 tpm2_$verb"
+done
+
+# (g2) the step traces — a future wedge names its own step
+for trace in 'srk createprimary starting' 'the SRK created' \
+    'pol.bin marshaled 32 bytes' 'self-seal starting for' \
+    'trial $(_fec_elapsed)s' '_fec_elapsed() { echo'; do
+    assert_contains "trace present: $trace" "$CONSUME_BODY" "$trace"
+done
 
 finish

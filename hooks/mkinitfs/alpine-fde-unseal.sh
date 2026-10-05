@@ -515,7 +515,7 @@ _fdh_resolve_dev() {
                 # assembled) and starved FDE_ATTACH_WAIT_SECS from the
                 # outside. busybox timeout gives the call a HARD ceiling so
                 # the §8.2 bound stays the bound.
-                _fdh_nf=$(timeout 10 "$FDE_NLPLUG_FINDFS" -t 5000 "$1" 2>/dev/null) && {
+                _fdh_nf=$(busybox timeout 10 "$FDE_NLPLUG_FINDFS" -t 5000 "$1" 2>/dev/null) && {
                     printf '%s\n' "$_fdh_nf"
                     return 0
                 }
@@ -713,6 +713,11 @@ _fdh_escrow_detect() {
 # next boot unless every member opened).
 _fdh_escrow_consume() {
     _fec_sysfs=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
+    # wall-clock stamps on every trace line: the s22f1 hang (2026-10-05, run
+    # 1791193782) froze between the marshal msg and the SRK with ZERO console
+    # output for 18 minutes — these make the next wedge name its own step
+    _fec_t0=$(date +%s 2>/dev/null || echo 0)
+    _fec_elapsed() { echo $(( $(date +%s 2>/dev/null || echo 0) - _fec_t0 )); }
     _fec_pcr7=''
     _fec_pcr11=''
     # the kernel's pcr-sha256 sysfs files are 0x-PREFIXED ("0x1a2b...") — the
@@ -726,12 +731,12 @@ _fdh_escrow_consume() {
     if [ -f "$_fec_sysfs/7" ]; then
         _fec_pcr7=$(_fdh_sysfs_read "$_fec_sysfs/7")
     elif command -v tpm2_pcrread >/dev/null 2>&1; then
-        _fec_pcr7=$(tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF; exit}')
+        _fec_pcr7=$(busybox timeout 15 tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF; exit}')
     fi
     if [ -f "$_fec_sysfs/11" ]; then
         _fec_pcr11=$(_fdh_sysfs_read "$_fec_sysfs/11")
     elif command -v tpm2_pcrread >/dev/null 2>&1; then
-        _fec_pcr11=$(tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF; exit}')
+        _fec_pcr11=$(busybox timeout 15 tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF; exit}')
     fi
     [ -n "$_fec_pcr7" ] && [ -n "$_fec_pcr11" ] || {
         _msg "provisioning escrow: cannot read the live PCRs — the escrow stays for the next boot"
@@ -783,11 +788,21 @@ _fdh_escrow_consume() {
     _msg "provisioning escrow: the policy digest marshaled ($_fec_pol)"
     _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
     chmod 700 "$_fec_w" 2>/dev/null || :
-    tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1 || {
+    _msg "provisioning escrow: srk createprimary starting (+$(_fec_elapsed)s)"
+    # timeout: a wedged qemu<->swtpm chardev (the tpmdev socket has NO
+    # reconnect=) blocks the guest's tpm2 write indefinitely — the s22f1 hang
+    # (2026-10-05: 18 silent minutes, swtpm never saw the command). 90s and
+    # the escrow degrades LOUD to its stays-for-the-next-boot path instead.
+    # `busybox timeout` — NOT bare timeout: the applet has no /usr/bin
+    # symlink in this initrd closure; only the multucall binary is packed.
+    busybox timeout 90 tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1
+    _fec_rc=$?
+    [ "$_fec_rc" = "0" ] || {
         rm -rf "$_fec_w"
-        _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot"
+        _msg "provisioning escrow: the SRK creation failed — the escrow stays for the next boot (rc=$_fec_rc +$(_fec_elapsed)s)"
         return 1
     }
+    _msg "provisioning escrow: the SRK created (+$(_fec_elapsed)s)"
     # _fdh_hex2bin (the hook's own awk transform) — NOT policy_hex_to_bin:
     # lib/policy.sh is not in the initrd closure (R640 2026-10-03: the
     # missing command silently killed every escrow boot at this line).
@@ -803,11 +818,15 @@ _fdh_escrow_consume() {
         _msg "provisioning escrow: cannot marshal the live policy digest"
         return 1
     }
-    [ "$(wc -c <"$_fec_w/pol.bin" 2>/dev/null)" = "32" ] || {
+    # `od|tr|awk` byte count — NOT wc: wc is NOT in this initrd closure (the
+    # blkid lesson again — the closure, not the host, is the runtime)
+    _fec_plen=$(( $(od -An -tx1 "$_fec_w/pol.bin" 2>/dev/null | tr -d ' \n' | awk '{print length($0)}') / 2 ))
+    [ "$_fec_plen" = "32" ] || {
         rm -rf "$_fec_w"
         _msg "provisioning escrow: the marshaled policy digest is not 32 bytes (the hex2bin transform collapsed) — the escrow stays for the next boot"
         return 1
     }
+    _msg "provisioning escrow: pol.bin marshaled 32 bytes (+$(_fec_elapsed)s)"
     _fdh_opened_list=''
     _fec_pos=0
     for _fec_wd in $_fdh_members; do
@@ -830,52 +849,61 @@ _fdh_escrow_consume() {
         }
         # SELF-SEAL: the {7,11} PolicyPCR digest over the LIVE values, sealing
         # the member's keyslot-1 credential text (the ADR-19 framing)
-        tpm2_create -C "$_fec_w/primary.ctx" -g sha256 -i "$_fec_w/$_fec_target.cred" \
-            -L "$_fec_w/pol.bin" -u "$_fec_w/$_fec_target.pub" -r "$_fec_w/$_fec_target.priv" >/dev/null 2>&1 || {
-            _msg "provisioning escrow: the self-seal failed for $_fec_target — the member stays for the ceremony"
+        _msg "provisioning escrow: self-seal starting for $_fec_target (+$(_fec_elapsed)s)"
+        busybox timeout 60 tpm2_create -C "$_fec_w/primary.ctx" -g sha256 -i "$_fec_w/$_fec_target.cred" \
+            -L "$_fec_w/pol.bin" -u "$_fec_w/$_fec_target.pub" -r "$_fec_w/$_fec_target.priv" >/dev/null 2>&1
+        _fec_rc=$?
+        [ "$_fec_rc" = "0" ] || {
+            _msg "provisioning escrow: the self-seal failed for $_fec_target — the member stays for the ceremony (rc=$_fec_rc +$(_fec_elapsed)s)"
             continue
         }
         # the TRIAL UNSEAL under a live PolicyPCR session, BEFORE any mutation
         # unsquashed with per-step diagnostics (the squashed one-liner hid WHICH
         # link failed — s22 2026-10-04 leg-3 iterations)
         _fec_tstep=startauthsession
-        tpm2_startauthsession --policy-session -S "$_fec_w/trial.ctx" >/dev/null 2>&1 || {
+        _msg "provisioning escrow: trial $(_fec_elapsed)s $_fec_tstep for $_fec_target"
+        busybox timeout 30 tpm2_startauthsession --policy-session -S "$_fec_w/trial.ctx" >/dev/null 2>&1 || {
             _msg "provisioning escrow: trial startauthsession failed for $_fec_target"
             continue
         }
         _fec_tstep=policypcr
-        tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 || {
+        _msg "provisioning escrow: trial $(_fec_elapsed)s $_fec_tstep for $_fec_target"
+        busybox timeout 30 tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 || {
             # the 3-way dump: the sealed pol vs the TPM-live PCRs vs the sysfs
             # PCRs — the mismatch's side names itself (the read channel vs the
-            # encoding)
+            # encoding); the reads are timeout-wrapped — a wedged TPM must
+            # not hang the DIAGNOSTIC itself
             _fec_polhex=$(od -An -tx1 "$_fec_w/pol.bin" 2>/dev/null | tr -d ' \n')
-            _fec_tpm7=$(tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF}')
-            _fec_tpm11=$(tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF}')
+            _fec_tpm7=$(busybox timeout 15 tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF}')
+            _fec_tpm11=$(busybox timeout 15 tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF}')
             _fec_sys7=$(cat "$_fec_sysfs/7" 2>/dev/null | tr -d ' \t\n\r')
             _fec_sys11=$(cat "$_fec_sysfs/11" 2>/dev/null | tr -d ' \t\n\r')
             _msg "provisioning escrow: trial policypcr failed for $_fec_target — pol.bin=$_fec_polhex tpm7=$_fec_tpm7 tpm11=$_fec_tpm11 sys7=$_fec_sys7 sys11=$_fec_sys11"
-            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
             continue
         }
         _fec_tstep=load
-        tpm2_load -C "$_fec_w/primary.ctx" -u "$_fec_w/$_fec_target.pub" \
+        _msg "provisioning escrow: trial $(_fec_elapsed)s $_fec_tstep for $_fec_target"
+        busybox timeout 30 tpm2_load -C "$_fec_w/primary.ctx" -u "$_fec_w/$_fec_target.pub" \
             -r "$_fec_w/$_fec_target.priv" -c "$_fec_w/$_fec_target.ctx" >/dev/null 2>&1 || {
             _msg "provisioning escrow: trial load failed for $_fec_target"
-            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
             continue
         }
         _fec_tstep=unseal
-        tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
+        _msg "provisioning escrow: trial $(_fec_elapsed)s $_fec_tstep for $_fec_target"
+        busybox timeout 30 tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
             >"$_fec_w/$_fec_target.trial" 2>"$_fec_w/unseal.err" && [ -s "$_fec_w/$_fec_target.trial" ] || {
-            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            _fec_rc=$?
+            busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
             # the 3-way digest dump: the sealed pol.bin vs the SESSION's computed
             # digest vs the sysfs inputs — the mismatch's side names itself
             _fec_polhex=$(od -An -tx1 "$_fec_w/pol.bin" 2>/dev/null | tr -d ' \n')
-            _fec_seed=$(tpm2_getpolicydigest -S "$_fec_w/trial.ctx" --hex 2>/dev/null | awk '{print $NF}' | sed 's/^0x//')
-            _msg "provisioning escrow: trial unseal failed for $_fec_target — tpm2 rc: $(head -c 120 "$_fec_w/unseal.err" 2>/dev/null | tr '\n' ' ') | pol.bin=$_fec_polhex session_digest=$_fec_seed sys7=$_fec_pcr7 sys11=$_fec_pcr11"
+            _fec_seed=$(busybox timeout 10 tpm2_getpolicydigest -S "$_fec_w/trial.ctx" --hex 2>/dev/null | awk '{print $NF}' | sed 's/^0x//')
+            _msg "provisioning escrow: trial unseal failed for $_fec_target — tpm2 rc: $(head -c 120 "$_fec_w/unseal.err" 2>/dev/null | tr '\n' ' ') | pol.bin=$_fec_polhex session_digest=$_fec_seed sys7=$_fec_pcr7 sys11=$_fec_pcr11 (rc=$_fec_rc +$(_fec_elapsed)s)"
             continue
         }
-        tpm2_flushcontext -t >/dev/null 2>&1 || :
+        busybox timeout 10 tpm2_flushcontext -t >/dev/null 2>&1 || :
         # the TOKEN JSON: the FULL §7.2 schema with an EMPTY tpm2-signature —
         # the escrow-provenance MARKER (the boot's PolicyPCR-only branch
         # unseals it; the TPM fail-closes any PCR drift)
