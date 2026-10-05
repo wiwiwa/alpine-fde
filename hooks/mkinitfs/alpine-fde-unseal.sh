@@ -757,24 +757,28 @@ _fdh_escrow_consume() {
     #           || sha256(hex2bin(d7)||hex2bin(d11)) )
     # The earlier simplified sha256(d7||d11) was a DIFFERENT digest — the trial
     # unseal refused it (s22 2026-10-04: "the trial unseal failed for root").
+    # LC_ALL=C: the awk %c UTF-8-encodes values > 127 without it (the lib
+    # policy_hex_to_bin comment) — the byte semantics MUST be pinned
     _fec_pol=$(printf '%s%s' "$_fec_pcr7" "$_fec_pcr11" | \
-        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
+        LC_ALL=C awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
         openssl dgst -sha256 -hex | awk '{print $NF}')
     [ -n "$_fec_pol" ] || {
         _msg "provisioning escrow: cannot compute the pcr digest — the escrow stays for the next boot"
         return 1
     }
+    _msg "provisioning escrow: the pcr digest computed ($_fec_pol)"
     _fec_pol=$(printf '%s%s%s%s' \
         '0000000000000000000000000000000000000000000000000000000000000000' \
         '0000017f' \
         '00000001000b03800800' \
         "$_fec_pol" | \
-        awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
+        LC_ALL=C awk '{hex="0123456789abcdef"; for(i=1;i<=length($0);i+=2){hi=index(hex,tolower(substr($0,i,1)))-1; lo=index(hex,tolower(substr($0,i+1,1)))-1; printf "%c",hi*16+lo}}' | \
         openssl dgst -sha256 -hex | awk '{print $NF}')
     [ -n "$_fec_pol" ] || {
         _msg "provisioning escrow: cannot marshal the live policy digest"
         return 1
     }
+    _msg "provisioning escrow: the policy digest marshaled ($_fec_pol)"
     _fec_w=$(mktemp -d "$FDE_TMPDIR/alpine-fde-escrow.XXXXXX") 2>/dev/null || return 1
     chmod 700 "$_fec_w" 2>/dev/null || :
     tpm2_createprimary -C o -g sha256 -G rsa -c "$_fec_w/primary.ctx" >/dev/null 2>&1 || {
