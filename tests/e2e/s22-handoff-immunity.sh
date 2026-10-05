@@ -1006,9 +1006,17 @@ timeout 120 "$CRYPTSETUP_BIN" luksAddKey --pbkdf argon2id --pbkdf-memory 1048576
 assert_eq "ceremony mirror: keyslot 0 enrolled (argon2id, the ×2 passphrase)" "argon2id" \
     "$(disk_metadata "$RUN/disk.img" | jq -r '.keyslots["0"].kdf.type')"
 # the hook's step (h): delete the escrow ONLY after every member is
-# credential-complete (single member here)
-mdeltree -i "$RUN/esp.img" ::/alpine-fde-provision \
-    || { echo "s22: the ceremony mirror's escrow delete failed"; exit 1; }
+# credential-complete (single member here). ADR-21: the in-guest consume
+# ALREADY deleted it (the "escrow DELETED in-guest" assert above) — the
+# mdeltree stays for the mirror-only path and must tolerate already-absent
+# (s22f10: the harness broke BECAUSE the product worked).
+if mdir -i "$RUN/esp.img" ::/alpine-fde-provision >/dev/null 2>&1; then
+    mdeltree -i "$RUN/esp.img" ::/alpine-fde-provision \
+        || { echo "s22: the ceremony mirror's escrow delete failed"; exit 1; }
+    echo "# ceremony mirror: the escrow deleted host-side (the mirror-only path)"
+else
+    echo "# ceremony mirror: the escrow already DELETED in-guest (the ADR-21 consume) — step (h) satisfied"
+fi
 mcopy -i "$RUN/esp.img" -o "::/alpine-fde-provision/volume-keys.json" "$RUN/escrow-gone.json" \
     2>/dev/null && { echo "s22: the escrow SURVIVED the mirror delete"; exit 1; } || true
 _assert_result ok "ceremony mirror: the escrow DELETED from the installed ESP (step h)" ""
