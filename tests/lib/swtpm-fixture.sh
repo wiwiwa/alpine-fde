@@ -119,6 +119,14 @@ swtpm_start() {
     local timed_log_fifo=""
     if [[ "${SWTPM_TIMED_LOG:-}" == "1" ]]; then
         timed_log_fifo="$dir/.tpm-log.fifo"
+        # idempotent per start: a stale fifo (File exists) plus a live-or-dead
+        # prior tailer left swtpm writing into a fifo with a half-dead reader
+        # and TRUNCATED the shared tpm-cmd.log on every cycle — the s22f13
+        # --save volatile ctrl exchange then blocked to its timeout
+        if [[ -f "$dir/ts.pid" ]]; then
+            kill "$(cat "$dir/ts.pid" 2>/dev/null)" 2>/dev/null || :
+        fi
+        rm -f "$timed_log_fifo" "$dir/ts.pid"
         mkfifo "$timed_log_fifo"
         ts '%.s' <"$timed_log_fifo" >"$dir/tpm-cmd.log" &
         echo $! >"$dir/ts.pid"

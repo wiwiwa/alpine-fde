@@ -945,10 +945,10 @@ run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU
 # swtpm stop/start cycle discards the blob before its boot, so the retired
 # store/restore hazard (s15-4) is void).
 if timeout 15 swtpm_ioctl --save volatile --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-    "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1 && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
+    "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
     echo "# completion capture: the booted volatile register saved"
 else
-    echo "# completion capture: the volatile save FAILED — the completion falls back to the extend replay"
+    echo "# completion capture: the volatile save FAILED — the completion falls back to the extend replay (err: $(head -c 200 "$RUN/tpm-save.err" 2>/dev/null | tr '\n' ' '))"
 fi
 overlay_discard "$RUN/boot3/disk.qcow2"   # ephemeral — the host legs below mutate
 CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
