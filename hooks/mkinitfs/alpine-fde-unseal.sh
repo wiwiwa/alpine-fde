@@ -1103,8 +1103,14 @@ fi
 # --- §8.2 steps 2+3: token path -------------------------------------------------
 # per-member state — initialized UNCONDITIONALLY: the TPM-absent path skips
 # the whole _fdh_w-guarded block below, and the recovery loop's `case
-# $_fdh_opened_list` must never trip strict-mode's unset-variable guard
-_fdh_opened_list=''
+# $_fdh_opened_list` must never trip strict-mode's unset-variable guard.
+# EXCEPT the escrow's record: a consumed escrow leaves its opened members
+# here (the consume appends _fec_target per unlocked member) — wiping it
+# re-arms the §8.2 step-4 passphrase prompt for volumes the escrow JUST
+# opened (s22f9: 'consumed' then parked at 'enter the recovery passphrase'
+# for 12 minutes). The :- default keeps strict mode happy when no consume
+# ran (the variable is then unset).
+_fdh_opened_list=${_fdh_opened_list:-''}
 _fdh_prev_tokdigest=''
 _fdh_prev_passfile=''
 _fdh_any_tok=0
