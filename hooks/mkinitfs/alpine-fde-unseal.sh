@@ -932,13 +932,18 @@ _fdh_escrow_consume() {
 {"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"","tpm2-signature":""}
 EOF
         _msg "provisioning escrow: token import id $_fec_free for $_fec_target starting (+$(_fec_elapsed)s)"
-        # stderr captured + echoed in the failure trace: s22f3 (2026-10-05)
-        # burned a run on a discarded rc=1 — cryptsetup stalled ~30s then
-        # failed with its error text invisible
-        busybox timeout 30 cryptsetup token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" \
+        # stderr captured + echoed in the failure trace. s22f4 LESSON (busybox
+        # timeout semantics, NOT GNU): rc=143 = died-by-TERM, rc=child's-own
+        # code = the child CAUGHT the TERM — so s22f4's "rc=1 Read interrupted."
+        # WAS the 30s ceiling firing into a HUNG read (cryptsetup's TERM
+        # handler interrupted it, exit 1). --debug names the internal step;
+        # the raw dd probe splits device-level vs cryptsetup-internal blocks.
+        busybox timeout 30 cryptsetup --debug token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" \
             >"$_fec_w/import.out" 2>"$_fec_w/import.err" || {
             _fec_rc=$?
-            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony (rc=$_fec_rc +$(_fec_elapsed)s) err: $(head -c 200 "$_fec_w/import.err" 2>/dev/null | tr '\n' ' ')"
+            busybox timeout 5 dd if="$_fec_dev" of=/dev/null bs=512 count=1 2>/dev/null
+            _fec_probe=$?
+            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony (rc=$_fec_rc +$(_fec_elapsed)s) probe=$_fec_probe err: $(tail -c 400 "$_fec_w/import.err" 2>/dev/null | tr '\n' ' ')"
             continue
         }
         # UNLOCK with the escrowed credential (the keyslot-1 passphrase text)

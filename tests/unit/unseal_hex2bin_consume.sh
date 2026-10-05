@@ -91,7 +91,7 @@ for verb in startauthsession policypcr load unseal; do
     assert_contains "trial $verb runs under busybox timeout" "$CONSUME_BODY" \
         "busybox timeout 30 tpm2_$verb"
 done
-for cspec in '10 cryptsetup token export' '30 cryptsetup token import' '60 cryptsetup open --type luks'; do
+for cspec in '10 cryptsetup token export' '30 cryptsetup --debug token import' '60 cryptsetup open --type luks'; do
     assert_contains "consume cryptsetup ($cspec) runs under busybox timeout" "$CONSUME_BODY" \
         "busybox timeout $cspec"
 done
