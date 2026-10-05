@@ -943,7 +943,10 @@ EOF
             _fec_rc=$?
             busybox timeout 5 dd if="$_fec_dev" of=/dev/null bs=512 count=1 2>/dev/null
             _fec_probe=$?
-            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony (rc=$_fec_rc +$(_fec_elapsed)s) probe=$_fec_probe err: $(tail -c 400 "$_fec_w/import.err" 2>/dev/null | tr '\n' ' ')"
+            # the LIBRARY --debug trail goes to stdout (import.out); the tool
+            # messages to stderr — s22f5 proved it: import.err held only the
+            # TERM line, the step trail must be in the out capture
+            _msg "provisioning escrow: the token import failed for $_fec_target — the member stays for the ceremony (rc=$_fec_rc +$(_fec_elapsed)s) probe=$_fec_probe err: $(tail -c 200 "$_fec_w/import.err" 2>/dev/null | tr '\n' ' ') out: $(tail -c 400 "$_fec_w/import.out" 2>/dev/null | tr '\n' ' ')"
             continue
         }
         # UNLOCK with the escrowed credential (the keyslot-1 passphrase text)
