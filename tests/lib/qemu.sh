@@ -109,12 +109,13 @@ _QEMU_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$_QEMU_LIB_DIR/serial.sh"
 
 # --- accelerator selection (/dev/kvm is REQUIRED) ---------------------------------
-# ALPINE_FDE_ACCEL: kvm (default) | tcg. KVM is a hard requirement for e2e
-# (§12): an unusable /dev/kvm is a loud fail-closed error — never a silent TCG
-# downgrade (TCG boots blow the per-scenario time budget and corrupt the serial
-# console; the explicit escape hatch below exists for exactly that reason).
-# ALPINE_FDE_ACCEL=tcg is honored verbatim as the explicitly-requested dev
-# opt-out; any other value (including the old silent 'auto') is rejected. The
+# ALPINE_FDE_ACCEL: kvm only. KVM is a hard requirement for e2e (§12): an
+# unusable /dev/kvm is a loud fail-closed error — never a silent TCG downgrade.
+# The former explicit ALPINE_FDE_ACCEL=tcg escape hatch is RETIRED (2026-10-04,
+# operator directive): TCG boots are 10-20x slower and blow every scenario
+# budget — a 25-minute tcg s22 iteration and a 10-hour tcg registry are worse
+# than not running; the tests now REFUSE without a working /dev/kvm. The tcg
+# machinery below stays for the low-level qemu debugging only. The
 # decision is made once per process and logged with a greppable `qemu-accel:`
 # marker; every qemu_run in the process then uses the chosen accelerator (the
 # `-accel kvm` flag is added ONLY for KVM, so TCG invocations stay
@@ -165,7 +166,8 @@ _qemu_accel_choose() {
     local mode="${ALPINE_FDE_ACCEL:-kvm}" why
     case "$mode" in
         tcg)
-            _qemu_accel="tcg"; why="requested (ALPINE_FDE_ACCEL=tcg)" ;;
+            echo "qemu-accel: REFUSED — ALPINE_FDE_ACCEL=tcg is retired (2026-10-04): the TCG boots are 10-20x slower and blow the scenario budgets; the e2e requires a working /dev/kvm" >&2
+            return 1 ;;
         kvm)
             if _qemu_kvm_ok; then
                 _qemu_accel="kvm"; why="requested (ALPINE_FDE_ACCEL=kvm)"
