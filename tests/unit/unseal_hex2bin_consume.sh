@@ -91,7 +91,7 @@ for verb in startauthsession policypcr load unseal; do
     assert_contains "trial $verb runs under busybox timeout" "$CONSUME_BODY" \
         "busybox timeout 30 tpm2_$verb"
 done
-for cspec in '10 cryptsetup token export' '30 cryptsetup --debug token import' '60 cryptsetup open --type luks'; do
+for cspec in '10 cryptsetup token export' '30 cryptsetup --debug token import --token-id "$_fec_free" --json-file' '60 cryptsetup open --type luks'; do
     assert_contains "consume cryptsetup ($cspec) runs under busybox timeout" "$CONSUME_BODY" \
         "busybox timeout $cspec"
 done
@@ -102,5 +102,12 @@ for trace in 'srk createprimary starting' 'the SRK created' \
     'trial $(_fec_elapsed)s' '_fec_elapsed() { echo'; do
     assert_contains "trace present: $trace" "$CONSUME_BODY" "$trace"
 done
+
+#   (h) the --json-file regression (s22f3..f6, strace-proven on the packed
+#       2.7.5 binary): token import MUST pass the token JSON via --json-file —
+#       the positional file form is ignored and the tool reads STDIN (the
+#       console in the initrd) until killed;
+assert_contains "token import passes --json-file (positional form is ignored by 2.7.5)" \
+    "$CONSUME_BODY" 'token import --token-id "$_fec_free" --json-file "$_fec_w/$_fec_target.tok"'
 
 finish

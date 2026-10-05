@@ -932,13 +932,14 @@ _fdh_escrow_consume() {
 {"type":"systemd-tpm2","keyslots":["1"],"tpm2-blob":"$_fec_priv_b64$_fec_pub_b64","tpm2-pcrs":[7,11],"tpm2-pcr-bank":"sha256","tpm2-pubkey":"","tpm2-signature":""}
 EOF
         _msg "provisioning escrow: token import id $_fec_free for $_fec_target starting (+$(_fec_elapsed)s)"
-        # stderr captured + echoed in the failure trace. s22f4 LESSON (busybox
-        # timeout semantics, NOT GNU): rc=143 = died-by-TERM, rc=child's-own
-        # code = the child CAUGHT the TERM — so s22f4's "rc=1 Read interrupted."
-        # WAS the 30s ceiling firing into a HUNG read (cryptsetup's TERM
-        # handler interrupted it, exit 1). --debug names the internal step;
-        # the raw dd probe splits device-level vs cryptsetup-internal blocks.
-        busybox timeout 30 cryptsetup --debug token import --token-id "$_fec_free" "$_fec_dev" "$_fec_w/$_fec_target.tok" \
+        # --json-file is MANDATORY on cryptsetup 2.7.5: the positional file
+        # argument is IGNORED and the tool falls back to reading the token
+        # JSON FROM STDIN — in the initrd that is /dev/console, so the import
+        # blocked on the console read until our TERM killed it (s22f3..f6:
+        # rc=1 +32s "Read interrupted.", probe=0 — the device was never
+        # touched; strace-proven on the packed binary: read(0,...) with the
+        # debug line 'STDIN descriptor JSON read requested').
+        busybox timeout 30 cryptsetup --debug token import --token-id "$_fec_free" --json-file "$_fec_w/$_fec_target.tok" "$_fec_dev" \
             >"$_fec_w/import.out" 2>"$_fec_w/import.err" || {
             _fec_rc=$?
             busybox timeout 5 dd if="$_fec_dev" of=/dev/null bs=512 count=1 2>/dev/null
