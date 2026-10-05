@@ -969,7 +969,16 @@ EOF
     # leaves the escrow standing (the retry converges on the next boot — the
     # recovery path covers the unopened members meanwhile)
     _fec_all=1
+    # completeness = every TARGET opened: _fdh_members is the flat
+    # "target device target device" list, but _fdh_opened_list accumulates
+    # TARGET names only — iterating every word (devices included) made
+    # _fec_all=0 UNCONDITIONAL: s22f8 unlocked root fine and still tripped
+    # "not every member opened" (first execution of this line ever — the
+    # consume never got past the import before tonight)
+    _fec_pos=0
     for _fec_wd in $_fdh_members; do
+        _fec_pos=$((_fec_pos + 1))
+        [ $((_fec_pos % 2)) -eq 1 ] || continue
         case " $_fdh_opened_list " in *" $_fec_wd "*) ;; *) _fec_all=0 ;; esac
     done
     if [ "$_fec_all" = 0 ]; then
