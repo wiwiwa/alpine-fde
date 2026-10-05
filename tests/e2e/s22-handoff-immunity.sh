@@ -925,6 +925,24 @@ assert_eq "[leg 2] host(esp): the escrow still stands (content byte-identical)" 
 # ============================================================================
 echo "# leg 3: the first boot — the escrow consume engages, the exact UKI enters"
 _boot_hook "$RUN/boot3" "$RUN/esp.img" "$RUN/disk.img" "$RUN/vars-enrolled.fd" ""
+# ADR-21 completion capture (background savor): the guest's PCR register is
+# FINAL after the enter-initrd phase extend — everything after it (consume,
+# unlock, ceremony) is PCR-silent. The savor waits for the 'consumed' marker
+# (≈15s of margin before the guest powers off), saves the volatile state ONCE,
+# and exits. The swtpm dies at the guest's chardev EOF at poweroff — extends
+# from zero can never reproduce the multi-event chain (s22f12) — so this
+# in-boot save is the only faithful capture.
+(
+    until grep -q "provisioning escrow: consumed" "$RUN/boot3/console.log" 2>/dev/null; do
+        kill -0 "$(cat "$RUN/boot3/qemu.pid" 2>/dev/null)" 2>/dev/null || exit 0
+        sleep 0.3
+    done
+    timeout 5 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+        --save volatile "$RUN/tpm-boot3-volatile.bin" 2>>"$RUN/tpm-save.err" || true
+    [[ -s "$RUN/tpm-boot3-volatile.bin" ]] || \
+        timeout 5 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+            --save volatile "$RUN/tpm-boot3-volatile.bin" 2>>"$RUN/tpm-save.err" || true
+) &
 i=0
 until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
     _qemu_alive_or_die "$RUN/boot3" "console-wait:boot3-UNSEALED"
@@ -934,18 +952,8 @@ until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
     sleep 1
     i=$((i + 1))
 done
-# ADR-21 completion capture: the ONLY window where the booted volatile
-# register is alive is RIGHT HERE — the guest is TPM-quiescent after UNSEALED
-# (hwrng rounds only), and swtpm exits on the chardev EOF the moment the
-# guest powers off (the simplified design: "swtpm exits on the EOF"), so no
-# post-exit capture can ever win that race (s22f13/f14/f15). The guest's PCR
-# chain is multi-event — extends from zero can never reproduce it (s22f12).
-if timeout 10 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-    --save volatile "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
-    echo "# completion capture: the booted volatile register saved (in-boot)"
-else
-    echo "# completion capture: the in-boot volatile save FAILED (err: $(head -c 200 "$RUN/tpm-save.err" 2>/dev/null | tr '\n' ' ')) — the completion falls back to the extend replay"
-fi
+[[ -s "$RUN/tpm-boot3-volatile.bin" ]] && \
+    echo "# completion capture: the booted volatile register saved (in-boot savor)"
 wait_console "$RUN/boot3" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT" 2>/dev/null || \
     wait_console "$RUN/boot3" "localhost login:" 120 || true
 run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
