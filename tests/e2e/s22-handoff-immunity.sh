@@ -1049,7 +1049,9 @@ swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
 # the provisional {11} token is digest-anchored to (the fidelity note at the
 # pcrsig-11 composition). The guest's own pre-phase chain is multi-event and
 # unreproducible by extends — that is WHY the anchor is V_SEED.
-timeout 10 swtpm_pcrextend -Q -T "$(_swtpm_tcti_for "$RUN/tpm")" "11:sha256=$PHASE_DGST" || true
+# swtpm_pcrextend is a FIXTURE FUNCTION (timeout cannot exec functions —
+# s22f18) and carries its own internal `timeout 10` on the ioctl.
+swtpm_pcrextend "$RUN/tpm" 11 "$PHASE_DGST" || true
 D11_LIVE=$(_pcrread "$RUN/tpm" 11)
 if [[ "$D11_LIVE" == "$V_SEED" ]]; then
     _assert_result ok "completion fixture: the register anchored to leg 3's V_SEED (the extend-from-zero phase register)" ""
