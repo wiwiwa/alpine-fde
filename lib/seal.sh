@@ -437,22 +437,34 @@ seal_unseal() {
     # staged at enroll time.
     # ALPINE_FDE_SEAL_TRACE=1: per-step rc trace on stderr (default OFF — the
     # generic "drift?" error is the production contract; the e2e completion
-    # sets the seam — s22f19: the silenced && chain hid WHICH step refused)
+    # sets the seam — s22f19: the silenced && chain hid WHICH step refused).
+    # The session MUST carry the signed policy's PCR commitment: the session
+    # digest at policyauthorize time must equal the -i authorized policy (the
+    # entry's signed pol = the PolicyPCR digest over the entry's own pcrs —
+    # the hook's in-guest token path runs the same policypcr, and the
+    # normative oracle is tests/unit/pcrsign_policyauthorize_accept.sh, which
+    # runs PolicyPCR before PolicyAuthorize). WITHOUT it the authorize
+    # compares an empty-session digest and refuses 0x1C4 parameter(1)
+    # RC_VALUE (s22f19-f21, first-ever host-side exercise of this path).
     if [ -n "${ALPINE_FDE_SEAL_TRACE:-}" ]; then
         tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1; _su_r1=$?
         echo "seal-trace: startauthsession rc=$_su_r1" >&2
-        _su_r2=$_su_r1 _su_r3=1
+        _su_r2=$_su_r1 _su_r3=1 _su_r4=1
         if [ "$_su_r1" -eq 0 ]; then
-            tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
-                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" 2>"$_su_w/authz.err" >/dev/null; _su_r2=$?
-            echo "seal-trace: policyauthorize rc=$_su_r2 $(head -c 200 "$_su_w/authz.err" 2>/dev/null | tr '\n' ' ')" >&2
+            tpm policypcr -S "$_su_w/sess.ctx" -l "sha256:$_su_sel" >/dev/null 2>&1; _su_r2=$?
+            echo "seal-trace: policypcr(sha256:$_su_sel) rc=$_su_r2" >&2
         fi
         if [ "$_su_r2" -eq 0 ]; then
-            tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
-                -o "$_su_w/secret.raw" >/dev/null 2>&1; _su_r3=$?
-            echo "seal-trace: unseal rc=$_su_r3" >&2
+            tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
+                -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" 2>"$_su_w/authz.err" >/dev/null; _su_r3=$?
+            echo "seal-trace: policyauthorize rc=$_su_r3 $(head -c 200 "$_su_w/authz.err" 2>/dev/null | tr '\n' ' ')" >&2
         fi
         if [ "$_su_r3" -eq 0 ]; then
+            tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
+                -o "$_su_w/secret.raw" >/dev/null 2>&1; _su_r4=$?
+            echo "seal-trace: unseal rc=$_su_r4" >&2
+        fi
+        if [ "$_su_r4" -eq 0 ]; then
             openssl base64 -A -in "$_su_w/secret.raw" >"$_su_out" 2>/dev/null &&
                 [ -s "$_su_out" ] && _su_rc=0 || _su_rc=1
         else
@@ -460,6 +472,7 @@ seal_unseal() {
         fi
     else
         tpm startauthsession --policy-session -S "$_su_w/sess.ctx" >/dev/null 2>&1 &&
+            tpm policypcr -S "$_su_w/sess.ctx" -l "sha256:$_su_sel" >/dev/null 2>&1 &&
             tpm policyauthorize -S "$_su_w/sess.ctx" -i "$_su_w/msg.bin" \
                 -n "$_su_w/name.bin" -t "$_su_w/ticket.bin" >/dev/null 2>&1 &&
             tpm unseal -c "$_su_w/seal.ctx" -p "session:$_su_w/sess.ctx" \
