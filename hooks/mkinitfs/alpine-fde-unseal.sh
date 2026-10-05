@@ -848,9 +848,9 @@ _fdh_escrow_consume() {
         }
         _fec_tstep=unseal
         tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
-            >"$_fec_w/$_fec_target.trial" 2>/dev/null && [ -s "$_fec_w/$_fec_target.trial" ] || {
+            >"$_fec_w/$_fec_target.trial" 2>"$_fec_w/unseal.err" && [ -s "$_fec_w/$_fec_target.trial" ] || {
             tpm2_flushcontext -t >/dev/null 2>&1 || :
-            _msg "provisioning escrow: trial unseal failed for $_fec_target (the policy session refused)"
+            _msg "provisioning escrow: trial unseal failed for $_fec_target — tpm2 rc: $(head -c 200 "$_fec_w/unseal.err" 2>/dev/null | tr '\n' ' ')"
             continue
         }
         tpm2_flushcontext -t >/dev/null 2>&1 || :
