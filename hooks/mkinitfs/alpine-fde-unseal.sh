@@ -818,14 +818,31 @@ _fdh_escrow_consume() {
             continue
         }
         # the TRIAL UNSEAL under a live PolicyPCR session, BEFORE any mutation
-        tpm2_startauthsession --policy-session -S "$_fec_w/trial.ctx" >/dev/null 2>&1 &&
-            tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 &&
-            tpm2_load -C "$_fec_w/primary.ctx" -u "$_fec_w/$_fec_target.pub" \
-                -r "$_fec_w/$_fec_target.priv" -c "$_fec_w/$_fec_target.ctx" >/dev/null 2>&1 &&
-            tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
-                >"$_fec_w/$_fec_target.trial" 2>/dev/null && [ -s "$_fec_w/$_fec_target.trial" ] || {
+        # unsquashed with per-step diagnostics (the squashed one-liner hid WHICH
+        # link failed — s22 2026-10-04 leg-3 iterations)
+        _fec_tstep=startauthsession
+        tpm2_startauthsession --policy-session -S "$_fec_w/trial.ctx" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: trial startauthsession failed for $_fec_target"
+            continue
+        }
+        _fec_tstep=policypcr
+        tpm2_policypcr -S "$_fec_w/trial.ctx" -l "sha256:7,11" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: trial policypcr failed for $_fec_target (the live PolicyPCR digest differs from the sealed policy)"
             tpm2_flushcontext -t >/dev/null 2>&1 || :
-            _msg "provisioning escrow: the trial unseal failed for $_fec_target — the member stays for the ceremony"
+            continue
+        }
+        _fec_tstep=load
+        tpm2_load -C "$_fec_w/primary.ctx" -u "$_fec_w/$_fec_target.pub" \
+            -r "$_fec_w/$_fec_target.priv" -c "$_fec_w/$_fec_target.ctx" >/dev/null 2>&1 || {
+            _msg "provisioning escrow: trial load failed for $_fec_target"
+            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            continue
+        }
+        _fec_tstep=unseal
+        tpm2_unseal -c "$_fec_w/$_fec_target.ctx" -p "session:$_fec_w/trial.ctx" \
+            >"$_fec_w/$_fec_target.trial" 2>/dev/null && [ -s "$_fec_w/$_fec_target.trial" ] || {
+            tpm2_flushcontext -t >/dev/null 2>&1 || :
+            _msg "provisioning escrow: trial unseal failed for $_fec_target (the policy session refused)"
             continue
         }
         tpm2_flushcontext -t >/dev/null 2>&1 || :
