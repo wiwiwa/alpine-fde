@@ -944,8 +944,8 @@ run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU
 # for the completion stage's restore (a HOST-side phase; leg 4's own
 # swtpm stop/start cycle discards the blob before its boot, so the retired
 # store/restore hazard (s15-4) is void).
-if timeout 15 swtpm_ioctl --save volatile --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-    "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
+if timeout 15 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+    --save volatile "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
     echo "# completion capture: the booted volatile register saved"
 else
     echo "# completion capture: the volatile save FAILED — the completion falls back to the extend replay (err: $(head -c 200 "$RUN/tpm-save.err" 2>/dev/null | tr '\n' ' '))"
@@ -1071,8 +1071,8 @@ swtpm_ensure "$RUN/tpm" >/dev/null 2>&1 || true
 # PRIMARY: restore the SAVED booted volatile register (the capture right
 # after boot3's exit) — the exact guest PCR state, PCR7 included. The swtpm
 # restart zeroes everything; the blob brings the boot back.
-if [[ -s "$RUN/tpm-boot3-volatile.bin" ]] && timeout 15 swtpm_ioctl --load volatile \
-    --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1; then
+if [[ -s "$RUN/tpm-boot3-volatile.bin" ]] && timeout 15 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+    --load volatile "$RUN/tpm-boot3-volatile.bin" >/dev/null 2>&1; then
     echo "# completion capture: the booted volatile register RESTORED"
 else
     # FALLBACK (soft landing — cannot reproduce the guest's multi-event
