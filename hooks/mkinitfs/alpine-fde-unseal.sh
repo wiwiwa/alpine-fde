@@ -713,13 +713,21 @@ _fdh_escrow_consume() {
     _fec_sysfs=${FDE_TPM_SYSFS:-/sys/class/tpm/tpm0/pcr-sha256}
     _fec_pcr7=''
     _fec_pcr11=''
+    # the kernel's pcr-sha256 sysfs files are 0x-PREFIXED ("0x1a2b...") — the
+    # unnormalized read produced a 33-byte garbage digest and the trial unseal
+    # refused it (s22 2026-10-04: the eliminate-chain pinned the sysfs branch).
+    # Normalize: strip 0x, lowercase, validate 64-hex; else fall through.
+    _fdh_sysfs_read() {
+        cat "$1" 2>/dev/null | tr -d ' \t\n\r' | sed 's/^0x//' | tr 'A-F' 'a-f' | \
+            grep -qE '^[0-9a-f]{64}$' && cat "$1" 2>/dev/null | tr -d ' \t\n\r' | sed 's/^0x//' | tr 'A-F' 'a-f'
+    }
     if [ -f "$_fec_sysfs/7" ]; then
-        _fec_pcr7=$(cat "$_fec_sysfs/7" 2>/dev/null | tr -d ' \n')
+        _fec_pcr7=$(_fdh_sysfs_read "$_fec_sysfs/7")
     elif command -v tpm2_pcrread >/dev/null 2>&1; then
         _fec_pcr7=$(tpm2_pcrread sha256:7 2>/dev/null | awk 'NR==1{print $NF; exit}')
     fi
     if [ -f "$_fec_sysfs/11" ]; then
-        _fec_pcr11=$(cat "$_fec_sysfs/11" 2>/dev/null | tr -d ' \n')
+        _fec_pcr11=$(_fdh_sysfs_read "$_fec_sysfs/11")
     elif command -v tpm2_pcrread >/dev/null 2>&1; then
         _fec_pcr11=$(tpm2_pcrread sha256:11 2>/dev/null | awk 'NR==1{print $NF; exit}')
     fi
