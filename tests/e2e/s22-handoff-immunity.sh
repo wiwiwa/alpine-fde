@@ -934,22 +934,21 @@ until grep -q "alpine-fde: UNSEALED" "$RUN/boot3/console.log" 2>/dev/null; do
     sleep 1
     i=$((i + 1))
 done
+# ADR-21 completion capture: the ONLY window where the booted volatile
+# register is alive is RIGHT HERE — the guest is TPM-quiescent after UNSEALED
+# (hwrng rounds only), and swtpm exits on the chardev EOF the moment the
+# guest powers off (the simplified design: "swtpm exits on the EOF"), so no
+# post-exit capture can ever win that race (s22f13/f14/f15). The guest's PCR
+# chain is multi-event — extends from zero can never reproduce it (s22f12).
+if timeout 10 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
+    --save volatile "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
+    echo "# completion capture: the booted volatile register saved (in-boot)"
+else
+    echo "# completion capture: the in-boot volatile save FAILED (err: $(head -c 200 "$RUN/tpm-save.err" 2>/dev/null | tr '\n' ' ')) — the completion falls back to the extend replay"
+fi
 wait_console "$RUN/boot3" "alpine-fde: POWEROFF" "$QEMU_TIMEOUT" 2>/dev/null || \
     wait_console "$RUN/boot3" "localhost login:" 120 || true
 run_stage qemu_wait-boot3 "$((QEMU_TIMEOUT + 60))" qemu_wait "$RUN/boot3" "$QEMU_TIMEOUT"
-# ADR-21 completion capture: qemu_wait does NOT reap the fixture swtpm — it is
-# alive RIGHT HERE holding the booted volatile register, the ONLY faithful
-# copy of the guest's PCR state (the guest's PCR chain is multi-event; extends
-# from zero can never reproduce it — s22f11/s22f12). Save the volatile blob
-# for the completion stage's restore (a HOST-side phase; leg 4's own
-# swtpm stop/start cycle discards the blob before its boot, so the retired
-# store/restore hazard (s15-4) is void).
-if timeout 15 swtpm_ioctl --unix "$(_swtpm_ctrl_sock "$RUN/tpm")" \
-    --save volatile "$RUN/tpm-boot3-volatile.bin" 2>"$RUN/tpm-save.err" && [[ -s "$RUN/tpm-boot3-volatile.bin" ]]; then
-    echo "# completion capture: the booted volatile register saved"
-else
-    echo "# completion capture: the volatile save FAILED — the completion falls back to the extend replay (err: $(head -c 200 "$RUN/tpm-save.err" 2>/dev/null | tr '\n' ' '))"
-fi
 overlay_discard "$RUN/boot3/disk.qcow2"   # ephemeral — the host legs below mutate
 CURRENT_QEMU_DIR=""                       # the RAW base through by-uuid
 
