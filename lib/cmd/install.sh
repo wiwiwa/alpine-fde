@@ -517,6 +517,11 @@ inst_bootentry_parse() {
             loader = ""
             if (match(lc, /file\([^)]*\)/)) {
                 loader = substr(lc, RSTART + 5, RLENGTH - 6)
+            } else if (match(lc, /\/[^/]*\.efi[ \t]*$/)) {
+                # the Alpine efibootmgr build prints the loader path BARE
+                # after the HD(...) device path - no File( wrapper (the
+                # Debian build wraps it). Take the final /path component.
+                loader = substr(lc, RSTART + 1, RLENGTH - 1)
             }
             printf "%s %s %s %s %s %s\n", num, guid, loader, kver, variant, rl
         }
