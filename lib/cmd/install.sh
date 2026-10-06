@@ -1489,6 +1489,14 @@ inst_setupmode_gate() {
     die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first (§9.1 preflight)"
   fi
   info "install: firmware Setup Mode confirmed ($_isg_state)"
+  # THE RE-RUN WALL (R640 2026-10-06): validating firmwares refuse EVERY
+  # OS-side mutation of an EXISTING authenticated variable — and the previous
+  # install's signing privates are shredded (ADR-18), so nothing can sign the
+  # deletes either. SetupMode=1 with KEK/db still present = un-enrollable
+  # from the OS; fail here, BEFORE any disk mutation, with the remedy.
+  if fw_var_present "$_isg_dir" KEK || fw_var_present "$_isg_dir" db; then
+    die "install: SetupMode is 1 but the KEK/db variables are still present — this firmware class refuses OS-side deletes of existing authenticated variables and the prior install's signing keys are gone (ADR-18), so the enrollment cannot clear them. Clear them via the firmware setup UI ('Clear All Secure Boot keys') or the standard Redfish SecureBoot.ResetKeys DeleteAllKeys action (applies at POST), then re-run (§9.1 preflight)"
+  fi
   return 0
 }
 
