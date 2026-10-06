@@ -2751,7 +2751,7 @@ cmd_install_main() {
   # device references keep it busy at teardown. The install is COMPLETE at this
   # point (sealed, state written) — a busy host bind must not fail it: every
   # umount gets a lazy (-l) fallback, best-effort, never fatal.
-  inst_exec host "umount $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $_im_mnt/sys/firmware/efi/efivars 2>/dev/null || :; umount $_im_mnt/dev 2>/dev/null || umount -l $_im_mnt/dev 2>/dev/null || :; umount $_im_mnt/sys 2>/dev/null || umount -l $_im_mnt/sys 2>/dev/null || :; umount $_im_mnt/proc 2>/dev/null || umount -l $_im_mnt/proc 2>/dev/null || :; umount -R $_im_mnt 2>/dev/null || umount -l $_im_mnt 2>/dev/null || :; $_im_close"
+  inst_exec host "umount -R $_im_mnt 2>/dev/null || umount -l -R $_im_mnt 2>/dev/null || :; sleep 2; $_im_close; sleep 2; $_im_close"
   inst_exec host "rm -f $_im_lukskey # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------
