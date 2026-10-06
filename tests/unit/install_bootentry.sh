@@ -502,7 +502,7 @@ assert_contains "plan: the record probes require_pkgs efibootmgr:efibootmgr" "$O
     "require_pkgs efibootmgr:efibootmgr"
 I_SEAL=$(line_no "$OUT" "seal_provisional")
 I_ENTRY=$(line_no "$OUT" "inst_bootentry_ensure")
-I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l")
+I_UMOUNT=$(line_no "$OUT" "fi; sleep 2; { cryptsetup close")
 assert_eq "order: boot entry AFTER the provisional seal (UKI pair staged)" "1" \
     "$(( I_SEAL > 0 && I_ENTRY > I_SEAL ? 1 : 0 ))"
 assert_eq "order: boot entry BEFORE the teardown (chroot still sees the ESP)" "1" \

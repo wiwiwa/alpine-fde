@@ -105,7 +105,7 @@ I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
-I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $T/mnt/sys/firmware/efi/efivars 2>/dev/null")
+I_UMOUNT=$(line_no "$OUT" "fi; sleep 2; { cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "# HOST: rm -f $T/alpine-fde-ephkey")
 I_PROBE=$(line_no "$OUT" "if fw_var_present")
 I_INSTR=$(line_no "$OUT" "Secure Boot key material is staged under")
@@ -127,24 +127,23 @@ assert_eq "scrub record is a HOST step (the staged key lives host-side, I1)" "1"
     "$(grep -cE '^# HOST: rm -f .*alpine-fde-ephkey' <<<"$OUT")"
 assert_contains "enrolled path keeps a PLAIN direct reboot to disk (ADR-20)" "$OUT" \
     "direct reboot to disk (NVRAM enrollment succeeded, ADR-20)"
-# child-before-parent + lazy -l fallbacks + the mapped close, all on the ONE
-# teardown record line (order pinned by index on that line, not a flat haystack)
-TEARDOWN_LINE=$(printf '%s\n' "$OUT" | grep -F "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null" | head -n 1)
-IE=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "/sys/firmware/efi/efivars 2>/dev/null") }')
-ID=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount '"$T"'/mnt/dev") }')
-IS=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount '"$T"'/mnt/sys 2>/dev/null") }')
-IP=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount '"$T"'/mnt/proc") }')
-IR=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "umount -R '"$T"'/mnt") }')
-IC=$(awk -v l="$TEARDOWN_LINE" 'BEGIN { print index(l, "cryptsetup close") }')
-assert_eq "teardown record: efivars (child) unmounted BEFORE the dev/sys/proc parents" "1" \
-    "$(( IE > 0 && ID > IE && IS > ID && IP > IS ? 1 : 0 ))"
-assert_eq "teardown record: recursive umount -R AFTER the child unmounts" "1" \
-    "$(( IP > 0 && IR > IP ? 1 : 0 ))"
-assert_eq "teardown record: mapped-container close LAST" "1" \
-    "$(( IR > 0 && IC > IR ? 1 : 0 ))"
+# /proc/mounts deepest-first sweep + lazy -l fallbacks + the settle-retried
+# mapped close + the per-member force sweep, pinned on the emitted lines
+TEARDOWN_LINE=$(printf '%s\n' "$OUT" | grep -F "/proc/mounts | sort -r | while read -r _rp" | head -n 1)
+assert_eq "teardown record: sweep matches everything under the target root (prefix + exact)" "1" \
+    "$(grep -cF 'index($2, m "/") == 1 || $2 == m {print $2}' <<<"$TEARDOWN_LINE")"
 LAZY=$(grep -oF '|| umount -l' <<<"$TEARDOWN_LINE" | wc -l)
-assert_eq "teardown record: lazy -l fallback for every umount (never a hard failure)" "1" \
-    "$(( LAZY >= 4 ? 1 : 0 ))"
+assert_eq "teardown record: lazy -l fallback for every sweep umount (never a hard failure)" "1" \
+    "$(( LAZY >= 1 ? 1 : 0 ))"
+assert_eq "teardown record: mapped-container close retried after a settle sleep" "1" \
+    "$(grep -cF '|| { sleep 3; { cryptsetup close' <<<"$OUT")"
+FORCE_LINE=$(printf '%s\n' "$OUT" | grep -F 'dmsetup remove -f' | head -n 1)
+assert_contains "teardown record: per-member force sweep falls back to dmsetup remove -f" "$FORCE_LINE" 'dmsetup remove -f'
+assert_contains "teardown record: surviving mapper WARNS loudly (never silent)" "$FORCE_LINE" 'mapper still open after teardown'
+assert_eq "teardown record: real umount -R is the PRIMARY (the umount package) with the sweep as fallback" "1" \
+    "$(( $(grep -cF 'else umount -R' <<<"$TEARDOWN_LINE") >= 1 && $(grep -cF 'grep -q busybox' <<<"$TEARDOWN_LINE") >= 1 ? 1 : 0 ))"
+assert_eq "teardown record: apk add umount best-effort precedes the branch" "1" \
+    "$(grep -cF 'apk add umount' <<<"$TEARDOWN_LINE")"
 
 # =============================================================================
 # NO_REBOOT seams (env + flag): the confirm + firmware trip + direct reboot
@@ -180,7 +179,7 @@ I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
 # blocker-#18-era flat teardown replaced by the child-before-parent + lazy-fallback
 # record: efivars (child) first, then dev/sys/proc parents, then the recursive
 # umount with -l fallbacks, then the mapped-container close
-I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $T/mnt/sys/firmware/efi/efivars 2>/dev/null")
+I_UMOUNT=$(line_no "$OUT" "fi; sleep 2; { cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "# HOST: rm -f $T/alpine-fde-ephkey")
 assert_eq "raid1: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "raid1: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -191,7 +190,7 @@ run_install_emission --disk "$DISK" --bcache "$CACHE"
 assert_eq "bcache emission rc 0" "0" "$RC"
 assert_eq "bcache: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
-I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $T/mnt/sys/firmware/efi/efivars 2>/dev/null")
+I_UMOUNT=$(line_no "$OUT" "fi; sleep 2; { cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "# HOST: rm -f $T/alpine-fde-ephkey")
 assert_eq "bcache: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "bcache: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"
@@ -202,7 +201,7 @@ run_install_emission --disk "$DISK" --disk "$DISKB" --bcache "$CACHE"
 assert_eq "bcache-multi emission rc 0" "0" "$RC"
 assert_eq "bcache-multi: exactly ONE runtime-conditional OsIndications record" "1" "$(grep -c 'else fw_osindications_set' <<<"$OUT")"
 I_META=$(line_no "$OUT" "inst_resolve_target_metadata")
-I_UMOUNT=$(line_no "$OUT" "umount $T/mnt/sys/firmware/efi/efivars 2>/dev/null || umount -l $T/mnt/sys/firmware/efi/efivars 2>/dev/null")
+I_UMOUNT=$(line_no "$OUT" "fi; sleep 2; { cryptsetup close")
 I_SCRUB=$(line_no "$OUT" "# HOST: rm -f $T/alpine-fde-ephkey")
 assert_eq "bcache-multi: target metadata BEFORE teardown" "1" "$(( I_META > 0 && I_UMOUNT > I_META ? 1 : 0 ))"
 assert_eq "bcache-multi: teardown BEFORE the scrub" "1" "$(( I_UMOUNT > 0 && I_SCRUB > I_UMOUNT ? 1 : 0 ))"

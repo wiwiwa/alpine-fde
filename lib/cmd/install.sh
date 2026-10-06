@@ -1102,17 +1102,24 @@ inst_sfdisk_swap_line() {
 # re-register a device mid-install. The dd head+tail superblock wipe in front
 # of make-bcache (7619960) then operates on a released device.
 
+# inst_rec_umount_line MNT — the portable RECURSIVE stale-tree umount body,
+# shared by the reset block and the §9.1 teardown.
+# User directive (R640): use the REAL umount -R — Alpine ships umount(1) as
+# its own `umount` package (split out of util-linux-mount), so the recursive
+# unmount is one apk add away. Best-effort install; when it lands, umount(1)
+# is the full binary and -R works. When the fetch fails or busybox still owns
+# umount, fall back to the /proc/mounts deepest-first sweep (zero deps).
+# Never fatal; single line, ash/busybox compatible.
+inst_rec_umount_line() {
+  printf '%s\n' "apk add umount >/dev/null 2>&1 || :; if readlink -f \"\$(command -v umount)\" 2>/dev/null | grep -q busybox; then awk -v m=\"$1\" 'index(\$2, m \"/\") == 1 || \$2 == m {print \$2}' /proc/mounts | sort -r | while read -r _rp; do umount \"\$_rp\" 2>/dev/null || umount -l \"\$_rp\" 2>/dev/null || :; done; else umount -R $1 2>/dev/null || umount -l -R $1 2>/dev/null || :; fi"
+}
+
 # inst_reset_umount_rec_line MNT — the PRIMARY mount teardown of the reset
-# block (item 26d, user-directed): ONE guarded RECURSIVE `umount -R <mnt>` of
-# the stale target tree. The retired fixed list (subvols + ESP + root) missed
-# the stale chroot binds a mid-chroot death leaves behind (/mnt/proc,
-# /mnt/sys, /mnt/dev, /mnt/sys/firmware/efi/efivars — created at the H-02
-# block, removed only by the plan teardown). `umount -R` is an accepted
-# dependency: the installer's own §9.1 teardown already relies on it.
-# mountpoint probe + warn branch + `|| :` no-op tail, single line, ash/busybox
-# compatible.
+# block (item 26d, user-directed): ONE guarded RECURSIVE unmount of the stale
+# target tree (inst_rec_umount_line), with an honest post-check verdict: the
+# warn branch fires only when the tree is STILL mounted after the pass.
 inst_reset_umount_rec_line() {
-  printf '%s\n' "if mountpoint -q $1 2>/dev/null; then umount -R $1 && echo 'alpine-fde: info: reset: recursively unmounted stale target tree $1' || echo 'alpine-fde: warn: reset: could not recursively unmount stale target tree $1'; fi || :"
+  printf '%s\n' "if mountpoint -q $1 2>/dev/null; then $(inst_rec_umount_line "$1"); if mountpoint -q $1 2>/dev/null; then echo 'alpine-fde: warn: reset: could not recursively unmount stale target tree $1'; else echo 'alpine-fde: info: reset: recursively unmounted stale target tree $1'; fi; fi || :"
 }
 
 # inst_reset_mapper_line MAPPER_DIR — guarded cryptsetup close of the stale
@@ -1169,14 +1176,23 @@ inst_exec() {
     if [ -z "${_IEX_TRAP_ARMED:-}" ]; then
       _IEX_TRAP_ARMED=1
       trap '
-                rm -f "${_ime_kf:-}" 2>/dev/null
+                apk add umount >/dev/null 2>&1 || :
                 if [ -n "${_im_mnt:-}" ]; then
                     # boot-lane finding #20: CHILD MOUNTS FIRST — the efivars
                     # bind hangs under /mnt/sys, so the parent must unmount
                     # after it (parent-first is EBUSY on every real install).
-                    umount "$_im_mnt/sys/firmware/efi/efivars" 2>/dev/null || :
-                    umount "$_im_mnt/dev" "$_im_mnt/sys" "$_im_mnt/proc" 2>/dev/null || :
+                    # R640: the recursive unmount is inst_rec_umount_line —
+                    # the real umount -R (the umount package) or the
+                    # deepest-first /proc/mounts sweep when busybox owns
+                    # umount; the old fixed list missed the ESP at
+                    # <mnt>/efi — the stale mount kept root1 busy.
+                    if readlink -f "$(command -v umount)" 2>/dev/null | grep -q busybox; then
+                        awk -v m="$_im_mnt" '\''index($2, m "/") == 1 || $2 == m {print $2}'\'' /proc/mounts | sort -r | while read -r _rp; do umount "$_rp" 2>/dev/null || umount -l "$_rp" 2>/dev/null || :; done
+                    else
+                        umount -R "$_im_mnt" 2>/dev/null || umount -l -R "$_im_mnt" 2>/dev/null || :
+                    fi
                 fi
+                rm -f "${_ime_kf:-}" 2>/dev/null
             ' EXIT
     fi
     if [ "$_iex_kind" = "host" ]; then
@@ -2414,7 +2430,6 @@ cmd_install_main() {
   # NVRAM enrollment then fails and the install defers key import to the
   # operator ("staged kek.auth ... ESP fallback"; PK absent at the verdict).
   inst_exec host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
-  mkdir -p "$_im_mnt/sys/firmware/efi/efivars"
   # the R640 (2026-10-06): the host-side BIND records /mnt/sys/... in
   # mountinfo — libefivar INSIDE the chroot resolves /sys/firmware/efi/efivars
   # against ITS root, finds no efivarfs mount at that path, and reports
@@ -2751,7 +2766,16 @@ cmd_install_main() {
   # device references keep it busy at teardown. The install is COMPLETE at this
   # point (sealed, state written) — a busy host bind must not fail it: every
   # umount gets a lazy (-l) fallback, best-effort, never fatal.
-  inst_exec host "umount -R $_im_mnt 2>/dev/null || umount -l -R $_im_mnt 2>/dev/null || :; sleep 2; $_im_close; sleep 2; $_im_close"
+  # (c) R640 root1-busy root cause: the ESP stays mounted at <mnt>/efi and the
+  # per-mount list never unmounted it; the recursive unmount is
+  # inst_rec_umount_line (the util-linux-mount subpackage provides the real
+  # umount -R; the /proc/mounts sweep is the offline fallback). (d) the mapper
+  # closes: the && chain retries once after a settle sleep, then a per-member
+  # sweep forces the remove (dmsetup remove -f) and WARNS loudly if a mapper
+  # survives — a busy close must never fail the install nor pass silently.
+  _im_rec=$(inst_rec_umount_line "$_im_mnt")
+  inst_exec host "${_im_rec}; sleep 2; { $_im_close ; } 2>/dev/null || { sleep 3; { $_im_close ; } 2>/dev/null || :; }"
+  inst_exec host "for _im_m in $_im_members_names; do cryptsetup status \$_im_m >/dev/null 2>&1 || continue; cryptsetup close \$_im_m 2>/dev/null || dmsetup remove -f \$_im_m 2>/dev/null || :; cryptsetup status \$_im_m >/dev/null 2>&1 && echo \"alpine-fde: warn: \$_im_m mapper still open after teardown (holder survived)\" || :; done; true"
   inst_exec host "rm -f $_im_lukskey # I1: ephemeral install key scrubbed (§9.1 teardown)"
 
   # --- 9. enrollment verdict + ESP-fallback tail (user directives 1+3) ------

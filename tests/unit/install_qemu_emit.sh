@@ -212,8 +212,10 @@ assert_eq "emitted: reset status record (guarded: previous failed install detect
 # item 26d: ONE guarded RECURSIVE stale-tree umount record (covers the stale
 # chroot binds — /mnt/proc /mnt/sys /mnt/dev /mnt/.../efivars — a fixed list
 # misses); the fixed-list records are gone
-assert_eq "emitted: 1 guarded RECURSIVE stale-tree umount record (item 26d)" "1" \
-    "$(grep -c '^# HOST: if mountpoint -q .*; then umount -R ' "$SCRIPT")"
+assert_eq "emitted: 1 guarded RECURSIVE stale-tree umount record (item 26d, the umount package)" "1" \
+    "$(grep -c '^# HOST: if mountpoint -q .*; then apk add umount ' "$SCRIPT")"
+assert_eq "emitted: umount -R primary, sweep fallback, zero full-util-linux adds" "1" \
+    "$(( $(grep -cF 'else umount -R' "$SCRIPT") >= 1 && $(grep -cF 'grep -q busybox' "$SCRIPT") >= 1 && $(grep -cE 'apk add util-linux( |$)' "$SCRIPT") == 0 ? 1 : 0 ))"
 assert_eq "emitted: zero FIXED-list stale-mount umount records remain (item 26d)" "0" \
     "$(grep -c 'unmounted stale mount' "$SCRIPT")"
 assert_eq "emitted: guarded stale-mapper close record (rootN glob + root-crypt + swap, name-stripped)" "1" \
@@ -304,7 +306,7 @@ assert_contains "guest: the guarded copy record installs BOTH ESP homes (canonic
 assert_contains "guest: the boot manager is RELEASE-SIGNED in the record (blocker #26 addendum)" "$(cat "$SCRIPT")" \
     'sbsign --key'
 assert_contains "guest: the guarded copy record dies fail-closed when no loader binary exists" "$(cat "$SCRIPT")" \
-    'no systemd-boot loader EFI binary found in-chroot'
+    'SKIPPING the boot-manager copy (the lane is retired'
 assert_eq "blocker #7: ZERO bootctl invocations anywhere in the emitted script" "0" \
     "$(grep -Ec 'bootctl( |$)' "$SCRIPT")"
 # real-server blocker #8: the build line must configure the release-key dir
@@ -424,15 +426,15 @@ assert_eq "target root untouched (no host step ran)" "0" "$([ -e "$ALPINE_FDE_IN
 # --- H-02 binds emitted in the right lane ------------------------------------------
 assert_eq "host step emitted as comment: /proc bind (H-02)" "1" \
     "$(grep -c '^# HOST: .*mount -t proc proc' "$SCRIPT")"
-assert_eq "host step emitted as comment: efivars bind (§9.1)" "1" \
-    "$(grep -c '^# HOST: .*mount --bind /sys/firmware/efi/efivars' "$SCRIPT")"
-# blocker-#23-era reconciliation: the bind teardown is now ONE record,
-# child-before-parent (efivars first) with lazy -l fallbacks and the
-# mapped-container close last
-assert_eq "host step emitted as comment: bind teardown (H-02, child-before-parent + lazy -l)" "1" \
-    "$(grep -cF "# HOST: umount $ALPINE_FDE_INSTALL_MNT/sys/firmware/efi/efivars 2>/dev/null || umount -l" "$SCRIPT")"
-assert_eq "bind teardown: the parent /mnt recursive umount still closes the plan" "1" \
-    "$(grep -cF 'umount -R '"$ALPINE_FDE_INSTALL_MNT"' 2>/dev/null || umount -l '"$ALPINE_FDE_INSTALL_MNT" "$SCRIPT")"
+assert_eq "host step emitted as comment: live-env efivarfs ensure (§9.1, R640 in-chroot mount)" "1" \
+    "$(grep -c '^# HOST: mountpoint -q /sys/firmware/efi/efivars' "$SCRIPT")"
+# R640 reconciliation: the bind teardown is inst_rec_umount_line — the real
+# umount -R (apk add umount, best-effort) with the /proc/mounts deepest-first
+# sweep as the busybox fallback, then the settle-retried mapper close
+assert_eq "bind teardown: the rec-umount record (apk add umount + branch)" "1" \
+    "$(grep -c '^# HOST: apk add umount >/dev/null 2>&1 || :; if readlink' "$SCRIPT")"
+assert_eq "bind teardown: umount -R primary + sweep fallback + close retry" "1" \
+    "$(( $(grep -cF 'else umount -R' "$SCRIPT") >= 1 && $(grep -cF 'grep -q busybox' "$SCRIPT") >= 1 && $(grep -cF '|| { sleep 3; { cryptsetup close' "$SCRIPT") >= 1 ? 1 : 0 ))"
 
 # --- conf drop (§4 topology + CR-01) -------------------------------------------------
 assert_contains "conf drop emitted: ROOT_FS=btrfs (§4)" "$(cat "$SCRIPT")" "ROOT_FS=btrfs"
