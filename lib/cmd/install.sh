@@ -5,7 +5,7 @@
 # Alpine rootfs (§3.3 apk populate), and the in-chroot provisioning ceremony
 # ending in a provisional TPM token (PCR 11 only) + a direct reboot to disk —
 # or, when the firmware REFUSED NVRAM enrollment (or a platform key was
-# ALREADY enrolled — factory or custom: the DEFERRED-ENROLLMENT mode, no
+# ALREADY enrolled — factory or custom: the REFUSED mode (2026-10-06), no
 # NVRAM writes, the release certificate is imported via the firmware UI), the
 # manual key-import instructions, an explicit Enter confirmation, and a reboot
 # INTO FIRMWARE SETUP (OsIndications) instead.
@@ -1456,17 +1456,17 @@ inst_live_tool_pairs() {
 }
 
 # inst_setupmode_gate — G-IL2 (§9.1 preflight, UserGuide §1): the FIRST
-# preflight check, BEFORE any disk mutation. TWO firmware states are supported:
+# preflight check, BEFORE any disk mutation. ONE firmware state is supported:
 #   SetupMode==1 (Setup Mode)            the NVRAM write flow (db reset +
 #                                        release+vendor rebuild -> KEK -> PK)
-#   SetupMode==0 WITH a platform PK      the DEFERRED-ENROLLMENT mode (DECIDED
-#                                        Samuel, 2026-09-28, real Dell
-#                                        PowerEdge R640): factory or custom
-#                                        PK stays; the release certificate is
-#                                        imported into the existing db via
-#                                        the firmware UI after the install
-#                                        (fw_auth_enroll stages the .cer set
-#                                        and makes NO NVRAM writes)
+# SetupMode==0 WITH a platform PK REFUSES (2026-10-06, real Dell PowerEdge
+# R640): an existing platform key is untouchable from the OS (no private
+# half) and the install must not half-finish behind a manual UI step — the
+# gate fails closed 64 up front with the clear-PK remediation (firmware UI
+# "Clear All Secure Boot keys", or iDRAC SecureBoot.ResetKeys DeletePK —
+# verified on this R640); the re-run then finds SetupMode==1 and completes
+# hands-free (completed steps skip via crash resume). This gate mirrors the
+# fw_auth_enroll gate so the refusal happens BEFORE any disk mutation.
 # Anything else (SetupMode==0 with NO PK — a state no real firmware reports;
 # SetupMode variable absent) fails closed 64 with the operator fix. Runs over
 # the ALPINE_FDE_EFIVARS_DIR seam.
@@ -1481,10 +1481,12 @@ inst_setupmode_gate() {
   _isg_setup=${_isg_setup%% *}
   if [ "$_isg_setup" != "1" ]; then
     if [ "$_isg_setup" = "0" ] && fw_var_present "$_isg_dir" PK; then
-      info "install: a platform key is already enrolled ($_isg_state) — deferred-enrollment mode: the installer makes NO NVRAM writes; the release certificate is imported via the firmware setup UI after the install"
-      return 0
+      # REFUSED (user directive 2026-10-06, R640): an existing platform key is
+      # untouchable from the OS (no private half) and the install must not
+      # half-finish behind a manual UI step — refuse BEFORE any disk mutation.
+      die "install: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): an existing PK cannot be modified or removed from the OS (that requires the PK's own private half). Clear it FIRST — firmware setup UI 'Clear All Secure Boot keys', or iDRAC: SecureBoot ResetKeys DeletePK (verified on this R640) — so SetupMode becomes 1, then re-run; completed install steps skip via crash resume and the enrollment (db rebuild with the release+vendor certs -> KEK -> PK) runs hands-free (§9.1 preflight)"
     fi
-    die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first, or keep the platform key enrolled (deferred-enrollment mode: the release certificate is imported via the firmware UI) (§9.1 preflight)"
+    die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first (§9.1 preflight)"
   fi
   info "install: firmware Setup Mode confirmed ($_isg_state)"
   return 0

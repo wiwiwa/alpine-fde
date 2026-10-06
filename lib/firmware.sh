@@ -387,21 +387,15 @@ EOF
 # write, so re-installs never accumulate duplicates). dbx is NEVER targeted:
 # it is the revocation list and stays exactly as the vendor/operator set it.
 # Gated: SetupMode==1 runs the write flow; a platform PK PRESENT with
-# SetupMode==0 takes the DEFERRED-ENROLLMENT path (DECIDED Samuel, 2026-09-28,
-# real Dell PowerEdge R640): no NVRAM writes at all — the release certificate
-# is imported into the EXISTING (factory or custom) key database via the
-# firmware setup UI from the staged .cer files (fw_auth_esp_fallback with the
-# defer note), and the enroll returns SUCCESS so the install continues. That
-# day's proven deployment mode: 'Restore Default Policy Entries' put the
-# factory Dell PK/KEK/db/dbx back (the vendor db carries the Microsoft
-# option-ROM CAs that keep the PERC/NIC option ROMs booting under Secure
-# Boot), then the release db.cer is imported into the factory db through the
-# firmware UI — PK present, SetupMode=0, Secure Boot enforced, our release
-# cert in db verifies our UKI. The old behavior (die 64 on any SetupMode!=1)
-# would have aborted that install. The same day also proved the OS-write path
-# is simply unreliable on this board (even in Setup Mode the firmware refuses
-# OS-side authenticated NVRAM writes after a UI-side wipe), so the UI import
-# from the staged files is the deterministic enrollment path. A
+# SetupMode==0 with a platform PK takes the REFUSED path (user directive,
+# 2026-10-06, R640): the installer never modifies or removes an EXISTING
+# platform key from the OS (that requires the PK's own private half) and no
+# longer half-finishes (the retired 2026-09-28 DEFERRED-ENROLLMENT mode):
+# stage the import-ready certs for the UI, then FAIL the install. The
+# remediation is deterministic: clear the PK (firmware setup UI "Clear All
+# Secure Boot keys", or iDRAC Redfish SecureBoot.ResetKeys DeletePK —
+# proven on this R640, applies at POST) so SetupMode becomes 1, then re-run:
+# completed steps skip via crash resume and the enroll below goes fully
 # SetupMode!=1 WITHOUT a platform PK (a state no real firmware reports) stays
 # fail-closed 64. A REFUSED write (firmware EINVAL even with correct attrs,
 # queue 26
@@ -424,24 +418,13 @@ fw_auth_enroll() {
     # firmware reports — user mode with no PK) is fail-closed 64.
     if [ "$_fae_setup" != "1" ]; then
         if [ "$_fae_setup" = "0" ] && fw_var_present "$_fae_dir" PK; then
-            # DEFERRED-ENROLLMENT path (REAL-SERVER 2026-09-28, Dell PowerEdge
-            # R640): the platform trusts its OWN PK (factory or custom); the
-            # install's job shrinks to getting OUR release certificate into
-            # the existing db — a UI import, not an NVRAM write. Stage the
-            # import-ready .cer set (fw_auth_esp_fallback, with the defer
-            # note) and return success; the install tail prints the
-            # deferred-import instructions and reboots into firmware setup.
-            info "firmware: a platform key is enrolled (SetupMode 0 — factory or custom PK) — enrollment DEFERS to the firmware-UI import: NO NVRAM writes are attempted; import the release certificate (db.cer) plus the vendor certificate INTO THE EXISTING key database via the firmware setup UI from the staged files (the platform's PK/KEK stay — do not import PK.cer/KEK.cer)"
+            # REFUSED (user directive 2026-10-06, R640): an existing platform
+            # key is untouchable from the OS (no private half) and the install
+            # must not half-finish behind a manual UI step. Stage the certs,
+            # then fail; the remediation is clear-PK + re-run (crash resume).
             fw_auth_esp_fallback "$_fae_esp" "$_fae_keys" \
-                'YOUR SITUATION — DEFERRED ENROLLMENT (a platform key is already enrolled, factory or custom): the installer made NO NVRAM writes. Import db.cer AND the vendor option-ROM certificate INTO THE EXISTING key database (db) via the firmware setup UI. Do NOT import KEK.cer or PK.cer and do NOT clear or replace the platform key — the existing PK and KEK stay. Secure Boot can remain ENABLED throughout. The generic decision tree below applies to the OTHER mode (firmware refused the installer'\''s NVRAM writes).'
-            # install-tail seam: the plan's verdict record reads this marker
-            # (host tmpfs, bind-mounted into the chroot) to route the completion
-            # message + the firmware-setup reboot to the deferred branch
-            if [ -n "${ALPINE_FDE_ENROLL_DEFERRED_MARKER:-}" ]; then
-                : >"$ALPINE_FDE_ENROLL_DEFERRED_MARKER" 2>/dev/null ||
-                    die "firmware: cannot record the deferred-enrollment marker at $ALPINE_FDE_ENROLL_DEFERRED_MARKER — the install tail could not learn the deferred verdict (fix the marker directory and re-run; completed steps skip via crash resume)"
-            fi
-            return 0
+                'YOUR SITUATION — ENROLLMENT REFUSED (a platform key is already enrolled, SetupMode 0): the installer made NO NVRAM writes and STOPPED. To finish automatically: clear the platform key (firmware setup UI "Clear All Secure Boot keys", or iDRAC SecureBoot ResetKeys DeletePK — verified on this Dell R640) so Setup Mode becomes 1, then re-run the installer: completed steps skip via crash resume and the enrollment (db rebuild with the release+vendor certs -> KEK -> PK) runs hands-free. The staged .cer files may alternatively be imported INTO the existing db via the firmware UI, but the installer itself will not proceed while SetupMode is 0.'
+            die "firmware: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): clear the PK (firmware UI 'Clear All Secure Boot keys' or iDRAC SecureBoot ResetKeys DeletePK) so SetupMode becomes 1, then re-run; completed install steps skip via crash resume"
         fi
         die "firmware: SetupMode is $_fae_setup (user mode, NO platform key present — a state no real firmware reports) — refusing the db reset + enrollment: this flow resets and rebuilds db ONLY in Setup Mode (reboot into BIOS setup, 'Clear Secure Boot Keys' to remove the vendor PK so SetupMode becomes 1, keep Secure Boot OFF, then re-run); resetting db outside Setup Mode requires different authorization and is not this flow's job"
     fi
