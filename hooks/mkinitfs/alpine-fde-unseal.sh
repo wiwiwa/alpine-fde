@@ -671,11 +671,21 @@ _fdh_wait_members() {
 # (the boot fell to the provisional-token path). blkid is now in the pinned
 # closure (features.d/alpine-fde.files) and a missed detect is LOUD.
 _fdh_escrow_detect() {
+    # the R640 (2026-10-06, first hardware consume attempt): the ONLY
+    # resolver was util-linux blkid -t LABEL= — but the Alpine initramfs
+    # ships the BUSYBOX blkid, which has no -t LABEL search → the detect
+    # failed on hardware while every e2e run passed (the e2e seams
+    # FDE_ESP_DEV directly). The candidates now cover the Alpine-native
+    # resolvers: nlplug-findfs (present + verified on the R640) and the
+    # /dev/disk/by-label symlink.
     _fded_e=''
     _fded_try=0
     while [ $_fded_try -lt 3 ]; do
         _fded_try=$((_fded_try + 1))
-        for _fded_c in "$FDE_ESP_DEV" $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1); do
+        for _fded_c in "$FDE_ESP_DEV" \
+        $(blkid -t LABEL="$FDE_ESP_LABEL" -o device 2>/dev/null | head -1) \
+        $(nlplug-findfs -t 8000 "LABEL=$FDE_ESP_LABEL" 2>/dev/null | head -1) \
+        /dev/disk/by-label/"$FDE_ESP_LABEL"; do
             [ -n "$_fded_c" ] || continue
             mkdir -p "$FDE_ESP_MNT" 2>/dev/null || :
             # iocharset=cp437: the kernel's default vfat iocharset (ascii) is a
