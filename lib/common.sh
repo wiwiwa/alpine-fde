@@ -250,9 +250,17 @@ require_pkgs() {
     # from the OPERATOR'S mirror (ALPINE_FDE_MIRROR), or a fully provisioned
     # mirror is useless the moment a preflight tool is absent from the media
     # ("util-linux (no such package): required by: world[util-linux]").
+    # THE MIRROR FALLBACK (R640 2026-10-06): a bare live ISO's repositories
+    # are the media's apks/ alone — an unset ALPINE_FDE_MIRROR silently
+    # degraded every fetch to "no such package: required by: world[X]".
+    # Fall back to the installer's own default mirror (the v3.24 main the
+    # target-repo setup uses), then its community twin.
     _SP_APK_REPO=''
     if [ -n "${ALPINE_FDE_MIRROR:-}" ]; then
       _SP_APK_REPO="--repository $ALPINE_FDE_MIRROR"
+    else
+      _sp_mirror=https://dl-cdn.alpinelinux.org/alpine/v3.24
+      _SP_APK_REPO="--repository $_sp_mirror/main --repository $_sp_mirror/community"
     fi
     if [ -z "${_SP_PKGS_UPDATED:-}" ]; then
       info "apk update ..."
