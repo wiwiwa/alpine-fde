@@ -2160,7 +2160,7 @@ cmd_install_main() {
     if [ "$(inst_swap_enabled)" = "1" ]; then
       inst_exec host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk --force $_im_disk"
     fi
     ;;
   bcache)
@@ -2172,7 +2172,7 @@ cmd_install_main() {
       # keeps p2, sized disk - esp - swap.
       inst_exec host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk --force $_im_bcache"
     fi
     # coldplug AFTER sfdisk (defect 2): the cache p1/p2 device nodes only
     # appear once the partition table is re-read and coldplug settles.
@@ -2197,7 +2197,7 @@ cmd_install_main() {
       # set keeps p2, sized disk - esp - swap.
       inst_exec host "$(inst_sfdisk_swap_line "$_im_bcache" cache "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk $_im_bcache"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"cache\"\n' | sfdisk --force $_im_bcache"
     fi
     # coldplug AFTER sfdisk (defect 2), then stale-superblock wipes
     # BEFORE make-bcache (defect 3) — cache p2 + every whole backing disk.
@@ -2230,7 +2230,7 @@ cmd_install_main() {
       # tolerates member size differences (the smallest member bounds the pool)
       inst_exec host "$(inst_sfdisk_swap_line "$_im_disk" root "$_im_esp_mib" "$_im_swap_mib")"
     else
-      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk $_im_disk"
+      inst_exec host "printf 'label: gpt\nstart=2048, size=+$(inst_esp_size), type=uefi, name=\"esp\"\ntype=linux, name=\"root\"\n' | sfdisk --force $_im_disk"
     fi
     # secondaries: LUKS2 container p1 ONLY (no ESP on member disks)
     _im_i=1
@@ -2239,7 +2239,7 @@ cmd_install_main() {
         _im_i=2
         continue
       }
-      inst_exec host "printf 'label: gpt\nstart=2048, type=linux, name=\"root\"\n' | sfdisk $_im_d"
+      inst_exec host "printf 'label: gpt\nstart=2048, type=linux, name=\"root\"\n' | sfdisk --force $_im_d"
       _im_i=$((_im_i + 1))
     done
     ;;
