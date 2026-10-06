@@ -2388,7 +2388,15 @@ cmd_install_main() {
   # NVRAM enrollment then fails and the install defers key import to the
   # operator ("staged kek.auth ... ESP fallback"; PK absent at the verdict).
   inst_exec host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
-  inst_exec host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
+  mkdir -p "$_im_mnt/sys/firmware/efi/efivars"
+  # the R640 (2026-10-06): the host-side BIND records /mnt/sys/... in
+  # mountinfo — libefivar INSIDE the chroot resolves /sys/firmware/efi/efivars
+  # against ITS root, finds no efivarfs mount at that path, and reports
+  # "EFI variables are not supported" — the boot-entry create+poll then runs
+  # blind 40× (the installer refused to guess the entry number, rc=64). The
+  # mount must happen FROM INSIDE the chroot so mountinfo records the path
+  # libefivar expects.
+  inst_exec guest "mkdir -p /sys/firmware/efi/efivars && mount -t efivarfs efivarfs /sys/firmware/efi/efivars"
   # the R640 (2026-10-06): a missing/broken efivars bind made the in-guest
   # boot-entry record fail 40× SILENTLY ('not in the efibootmgr listing' —
   # the poll is blind without efivarfs) and the install aborted rc=64. Verify
