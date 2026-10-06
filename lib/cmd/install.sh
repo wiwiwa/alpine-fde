@@ -2603,7 +2603,7 @@ cmd_install_main() {
   # the §9 tail verdict to route the deferred instructions + firmware-setup
   # reboot.
   inst_exec host "rm -f /dev/shm/alpine-fde-enroll-deferred # stale deferred marker from a previous boot/install must not misroute the §9 verdict"
-  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
+  inst_exec guest "export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && require_pkgs sbctl:sbctl && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys $_im_esp_mnt"
   # step 4b (REPLACED + MOVED BEFORE the ceremony — real-server blocker #7:
   # Alpine ships NO bootctl binary; the retired `bootctl install` record died
   # "/bin/sh: bootctl: not found" AFTER the credential ceremony had already

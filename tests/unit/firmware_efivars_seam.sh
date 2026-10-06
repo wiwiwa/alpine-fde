@@ -315,6 +315,10 @@ openssl req -x509 -newkey rsa:2048 -keyout "$tmp/release.key" \
 openssl x509 -in "$FAKEYS/release.crt" -outform der >"$tmp/release.der"
 printf 'KEK-CERT-DER' >"$FAKEYS/kek.cert.der"
 printf 'PK-CERT-DER' >"$FAKEYS/pk.cert.der"
+# the sbctl-flow store swap stages these PEM certs (the keydir contract:
+# prov_keygen ships PEM + DER for every cert)
+printf 'KEK-CERT-PEM' >"$FAKEYS/kek.cert.pem"
+printf 'PK-CERT-PEM' >"$FAKEYS/pk.cert.pem"
 # the ESP fallback stages the .auth packets AND the .esl lists (KeyTool.efi
 # "enroll from file" consumes the signed .esl form)
 printf 'DB-ESL' >"$FAKEYS/db.esl"
@@ -326,250 +330,126 @@ cp -r "$FAKEYS" "$FAKEYS_DBX"
 printf 'DBX-AUTH' >"$FAKEYS_DBX/dbx.auth"
 printf 'DBX-ESL' >"$FAKEYS_DBX/dbx.esl"
 
-# (a) pre-existing vendor db/KEK/PK are removed before each authenticated write
-fa="$tmp/enroll-preexisting"
+# (a) THE SBCTL FLOW — the success path (R640-proven 2026-10-06): the store
+# is created (if fresh), reset clears the stale variables, the cert swap
+# stages OUR certs into the store, enroll-keys lands PK/KEK/db, SetupMode
+# flips to 0, and the SUCCESS path stages NOTHING to the ESP.
+fa="$tmp/enroll-sbctl-ok"
 mkdir -p "$fa"
 mkvar_byte "$fa" SetupMode 1
-# vendor-shaped variables: plain attrs 0x7, real firmware keeps db/KEK after
-# the vendor PK is cleared (Setup Mode permits removing them)
-printf '\007\000\000\000VENDORDB' >"$fa/db-$DBXGUID"
-printf '\007\000\000\000VENDORKEK' >"$fa/KEK-$GUID"
-printf '\007\000\000\000VENDORPK' >"$fa/PK-$GUID"
-rc=0
-if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(ALPINE_FDE_SEAM_EFIVARS="$fa" fw_auth_enroll "$fa" "$FAKEYS" 2>&1) || rc=$?
-else
-    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
-fi
-assert_rc "enroll: pre-existing vendor vars -> rc 0" 0 "$rc"
-assert_contains "enroll: info line announces the db RESET for pre-existing db" "$out" \
-    "db RESET — deleting the pre-existing db before the release+vendor rebuild"
-assert_contains "enroll: info line for pre-existing vendor KEK" "$out" \
-    "removing pre-existing vendor KEK"
-assert_contains "enroll: info line for pre-existing vendor PK" "$out" \
-    "removing pre-existing vendor PK"
-assert_eq "enroll: db re-created with auth attrs prefix" "07000100" \
-    "$(head -c 4 "$fa/db-$DBXGUID" | od -An -vtx1 | tr -d ' \n')"
-assert_eq "enroll: KEK re-created with auth attrs prefix" "07000100" \
-    "$(head -c 4 "$fa/KEK-$GUID" | od -An -vtx1 | tr -d ' \n')"
-assert_eq "enroll: PK re-created with auth attrs prefix" "07000100" \
-    "$(head -c 4 "$fa/PK-$GUID" | od -An -vtx1 | tr -d ' \n')"
-
-# (b) write refusal -> NON-FATAL ESP fallback (queue 26 ext, user directive:
-# "write .esl to EFI partition, if write to efivars failed, and show
-# instruction to import the file into uefi bios"): the rm failure warns, the
-# refused db write warns WITHOUT dying, the KEK and PK writes are STILL
-# attempted (the same firmware will refuse them too — harmless and
-# diagnostic), all key material is staged under <ESP>/alpine-fde-keys, the
-# manual-import instructions are DEFERRED to the very end of the install
-# (blocker #12 follow-up: the fallback stages silently; the install tail
-# prints the instructions ONCE), and the install CONTINUES.
-fb="$tmp/enroll-rm-fails"
-mkdir -p "$fb"
-# a failing efi-updatevar stub models the real firmware refusing the write
-# (blocker #26 final: the write is efi-updatevar's; the refusal is NON-FATAL
-# -> the ESP fallback stages the manual-import kit and the install continues)
-mkdir -p "$tmp/stub-fail"
-cat >"$tmp/stub-fail/efi-updatevar" <<'STUB'
+printf '\007\000\000\000STALEDB' >"$fa/db-$DBXGUID"
+printf '\007\000\000\000STALEKEK' >"$fa/KEK-$GUID"
+printf '\007\000\000\000STALEPK' >"$fa/PK-$GUID"
+STORE="$tmp/sbctl-store"; rm -rf "$STORE"
+SBLOG="$tmp/sbctl.log"; : >"$SBLOG"
+cat >"$tmp/sbctl-stub" <<STUB
 #!/bin/sh
-echo "efi-updatevar: firmware refused the authenticated write" >&2
-exit 1
+echo "\$1" >>"$SBLOG"
+case "\$1" in
+  reset) rm -f "$fa"/PK-* "$fa"/KEK-* "$fa"/db-* "$fa"/dbx-* ;;
+  create-keys)
+    mkdir -p "$STORE/keys/db" "$STORE/keys/KEK" "$STORE/keys/PK"
+    printf 'SBCTL-DB-PEM' >"$STORE/keys/db/db.pem"
+    printf 'SBCTL-KEY' >"$STORE/keys/db/db.key"
+    printf 'SBCTL-KEK-PEM' >"$STORE/keys/KEK/KEK.pem"
+    printf 'SBCTL-KEY' >"$STORE/keys/KEK/KEK.key"
+    printf 'SBCTL-PK-PEM' >"$STORE/keys/PK/PK.pem"
+    printf 'SBCTL-KEY' >"$STORE/keys/PK/PK.key" ;;
+  enroll-keys)
+    printf '\007\000\000\000NEWPK' >"$fa/PK-$GUID"
+    printf '\007\000\000\000NEWKEK' >"$fa/KEK-$GUID"
+    printf '\007\000\000\000NEWDB' >"$fa/db-$DBXGUID"
+    mkvar_byte "$fa" SetupMode 0 ;;
+esac
 STUB
-chmod +x "$tmp/stub-fail/efi-updatevar"
-mkvar_byte "$fb" SetupMode 1
-# a DIRECTORY at the variable path: rm -f fails (EISDIR) and the subsequent
-# write redirection fails too — models an unremovable stubborn variable
-mkdir "$fb/db-$DBXGUID"
-rm -rf "$tmp/esp-b"
+chmod +x "$tmp/sbctl-stub"
+rm -rf "$tmp/esp-a"
 rc=0
-if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(PATH="$tmp/stub-fail:$PATH" ALPINE_FDE_SEAM_EFIVARS="$fb" fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
-else
-    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
-fi
-assert_rc "enroll: write refusal -> ESP fallback, install continues (rc 0)" 0 "$rc"
-assert_contains "enroll: rm failure warns (non-fatal, blocker #25 fresh-mode)" "$out" \
-    "the db delete was refused and the signed-delete chain keys"
-# the write is efi-updatevar's (blocker #26 final); with the stub refusing,
-# the NON-FATAL warn + ESP fallback fire and the install continues
-assert_contains "enroll: refused db write warns (non-fatal, no die)" "$out" \
-    "cannot write $fb/db-$DBXGUID"
-assert_contains "enroll: KEK write still attempted after the db refusal (blocker #26: writes are efi-updatevar's)" "$out" \
-    "cannot write $fb/KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-assert_contains "enroll: PK write still attempted after the db refusal (blocker #26: writes are efi-updatevar's)" "$out" \
-    "cannot write $fb/PK-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-# user directive (ESP staging declutter): the user-facing import directory
-# stages EXACTLY the three import files + a README.txt with the numbered
-# steps — NO .esl/.dbx/.cert material (that stays on the target's
-# /etc/alpine-fde/keys for repair use)
-for _b_f in db.auth kek.auth pk.auth; do
-    assert_eq "enroll: fallback staged $_b_f under <esp>/alpine-fde-keys" "1" \
-        "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
-done
-for _b_f in db.esl kek.esl pk.esl dbx.auth dbx.esl; do
-    assert_eq "enroll: fallback does NOT stage $_b_f (declutter: import dir = packets + certs + README)" "0" \
-        "$([ -e "$tmp/esp-b/alpine-fde-keys/$_b_f" ] && echo 1 || echo 0)"
-done
-# REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the firmware setup UI imports
-# X.509 certificates ONLY — the operator's OWN certs must land on the staged
-# ESP under the variable names, mapped from the keydir artifacts (db.cer from
-# release.crt — the db ESL carries the RELEASE cert per the blocker #25
-# cert-mixup fix; KEK.cer from kek.cert.der; PK.cer from pk.cert.der)
-for _b_pair in 'db.cer release.crt' 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
-    _b_cer=${_b_pair%% *}
-    _b_src=${_b_pair#* }
-    assert_eq "enroll: fallback staged the import-ready $_b_cer" "1" \
-        "$([ -f "$tmp/esp-b/alpine-fde-keys/$_b_cer" ] && echo 1 || echo 0)"
-done
-# REAL-SERVER 2026-09-29 (Dell PowerEdge R640): db.cer is the DER ENCODING of
-# release.crt, NOT a PEM byte copy — the firmware UI rejected the PEM .cer
-# ("The import operation did not complete successfully") while DER imported
-# fine. KEK.cer / PK.cer stay byte copies (their keydir artifacts are DER).
-assert_eq "enroll: db.cer is the DER encoding of release.crt (Dell UIs reject PEM .cer)" \
-    "$(cat "$tmp/release.der")" "$(cat "$tmp/esp-b/alpine-fde-keys/db.cer")"
-assert_eq "enroll: db.cer parses as DER and carries the release.crt subject" \
-    "$(openssl x509 -in "$FAKEYS/release.crt" -noout -subject)" \
-    "$(openssl x509 -inform der -in "$tmp/esp-b/alpine-fde-keys/db.cer" -noout -subject)"
-for _b_pair in 'KEK.cer kek.cert.der' 'PK.cer pk.cert.der'; do
-    _b_cer=${_b_pair%% *}
-    _b_src=${_b_pair#* }
-    assert_eq "enroll: $_b_cer is a byte-for-byte copy of $_b_src" \
-        "$(cat "$FAKEYS/$_b_src")" "$(cat "$tmp/esp-b/alpine-fde-keys/$_b_cer")"
-done
-assert_eq "enroll: README.txt staged with the numbered steps" "1" \
-    "$([ -f "$tmp/esp-b/alpine-fde-keys/README.txt" ] && echo 1 || echo 0)"
-assert_contains "enroll: README names the three import files in order (db -> KEK -> PK)" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "db.auth"
-assert_contains "enroll: README names kek.auth" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "kek.auth"
-assert_contains "enroll: README names pk.auth" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "pk.auth"
-assert_contains "enroll: README explains what each file IS" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Key Database"
-assert_contains "enroll: README states the Platform Key is LAST" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Platform Key"
-assert_contains "enroll: README names the firmware menu area" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "Secure Boot"
-assert_contains "enroll: README carries the admin-password reminder" \
-    "$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")" "administrator"
-# REAL-SERVER 2026-09-28 (Dell PowerEdge R640): the README is the operator
-# decision tree — (a) firmware accepted the writes -> nothing to do; (b)
-# refused -> UI import of the CERTIFICATES (the UI cannot read .auth), order
-# db (BOTH db.cer and the vendor .cer) -> KEK -> PK last, then enable Secure
-# Boot. The db carries BOTH the release cert and the vendor option-ROM cert,
-# and the README must state WHY (option-ROM authorization under custom keys,
-# UEFI0072).
-_b_readme=$(cat "$tmp/esp-b/alpine-fde-keys/README.txt")
-assert_contains "enroll: README decision tree (a): accepted writes -> nothing to do" \
-    "$_b_readme" "NOTHING to do"
-assert_contains "enroll: README states the UI imports X.509 certificates, not .auth" \
-    "$_b_readme" "cannot import .auth"
-assert_contains "enroll: README names db.cer in the import order" \
-    "$_b_readme" "db.cer"
-assert_contains "enroll: README names KEK.cer in the import order" \
-    "$_b_readme" "KEK.cer"
-assert_contains "enroll: README names PK.cer as LAST (flips to User Mode)" \
-    "$_b_readme" "import LAST"
-assert_contains "enroll: README says import the vendor option-ROM cert into db AS WELL" \
-    "$_b_readme" "microsoft-option-rom-uefi-ca-2023.cer"
-assert_contains "enroll: README states the vendor-cert rationale (UEFI0072 option-ROM policy)" \
-    "$_b_readme" "UEFI0072"
-assert_contains "enroll: README says enable Secure Boot after the imports (User Mode)" \
-    "$_b_readme" "User Mode"
-# at-firmware marker (user directive): the firmware UI cannot read README.txt —
-# an EMPTY marker file named !import_all_auth_files sorts FIRST in firmware
-# file browsers and its filename IS the instruction; no recognizable key
-# extension so import pickers that filter by extension won't offer it
-assert_eq "enroll: the !import_all_auth_files marker is staged" "1" \
-    "$([ -f "$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" ] && echo 1 || echo 0)"
-assert_eq "enroll: the marker is EMPTY (a reminder, not an importable)" "0" \
-    "$(wc -c <"$tmp/esp-b/alpine-fde-keys/!import_all_auth_files" | tr -d '[:space:]')"
-assert_eq "enroll: the marker sorts FIRST in the firmware file browser" \
-    "!import_all_auth_files" "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | head -n 1)"
-assert_eq "enroll: staged-file set is db.auth kek.auth pk.auth db.cer KEK.cer PK.cer README.txt !import_all_auth_files + the shipped vendor certs" "9" \
-    "$(ls -1 "$tmp/esp-b/alpine-fde-keys" | wc -l)"
-assert_eq "enroll: the shipped Microsoft Option ROM UEFI CA 2023 .cer is staged (DECIDED 2026-09-27)" "1" \
-    "$([ -f "$tmp/esp-b/alpine-fde-keys/microsoft-option-rom-uefi-ca-2023.cer" ] && echo 1 || echo 0)"
-assert_contains "enroll: fallback names the staging directory" "$out" \
-    "$tmp/esp-b/alpine-fde-keys"
-assert_contains "enroll: fallback per-file cp info line" "$out" \
-    "staged db.auth"
-# user directive (re-raised): the numbered manual-import instructions are
-# DEFERRED — the fallback stages SILENTLY (one info line) and the install
-# tail prints the instructions ONCE, at the VERY END, immediately before the
-# final confirm/reboot
-assert_contains "enroll: fallback announces the deferral to the install tail" \
-    "$out" "manual-import instructions are DEFERRED to the very end of the install"
-assert_not_contains "enroll: NO numbered instructions mid-flow (deferred to the tail)" \
-    "$out" "1. copy the alpine-fde-keys directory to a FAT USB stick"
-assert_not_contains "enroll: NO KeyTool guidance mid-flow (deferred)" \
-    "$out" "KeyTool.efi"
-assert_contains "enroll: final WARN — first boot stays guarded, instructions deferred" \
-    "$out" \
-    "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
-# the fallback is NOT the old fail-closed die: no die text may leak through
-assert_eq "enroll: fallback path does not die" "0" \
-    "$(printf '%s\n' "$out" | grep -c 'refusing to program')"
+out=$(ALPINE_FDE_SEAM_EFIVARS="$fa" ALPINE_FDE_SBCTL="$tmp/sbctl-stub" \
+    ALPINE_FDE_SBCTL_STORE="$STORE" fw_auth_enroll "$fa" "$FAKEYS" "$tmp/esp-a" 2>&1) || rc=$?
+assert_rc "enroll: the sbctl flow -> rc 0" 0 "$rc"
+assert_eq "enroll: the invocation order is create-keys -> reset -> enroll-keys" "create-keys
+reset
+enroll-keys" "$(cat "$SBLOG")"
+assert_eq "enroll: the store db.pem is the release cert (the swap)" \
+    "$(cat "$FAKEYS/release.crt")" "$(cat "$STORE/keys/db/db.pem")"
+assert_eq "enroll: the store KEK.pem is kek.cert.pem (the swap)" \
+    "$(cat "$FAKEYS/kek.cert.pem")" "$(cat "$STORE/keys/KEK/KEK.pem")"
+assert_eq "enroll: the store PK.pem is pk.cert.pem (the swap)" \
+    "$(cat "$FAKEYS/pk.cert.pem")" "$(cat "$STORE/keys/PK/PK.pem")"
+assert_eq "enroll: db carries the sbctl-enrolled payload (the stale one is gone)" \
+    "$(printf '\007\000\000\000NEWDB')" "$(cat "$fa/db-$DBXGUID")"
+assert_eq "enroll: SetupMode flipped to 0 (user mode)" "0" \
+    "$(tail -c 1 "$fa/SetupMode-$GUID" | od -An -tu1 | tr -d ' ')"
+assert_eq "enroll: the SUCCESS path stages NOTHING to the ESP" "0" \
+    "$([ -e "$tmp/esp-a/alpine-fde-keys" ] && echo 1 || echo 0)"
+assert_contains "enroll: the completion info names the chain" "$out" \
+    "enrollment complete"
 
-# (c) absent variables -> no rm info noise, NO fallback noise (clean path
-# unchanged; 2-arg call also pins the ESP_DIR default for old callers)
-fc="$tmp/enroll-clean"
+# (b) sbctl reset failure -> stage-and-die (the certs land on the ESP for the
+# UI repair; the die carries the UI-clear remedy; create-keys ran first)
+fb="$tmp/enroll-reset-fails"
+mkdir -p "$fb"
+mkvar_byte "$fb" SetupMode 1
+printf '\007\000\000\000OLDB' >"$fb/db-$DBXGUID"
+STORE2="$tmp/sbctl-store2"; rm -rf "$STORE2"
+SBLOG2="$tmp/sbctl2.log"; : >"$SBLOG2"
+rm -rf "$tmp/esp-b"
+cat >"$tmp/sbctl-stub-fail" <<STUB
+#!/bin/sh
+echo "\$1" >>"$SBLOG2"
+[ "\$1" = reset ] && exit 1
+[ "\$1" = create-keys ] && { mkdir -p "$STORE2/keys/db"; printf 'X' >"$STORE2/keys/db/db.pem"; }
+exit 0
+STUB
+chmod +x "$tmp/sbctl-stub-fail"
+rc=0
+out=$(ALPINE_FDE_SEAM_EFIVARS="$fb" ALPINE_FDE_SBCTL="$tmp/sbctl-stub-fail" \
+    ALPINE_FDE_SBCTL_STORE="$STORE2" fw_auth_enroll "$fb" "$FAKEYS" "$tmp/esp-b" 2>&1) || rc=$?
+assert_rc "enroll: reset failure -> fail-closed 64" 64 "$rc"
+assert_contains "enroll: the reset die names the clear-PK remedy" "$out" \
+    "sbctl reset failed — the platform keys could not be cleared"
+assert_eq "enroll: create-keys ran before reset (the store precedes the clear)" "create-keys
+reset" "$(cat "$SBLOG2")"
+assert_eq "enroll: the failure staged the repair kit (db.cer on the ESP)" "1" \
+    "$([ -f "$tmp/esp-b/alpine-fde-keys/db.cer" ] && echo 1 || echo 0)"
+assert_contains "enroll: the fallback warn fires on the failure path" "$out" \
+    "firmware enrollment incomplete — first boot stays guarded"
+
+# (c) enroll-keys failure -> stage-and-die (the reset succeeded; the land failed)
+fc="$tmp/enroll-land-fails"
 mkdir -p "$fc"
 mkvar_byte "$fc" SetupMode 1
+STORE3="$tmp/sbctl-store3"; rm -rf "$STORE3"
+rm -rf "$tmp/esp-c"
+cat >"$tmp/sbctl-stub-land" <<STUB
+#!/bin/sh
+[ "\$1" = reset ] && rm -f "$fc"/PK-* "$fc"/KEK-* "$fc"/db-* "$fc"/dbx-*
+[ "\$1" = create-keys ] && { mkdir -p "$STORE3/keys/db"; printf 'X' >"$STORE3/keys/db/db.pem"; }
+[ "\$1" = enroll-keys ] && exit 1
+exit 0
+STUB
+chmod +x "$tmp/sbctl-stub-land"
 rc=0
-if command -v sign-efi-sig-list >/dev/null 2>&1 && command -v cert-to-efi-sig-list >/dev/null 2>&1; then
-    out=$(ALPINE_FDE_SEAM_EFIVARS="$fc" fw_auth_enroll "$fc" "$FAKEYS" 2>&1) || rc=$?
-else
-    _pass "fw_auth_enroll leg skipped (efitools not on this host)"
-fi
-assert_rc "enroll: clean path -> rc 0" 0 "$rc"
-assert_eq "enroll: clean path emits no rm info noise" "0" \
-    "$(printf '%s\n' "$out" | grep -c 'removing pre-existing')"
-assert_eq "enroll: clean path emits ZERO fallback noise (no staging dir named)" "0" \
-    "$(printf '%s\n' "$out" | grep -c 'alpine-fde-keys')"
-assert_eq "enroll: clean path prints no manual instructions" "0" \
-    "$(printf '%s\n' "$out" | grep -c 'firmware enrollment incomplete')"
+out=$(ALPINE_FDE_SEAM_EFIVARS="$fc" ALPINE_FDE_SBCTL="$tmp/sbctl-stub-land" \
+    ALPINE_FDE_SBCTL_STORE="$STORE3" fw_auth_enroll "$fc" "$FAKEYS" "$tmp/esp-c" 2>&1) || rc=$?
+assert_rc "enroll: enroll-keys failure -> fail-closed 64" 64 "$rc"
+assert_contains "enroll: the land die names sbctl enroll-keys" "$out" \
+    "sbctl enroll-keys failed — the keys did not land"
+assert_eq "enroll: the land failure staged the repair kit" "1" \
+    "$([ -f "$tmp/esp-c/alpine-fde-keys/db.cer" ] && echo 1 || echo 0)"
 
-# (d) failure injection: read-only efivars dir at write time -> ALL THREE
-# writes are attempted and refused (db first — the db failure does NOT stop
-# the KEK/PK attempts, same firmware refuses them identically; attempting is
-# harmless and diagnostic), then the fallback stages everything (including
-# the dbx pair when present) and the install continues rc 0
-fd="$tmp/enroll-readonly"
+# (d) sbctl absent -> fail-closed with the install remedy (the emitted chain
+# runs require_pkgs sbctl:sbctl; the function guards independently)
+fd="$tmp/enroll-nosbctl"
 mkdir -p "$fd"
 mkvar_byte "$fd" SetupMode 1
-mkdir -p "$tmp/stub-readonly"
-cat >"$tmp/stub-readonly/efi-updatevar" <<'STUB'
-#!/bin/sh
-echo "efi-updatevar: firmware refused the authenticated write" >&2
-exit 1
-STUB
-chmod +x "$tmp/stub-readonly/efi-updatevar"
-rm -rf "$tmp/esp-d"
 rc=0
-out=$(PATH="$tmp/stub-readonly:$PATH" fw_auth_enroll "$fd" "$FAKEYS_DBX" "$tmp/esp-d" 2>&1) || rc=$?
-chmod 755 "$fd"
-assert_rc "enroll: read-only efivars -> fallback, install continues (rc 0)" 0 "$rc"
-assert_eq "enroll: ALL THREE write attempts made and refused" "3" \
-    "$(printf '%s\n' "$out" | grep -c 'cannot write')"
-assert_contains "enroll: db refusal warned first" "$out" \
-    "cannot write $fd/db-$DBXGUID"
-assert_contains "enroll: KEK refusal warned" "$out" \
-    "cannot write $fd/KEK-$GUID"
-assert_contains "enroll: PK refusal warned" "$out" \
-    "cannot write $fd/PK-$GUID"
-for _d_f in db.auth kek.auth pk.auth README.txt '!import_all_auth_files'; do
-    assert_eq "enroll: total refusal stages exactly $_d_f (decluttered set)" "1" \
-        "$([ -f "$tmp/esp-d/alpine-fde-keys/$_d_f" ] && echo 1 || echo 0)"
-done
-assert_eq "enroll: nothing was written to the read-only efivars dir" "0" \
-    "$([ -e "$fd/db-$DBXGUID" ] && echo 1 || echo 0)"
-assert_contains "enroll: total refusal ALSO defers the instructions (no mid-flow block)" \
-    "$out" "manual-import instructions are DEFERRED to the very end of the install"
-assert_not_contains "enroll: total refusal prints NO numbered instructions mid-flow" \
-    "$out" "1. copy the alpine-fde-keys directory to a FAT USB stick"
-assert_contains "enroll: final WARN after total refusal" "$out" \
-    "firmware enrollment incomplete — first boot stays guarded until the keys are imported"
+out=$(ALPINE_FDE_SEAM_EFIVARS="$fd" ALPINE_FDE_SBCTL=/nonexistent/sbctl \
+    fw_auth_enroll "$fd" "$FAKEYS" 2>&1) || rc=$?
+assert_rc "enroll: sbctl absent -> fail-closed 64" 64 "$rc"
+assert_contains "enroll: the sbctl-absent die names the engine requirement" "$out" \
+    "sbctl is not installed — the enrollment engine requires it"
 
 # (e) fw_var_write split (blocker #26 final): the write is ALWAYS efi-updatevar's;
 # on a read-only efivars dir the try returns rc 1 (non-die), the wrapper dies 64.

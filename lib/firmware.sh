@@ -375,6 +375,13 @@ EOF
     return 0
 }
 
+# fw_auth_stage_die ESP KEYDIR MESSAGE — stage the cert set for the UI
+# repair, THEN fail loudly (the enrollment failure paths share this tail).
+fw_auth_stage_die() {
+    fw_auth_esp_fallback "$1" "$2" || :
+    die "$3"
+}
+
 # fw_auth_enroll EFIVARS_DIR KEYDIR [ESP_DIR] — the §9.1 Stage-1 step-4
 # enrollment: db RESET + authenticated updates into NVRAM in strict order
 # reset-db → db → KEK → PK (last) from KEYDIR's .auth packets (db in the
@@ -428,89 +435,56 @@ fw_auth_enroll() {
         fi
         die "firmware: SetupMode is $_fae_setup (user mode, NO platform key present — a state no real firmware reports) — refusing the db reset + enrollment: this flow resets and rebuilds db ONLY in Setup Mode (reboot into BIOS setup, 'Clear Secure Boot Keys' to remove the vendor PK so SetupMode becomes 1, keep Secure Boot OFF, then re-run); resetting db outside Setup Mode requires different authorization and is not this flow's job"
     fi
-    info "firmware: Setup Mode — db reset + release+vendor rebuild, then KEK -> PK (PK last)"
-    _fae_failed=''
-    for _fae_v in db KEK PK; do
-        _fae_guid=$FW_GUID_GLOBAL
-        [ "$_fae_v" = "db" ] && _fae_guid=$FW_GUID_IMAGE_SECURITY
-        # Real firmware keeps the vendor db (and KEK/PK) variable after the
-        # vendor PK is cleared — Setup Mode does NOT imply empty variables on
-        # all firmwares — and efivarfs/firmware refuse a SetVariable that would
-        # CHANGE an existing variable's attributes (vendor db = plain
-        # NV+BS+RT; ours adds TIME_BASED_AUTHENTICATED_WRITE_ACCESS), dying
-        # with EINVAL (2026-09 bcache-multi live server, SetupMode==1 verified
-        # by the gate above). CI never hits this: it enrolls via offline
-        # virt-fw-vars on a fresh OVMF_VARS, where no variable pre-exists.
-        # Remove any pre-existing variable of the same name/GUID before the
-        # authenticated write — for db this IS the decided db RESET (the
-        # rebuild replaces the whole variable, so no APPEND_ATTRIBUTE write is
-        # ever needed and re-installs never accumulate duplicates). Safe by
-        # construction: SetupMode==1 is a fail-closed gate above, and the
-        # reset-db -> db -> KEK -> PK order protects the half-enrolled trust
-        # root.
-        if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-            if [ "$_fae_v" = "db" ]; then
-                info "firmware: db RESET — deleting the pre-existing db before the release+vendor rebuild (authenticated delete, Setup Mode)"
-            else
-                info "firmware: removing pre-existing vendor $_fae_v"
-            fi
-            # REAL-SERVER blocker #25 addendum (Dell, live-proven): efivarfs
-            # marks AUTHENTICATED variables' inodes S_IMMUTABLE at creation.
-            # chattr -i is required before ANY removal attempt.
-            command -v chattr >/dev/null 2>&1 ||
-                die "firmware: clearing the pre-existing $_fae_v requires chattr — apk add e2fsprogs (efivarfs marks authenticated variables immutable; blocker #25 addendum)"
-            chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-            rm -f "$_fae_dir/$_fae_v-$_fae_guid" 2>/dev/null || :
-            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-                # SIGNED-EMPTY delete fallback (the blocker #25 addendum
-                # machinery, REUSED for the db reset — no separate deleter):
-                # efitools signs the EMPTY payload and efi-updatevar -f
-                # performs the authenticated remove. Chain: db-del by the KEK
-                # key, KEK/PK-del by the PK key. The chain keys are usually
-                # already shredded at this point of the install (stage1
-                # custody) — when they are absent the attempt degrades to the
-                # write below + the shared final gate, never a silent skip.
-                if command -v efi-updatevar >/dev/null 2>&1 &&
-                    command -v sign-efi-sig-list >/dev/null 2>&1; then
-                    case $_fae_v in
-                        db)  _fae_dkey="$_fae_keys/kek.priv.pem"; _fae_dcert="$_fae_keys/kek.cert.pem" ;;
-                        *)   _fae_dkey="$_fae_keys/pk.priv.pem"; _fae_dcert="$_fae_keys/pk.cert.pem" ;;
-                    esac
-                    if [ -f "$_fae_dkey" ] && [ -f "$_fae_dcert" ]; then
-                        chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-                        sign-efi-sig-list -g "$_fae_guid" -c "$_fae_dcert" -k "$_fae_dkey" \
-                            "$_fae_v" /dev/null "$_fae_dir/$_fae_v-del.auth" >/dev/null 2>&1 ||
-                            die "firmware: sign-efi-sig-list failed for the $_fae_v signed-empty delete (blocker #25 addendum)"
-                        chattr -i "$_fae_dir/$_fae_v-$_fae_guid" >/dev/null 2>&1 || :
-                        efi-updatevar -f "$_fae_dir/$_fae_v-del.auth" "$_fae_v" >/dev/null 2>&1 ||
-                            warn "firmware: efi-updatevar refused the $_fae_v signed-empty delete (blocker #25 addendum)"
-                    else
-                        warn "firmware: the $_fae_v delete was refused and the signed-delete chain keys ($_fae_dkey) are not on disk (shredded after stage1, ADR-18) — attempting the authenticated write anyway; the shared gate below refuses to enroll over a surviving variable"
-                    fi
-                else
-                    warn "firmware: the unauthenticated delete of $_fae_v was refused and the signed-delete tools (efitools) are missing — attempting the authenticated write anyway; the shared gate below refuses to enroll over a surviving variable"
-                fi
-            fi
-            # SHARED final gate: the variable MUST be gone before enrolling —
-            # never enroll over a live trust anchor
-            if [ -e "$_fae_dir/$_fae_v-$_fae_guid" ]; then
-                rm -rf "$_fae_dir/$_fae_v-$_fae_guid" 2>/dev/null || :
-                [ -e "$_fae_dir/$_fae_v-$_fae_guid" ] &&
-                    die "firmware: $_fae_v survived the cleanup — refusing to enroll over a live trust anchor (blocker #25 addendum)"
-            fi
-        fi
-        # provision stage1 ships the packets as db.auth / kek.auth / pk.auth
-        _fae_lc=$(printf '%s' "$_fae_v" | tr '[:upper:]' '[:lower:]')
-        # Try-form: a refused SetVariable warns and remembers; it does NOT
-        # stop the loop — after a db refusal the KEK/PK attempts fail
-        # identically on the same firmware, but attempting them costs nothing
-        # and their warns are the diagnostic record of what was tried.
-        if ! fw_var_write_try "$_fae_dir" "$_fae_v" "$_fae_guid" "$_fae_keys/$_fae_lc.auth"; then
-            warn "firmware: cannot write $_fae_dir/$_fae_v-$_fae_guid (firmware refused the authenticated SetVariable) — staging the key material to the ESP for manual enrollment"
-            _fae_failed=1
-        fi
-    done
-    [ -z "$_fae_failed" ] || fw_auth_esp_fallback "$_fae_esp" "$_fae_keys"
+    # THE SBCTL FLOW (R640-proven 2026-10-06, user-directed refactor): the
+    # hand-rolled packet writes are REFUSED by validating firmware — the Dell
+    # R640 returns SECURITY_VIOLATION/EINVAL for every mutation of an
+    # existing authenticated variable (append, replace, zero-length delete)
+    # EVEN in Setup Mode, and rejects stale-timestamp packets outright.
+    # sbctl does what this firmware class demands, in the order it demands:
+    #   1. RESET       — delete-all: the guaranteed empty slate (creates are
+    #                    the one write class this firmware accepts)
+    #   2. CREATE-KEYS — the signing store (ephemeral sbctl privates, on the
+    #                    LUKS-protected target; ADR-18 keeps the PLATFORM
+    #                    privates shredded — the enrolled identity comes from
+    #                    the cert swap below, never from sbctl's keys)
+    #   3. CERT SWAP   — keys/{PK,KEK,db}/*.pem := OUR certs (pk.cert.pem /
+    #                    kek.cert.pem / release.crt — all public, all in the
+    #                    keydir): the enrolled chain is alpine-fde's
+    #   4. ENROLL      — --microsoft: fresh-timestamp packets, exact auth
+    #                    attributes, the vendor chain preserved; deliberately
+    #                    NO --tpm-eventlog (the eventlog hash rows read as
+    #                    garbage in the firmware key-management UI)
+    # The certs are staged to the ESP first (the UI-repair ammunition); any
+    # failure dies loud with that remedy attached.
+    _fae_sb=${ALPINE_FDE_SBCTL:-sbctl}
+    _fae_store=${ALPINE_FDE_SBCTL_STORE:-/var/lib/sbctl}
+    command -v "$_fae_sb" >/dev/null 2>&1 ||
+        die "firmware: sbctl is not installed — the enrollment engine requires it (install sbctl from the community repo; the emitted chain runs require_pkgs sbctl:sbctl)"
+    # the immutable bits make the reset's deletes EPERM (the operator-lane
+    # discovery: chattr -i unlocks the operations on this firmware class)
+    chattr -i "$_fae_dir"/PK-* "$_fae_dir"/KEK-* "$_fae_dir"/db-* "$_fae_dir"/dbx-* >/dev/null 2>&1 || :
+    info "firmware: Setup Mode — the sbctl flow: create-keys -> reset -> cert swap -> enroll --microsoft"
+    [ -f "$_fae_store/keys/db/db.pem" ] || "$_fae_sb" create-keys >/dev/null 2>&1 ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: sbctl create-keys failed — the signing store could not be created"
+    "$_fae_sb" reset >/dev/null 2>&1 ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: sbctl reset failed — the platform keys could not be cleared from the OS (remedy: firmware setup UI 'Clear All Secure Boot keys', then re-run; completed steps skip via crash resume)"
+    cp "$_fae_keys/pk.cert.pem" "$_fae_store/keys/PK/PK.pem" 2>/dev/null ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: cannot stage pk.cert.pem into the sbctl store (keys/PK/PK.pem) — keydir custody bug"
+    cp "$_fae_keys/kek.cert.pem" "$_fae_store/keys/KEK/KEK.pem" 2>/dev/null ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: cannot stage kek.cert.pem into the sbctl store (keys/KEK/KEK.pem) — keydir custody bug"
+    cp "$_fae_keys/release.crt" "$_fae_store/keys/db/db.pem" 2>/dev/null ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: cannot stage release.crt into the sbctl store (keys/db/db.pem) — keydir custody bug"
+    "$_fae_sb" enroll-keys --microsoft >/dev/null 2>&1 ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: sbctl enroll-keys failed — the keys did not land (check 'sbctl status'; completed steps skip via crash resume)"
+    fw_var_present "$_fae_dir" PK ||
+        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: no PK after the sbctl enrollment — the platform did not take the keys"
+    _fae_state2=$(fw_sb_state || true)
+    case $_fae_state2 in
+        *setup_mode=0*)
+            info "firmware: enrollment complete ($_fae_state2) — the platform chain is PK/KEK/db = the alpine-fde certs + the Microsoft vendor set; Secure Boot re-arms at the next boot" ;;
+        *)
+            warn "firmware: SetupMode still reports set after the enrollment ($_fae_state2) — verify with 'sbctl status' after the next boot" ;;
+    esac
     return 0
 }
 

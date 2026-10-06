@@ -294,7 +294,7 @@ assert_eq "guest: platform-key ceremony (§9.1 step 3, explicit keydir, custody 
 assert_contains "emitted: defer-custody — provision record defers release.pem encryption to ceremony 3/3 (release-key prompt may not precede the LUKS recovery)" \
     "$(grep -m1 'provision stage1' "$SCRIPT")" "--defer-custody"
 assert_eq "guest: NVRAM enrollment db->KEK->PK (§9.1 step 4)" "1" \
-    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
+    "$(grep -cx 'export ALPINE_FDE_CMD_DIR=/opt/alpine-fde/lib/cmd; export ALPINE_FDE_ENROLL_DEFERRED_MARKER=/dev/shm/alpine-fde-enroll-deferred; . /opt/alpine-fde/lib/common.sh && . /opt/alpine-fde/lib/firmware.sh && require_pkgs sbctl:sbctl && fw_auth_enroll /sys/firmware/efi/efivars /etc/alpine-fde/keys /efi' "$SCRIPT")"
 # real-server blocker #7: the boot manager installs by GUARDED FILE COPY of
 # the systemd-boot loader EFI binary — never a bootctl invocation (Alpine
 # ships NO bootctl binary; the retired record died POST-ceremony)
