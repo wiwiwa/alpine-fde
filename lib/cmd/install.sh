@@ -2389,6 +2389,12 @@ cmd_install_main() {
   # operator ("staged kek.auth ... ESP fallback"; PK absent at the verdict).
   inst_exec host "mountpoint -q /sys/firmware/efi/efivars 2>/dev/null || mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || : # ensure the live env's efivarfs is mounted (NVRAM enrollment path)"
   inst_exec host "mkdir -p $_im_mnt/sys/firmware/efi/efivars && mount --bind /sys/firmware/efi/efivars $_im_mnt/sys/firmware/efi/efivars"
+  # the R640 (2026-10-06): a missing/broken efivars bind made the in-guest
+  # boot-entry record fail 40× SILENTLY ('not in the efibootmgr listing' —
+  # the poll is blind without efivarfs) and the install aborted rc=64. Verify
+  # LOUD immediately: the chroot must see at least one NVRAM variable.
+  inst_exec guest "[ -d /sys/firmware/efi/efivars ] && [ -n \"\
+\$(ls /sys/firmware/efi/efivars 2>/dev/null | head -1)\" ] && echo 'alpine-fde: efivars bind verified (the NVRAM is visible in-chroot)' || { echo 'alpine-fde: FATAL: the chroot cannot see the EFI variables (the efivars bind is missing or the LIVE env lacks efivarfs) — on the LIVE env run: mkdir -p /mnt/sys/firmware/efi/efivars && mount -t efivarfs efivarfs /mnt/sys/firmware/efi/efivars'; exit 64; }"
 
   # --- 6. tooling copy (host) — the in-chroot CLI lives at /opt/alpine-fde ---
   info "tooling copy: product script tree only (bin lib hooks docs) — VCS/harness residue excluded (§3.3)"
