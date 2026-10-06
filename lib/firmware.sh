@@ -466,8 +466,17 @@ fw_auth_enroll() {
     info "firmware: Setup Mode — the sbctl flow: create-keys -> reset -> cert swap -> enroll --microsoft"
     [ -f "$_fae_store/keys/db/db.pem" ] || "$_fae_sb" create-keys >/dev/null 2>&1 ||
         fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: sbctl create-keys failed — the signing store could not be created"
-    "$_fae_sb" reset >/dev/null 2>&1 ||
-        fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: sbctl reset failed — the platform keys could not be cleared from the OS (remedy: firmware setup UI 'Clear All Secure Boot keys', then re-run; completed steps skip via crash resume)"
+    # sbctl reset returns NONZERO when the keys are already absent (the
+    # delete of a nonexistent PK fails with EIO) — the empty state IS the
+    # goal, so the rc is advisory; the gate below verifies the state itself
+    # and dies only on SURVIVORS (the R640: mutations of existing auth vars
+    # are refused, so survivors mean a BIOS-privileged clear is required)
+    "$_fae_sb" reset >/dev/null 2>&1 || :
+    for _fae_v in PK KEK db; do
+        if fw_var_present "$_fae_dir" "$_fae_v"; then
+            fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: $_fae_v survived the sbctl reset — the platform keys could not be cleared from the OS (remedy: firmware setup UI 'Clear All Secure Boot keys', then re-run; completed steps skip via crash resume)"
+        fi
+    done
     cp "$_fae_keys/pk.cert.pem" "$_fae_store/keys/PK/PK.pem" 2>/dev/null ||
         fw_auth_stage_die "$_fae_esp" "$_fae_keys" "firmware: cannot stage pk.cert.pem into the sbctl store (keys/PK/PK.pem) — keydir custody bug"
     cp "$_fae_keys/kek.cert.pem" "$_fae_store/keys/KEK/KEK.pem" 2>/dev/null ||
