@@ -744,8 +744,22 @@ inst_bootentry_family_cleanup() {
   _ibfc_guid=$1
   _ibfc_eb=$(inst_efibootmgr)
   _ibfc_list=$("$_ibfc_eb" -v 2>/dev/null | inst_bootentry_parse)
-  while IFS=' ' read -r _ibfc_n _ibfc_g _ibfc_l _ibfc_k _ibfc_v; do
+  while IFS=' ' read -r _ibfc_n _ibfc_g _ibfc_l _ibfc_k _ibfc_v _ibfc_lbl; do
     [ -n "${_ibfc_n:-}" ] || continue
+    # the live ISO's boot-process leftover (the operator, 2026-10-06): every
+    # live-env boot creates an 'AlpineLinux' NVRAM entry whose loader is the
+    # UTF-16-mangled kernel cmdline — it can never boot the installed system
+    # and pollutes the firmware menu. Swept at ANY GUID.
+    case ${_ibfc_lbl:-} in
+    alpinelinux*)
+      if "$_ibfc_eb" -b "$_ibfc_n" -B >/dev/null 2>&1; then
+        info "install: deleted the live-ISO leftover boot entry Boot$_ibfc_n ('alpinelinux' — the ISO boot-process leftover)"
+      else
+        warn "install: cannot delete the live-ISO leftover boot entry Boot$_ibfc_n ('alpinelinux') — re-run converges"
+      fi
+      continue
+      ;;
+    esac
     case $_ibfc_l in
     *-serial.efi)
       # a retired SERIAL loader (even under a hand-edited/foreign label) at
