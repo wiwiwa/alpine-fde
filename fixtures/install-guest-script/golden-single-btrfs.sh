@@ -8,7 +8,7 @@ set -eux
 # HOST: for d in /sys/fs/bcache/*/; do [ -f "${d}stop" ] || continue; u="${d%/}"; echo "${u##*/}" > "$u/stop" && echo "alpine-fde: info: reset: stopped live bcache set ${u##*/}" || echo "alpine-fde: warn: reset: could not stop bcache set ${u##*/}"; done || :
 # HOST: if command -v modprobe >/dev/null 2>&1; then modprobe btrfs; fi # physical boot: the btrfs module is not auto-loaded
 # HOST: if command -v mdev >/dev/null 2>&1; then mdev -s; fi # coldplug: settle /dev before partitioning
-# HOST: printf 'label: gpt\nstart=2048, size=+512M, type=uefi, name="esp"\ntype=linux, name="root"\n' | sfdisk <TMP>/disk.img
+# HOST: printf 'label: gpt\nstart=2048, size=+512M, type=uefi, name="esp"\ntype=linux, name="root"\n' | sfdisk --force <TMP>/disk.img
 # HOST: cryptsetup --batch-mode luksFormat --type luks2 --pbkdf argon2id --pbkdf-memory 1048576 --pbkdf-parallel 4 --iter-time 2000 --key-slot 2 --uuid <UUID> --key-file /dev/shm/alpine-fde-ephkey.<X> <TMP>/disk.img2 # keyslot 2: ephemeral install key (TEMPORARY keyslot — purged at first-boot finalization, §9.1 Stage 2; ADR-20); --batch-mode: NO interactive dangerous-action YES prompt (real-install defect 5)
 # HOST: cryptsetup open --key-file /dev/shm/alpine-fde-ephkey.<X> <TMP>/disk.img2 root-crypt
 # HOST: mkfs.btrfs -U <UUID> /dev/mapper/root-crypt
