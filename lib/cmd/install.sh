@@ -517,11 +517,18 @@ inst_bootentry_parse() {
             loader = ""
             if (match(lc, /file\([^)]*\)/)) {
                 loader = substr(lc, RSTART + 5, RLENGTH - 6)
-            } else if (match(lc, /\/[^/]*\.efi[ \t]*$/)) {
+            } else {
                 # the Alpine efibootmgr build prints the loader path BARE
                 # after the HD(...) device path - no File( wrapper (the
-                # Debian build wraps it). Take the final /path component.
-                loader = substr(lc, RSTART + 1, RLENGTH - 1)
+                # Debian build wraps it). Take everything after the LAST /
+                # in the line - the loader is the final /path component.
+                # REGEX-FREE on purpose: the BusyBox awk that runs this in
+                # the guest rejects match()-regex forms gawk accepts (the
+                # 218a575 regex was an Unexpected token under the guest awk
+                # and would have crashed the parse on hardware).
+                _sl = length(lc)
+                while (_sl > 0 && substr(lc, _sl, 1) != "/") _sl = _sl - 1
+                if (_sl > 0) loader = substr(lc, _sl + 1)
             }
             printf "%s %s %s %s %s %s\n", num, guid, loader, kver, variant, rl
         }
