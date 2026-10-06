@@ -1463,8 +1463,8 @@ inst_live_tool_pairs() {
 # R640): an existing platform key is untouchable from the OS (no private
 # half) and the install must not half-finish behind a manual UI step — the
 # gate fails closed 64 up front with the clear-PK remediation (firmware UI
-# "Clear All Secure Boot keys", or iDRAC SecureBoot.ResetKeys DeletePK —
-# verified on this R640); the re-run then finds SetupMode==1 and completes
+# "Clear All Secure Boot keys", or the standard Redfish SecureBoot.ResetKeys
+# DeletePK action (both are vendor-neutral mechanisms)); the re-run then finds SetupMode==1 and completes
 # hands-free (completed steps skip via crash resume). This gate mirrors the
 # fw_auth_enroll gate so the refusal happens BEFORE any disk mutation.
 # Anything else (SetupMode==0 with NO PK — a state no real firmware reports;
@@ -1484,7 +1484,7 @@ inst_setupmode_gate() {
       # REFUSED (user directive 2026-10-06, R640): an existing platform key is
       # untouchable from the OS (no private half) and the install must not
       # half-finish behind a manual UI step — refuse BEFORE any disk mutation.
-      die "install: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): an existing PK cannot be modified or removed from the OS (that requires the PK's own private half). Clear it FIRST — firmware setup UI 'Clear All Secure Boot keys', or iDRAC: SecureBoot ResetKeys DeletePK (verified on this R640) — so SetupMode becomes 1, then re-run; completed install steps skip via crash resume and the enrollment (db rebuild with the release+vendor certs -> KEK -> PK) runs hands-free (§9.1 preflight)"
+      die "install: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): an existing PK cannot be modified or removed from the OS (that requires the PK's own private half). Clear it FIRST — firmware setup UI 'Clear All Secure Boot keys', or the vendor out-of-band management Redfish SecureBoot.ResetKeys DeletePK action — so SetupMode becomes 1, then re-run; completed install steps skip via crash resume and the enrollment (db rebuild with the release+vendor certs -> KEK -> PK) runs hands-free (§9.1 preflight)"
     fi
     die "install: firmware is NOT in Setup Mode ($_isg_state) — clear the vendor PK in BIOS setup first (§9.1 preflight)"
   fi

@@ -321,7 +321,7 @@ STEP 1 — did the firmware ACCEPT the installer's NVRAM writes?
 STEP 2 (refused case only) — import order in the firmware UI:
 
   The firmware setup UI imports X.509 CERTIFICATES — it cannot import .auth
-  packets. Dell PowerEdge firmware imports .cer files in DER encoding ONLY
+  packets. Many vendor firmwares import .cer files in DER encoding ONLY
   (a PEM .cer is rejected with "The import operation did not complete
   successfully"), so every staged .cer in this directory is DER. The
   import-ready certificates are staged here next to the packets:
@@ -354,8 +354,8 @@ STEP 2 (refused case only) — import order in the firmware UI:
   KeyTool.efi / efi-updatevar repair only — the firmware setup UI cannot
   import them.
 
-How: reboot into the firmware setup (BIOS/UEFI; Dell PowerEdge: F2 during
-POST). Under Security / Secure Boot / Key Management (wording varies by
+How: reboot into the firmware setup (BIOS/UEFI; commonly F2 during POST
+on servers). Under Security / Secure Boot / Key Management (wording varies by
 vendor) use the certificate "enqueue" / "import from file" action — pick
 each file above IN THE ORDER above, db (both certificates) -> KEK -> PK
 last. Then enable Secure Boot (the platform must show User Mode, Custom
@@ -393,8 +393,8 @@ EOF
 # longer half-finishes (the retired 2026-09-28 DEFERRED-ENROLLMENT mode):
 # stage the import-ready certs for the UI, then FAIL the install. The
 # remediation is deterministic: clear the PK (firmware setup UI "Clear All
-# Secure Boot keys", or iDRAC Redfish SecureBoot.ResetKeys DeletePK —
-# proven on this R640, applies at POST) so SetupMode becomes 1, then re-run:
+# Secure Boot keys", or the standard Redfish SecureBoot.ResetKeys DeletePK
+# action — both proven on this hardware, applies at POST) so SetupMode becomes 1, then re-run:
 # completed steps skip via crash resume and the enroll below goes fully
 # SetupMode!=1 WITHOUT a platform PK (a state no real firmware reports) stays
 # fail-closed 64. A REFUSED write (firmware EINVAL even with correct attrs,
@@ -424,7 +424,7 @@ fw_auth_enroll() {
             # then fail; the remediation is clear-PK + re-run (crash resume).
             fw_auth_esp_fallback "$_fae_esp" "$_fae_keys" \
                 'YOUR SITUATION — ENROLLMENT REFUSED (a platform key is already enrolled, SetupMode 0): the installer made NO NVRAM writes and STOPPED. To finish automatically: clear the platform key (firmware setup UI "Clear All Secure Boot keys", or iDRAC SecureBoot ResetKeys DeletePK — verified on this Dell R640) so Setup Mode becomes 1, then re-run the installer: completed steps skip via crash resume and the enrollment (db rebuild with the release+vendor certs -> KEK -> PK) runs hands-free. The staged .cer files may alternatively be imported INTO the existing db via the firmware UI, but the installer itself will not proceed while SetupMode is 0.'
-            die "firmware: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): clear the PK (firmware UI 'Clear All Secure Boot keys' or iDRAC SecureBoot ResetKeys DeletePK) so SetupMode becomes 1, then re-run; completed install steps skip via crash resume"
+            die "firmware: SetupMode is 0 with a platform key enrolled — refusing to continue (user directive 2026-10-06): clear the PK (firmware UI 'Clear All Secure Boot keys' or the Redfish SecureBoot.ResetKeys DeletePK action) so SetupMode becomes 1, then re-run; completed install steps skip via crash resume"
         fi
         die "firmware: SetupMode is $_fae_setup (user mode, NO platform key present — a state no real firmware reports) — refusing the db reset + enrollment: this flow resets and rebuilds db ONLY in Setup Mode (reboot into BIOS setup, 'Clear Secure Boot Keys' to remove the vendor PK so SetupMode becomes 1, keep Secure Boot OFF, then re-run); resetting db outside Setup Mode requires different authorization and is not this flow's job"
     fi
