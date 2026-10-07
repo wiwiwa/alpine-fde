@@ -1,4 +1,5 @@
 #!/bin/sh
+set -x  # THE DEBUG TRACE (the operator directive): every command prints to the console until the problem is solved
 # alpine-fde-unseal.sh — mkinitfs Early-Boot Unseal Hook (docs/Architecture.md
 # §8.2 + §9.1 Stage 2; ADR-13/ADR-20, gap G-C8). ONE POSIX-sh script, shipped
 # into the initramfs via hooks/mkinitfs/features.d/alpine-fde.files.
