@@ -1269,6 +1269,15 @@ if [ -n "$_fdh_w" ] && [ -r "$FDE_EXTRA_DIR/tpm2-pcr-signature.json" ] &&
                 if [ -n "$_fdh_plen" ] && [ "$_fdh_plen" -gt 0 ] 2>/dev/null; then
                     dd if="$_fdh_w/blob.bin" of="$_fdh_w/priv.bin" bs=1 count=$((2 + _fdh_plen)) 2>/dev/null
                     dd if="$_fdh_w/blob.bin" of="$_fdh_w/pub.bin" bs=1 skip=$((2 + _fdh_plen)) 2>/dev/null
+                    # THE DA-LOCK CLEAR (R640 2026-10-06): the repeated failed
+                    # unseals (the broken-install boot loops) trip the NV
+                    # dictionary-attack lockout, which SURVIVES reboots and
+                    # refuses every subsequent legitimate unseal — forcing the
+                    # recovery-passphrase fallback forever. The single-user
+                    # early-boot context is exactly where the clear is safe
+                    # (the operator is present at the console; the lockout
+                    # auth defaults empty) and it costs nothing.
+                    tpm2_dictionarylockout -c >/dev/null 2>&1 || :
                     # sealed object under the SRK (pinned template, seal.sh)
                     if tpm2_createprimary -C o -g sha256 -G rsa -c "$_fdh_w/primary.ctx" >/dev/null 2>&1 &&
                         tpm2_load -C "$_fdh_w/primary.ctx" -u "$_fdh_w/pub.bin" -r "$_fdh_w/priv.bin" \
