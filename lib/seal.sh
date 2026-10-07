@@ -332,20 +332,21 @@ seal_blob_split() {
 seal_create() {
     [ $# -eq 3 ] || die "seal_create: usage: <workdir> <pass_file> <sealed_hex>"
     _sc_w=$1 _sc_pass=$2 _sc_sealed=$3
+    # THE FAILURE PATHS PRESERVE THE WORK DIR (user directive, R640
+    # 2026-10-06: the seal failure scrubbed its own evidence and the
+    # troubleshooting ran blind). Cleanup happens at the INSTALLATION START
+    # (the reset block sweeps the seal staging dirs), never on failure.
     if ! openssl base64 -d -A -in "$_sc_pass" >"$_sc_w/secret.bin" 2>/dev/null ||
         [ "$(wc -c <"$_sc_w/secret.bin")" -ne 48 ]; then
-        seal_scrub "$_sc_w" # I1: zeroize the staged passphrase, drop the work dir
-        die "seal: staged passphrase is not 64-char base64 of 48 raw bytes — refusing"
+        die "seal: staged passphrase is not 64-char base64 of 48 raw bytes — refusing (the work dir $_sc_w is PRESERVED for troubleshooting; cleanup at the installation start)"
     fi
     if ! tpm createprimary -C o -g sha256 -G rsa -c "$_sc_w/primary.ctx" >/dev/null 2>&1; then
-        seal_scrub "$_sc_w" # I1: zeroize the staged passphrase, drop the work dir
-        die "seal: tpm2_createprimary failed (SRK; TCTI: ${ALPINE_FDE_TCTI:-default})"
+        die "seal: tpm2_createprimary failed (SRK; TCTI: ${ALPINE_FDE_TCTI:-default}) — the work dir $_sc_w is PRESERVED for troubleshooting"
     fi
     if ! tpm create -C "$_sc_w/primary.ctx" -g sha256 -i "$_sc_w/secret.bin" \
         -L "$_sc_sealed" -u "$_sc_w/seal.pub" -r "$_sc_w/seal.priv" >/dev/null 2>&1; then
         tpm flushcontext -t >/dev/null 2>&1 || true
-        seal_scrub "$_sc_w" # I1: zeroize the staged passphrase, drop the work dir
-        die "seal: tpm2_create failed — could not seal the volume passphrase under the SRK policy"
+        die "seal: tpm2_create failed — could not seal the volume passphrase under the SRK policy (the work dir $_sc_w is PRESERVED for troubleshooting: the policy blob, the secret, the TPM command outputs)"
     fi
     tpm flushcontext -t >/dev/null 2>&1 || true
     if [ ! -s "$_sc_w/seal.priv" ] || [ ! -s "$_sc_w/seal.pub" ]; then

@@ -2135,6 +2135,11 @@ cmd_install_main() {
   _im_mdir=$(inst_mapper_dir)
   _im_bsys=$(inst_bcache_sysfs)
   inst_exec host "if mountpoint -q $_im_mnt 2>/dev/null || ls $_im_mdir/root[0-9]* >/dev/null 2>&1 || [ -e $_im_mdir/root-crypt ] || [ -e $_im_mdir/swap ] || ls $_im_bsys/*/ >/dev/null 2>&1; then echo 'alpine-fde: info: reset: previous failed install detected — tearing down its stale target mounts + mapper mappings before re-partitioning'; fi || :"
+  # THE CLEANUP AT THE INSTALLATION START (user directive, R640 2026-10-06):
+  # the seal/keys failure paths PRESERVE their work dirs for troubleshooting;
+  # the stale ones from prior runs are swept HERE — at the start, never on
+  # failure — so every failed run leaves its evidence intact.
+  inst_exec host "rm -rf /run/alpine-fde \${ALPINE_FDE_TMPDIR:-\${TMPDIR:-/tmp}}/alpine-fde-seal.* 2>/dev/null; echo 'alpine-fde: info: reset: swept stale seal/key staging dirs (the cleanup at the installation start)'"
   # item 26d: ONE recursive umount replaces the fixed per-mount list — it
   # covers the subvols, the ESP and any stale chroot binds in a single record
   inst_exec host "$(inst_reset_umount_rec_line $_im_mnt)"
