@@ -344,10 +344,14 @@ seal_create() {
         die "seal: tpm2_createprimary failed (SRK; TCTI: ${ALPINE_FDE_TCTI:-default}) — the work dir $_sc_w is PRESERVED for troubleshooting"
     fi
     # THE -L POLICY FILE (R640 2026-10-06): policy_sealed_digest returns the
-    # HEX DIGEST STRING — tpm2_create -L expects a BINARY policy file. The
-    # hex passed raw made tpm2_create try to open the hex string as a
-    # filename and every seal died with "could not seal". Convert to bin.
-    printf '%s' "$_sc_sealed" | policy_hex_to_bin >"$_sc_w/pol.bin" 2>/dev/null ||
+    # HEX DIGEST STRING — tpm2_create -L expects a BINARY TPM2B_DIGEST:
+    # 2-byte big-endian total length followed by the raw policy digest.
+    # The raw 32-byte hash alone is a MALFORMED policy and tpm2_create
+    # refuses it (the R640 seal failure persisted after the first
+    # hex-to-bin conversion for exactly this reason). Marshal properly.
+    printf '%04x' $((${#_sc_sealed} / 2)) | policy_hex_to_bin >"$_sc_w/pol.bin" 2>/dev/null ||
+        die "seal: cannot write the policy digest bin $_sc_w/pol.bin (the length prefix marshal failed)"
+    printf '%s' "$_sc_sealed" | policy_hex_to_bin >>"$_sc_w/pol.bin" 2>/dev/null ||
         die "seal: cannot write the policy digest bin $_sc_w/pol.bin (policy_hex_to_bin failed)"
     if ! tpm create -C "$_sc_w/primary.ctx" -g sha256 -i "$_sc_w/secret.bin" \
         -L "$_sc_w/pol.bin" -u "$_sc_w/seal.pub" -r "$_sc_w/seal.priv" >/dev/null 2>&1; then
