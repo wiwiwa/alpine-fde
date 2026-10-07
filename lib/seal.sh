@@ -343,16 +343,18 @@ seal_create() {
     if ! tpm createprimary -C o -g sha256 -G rsa -c "$_sc_w/primary.ctx" >/dev/null 2>&1; then
         die "seal: tpm2_createprimary failed (SRK; TCTI: ${ALPINE_FDE_TCTI:-default}) — the work dir $_sc_w is PRESERVED for troubleshooting"
     fi
-    # THE -L POLICY FILE (R640 2026-10-06): policy_sealed_digest returns the
-    # HEX DIGEST STRING — tpm2_create -L expects a BINARY TPM2B_DIGEST:
-    # 2-byte big-endian total length followed by the raw policy digest.
-    # The raw 32-byte hash alone is a MALFORMED policy and tpm2_create
-    # refuses it (the R640 seal failure persisted after the first
-    # hex-to-bin conversion for exactly this reason). Marshal properly.
-    printf '%04x' $((${#_sc_sealed} / 2)) | policy_hex_to_bin >"$_sc_w/pol.bin" 2>/dev/null ||
-        die "seal: cannot write the policy digest bin $_sc_w/pol.bin (the length prefix marshal failed)"
-    printf '%s' "$_sc_sealed" | policy_hex_to_bin >>"$_sc_w/pol.bin" 2>/dev/null ||
+    # THE -L POLICY FILE (R640 2026-10-06, THE DEFINITIVE): tpm2_create -L
+    # expects the RAW policy digest (32 bytes for sha256) — the tool wraps
+    # it into the TPM2B structure itself. The 2-byte-prefix "TPM2B" marshal
+    # made the TPM see a wrong-size structure (0x2d5 parameter(2)) and every
+    # seal died. tpm2_dictionarylockout -c ALSO runs before the create: the
+    # NV dictionary-attack lockout from prior failed boots refuses the
+    # sealing auth (the proven blocker, cleared here for this run).
+    tpm2_dictionarylockout -c >/dev/null 2>&1 || :
+    printf '%s' "$_sc_sealed" | policy_hex_to_bin >"$_sc_w/pol.bin" 2>/dev/null ||
         die "seal: cannot write the policy digest bin $_sc_w/pol.bin (policy_hex_to_bin failed)"
+    [ "$(wc -c <"$_sc_w/pol.bin")" = "32" ] ||
+        die "seal: the policy digest bin is not 32 bytes ($_sc_w/pol.bin) — refusing"
     if ! tpm create -C "$_sc_w/primary.ctx" -g sha256 -i "$_sc_w/secret.bin" \
         -L "$_sc_w/pol.bin" -u "$_sc_w/seal.pub" -r "$_sc_w/seal.priv" >/dev/null 2>&1; then
         tpm flushcontext -t >/dev/null 2>&1 || true
