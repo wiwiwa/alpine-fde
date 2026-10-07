@@ -847,8 +847,12 @@ _fdh_escrow_consume() {
             continue
         fi
         _fec_dev=$(_fdh_resolve_dev "$_fec_wd") || continue
-        _fec_pb64=$(sed -n "s/.*\"target\":\"$_fec_target\",\"uuid\":\"[^\"]*\",\"pass_b64\":\"\([^\"]*\)\".*/\1/p" \
-            "$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" 2>/dev/null)
+        # THE PRETTY-JSON FLATTEN (R640 2026-10-06): jq -s writes the escrow
+        # MULTI-LINE — a single-line sed pattern can never match the pretty
+        # form (every member fell to "no record" and the escrow stayed for a
+        # ceremony that does not exist under ADR-21). Flatten before matching.
+        _fec_pb64=$(tr -d '\n ' <"$FDE_ESP_MNT/$FDE_PROV_DIR/volume-keys.json" 2>/dev/null | \
+            sed -n "s/.*\"target\":\"$_fec_target\",\"uuid\":\"[^\"]*\",\"pass_b64\":\"\([^\"]*\)\".*/\1/p")
         [ -n "$_fec_pb64" ] || {
             _msg "provisioning escrow: no record for $_fec_target — the member stays for the ceremony"
             continue
