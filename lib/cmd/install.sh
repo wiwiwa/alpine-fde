@@ -1529,15 +1529,39 @@ inst_preflight() {
   if [ -z "$_if_tpm_dev" ]; then
     warn "install: no TPM device present — continuing (the reseal/finalize will gate on the missing TPM)"
   else
-    info "install: clearing the TPM to a clean slate (tpm2_clear, platform hierarchy) — any prior seal is already void under the new install"
+    info "install: clearing the TPM to a clean slate (tpm2_clear) — any prior seal is already void under the new install"
     # the shared tpm() wrapper (lib/common.sh): resolves the TCTI through the
     # SAME code path the seal uses (device:/dev/tpmrm0 with the modprobe
     # fallback — the raw -C/-c misuse here died 'unrecognized option'/'Could
     # not load tcti' on the live env before this), so what the preflight
     # verifies is exactly the access path the seal will use
     . "${ALPINE_FDE_BOOTSTRAP_DIR:-/tmp/alpine-fde-local}/lib/common.sh" 2>/dev/null || . lib/common.sh
-    tpm clear -c platform >/dev/null 2>&1
+    # LOCKOUT FIRST (R640 2026-10-08, the empirical matrix): Clear via
+    # lockoutAuth (empty on any stock server TPM) wipes EVERYTHING the OS
+    # owns — owner/endorsement auths, NV, the DA counter. The PLATFORM
+    # hierarchy is the FIRMWARE's (Dell ships it auth-protected, 0x9a2;
+    # by spec its auth survives Clear) — 'tpm clear -c platform' is only
+    # the fallback for the exotic lockoutAuth-set case, and its 0x9a2
+    # refusal is EXPECTED and harmless after a successful lockout clear.
+    tpm clear -c lockout >/dev/null 2>&1
     _if_clear_rc=$?
+    if [ "$_if_clear_rc" != "0" ]; then
+      tpm clear -c platform >/dev/null 2>&1
+      _if_clear_rc=$?
+    fi
+    [ "$_if_clear_rc" = "0" ] || {
+      die "install: tpm2_clear failed (rc=$_if_clear_rc) — the TPM carries state this install refuses to build on (a DA lockout, an owner/lockout auth, or stale objects). Clear it FIRST: racadm 'set BIOS.SysSecurity.Tpm2Hierarchy Clear' + 'jobqueue create BIOS.Setup.1-1' (applies at POST), or F2 firmware setup 'Clear TPM', then re-run (§9.1 preflight)"
+    }
+    # THE ACTUAL PRECONDITION, verified not assumed: the seal's
+    # createprimary must succeed on the post-clear TPM (the R640 boot-1
+    # escrow died exactly here). A live probe — not a hope.
+    tpm createprimary -C o -g sha256 -G rsa -c "${ALPINE_FDE_TMPDIR:-/tmp}/alpine-fde-preflight-primary.ctx" >/dev/null 2>&1
+    _if_cp_rc=$?
+    rm -f "${ALPINE_FDE_TMPDIR:-/tmp}/alpine-fde-preflight-primary.ctx" 2>/dev/null || :
+    [ "$_if_cp_rc" = "0" ] || {
+      die "install: the post-clear createprimary probe failed (rc=$_if_cp_rc) — the seal's SRK creation would die the same way; debug the TPM before installing (§9.1 preflight)"
+    }
+    info "install: TPM cleared — the hierarchies, DA counter and NV state are factory-fresh; the SRK probe succeeded"
     [ "$_if_clear_rc" = "0" ] || {
       die "install: tpm2_clear failed (rc=$_if_clear_rc) — the TPM carries state this install refuses to build on (a DA lockout, an owner/lockout auth, or stale objects). Clear it FIRST: racadm 'set BIOS.SysSecurity.Tpm2Hierarchy Clear' + 'jobqueue create BIOS.Setup.1-1' (applies at POST), or F2 firmware setup 'Clear TPM', then re-run (§9.1 preflight)"
     }

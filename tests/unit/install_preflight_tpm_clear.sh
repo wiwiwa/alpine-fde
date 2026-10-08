@@ -21,11 +21,11 @@ t() {
 grep -q 'inst_preflight()' lib/cmd/install.sh
 t "inst_preflight exists" $?
 
-grep -q 'tpm clear -c platform' lib/cmd/install.sh
-t "preflight clears the TPM (platform hierarchy, shared tpm() wrapper)" $?
+grep -q 'tpm clear -c lockout' lib/cmd/install.sh
+t "preflight clears the TPM (lockout-first, shared tpm() wrapper)" $?
 
 # the clear sits BEFORE the first partition/disk mutation record
-cl=$(grep -n 'tpm clear -c platform' lib/cmd/install.sh | head -1 | cut -d: -f1)
+cl=$(grep -n 'tpm clear -c lockout' lib/cmd/install.sh | head -1 | cut -d: -f1)
 p1=$(grep -n 'sfdisk --force' lib/cmd/install.sh | head -1 | cut -d: -f1)
 [ -n "$cl" ] && [ -n "$p1" ] && [ "$cl" -lt "$p1" ]
 t "clear runs before the first partition write" $?
@@ -46,3 +46,7 @@ t "success prints the clean-slate confirmation" $?
 
 echo "1..$((pass + fail))"
 [ "$fail" = 0 ]
+
+# the SRK probe: the clear is verified by an actual createprimary, not a hope
+grep -q 'post-clear createprimary probe failed' lib/cmd/install.sh
+t "clear verified by a live createprimary probe" $?
