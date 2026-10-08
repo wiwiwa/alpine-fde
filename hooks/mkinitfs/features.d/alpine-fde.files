@@ -37,6 +37,17 @@
 /usr/bin/tpm2_load
 /usr/bin/tpm2_unseal
 /usr/bin/tpm2_flushcontext
+# R640 2026-10-08: tpm2_create (the ADR-21 escrow self-seal's own verb —
+# boot-2 rc=127: the verb was invoked by the hook but never packed, so every
+# real-boot self-seal died command-not-found and the x2 ceremony never ran;
+# the e2e passed because 4d61efa fixed the HARNESS wrapper list only),
+# tpm2_dictionarylockout (the a0b28d7 DA-clear — same silent-127 class),
+# tpm2_pcrread (the live-PCR reads), tpm2_getpolicydigest (the trial-unseal
+# diagnostic dump)
+/usr/bin/tpm2_create
+/usr/bin/tpm2_dictionarylockout
+/usr/bin/tpm2_pcrread
+/usr/bin/tpm2_getpolicydigest
 /usr/lib/libtss2-esys.so*
 /usr/lib/libtss2-mu.so*
 /usr/lib/libtss2-rc.so*

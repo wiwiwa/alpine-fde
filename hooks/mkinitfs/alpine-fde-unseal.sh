@@ -838,6 +838,14 @@ _fdh_escrow_consume() {
         return 1
     }
     _msg "provisioning escrow: pol.bin marshaled 32 bytes (+$(_fec_elapsed)s)"
+    # THE REAL-TPM rc=127 LESSON (R640 2026-10-08): the verbs this loop runs
+    # (tpm2_create et al.) MUST be in the mkinitfs closure
+    # (features.d/alpine-fde.files) — boot-2 died command-not-found at the
+    # self-seal and the x2 ceremony never ran. Pinned by
+    # tests/unit/initrd-closure-tpm2-verbs.sh; the closure also now carries
+    # tpm2_dictionarylockout (the a0b28d7 DA-clear was silently a no-op on
+    # every real boot for the same missing-verb reason).
+    busybox timeout 10 tpm2_dictionarylockout -c >/dev/null 2>&1 || :
     _fdh_opened_list=''
     _fec_pos=0
     for _fec_wd in $_fdh_members; do

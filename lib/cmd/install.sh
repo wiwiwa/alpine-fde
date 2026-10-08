@@ -1510,6 +1510,33 @@ inst_preflight() {
   for _if_disk in "$@"; do
     [ -b "$_if_disk" ] || [ -f "$_if_disk" ] || die "install: target disk not found: $_if_disk"
   done
+  # THE TPM CLEAN-SLATE CLEAR (R640 2026-10-08, real-hardware blocker): every
+  # TPM failure tonight traced to UNDEFINED LEFTOVER STATE — a DA lockout
+  # counter accumulated across the night's failed boots (boot-1's escrow
+  # createprimary died on it), stale hierarchy objects from prior installs,
+  # and unknown owner/lockout auths. The e2e never hits this class: swtpm is
+  # wiped between scenarios. The install OWNS the machine's whole key
+  # lifecycle (it reformats the disks, rebuilds the SB keys) — any prior seal
+  # is already dead (its PCR predictions cannot survive the new
+  # UKI/firmware/keys). Clearing here (platform hierarchy — the same auth the
+  # firmware's 'Clear TPM' uses; no secret needed on any stock server TPM)
+  # makes createprimary deterministic: empty hierarchies, empty auths, zero
+  # DA counter. A refusal fails loud BEFORE any disk mutation with the
+  # firmware/racadm remedy (set BIOS.SysSecurity.Tpm2Hierarchy Clear +
+  # jobqueue create BIOS.Setup.1-1, or F2 Clear TPM).
+  _if_tpm_dev=''
+  for _if_t in /dev/tpmrm0 /dev/tpm0; do [ -e "$_if_t" ] && { _if_tpm_dev=$_if_t; break; }; done
+  if [ -z "$_if_tpm_dev" ]; then
+    warn "install: no TPM device present — continuing (the reseal/finalize will gate on the missing TPM)"
+  else
+    info "install: clearing the TPM to a clean slate (tpm2_clear, platform hierarchy) — any prior seal is already void under the new install"
+    TPM2TOOLS_TCTI="device:$_if_tpm_dev" tpm2_clear -C p >/dev/null 2>&1
+    _if_clear_rc=$?
+    [ "$_if_clear_rc" = "0" ] || {
+      die "install: tpm2_clear failed (rc=$_if_clear_rc) — the TPM carries state this install refuses to build on (a DA lockout, an owner/lockout auth, or stale objects). Clear it FIRST: racadm 'set BIOS.SysSecurity.Tpm2Hierarchy Clear' + 'jobqueue create BIOS.Setup.1-1' (applies at POST), or F2 firmware setup 'Clear TPM', then re-run (§9.1 preflight)"
+    }
+    info "install: TPM cleared — the hierarchies, DA counter and NV state are factory-fresh"
+  fi
   # §13 R640 2026-09-29: firmware TPM settings can ship SHA-1-only (Dell
   # Tpm2Algorithm=SHA1) — the install would run to completion and only DIE at
   # the reseal/finalize, when the SHA-256 PCR bank turns out missing. A
