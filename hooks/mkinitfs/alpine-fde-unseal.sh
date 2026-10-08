@@ -951,6 +951,16 @@ _fdh_escrow_consume() {
                 _msg "provisioning escrow: token id $_fec_free free for $_fec_target (+$(_fec_elapsed)s)"
                 break
             }
+            # R640 2026-10-08 (the poisoned-first-token bug): a STANDING token
+            # on this member is the installer's provisional {11} seal, whose
+            # policy cannot match real hardware (the boot refused it every
+            # time) — and every boot's token scan takes the FIRST token, so
+            # leaving it in place poisons the unlock FOREVER (the valid
+            # self-sealed {7,11} token behind it is never reached). The fresh
+            # token is imported at the first free id BELOW; retire the
+            # superseded ones right here, BEFORE the import, authorized by
+            # nothing (token removal needs no keyslot auth).
+            busybox timeout 10 cryptsetup token remove --token-id "$_fec_tid" "$_fec_dev" >/dev/null 2>&1 || :
         done
         [ -n "$_fec_free" ] || {
             _msg "provisioning escrow: no free token id for $_fec_target — the member stays for the ceremony"

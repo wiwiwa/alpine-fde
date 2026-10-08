@@ -168,6 +168,18 @@ aud_eventlog_report() {
     _aer_base_sz=$(baseline_get_in "$_aer_bl" fw eventlog_size)
     if [ "$_aer_live_sha" = "$_aer_base_sha" ]; then
         printf 'eventlog sha256=%s size=%s   match\n' "$_aer_live_sha" "$_aer_live_sz"
+    elif [ "$_aer_live_sz" = "$_aer_base_sz" ]; then
+        # SAME SIZE, DIFFERENT DIGEST — NOT drift (R640 2026-10-08): the TCG
+        # log is a FIXED-SIZE buffer whose fill order varies per boot path
+        # (the console-redirection, the boot-device one-shots and the LC jobs
+        # reorder events at identical length), so its whole-buffer digest is
+        # per-boot UNSTABLE. Pinning it re-wrote the drift marker on every
+        # boot no matter how many times the operator accepted — the alert
+        # could never clear on real hardware. The stable facts (the size and
+        # the buffer's presence/absence) stay armed; the unstable digest is
+        # reported INFORMATIONALLY and never trips AUD_DRIFT.
+        printf 'eventlog sha256 live=%s baseline=%s (size %s — stable; the digest is per-boot volatile, not drift)   info\n' \
+            "$_aer_live_sha" "$_aer_base_sha" "$_aer_live_sz"
     else
         printf 'eventlog sha256 live=%s baseline=%s (size %s vs %s)   DRIFT\n' \
             "$_aer_live_sha" "$_aer_base_sha" "$_aer_live_sz" "${_aer_base_sz:-?}"
