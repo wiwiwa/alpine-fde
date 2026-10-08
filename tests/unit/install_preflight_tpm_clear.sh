@@ -21,11 +21,11 @@ t() {
 grep -q 'inst_preflight()' lib/cmd/install.sh
 t "inst_preflight exists" $?
 
-grep -q 'tpm2_clear -C p' lib/cmd/install.sh
-t "preflight clears the TPM (platform hierarchy)" $?
+grep -q 'tpm clear -c platform' lib/cmd/install.sh
+t "preflight clears the TPM (platform hierarchy, shared tpm() wrapper)" $?
 
 # the clear sits BEFORE the first partition/disk mutation record
-cl=$(grep -n 'tpm2_clear -C p' lib/cmd/install.sh | head -1 | cut -d: -f1)
+cl=$(grep -n 'tpm clear -c platform' lib/cmd/install.sh | head -1 | cut -d: -f1)
 p1=$(grep -n 'sfdisk --force' lib/cmd/install.sh | head -1 | cut -d: -f1)
 [ -n "$cl" ] && [ -n "$p1" ] && [ "$cl" -lt "$p1" ]
 t "clear runs before the first partition write" $?

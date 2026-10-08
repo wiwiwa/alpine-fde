@@ -1530,7 +1530,13 @@ inst_preflight() {
     warn "install: no TPM device present — continuing (the reseal/finalize will gate on the missing TPM)"
   else
     info "install: clearing the TPM to a clean slate (tpm2_clear, platform hierarchy) — any prior seal is already void under the new install"
-    TPM2TOOLS_TCTI="device:$_if_tpm_dev" tpm2_clear -C p >/dev/null 2>&1
+    # the shared tpm() wrapper (lib/common.sh): resolves the TCTI through the
+    # SAME code path the seal uses (device:/dev/tpmrm0 with the modprobe
+    # fallback — the raw -C/-c misuse here died 'unrecognized option'/'Could
+    # not load tcti' on the live env before this), so what the preflight
+    # verifies is exactly the access path the seal will use
+    . "${ALPINE_FDE_BOOTSTRAP_DIR:-/tmp/alpine-fde-local}/lib/common.sh" 2>/dev/null || . lib/common.sh
+    tpm clear -c platform >/dev/null 2>&1
     _if_clear_rc=$?
     [ "$_if_clear_rc" = "0" ] || {
       die "install: tpm2_clear failed (rc=$_if_clear_rc) — the TPM carries state this install refuses to build on (a DA lockout, an owner/lockout auth, or stale objects). Clear it FIRST: racadm 'set BIOS.SysSecurity.Tpm2Hierarchy Clear' + 'jobqueue create BIOS.Setup.1-1' (applies at POST), or F2 firmware setup 'Clear TPM', then re-run (§9.1 preflight)"
